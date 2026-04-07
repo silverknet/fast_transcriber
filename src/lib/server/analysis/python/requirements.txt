@@ -1,0 +1,13 @@
+# Prefer: bash src/lib/server/analysis/python/install-deps.sh
+# (madmom needs --no-build-isolation; setuptools<76 keeps pkg_resources for madmom 0.16.)
+#
+# Manual:
+#   python3 -m venv .venv && .venv/bin/pip install -U pip
+#   .venv/bin/pip install 'setuptools>=69,<76' wheel
+#   .venv/bin/pip install cython "numpy>=1.19,<2" scipy
+#   .venv/bin/pip install madmom==0.16.1 --no-build-isolation
+setuptools>=69,<76
+wheel
+cython>=0.29.36
+numpy>=1.19.0,<2
+scipy>=1.5.0

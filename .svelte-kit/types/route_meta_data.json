@@ -1,0 +1,19 @@
+{
+	"/": [],
+	"/api/analyze": [
+		"src/routes/api/analyze/+server.ts"
+	],
+	"/api/health": [
+		"src/routes/api/health/+server.ts"
+	],
+	"/api/sessions/ensure": [
+		"src/routes/api/sessions/ensure/+server.ts"
+	],
+	"/api/sessions/[id]": [
+		"src/routes/api/sessions/[id]/+server.ts"
+	],
+	"/api/sessions/[id]/audio": [
+		"src/routes/api/sessions/[id]/audio/+server.ts"
+	],
+	"/edit": []
+}
