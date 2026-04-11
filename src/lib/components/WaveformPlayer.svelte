@@ -69,6 +69,8 @@
     /** Sections mode: parent applies tag to current multi-selection. */
     onApplySectionTag = undefined as ((kind: SectionKind) => void) | undefined,
     sectionsSelectionBarIds = $bindable<string[]>([]),
+    /** Chords mode: multi-selected beats (timeline order). */
+    chordsSelectionBeatIds = $bindable<string[]>([]),
     /** Chords mode: selected timeline beat; parent commits harmony. */
     selectedBeatId = $bindable<string | null>(null),
     /** Resolved + formatted chord label per beat (carry-forward included). */
@@ -109,6 +111,18 @@
     }
   })
 
+  /** Prune stale beat ids when `beatGrid` changes — must not subscribe to `chordsSelectionBeatIds` or we loop. */
+  $effect(() => {
+    const ids = new Set(beatGrid?.beats.map((b) => b.id) ?? [])
+    const cur = untrack(() => chordsSelectionBeatIds)
+    const next = cur.filter((id) => ids.has(id))
+    if (next.length !== cur.length || next.some((id, i) => id !== cur[i])) {
+      chordsSelectionBeatIds = next
+    }
+    const sid = untrack(() => selectedBeatId)
+    if (sid && !ids.has(sid)) selectedBeatId = null
+  })
+
   let prevTimelineStripMode = $state<'grid' | 'sections' | 'chords' | null>(null)
   $effect(() => {
     const m = timelineStripMode
@@ -116,6 +130,7 @@
       selectedBarId = null
       sectionsSelectionBarIds = []
       selectedBeatId = null
+      chordsSelectionBeatIds = []
     }
     prevTimelineStripMode = m
   })
@@ -127,6 +142,7 @@
         selectedBarId = null
         sectionsSelectionBarIds = []
         selectedBeatId = null
+        chordsSelectionBeatIds = []
       }
     }
     document.addEventListener('keydown', onKey)
@@ -1445,8 +1461,9 @@
     <p class="text-muted-foreground text-center text-[11px]">
       {#if isEditorVariant}
         Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan (waveform, bar strip, minimap) · Grid: click bar,
-        vertical wheel = beats/bar; Sections: drag across bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: click a
-        beat for the chord picker; Esc clears selection
+        vertical wheel = beats/bar; Sections: drag across bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: drag or
+        Shift+click beat range, ⌘/Ctrl+click toggle; click a beat opens the picker · ⌘/Ctrl+C / ⌘/Ctrl+V copy & paste
+        resolved chords · Esc clears selection
       {:else}
         Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan · top waveform: handles resize, body moves, outside
         drag creates selection, tap seeks · minimap: viewport handles resize, body drags, outside recenters
@@ -1471,6 +1488,7 @@
           bind:selectedBarId
           bind:selectedBarIds={sectionsSelectionBarIds}
           bind:selectedBeatId
+          bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
           onSectionsSeekCommit={timelineStripMode === 'sections' ? seekToSectionsSelection : undefined}
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}

@@ -5,6 +5,7 @@
   import { onDestroy } from 'svelte'
   import { clientXToTimeInView, timeToPxInView } from '$lib/audio/timeGeometry'
   import type { BarGridAction } from '$lib/songmap/timelineEdit'
+  import { sortBeatsByTime } from '$lib/songmap/normalize'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
 
   const HIDE_BAR_CHROME_ENTER = 18
@@ -66,6 +67,8 @@
     /** Chords mode: after selecting a beat, report pointer position for anchoring a popover. */
     onChordBeatInteract,
     selectedBeatId = $bindable<string | null>(null),
+    /** Chords mode: multi-select beats (timeline order); single-click also sets `selectedBeatId`. */
+    chordsSelectionBeatIds = $bindable<string[]>([]),
     chordLabelByBeatId = {} as Record<string, string>,
   }: {
     viewStart: number
@@ -83,11 +86,14 @@
     onViewportWheel?: (e: WheelEvent) => boolean
     onChordBeatInteract?: (detail: { clientX: number; clientY: number }) => void
     selectedBeatId?: string | null
+    chordsSelectionBeatIds?: string[]
     chordLabelByBeatId?: Record<string, string>
   } = $props()
 
   let gridEl = $state<HTMLDivElement | undefined>()
   let rangeAnchorIndex = $state<number | null>(null)
+  /** Sorted-beat index for Shift+click / drag range in chords mode. */
+  let rangeAnchorChordSortedIndex = $state<number | null>(null)
 
   let editing = $derived(
     Boolean(
@@ -319,9 +325,11 @@
   })
 
   let sectionsDragCleanup: (() => void) | null = null
+  let chordsDragCleanup: (() => void) | null = null
 
   onDestroy(() => {
     sectionsDragCleanup?.()
+    chordsDragCleanup?.()
   })
 
   function applySectionsClick(hit: Bar, shift: boolean, meta: boolean) {
@@ -400,6 +408,98 @@
     sectionsDragCleanup = teardown
   }
 
+  function sortedBeatsChord(): Beat[] {
+    return sortBeatsByTime(beats)
+  }
+
+  function applyChordsClick(hit: Beat, shift: boolean, meta: boolean): boolean {
+    const sorted = sortedBeatsChord()
+    const idx = sorted.findIndex((b) => b.id === hit.id)
+    if (idx < 0) return false
+
+    if (shift && rangeAnchorChordSortedIndex != null) {
+      const a = Math.min(rangeAnchorChordSortedIndex, idx)
+      const b = Math.max(rangeAnchorChordSortedIndex, idx)
+      chordsSelectionBeatIds = sorted.slice(a, b + 1).map((bt) => bt.id)
+      selectedBeatId = hit.id
+      return false
+    }
+    if (meta) {
+      const set = new Set(chordsSelectionBeatIds)
+      if (set.has(hit.id)) set.delete(hit.id)
+      else set.add(hit.id)
+      chordsSelectionBeatIds = sorted.filter((b) => set.has(b.id)).map((b) => b.id)
+      rangeAnchorChordSortedIndex = idx
+      selectedBeatId = hit.id
+      return false
+    }
+
+    chordsSelectionBeatIds = [hit.id]
+    rangeAnchorChordSortedIndex = idx
+    selectedBeatId = hit.id
+    return true
+  }
+
+  function onChordsPointerDown(e: PointerEvent) {
+    if (!editing || e.button !== 0) return
+    chordsDragCleanup?.()
+    chordsDragCleanup = null
+
+    const hit = beatAtTime(timeFromClientX(e.clientX))
+    if (!hit) {
+      chordsSelectionBeatIds = []
+      selectedBeatId = null
+      rangeAnchorChordSortedIndex = null
+      return
+    }
+
+    const downShift = e.shiftKey
+    const downMeta = e.metaKey || e.ctrlKey
+    const sorted = sortedBeatsChord()
+    const startIdx = sorted.findIndex((b) => b.id === hit.id)
+    if (startIdx < 0) return
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let dragActive = false
+
+    const move = (ev: PointerEvent) => {
+      if (!dragActive) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) <= DRAG_PX) return
+        dragActive = true
+      }
+      const cur = beatAtTime(timeFromClientX(ev.clientX))
+      if (!cur) return
+      const curIdx = sorted.findIndex((b) => b.id === cur.id)
+      if (curIdx < 0) return
+      const a = Math.min(startIdx, curIdx)
+      const b = Math.max(startIdx, curIdx)
+      chordsSelectionBeatIds = sorted.slice(a, b + 1).map((bt) => bt.id)
+      rangeAnchorChordSortedIndex = startIdx
+      selectedBeatId = cur.id
+    }
+
+    const teardown = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      chordsDragCleanup = null
+    }
+
+    const up = (ev: PointerEvent) => {
+      teardown()
+      if (!dragActive) {
+        const openPicker = applyChordsClick(hit, downShift, downMeta)
+        if (openPicker) onChordBeatInteract?.({ clientX: ev.clientX, clientY: ev.clientY })
+      }
+    }
+
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    chordsDragCleanup = teardown
+  }
+
   function onStripPointerDown(e: PointerEvent) {
     if (!editing || e.button !== 0) return
 
@@ -409,9 +509,7 @@
     }
 
     if (stripMode === 'chords') {
-      const hit = beatAtTime(timeFromClientX(e.clientX))
-      selectedBeatId = hit?.id ?? null
-      if (hit) onChordBeatInteract?.({ clientX: e.clientX, clientY: e.clientY })
+      onChordsPointerDown(e)
       return
     }
 
@@ -453,6 +551,19 @@
       if (e.key === 'Escape') {
         selectedBarIds = []
         rangeAnchorIndex = null
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  })
+
+  $effect(() => {
+    if (!editing || stripMode !== 'chords') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        chordsSelectionBeatIds = []
+        selectedBeatId = null
+        rangeAnchorChordSortedIndex = null
       }
     }
     document.addEventListener('keydown', onKey)
@@ -535,8 +646,9 @@
     {#if editing && stripMode === 'chords'}
       {#each chordBeatSegments as seg (seg.beat.id)}
         <div
-          class="pointer-events-none absolute inset-y-0 z-[6] rounded-sm border border-transparent {selectedBeatId ===
-          seg.beat.id
+          class="pointer-events-none absolute inset-y-0 z-[6] rounded-sm border border-transparent {chordsSelectionBeatIds.includes(
+            seg.beat.id,
+          )
             ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-400/40'
             : 'bg-zinc-500/5'}"
           style:left="{seg.x0}px"

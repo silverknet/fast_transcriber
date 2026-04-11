@@ -14,4 +14,10 @@ export { rankChordSuggestions, type RankedChord } from './rankSuggestions'
 export { dominantSeventhOfChordRoot, tritoneSubOfDominantSeventh } from './secondaryDominant'
 export { chordWithoutBass, withSlashBass } from './slashBass'
 export { resolveChordAtEachBeat, chordAtBeat } from './carryForward'
+export {
+  CHORD_CLIPBOARD_KIND,
+  parseChordClipboard,
+  serializeChordClipboard,
+  type ChordClipboardPayload,
+} from './chordClipboard'
 export { deriveNumeral, deriveNumeralBasic, chordRootDegreeInKey } from './deriveNumeral'

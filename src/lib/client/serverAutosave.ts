@@ -16,6 +16,8 @@ const META_KEY = 'barbro_autosave_meta'
 const INTERVAL_MS = 30_000
 
 let autosaveBootInFlight = false
+/** Set when {@link stopServerAutosave} runs so late async bootstrap does not attach timers. */
+let autosaveCancelled = false
 
 type LocalMeta = { sessionId: string; fingerprint: string }
 
@@ -71,11 +73,12 @@ async function ensureSession(): Promise<boolean> {
 
   writeMeta({ sessionId: data.sessionId, fingerprint: fingerprint! })
 
-  sessionId = data.sessionId
+  const sid = data.sessionId
+  sessionId = sid
   serverAutosaveStatus.update((s) => ({
     ...s,
     enabled: true,
-    sessionId: data.sessionId,
+    sessionId: sid,
     lastError: null,
   }))
   return true
@@ -216,15 +219,22 @@ export async function loadServerAutosave(): Promise<{ ok: boolean; error?: strin
 
 export function startServerAutosave(): void {
   if (!browser || intervalId || autosaveBootInFlight) return
+  autosaveCancelled = false
   autosaveBootInFlight = true
 
   void (async () => {
     try {
       const ok = await ensureSession()
-      if (!ok) return
+      if (!ok || autosaveCancelled) return
 
       unsubscribers.push(songMap.subscribe(() => markDirtyIfChanged()))
       unsubscribers.push(audioSession.subscribe(() => markDirtyIfChanged()))
+
+      if (autosaveCancelled) {
+        for (const u of unsubscribers) u()
+        unsubscribers = []
+        return
+      }
 
       intervalId = setInterval(() => void tick(), INTERVAL_MS)
 
@@ -242,6 +252,7 @@ function onVis() {
 }
 
 export function stopServerAutosave(): void {
+  autosaveCancelled = true
   if (intervalId) {
     clearInterval(intervalId)
     intervalId = null

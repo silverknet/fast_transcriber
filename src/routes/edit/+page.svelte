@@ -9,11 +9,15 @@
   import {
     formatChordSymbol,
     formatSongKeyLabel,
+    parseChordClipboard,
+    resolveChordAtEachBeat,
+    serializeChordClipboard,
     songKeyPreferFlats,
   } from '$lib/chords'
   import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
   import { newId } from '$lib/songmap/factory'
   import { clearHarmonyAtBeat, upsertHarmonyAtBeat } from '$lib/songmap/harmonyEdit'
+  import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { setSectionForBarRange } from '$lib/songmap/sectionEdit'
   import { applyBarGridAction, type BarGridAction } from '$lib/songmap/timelineEdit'
   import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey } from '$lib/songmap/types'
@@ -85,6 +89,7 @@
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 
   let selectedBeatId = $state<string | null>(null)
+  let chordsSelectionBeatIds = $state<string[]>([])
   /** Chord UI: nested radial quick select (`ChordRadialQuickSelect.svelte`; legacy: `ChordPickerPopover.svelte`, `ChordMarkingMenu.svelte`) */
   let chordPickerOpen = $state(false)
   let chordAnchorX = $state(0)
@@ -124,15 +129,93 @@
     else beatEditError = ''
   }
 
-  function commitChord(chord: ChordSymbol) {
+  function selectedChordTargetBeatIds(): string[] {
     const sm = get(songMap)
-    if (!sm || !selectedBeatId) return
-    const out = upsertHarmonyAtBeat(sm, selectedBeatId, chord, newId)
-    if (!out.ok) {
-      beatEditError = out.error
+    if (!sm) return []
+    const sorted = sortBeatsByTime(sm.timeline.beats)
+    if (chordsSelectionBeatIds.length > 0) {
+      return sorted.filter((b) => chordsSelectionBeatIds.includes(b.id)).map((b) => b.id)
+    }
+    if (selectedBeatId) return [selectedBeatId]
+    return []
+  }
+
+  /** Earliest selected beat in timeline order — paste starts here. */
+  function chordPasteAnchorBeatId(): string | null {
+    const ids = selectedChordTargetBeatIds()
+    return ids[0] ?? null
+  }
+
+  function copyChordsSelection() {
+    const sm = get(songMap)
+    if (!sm) return
+    const ids = selectedChordTargetBeatIds()
+    if (ids.length === 0) return
+    const resolved = resolveChordAtEachBeat(sm)
+    const chords = ids.map((id) => resolved.get(id) ?? null)
+    const text = serializeChordClipboard(chords)
+    void navigator.clipboard.writeText(text).catch(() => {
+      beatEditError = 'Could not copy chords to the clipboard'
+    })
+    beatEditError = ''
+  }
+
+  async function pasteChordsFromClipboard() {
+    const sm = get(songMap)
+    if (!sm) return
+    let text: string
+    try {
+      text = await navigator.clipboard.readText()
+    } catch {
+      beatEditError = 'Could not read the clipboard'
       return
     }
-    const p = patchSongMap(() => out.map)
+    const chords = parseChordClipboard(text)
+    if (!chords || chords.length === 0) return
+    const sorted = sortBeatsByTime(sm.timeline.beats)
+    const anchorId = chordPasteAnchorBeatId()
+    if (!anchorId) {
+      beatEditError = 'Select a beat to paste onto'
+      return
+    }
+    const anchorIdx = sorted.findIndex((b) => b.id === anchorId)
+    if (anchorIdx < 0) return
+
+    let map = sm
+    for (let i = 0; i < chords.length; i++) {
+      const beat = sorted[anchorIdx + i]
+      if (!beat) break
+      const c = chords[i]
+      if (c === null) map = clearHarmonyAtBeat(map, beat.id)
+      else {
+        const out = upsertHarmonyAtBeat(map, beat.id, c, newId)
+        if (!out.ok) {
+          beatEditError = out.error
+          return
+        }
+        map = out.map
+      }
+    }
+    const p = patchSongMap(() => map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function commitChord(chord: ChordSymbol) {
+    const sm = get(songMap)
+    if (!sm) return
+    const targets = selectedChordTargetBeatIds()
+    if (targets.length === 0) return
+    let map = sm
+    for (const beatId of targets) {
+      const out = upsertHarmonyAtBeat(map, beatId, chord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
+      }
+      map = out.map
+    }
+    const p = patchSongMap(() => map)
     if (!p.ok) beatEditError = p.errors.join('; ')
     else {
       beatEditError = ''
@@ -142,9 +225,14 @@
 
   function clearChordAtBeat() {
     const sm = get(songMap)
-    if (!sm || !selectedBeatId) return
-    const next = clearHarmonyAtBeat(sm, selectedBeatId)
-    const p = patchSongMap(() => next)
+    if (!sm) return
+    const targets = selectedChordTargetBeatIds()
+    if (targets.length === 0) return
+    let map = sm
+    for (const beatId of targets) {
+      map = clearHarmonyAtBeat(map, beatId)
+    }
+    const p = patchSongMap(() => map)
     if (!p.ok) beatEditError = p.errors.join('; ')
     else {
       beatEditError = ''
@@ -190,9 +278,29 @@
   })
 
   $effect(() => {
+    if (!browser || editMode !== 'chords') return
+    const fn = (e: KeyboardEvent) => {
+      if (blocksChordGlobalShortcut(e.target)) return
+      if (chordPickerOpen) return
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod) return
+      if (e.key === 'c') {
+        e.preventDefault()
+        copyChordsSelection()
+      } else if (e.key === 'v') {
+        e.preventDefault()
+        void pasteChordsFromClipboard()
+      }
+    }
+    window.addEventListener('keydown', fn, true)
+    return () => window.removeEventListener('keydown', fn, true)
+  })
+
+  $effect(() => {
     if (editMode !== 'chords') {
       chordPickerOpen = false
       selectedBeatId = null
+      chordsSelectionBeatIds = []
     }
   })
 
@@ -522,11 +630,12 @@
           </p>
         {:else}
           <p class="text-muted-foreground mb-3 text-xs leading-relaxed sm:mb-4">
-            Click a beat for the radial menu: common chords are one tap; hover or tap a category for more; hold a chord ~1s for slash
-            bass; Search for anything else. Only beats with
-            an explicit chord show a label—later beats inherit until the next change. Song key drives spelling and families,
-            not transposition: harmony is stored as absolute chord symbols. Section/bar key changes and a transpose pass are
-            not in this build yet.
+            Drag across the chord strip or Shift+click / ⌘/Ctrl+click to select beats. Click a beat (no modifiers) for the radial
+            menu: common chords are one tap; hover or tap a category for more; hold a chord ~1s for slash bass; Search for
+            anything else. ⌘/Ctrl+C copies the resolved (sounding) chord on each selected beat;
+            ⌘/Ctrl+V pastes in order starting at the earliest selected beat. Only beats with an explicit chord show a
+            label—later beats inherit until the next change. Song key drives spelling and families, not transposition: harmony
+            is stored as absolute chord symbols.
           </p>
           <div
             data-song-key-picker
@@ -589,6 +698,7 @@
           onBarGridAction={handleBarGridAction}
           onApplySectionTag={handleApplySectionTag}
           bind:sectionsSelectionBarIds
+          bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
