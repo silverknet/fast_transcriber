@@ -32,11 +32,24 @@
   import { serverAutosaveStatus } from '$lib/stores/serverAutosaveStatus'
   import { songMap } from '$lib/stores/songMap'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
+  import Cloud from '@lucide/svelte/icons/cloud'
   import Music from '@lucide/svelte/icons/music'
 
   let menuError = $state('')
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
+  let cloudConnected = $derived($serverAutosaveStatus.enabled && !$serverAutosaveStatus.lastError)
+  let lastCheckedLabel = $derived(
+    $serverAutosaveStatus.lastCheckedAt ? $serverAutosaveStatus.lastCheckedAt.slice(11, 19) : '--:--:--',
+  )
+  let lastSavedLabel = $derived(
+    $serverAutosaveStatus.lastSavedAt ? $serverAutosaveStatus.lastSavedAt.slice(11, 19) : '--:--:--',
+  )
+  let cloudStatusTitle = $derived.by(() => {
+    if ($serverAutosaveStatus.saving) return 'Cloud: saving...'
+    if (cloudConnected) return 'Cloud: connected'
+    return `Cloud: disconnected${$serverAutosaveStatus.lastError ? ` (${$serverAutosaveStatus.lastError})` : ''}`
+  })
 
   const debugJsonText = $derived.by(() => {
     const sm = $songMap
@@ -146,7 +159,7 @@
             void onExportFull()
           }}
         >
-          Export full state…
+          Save project (.smap)…
         </DropdownMenuItem>
         <DropdownMenuItem
           class="cursor-pointer"
@@ -154,7 +167,7 @@
             importInput?.click()
           }}
         >
-          Import full state…
+          Open project…
         </DropdownMenuItem>
         <DropdownMenuItem
           class="cursor-pointer"
@@ -162,7 +175,7 @@
             void onSaveToServer()
           }}
         >
-          Save to server
+          Save to cloud
         </DropdownMenuItem>
         <DropdownMenuItem
           class="cursor-pointer"
@@ -170,7 +183,7 @@
             void onRestoreFromServer()
           }}
         >
-          Restore from server…
+          Load from cloud…
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -185,8 +198,8 @@
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" class="min-w-[10rem]">
-        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Undo</DropdownMenuItem>
-        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Redo</DropdownMenuItem>
+        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Undo (coming soon)</DropdownMenuItem>
+        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Redo (coming soon)</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
 
@@ -200,23 +213,29 @@
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" class="min-w-[10rem]">
-        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>More tools later</DropdownMenuItem>
+        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Zoom controls (coming soon)</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>
 
   <div class="ml-auto flex shrink-0 items-center gap-2">
-    {#if $serverAutosaveStatus.enabled}
-      <span class="text-muted-foreground hidden max-w-[10rem] truncate text-[10px] sm:inline" title="Anonymous session autosave (fingerprint + DB)">
-        {#if $serverAutosaveStatus.saving}
-          Saving…
-        {:else if $serverAutosaveStatus.lastSavedAt}
-          Saved {$serverAutosaveStatus.lastSavedAt.slice(11, 19)}
-        {:else}
-          Autosave on
-        {/if}
-      </span>
-    {/if}
+    <span
+      class="inline-flex size-8 items-center justify-center rounded-md border {cloudConnected
+        ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-300'
+        : 'border-rose-400/40 bg-rose-500/10 text-rose-300'} {$serverAutosaveStatus.saving
+        ? 'animate-pulse'
+        : ''}"
+      title={cloudStatusTitle}
+      aria-label={cloudStatusTitle}
+    >
+      <Cloud class="size-4" aria-hidden="true" />
+    </span>
+    <span
+      class="text-muted-foreground hidden max-w-[14rem] truncate font-mono text-[10px] tabular-nums sm:inline"
+      title="Cloud check and latest autosave time"
+    >
+      chk {lastCheckedLabel} · save {lastSavedLabel}
+    </span>
     <Button
       type="button"
       variant="outline"
@@ -226,7 +245,7 @@
         debugOpen = true
       }}
     >
-      Debug JSON
+      Inspect JSON
     </Button>
   </div>
 
@@ -250,10 +269,9 @@
     showCloseButton={true}
   >
     <DialogHeader>
-      <DialogTitle>App state (JSON)</DialogTitle>
+      <DialogTitle>Project JSON</DialogTitle>
       <DialogDescription>
-        In-memory <code class="text-foreground/90">songMap</code> plus audio session metadata. Raw audio bytes are not
-        included.
+        Live song map and audio session metadata. Audio bytes are not shown here.
       </DialogDescription>
     </DialogHeader>
     <pre

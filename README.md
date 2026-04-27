@@ -1,43 +1,52 @@
-# Svelte + Vite
+# BarBro
 
-This template should help get you started developing with Svelte in Vite.
+## Quick start
 
-## Recommended IDE Setup
-
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
-
-## Need an official Svelte framework?
-
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
-
-## Technical considerations
-
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `checkJs` in the JS template?**
-
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```bash
+npm install
+npm run dev          # http://localhost:5173
 ```
+
+Optional — Postgres autosave (Docker):
+
+```bash
+npm run db:up        # starts Postgres on port 5433
+npm run db:migrate   # creates the editor_sessions table
+```
+
+## Tech stack
+
+SvelteKit 2 + Svelte 5 (runes), TypeScript, Tailwind CSS 4, Vite 8.
+UI primitives from **shadcn-svelte** (`bits-ui` + `tailwind-variants`), icons from **Lucide** (`@lucide/svelte`).
+Tests with Vitest.
+
+## What it is
+
+A browser-based music transcription editor. Import audio, detect beats, then edit bars, sections, and chord harmony on a zoomable waveform timeline. Export everything as a single `.smap` file.
+
+## The `.smap` file format
+
+A `.smap` is a binary container: a fixed 28-byte header, a UTF-8 JSON chunk (`SongProject` → `SongMap`), and an optional raw audio chunk.
+
+```
+HEADER  28 B   magic "SMAP" · container version · flags · jsonLength · audioLength
+JSON    n B    SongMap: metadata, timeline (bars + beats), harmony, sections, cues
+AUDIO   m B    reference MP3 (64 kbps), present when hasAudio flag is set
+```
+
+The JSON schema is defined in `src/lib/songmap/types.ts` — `SongMapV1`. Key top-level fields:
+
+| Field | Purpose |
+|---|---|
+| `metadata` | Title, artist, key, BPM, timestamps |
+| `timeline` | `bars[]` (index, meter, time span) + `beats[]` (barId, timeSec) |
+| `harmony` | `HarmonyEvent[]` — chord per beat (absolute `ChordSymbol`, not numerals) |
+| `sections` | Labeled bar ranges (verse, chorus, bridge, …) |
+| `cues` | Click / count-in settings |
+| `audio` | Reference file metadata (fileName, trim, sha256) |
+
+## JSON ↔ UI: single source of truth
+
+The `SongMap` JSON is the **complete, canonical state**. Every UI element — bars, beats, chords, sections, key, BPM — reads from and writes to this one object. There is no shadow state; if you serialize the JSON you get exactly what the editor shows, and loading it back restores the editor exactly.
+
+Audio is handled the same way: after analysis (on full-quality WAV), the clip is re-encoded to a 64 kbps reference MP3 via lamejs. That MP3 is the audio chunk inside `.smap` — small enough to save and share, good enough for playback and navigation. The editor plays directly from this reference blob.

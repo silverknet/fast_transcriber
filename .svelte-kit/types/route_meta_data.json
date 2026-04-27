@@ -1,5 +1,8 @@
 {
-	"/": [],
+	"/": [
+		"src/routes/+layout.server.ts",
+		"src/routes/+layout.server.ts"
+	],
 	"/api/analyze": [
 		"src/routes/api/analyze/+server.ts"
 	],
@@ -15,5 +18,7 @@
 	"/api/sessions/[id]/audio": [
 		"src/routes/api/sessions/[id]/audio/+server.ts"
 	],
-	"/edit": []
+	"/edit": [
+		"src/routes/+layout.server.ts"
+	]
 }

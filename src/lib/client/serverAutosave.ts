@@ -49,6 +49,7 @@ function markDirtyIfChanged() {
 
 async function ensureSession(): Promise<boolean> {
   if (!fingerprint) fingerprint = await computeBrowserFingerprintHash()
+  const checkedAt = new Date().toISOString()
 
   const res = await fetch('/api/sessions/ensure', {
     method: 'POST',
@@ -60,6 +61,7 @@ async function ensureSession(): Promise<boolean> {
     serverAutosaveStatus.update((s) => ({
       ...s,
       enabled: false,
+      lastCheckedAt: checkedAt,
       lastError: res.status === 503 ? 'Server autosave off (no database)' : `ensure failed (${res.status})`,
     }))
     return false
@@ -67,7 +69,12 @@ async function ensureSession(): Promise<boolean> {
 
   const data = (await res.json()) as { ok?: boolean; sessionId?: string }
   if (!data.ok || !data.sessionId) {
-    serverAutosaveStatus.update((s) => ({ ...s, enabled: false, lastError: 'Invalid ensure response' }))
+    serverAutosaveStatus.update((s) => ({
+      ...s,
+      enabled: false,
+      lastCheckedAt: checkedAt,
+      lastError: 'Invalid ensure response',
+    }))
     return false
   }
 
@@ -78,6 +85,7 @@ async function ensureSession(): Promise<boolean> {
   serverAutosaveStatus.update((s) => ({
     ...s,
     enabled: true,
+    lastCheckedAt: checkedAt,
     sessionId: sid,
     lastError: null,
   }))

@@ -21,4 +21,7 @@ export function hasActiveSongSession(): boolean {
 export function clearFullAppSongState(): void {
   clearSongMap()
   audioSession.set({ file: null, name: '', startSec: 0, endSec: 0 })
+  if (typeof document !== 'undefined') {
+    document.cookie = 'barbro_session=; Max-Age=0; Path=/; SameSite=Lax'
+  }
 }

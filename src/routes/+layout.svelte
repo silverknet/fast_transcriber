@@ -4,12 +4,27 @@
   import { beforeNavigate, goto } from '$app/navigation'
   import { browser } from '$app/environment'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
-  import { startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
+  import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
   import { hasActiveSongSession } from '$lib/stores/restorableSong'
   import { beatPulse, uiAnimations } from '$lib/stores/beatPulse'
 
+  let { data } = $props<{ data: { savedSessionId: string | null } }>()
+
+  let restoringSession = $state(false)
+
   onMount(() => {
-    if (browser) startServerAutosave()
+    if (!browser) return
+    startServerAutosave()
+    if (hasActiveSongSession()) return
+    if (!data.savedSessionId) return
+    restoringSession = true
+    void (async () => {
+      const r = await loadServerAutosave()
+      restoringSession = false
+      if (r.ok && hasActiveSongSession()) {
+        await goto('/edit', { replaceState: true })
+      }
+    })()
   })
 
   onDestroy(() => {
@@ -107,6 +122,9 @@
   </div>
   <!-- Fixed header (~3rem); keep page content below it -->
   <div class="pt-12">
+    {#if restoringSession}
+      <div class="text-muted-foreground px-4 pt-3 text-sm">Restoring your session...</div>
+    {/if}
     <slot />
   </div>
 </div>

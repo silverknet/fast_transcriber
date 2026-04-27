@@ -15,28 +15,6 @@
   const LABEL_FADE_END_PX = 52
   const DRAG_PX = 5
 
-  const SECTION_TINT: Record<SectionKind, string> = {
-    intro: 'bg-violet-500/25',
-    verse: 'bg-sky-500/20',
-    preChorus: 'bg-cyan-500/20',
-    chorus: 'bg-amber-500/25',
-    bridge: 'bg-orange-500/20',
-    solo: 'bg-rose-500/20',
-    outro: 'bg-fuchsia-500/20',
-    custom: 'bg-zinc-500/20',
-  }
-
-  const SECTION_BORDER: Record<SectionKind, string> = {
-    intro: 'border-l-violet-400',
-    verse: 'border-l-sky-400',
-    preChorus: 'border-l-cyan-400',
-    chorus: 'border-l-amber-400',
-    bridge: 'border-l-orange-400',
-    solo: 'border-l-rose-400',
-    outro: 'border-l-fuchsia-400',
-    custom: 'border-l-zinc-400',
-  }
-
   const SECTION_LABEL_TEXT: Record<SectionKind, string> = {
     intro: 'text-violet-200',
     verse: 'text-sky-200',
@@ -124,7 +102,58 @@
   })
 
   /** One label row per section, positioned over the visible time span of that section’s bars. */
-  type SectionLabelSpan = { key: string; label: string; kind: SectionKind; x0: number; w: number }
+  type SectionSpan = { key: string; label: string; kind: SectionKind; x0: number; w: number }
+  type SectionLabelSpan = SectionSpan
+
+  const SECTION_FILL_CSS: Record<SectionKind, string> = {
+    intro: 'background-color: rgb(139 92 246 / 0.25)',
+    verse: 'background-color: rgb(14 165 233 / 0.20)',
+    preChorus: 'background-color: rgb(6 182 212 / 0.20)',
+    chorus: 'background-color: rgb(245 158 11 / 0.25)',
+    bridge: 'background-color: rgb(249 115 22 / 0.20)',
+    solo: 'background-color: rgb(244 63 94 / 0.20)',
+    outro: 'background-color: rgb(217 70 239 / 0.20)',
+    custom: 'background-color: rgb(113 113 122 / 0.20)',
+  }
+
+  const SECTION_LEFT_BORDER_CSS: Record<SectionKind, string> = {
+    intro: 'border-left: 2px solid rgb(167 139 250)',
+    verse: 'border-left: 2px solid rgb(56 189 248)',
+    preChorus: 'border-left: 2px solid rgb(34 211 238)',
+    chorus: 'border-left: 2px solid rgb(251 191 36)',
+    bridge: 'border-left: 2px solid rgb(251 146 60)',
+    solo: 'border-left: 2px solid rgb(251 113 133)',
+    outro: 'border-left: 2px solid rgb(232 121 249)',
+    custom: 'border-left: 2px solid rgb(161 161 170)',
+  }
+
+  /** Contiguous section tint fills — always visible, outside the hideBarChrome opacity wrapper. */
+  let sectionFillSpans = $derived.by(() => {
+    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || mapSections.length === 0) {
+      return [] as SectionSpan[]
+    }
+    const byIndex = new Map(bars.map((b) => [b.index, b]))
+    const out: SectionSpan[] = []
+    for (const sec of mapSections) {
+      const inRange: Bar[] = []
+      for (let i = sec.barRange.startBarIndex; i <= sec.barRange.endBarIndex; i++) {
+        const b = byIndex.get(i)
+        if (b) inRange.push(b)
+      }
+      if (inRange.length === 0) continue
+      const t0 = Math.min(...inRange.map((b) => b.startSec))
+      const t1 = Math.max(...inRange.map((b) => b.endSec))
+      const visT0 = Math.max(t0, viewStart)
+      const visT1 = Math.min(t1, viewEnd)
+      if (!(visT1 > visT0)) continue
+      const x0 = timeToPxInView(visT0, viewStart, viewEnd, widthPx)
+      const x1 = timeToPxInView(visT1, viewStart, viewEnd, widthPx)
+      const w = x1 - x0
+      if (w < 0.5) continue
+      out.push({ key: sec.id, label: sec.label.trim() || sec.kind, kind: sec.kind, x0, w })
+    }
+    return out
+  })
 
   /** Single horizontal highlight for the full selected time span (sections mode). */
   let selectionRangePx = $derived.by(() => {
@@ -140,6 +169,37 @@
     if (sel.length === 0) return null
     const t0 = Math.min(...sel.map((b) => b.startSec))
     const t1 = Math.max(...sel.map((b) => b.endSec))
+    const visT0 = Math.max(t0, viewStart)
+    const visT1 = Math.min(t1, viewEnd)
+    if (!(visT1 > visT0)) return null
+    const x0 = timeToPxInView(visT0, viewStart, viewEnd, widthPx)
+    const x1 = timeToPxInView(visT1, viewStart, viewEnd, widthPx)
+    const w = x1 - x0
+    if (w < 0.5) return null
+    return { x0, w }
+  })
+
+  /** Single horizontal highlight for the full selected time span (chords mode). */
+  let chordsSelectionRangePx = $derived.by(() => {
+    if (stripMode !== 'chords' || chordsSelectionBeatIds.length === 0 || !(widthPx > 0) || viewEnd <= viewStart) {
+      return null as { x0: number; w: number } | null
+    }
+    const sorted = sortBeatsByTime(beats)
+    const selSet = new Set(chordsSelectionBeatIds)
+    const barsById = new Map(bars.map((b) => [b.id, b]))
+    let t0 = Number.POSITIVE_INFINITY
+    let t1 = Number.NEGATIVE_INFINITY
+    for (let i = 0; i < sorted.length; i++) {
+      const b = sorted[i]!
+      if (!selSet.has(b.id)) continue
+      const bar = barsById.get(b.barId)
+      const barEnd = bar?.endSec ?? b.timeSec + 0.1
+      const next = sorted[i + 1]
+      const beatEnd = next ? Math.min(next.timeSec, barEnd) : barEnd
+      if (b.timeSec < t0) t0 = b.timeSec
+      if (beatEnd > t1) t1 = beatEnd
+    }
+    if (!isFinite(t0) || !(t1 > t0)) return null
     const visT0 = Math.max(t0, viewStart)
     const visT1 = Math.min(t1, viewEnd)
     if (!(visT1 > visT0)) return null
@@ -224,22 +284,6 @@
     const s = [...beats].sort((a, b) => a.timeSec - b.timeSec || a.id.localeCompare(b.id))
     return { firstId: s[0]!.id, lastId: s[s.length - 1]!.id }
   })
-
-  function sectionForBarIndex(barIndex: number): Section | undefined {
-    return mapSections.find(
-      (sec) => barIndex >= sec.barRange.startBarIndex && barIndex <= sec.barRange.endBarIndex,
-    )
-  }
-
-  function sectionTintForBarIndex(barIndex: number): string {
-    const s = sectionForBarIndex(barIndex)
-    return s ? (SECTION_TINT[s.kind] ?? 'bg-zinc-500/15') : ''
-  }
-
-  function sectionBorderForBarIndex(barIndex: number): string {
-    const s = sectionForBarIndex(barIndex)
-    return s ? (SECTION_BORDER[s.kind] ?? 'border-l-zinc-500') : ''
-  }
 
   function isBarSelected(barId: string): boolean {
     if (stripMode === 'grid') return selectedBarId === barId
@@ -614,15 +658,26 @@
     {/each}
   {/if}
 
+  <!-- Section tint fills: always visible (outside the hideBarChrome opacity wrapper). -->
+  {#if editing && stripMode === 'sections'}
+    {#each sectionFillSpans as span (span.key)}
+      <div
+        class="pointer-events-none absolute inset-y-0"
+        style:left="{span.x0}px"
+        style:width="{span.w}px"
+        style="{SECTION_FILL_CSS[span.kind] ?? ''}; {SECTION_LEFT_BORDER_CSS[span.kind] ?? ''}"
+        aria-hidden="true"
+      ></div>
+    {/each}
+  {/if}
+
   <div
     class="pointer-events-none absolute inset-0 transition-opacity duration-300 ease-out"
     style:opacity={hideBarChrome ? 0 : 1}
   >
     {#each barSlices as slice, i (slice.bar.id)}
       <div
-        class="absolute inset-y-0 border-l-2 border-transparent {stripMode === 'sections'
-          ? `${sectionTintForBarIndex(slice.bar.index) || (i % 2 === 0 ? 'bg-zinc-500/[0.1]' : 'bg-zinc-400/[0.06]')} ${sectionBorderForBarIndex(slice.bar.index)}`
-          : i % 2 === 0
+        class="absolute inset-y-0 {i % 2 === 0
             ? 'bg-zinc-500/[0.1]'
             : 'bg-zinc-400/[0.06]'} {stripMode === 'grid' && isBarSelected(slice.bar.id)
           ? 'ring-1 ring-inset ring-amber-400/45'
@@ -635,22 +690,11 @@
         style:left="{slice.x0}px"
       ></div>
     {/each}
-    {#if stripMode === 'sections' && selectionRangePx}
-      <div
-        class="pointer-events-none absolute inset-y-0 z-[7] rounded-[2px] bg-amber-400/10 ring-1 ring-inset ring-amber-400/28"
-        style:left="{selectionRangePx.x0}px"
-        style:width="{selectionRangePx.w}px"
-        aria-hidden="true"
-      ></div>
-    {/if}
+    
     {#if editing && stripMode === 'chords'}
       {#each chordBeatSegments as seg (seg.beat.id)}
         <div
-          class="pointer-events-none absolute inset-y-0 z-[6] rounded-sm border border-transparent {chordsSelectionBeatIds.includes(
-            seg.beat.id,
-          )
-            ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-400/40'
-            : 'bg-zinc-500/5'}"
+          class="pointer-events-none absolute inset-y-0 z-[6] rounded-sm border border-transparent bg-zinc-500/5"
           style:left="{seg.x0}px"
           style:width="{seg.x1 - seg.x0}px"
           aria-hidden="true"
@@ -668,6 +712,24 @@
       {/each}
     {/if}
   </div>
+
+  <!-- Selection range overlays: outside the hideBarChrome opacity wrapper so they stay visible at every zoom. -->
+  {#if stripMode === 'sections' && selectionRangePx}
+    <div
+      class="pointer-events-none absolute inset-y-0 z-[7] rounded-[2px] bg-amber-400/10 ring-1 ring-inset ring-amber-400/28"
+      style:left="{selectionRangePx.x0}px"
+      style:width="{selectionRangePx.w}px"
+      aria-hidden="true"
+    ></div>
+  {/if}
+  {#if stripMode === 'chords' && chordsSelectionRangePx}
+    <div
+      class="pointer-events-none absolute inset-y-0 z-[7] rounded-[2px] bg-amber-400/10 ring-1 ring-inset ring-amber-400/28"
+      style:left="{chordsSelectionRangePx.x0}px"
+      style:width="{chordsSelectionRangePx.w}px"
+      aria-hidden="true"
+    ></div>
+  {/if}
 
   {#each beatLines as bl (bl.id)}
     <div

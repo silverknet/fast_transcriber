@@ -38,6 +38,7 @@
       'Leave the editor and go to the import page?\n\nThis project only lives in this tab until you export a .smap file. If you continue without exporting, you can lose your work.',
     )
     if (!ok) return
+    document.cookie = 'barbro_session=; Max-Age=0; Path=/; SameSite=Lax'
     clearFullAppSongState()
     void goto('/')
   }

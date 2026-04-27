@@ -2,6 +2,7 @@
 /**
  * Apply SQL migrations when Postgres already has data (docker init only runs on first volume).
  * Usage: DATABASE_URL=postgresql://... node scripts/migrate.mjs
+ * Fallback: if DATABASE_URL is missing in env, read it from project `.env`.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -9,9 +10,32 @@ import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const url = process.env.DATABASE_URL
+const envPath = path.join(__dirname, '..', '.env')
+
+function databaseUrlFromDotEnv() {
+  if (!fs.existsSync(envPath)) return null
+  const text = fs.readFileSync(envPath, 'utf8')
+  for (const line of text.split(/\r?\n/)) {
+    const s = line.trim()
+    if (!s || s.startsWith('#')) continue
+    const eq = s.indexOf('=')
+    if (eq <= 0) continue
+    const k = s.slice(0, eq).trim()
+    if (k !== 'DATABASE_URL') continue
+    const v = s.slice(eq + 1).trim()
+    if (!v) return null
+    // Support quoted values: DATABASE_URL="postgresql://..."
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      return v.slice(1, -1)
+    }
+    return v
+  }
+  return null
+}
+
+const url = process.env.DATABASE_URL ?? databaseUrlFromDotEnv()
 if (!url) {
-  console.error('Set DATABASE_URL')
+  console.error('Set DATABASE_URL (env or .env)')
   process.exit(1)
 }
 

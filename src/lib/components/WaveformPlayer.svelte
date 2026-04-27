@@ -46,6 +46,7 @@
   import { MAX_AUDIO_DURATION_SEC, MAX_WAVE_WIDTH_PX } from '$lib/constants'
   import TimelineBeatGrid from '$lib/components/TimelineBeatGrid.svelte'
   import { triggerBeatPulse } from '$lib/stores/beatPulse'
+  import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { SECTION_KIND_OPTIONS } from '$lib/songmap/sectionEdit'
   import type { BarGridAction } from '$lib/songmap/timelineEdit'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
@@ -470,6 +471,107 @@
       ? (Math.max(0, Math.min(currentTime, timelineSec)) / timelineSec) * 100
       : 0,
   )
+
+  /** Time range [startSec, endSec) of the current edit-mode selection (sections or chords). */
+  let editSelectionTimeSec = $derived.by((): { startSec: number; endSec: number } | null => {
+    if (!beatGrid || timelineStripMode === 'grid') return null
+
+    if (timelineStripMode === 'sections' && sectionsSelectionBarIds.length > 0) {
+      const byId = new Map(beatGrid.bars.map((b) => [b.id, b]))
+      let t0 = Number.POSITIVE_INFINITY
+      let t1 = Number.NEGATIVE_INFINITY
+      for (const id of sectionsSelectionBarIds) {
+        const b = byId.get(id)
+        if (!b) continue
+        if (b.startSec < t0) t0 = b.startSec
+        if (b.endSec > t1) t1 = b.endSec
+      }
+      return isFinite(t0) && t1 > t0 ? { startSec: t0, endSec: t1 } : null
+    }
+
+    if (timelineStripMode === 'chords' && chordsSelectionBeatIds.length > 0) {
+      const sorted = sortBeatsByTime(beatGrid.beats)
+      const selSet = new Set(chordsSelectionBeatIds)
+      const barsById = new Map(beatGrid.bars.map((b) => [b.id, b]))
+      let t0 = Number.POSITIVE_INFINITY
+      let t1 = Number.NEGATIVE_INFINITY
+      for (let i = 0; i < sorted.length; i++) {
+        const b = sorted[i]!
+        if (!selSet.has(b.id)) continue
+        const bar = barsById.get(b.barId)
+        const barEnd = bar?.endSec ?? b.timeSec + 0.1
+        const next = sorted[i + 1]
+        const beatEnd = next ? Math.min(next.timeSec, barEnd) : barEnd
+        if (b.timeSec < t0) t0 = b.timeSec
+        if (beatEnd > t1) t1 = beatEnd
+      }
+      return isFinite(t0) && t1 > t0 ? { startSec: t0, endSec: t1 } : null
+    }
+
+    return null
+  })
+
+  let editSelLeft = $derived(
+    editSelectionTimeSec && waveWidth > 0
+      ? timeToPxInView(editSelectionTimeSec.startSec, layoutViewStart, layoutViewEnd, waveWidth)
+      : 0,
+  )
+  let editSelW = $derived(
+    editSelectionTimeSec && waveWidth > 0
+      ? timeToPxInView(editSelectionTimeSec.endSec, layoutViewStart, layoutViewEnd, waveWidth) - editSelLeft
+      : 0,
+  )
+  let editSelMinimapLeftPct = $derived(
+    editSelectionTimeSec && timelineSec > 0
+      ? (editSelectionTimeSec.startSec / timelineSec) * 100
+      : 0,
+  )
+  let editSelMinimapWidthPct = $derived(
+    editSelectionTimeSec && timelineSec > 0
+      ? ((editSelectionTimeSec.endSec - editSelectionTimeSec.startSec) / timelineSec) * 100
+      : 0,
+  )
+
+  const SECTION_FILL_RGBA: Record<string, string> = {
+    intro: 'rgba(139, 92, 246, 0.12)',
+    verse: 'rgba(14, 165, 233, 0.10)',
+    preChorus: 'rgba(6, 182, 212, 0.10)',
+    chorus: 'rgba(245, 158, 11, 0.12)',
+    bridge: 'rgba(249, 115, 22, 0.10)',
+    solo: 'rgba(244, 63, 94, 0.10)',
+    outro: 'rgba(217, 70, 239, 0.10)',
+    custom: 'rgba(113, 113, 122, 0.10)',
+  }
+
+  type WaveformSectionSpan = { key: string; kind: string; x0Pct: number; wPct: number; xPx: number; wPx: number }
+
+  /** Section tint spans for waveform + minimap. */
+  let waveformSectionSpans = $derived.by((): WaveformSectionSpan[] => {
+    if (!beatGrid || timelineStripMode !== 'sections' || mapSections.length === 0 || !(timelineSec > 0)) {
+      return []
+    }
+    const byIndex = new Map(beatGrid.bars.map((b) => [b.index, b]))
+    const out: WaveformSectionSpan[] = []
+    for (const sec of mapSections) {
+      const inRange: Bar[] = []
+      for (let i = sec.barRange.startBarIndex; i <= sec.barRange.endBarIndex; i++) {
+        const b = byIndex.get(i)
+        if (b) inRange.push(b)
+      }
+      if (inRange.length === 0) continue
+      const t0 = Math.min(...inRange.map((b) => b.startSec))
+      const t1 = Math.max(...inRange.map((b) => b.endSec))
+      if (!(t1 > t0)) continue
+      const x0Pct = (t0 / timelineSec) * 100
+      const wPct = ((t1 - t0) / timelineSec) * 100
+      const xPx = waveWidth > 0 ? timeToPxInView(Math.max(t0, layoutViewStart), layoutViewStart, layoutViewEnd, waveWidth) : 0
+      const wPx = waveWidth > 0
+        ? timeToPxInView(Math.min(t1, layoutViewEnd), layoutViewStart, layoutViewEnd, waveWidth) - xPx
+        : 0
+      out.push({ key: sec.id, kind: sec.kind, x0Pct, wPct, xPx, wPx })
+    }
+    return out
+  })
 
   function minimapXToTime(clientX) {
     if (!minimapEl || !(timelineSec > 0)) return 0
@@ -1640,11 +1742,30 @@
         <!-- Do not cover the canvas with a mediaReady blur: `<audio>` can lag Web Audio decode; controls stay disabled until ready. -->
         <canvas bind:this={canvas} class="pointer-events-none relative z-[3] block" aria-hidden="true"></canvas>
 
+        {#each waveformSectionSpans as span (span.key)}
+          {#if span.wPx > 0}
+            <div
+              class="pointer-events-none absolute inset-y-0"
+              style:left="{span.xPx}px"
+              style:width="{span.wPx}px"
+              style:background-color={SECTION_FILL_RGBA[span.kind] ?? 'transparent'}
+              aria-hidden="true"
+            ></div>
+          {/if}
+        {/each}
         <div
           class="pointer-events-none absolute inset-y-0 bg-zinc-400/18 ring-1 ring-zinc-500/35"
           style:left="{selLeft}px"
           style:width="{selW}px"
         ></div>
+        {#if editSelectionTimeSec}
+          <div
+            class="pointer-events-none absolute inset-y-0 z-[1] bg-amber-400/12 ring-1 ring-inset ring-amber-400/30"
+            style:left="{editSelLeft}px"
+            style:width="{editSelW}px"
+            aria-hidden="true"
+          ></div>
+        {/if}
         {#if showSelectionLeftHandle}
           <div
             class="pointer-events-none absolute top-1/2 z-[4] h-11 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-zinc-300/75 bg-zinc-500/95 shadow-md shadow-black/25"
@@ -1708,11 +1829,28 @@
           style:height="{minimapH}px"
           aria-hidden="true"
         ></canvas>
+        {#each waveformSectionSpans as span (span.key)}
+          <div
+            class="pointer-events-none absolute inset-y-0"
+            style:left="{span.x0Pct}%"
+            style:width="{span.wPct}%"
+            style:background-color={SECTION_FILL_RGBA[span.kind] ?? 'transparent'}
+            aria-hidden="true"
+          ></div>
+        {/each}
         <div
           class="pointer-events-none absolute inset-y-0 bg-zinc-500/22"
           style:left="{selectionLeftMinimapPct}%"
           style:width="{selectionWidthMinimapPct}%"
         ></div>
+        {#if editSelectionTimeSec}
+          <div
+            class="pointer-events-none absolute inset-y-0 bg-amber-400/15 ring-1 ring-inset ring-amber-400/30"
+            style:left="{editSelMinimapLeftPct}%"
+            style:width="{editSelMinimapWidthPct}%"
+            aria-hidden="true"
+          ></div>
+        {/if}
         <div
           class="pointer-events-none absolute inset-y-0 z-[1] w-px bg-foreground/85"
           style:left="{playheadMinimapPct}%"
