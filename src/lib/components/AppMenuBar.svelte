@@ -28,12 +28,39 @@
   import { restorableSongState } from '$lib/songmap/session'
   import { audioSession } from '$lib/stores/audioSession'
   import { loadServerAutosave, saveServerAutosaveNow } from '$lib/client/serverAutosave'
+  import { songMapToMusicXml } from '$lib/export/musicxml'
+  import { renderLeadSheetPdf } from '$lib/export/pdfLeadSheet'
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
   import { serverAutosaveStatus } from '$lib/stores/serverAutosaveStatus'
   import { songMap } from '$lib/stores/songMap'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
   import Cloud from '@lucide/svelte/icons/cloud'
+  import Moon from '@lucide/svelte/icons/moon'
   import Music from '@lucide/svelte/icons/music'
+  import Sun from '@lucide/svelte/icons/sun'
+
+  let dark = $state(browser && document.documentElement.classList.contains('dark'))
+
+  function toggleDarkMode() {
+    dark = !dark
+    document.documentElement.classList.toggle('dark', dark)
+    try {
+      localStorage.setItem('barbro-theme', dark ? 'dark' : 'light')
+    } catch {}
+  }
+
+  if (browser) {
+    try {
+      const saved = localStorage.getItem('barbro-theme')
+      if (saved === 'dark') {
+        dark = true
+        document.documentElement.classList.add('dark')
+      } else if (saved === 'light') {
+        dark = false
+        document.documentElement.classList.remove('dark')
+      }
+    } catch {}
+  }
 
   let menuError = $state('')
   let importInput = $state<HTMLInputElement | undefined>()
@@ -91,6 +118,41 @@
     }
   }
 
+  async function onExportMusicXml() {
+    menuError = ''
+    if (!browser) return
+    const sm = get(songMap)
+    if (!sm) {
+      menuError = 'Nothing to export — open or import a song first.'
+      return
+    }
+    try {
+      const xml = songMapToMusicXml(sm)
+      const blob = new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml;charset=utf-8' })
+      const name = `${safeExportBasename(sm.metadata.title)}.musicxml`
+      downloadBlob(blob, name)
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'MusicXML export failed'
+    }
+  }
+
+  async function onExportPdf() {
+    menuError = ''
+    if (!browser) return
+    const sm = get(songMap)
+    if (!sm) {
+      menuError = 'Nothing to export — open or import a song first.'
+      return
+    }
+    try {
+      const blob = await renderLeadSheetPdf(sm)
+      const name = `${safeExportBasename(sm.metadata.title)}.pdf`
+      downloadBlob(blob, name)
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'PDF export failed'
+    }
+  }
+
   async function onSaveToServer() {
     menuError = ''
     const r = await saveServerAutosaveNow()
@@ -124,17 +186,17 @@
 </script>
 
 <header
-  class="border-foreground/10 bg-foreground/5 fixed top-0 right-0 left-0 z-50 flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-sm shadow-sm backdrop-blur-xl"
+  class="bg-background border-foreground fixed top-0 right-0 left-0 z-50 flex flex-wrap items-center gap-2 border-b-2 px-3 py-1.5 text-sm"
   aria-label="Application"
   data-app-menu
 >
   <a
     href={$songMap && $audioSession.file ? '/edit' : '/'}
-    class="text-foreground/95 hover:text-foreground flex shrink-0 items-center gap-2 rounded-lg py-1 pr-2 transition-colors"
+    class="text-foreground hover:text-foreground flex shrink-0 items-center gap-2 py-1 pr-2 transition-colors"
     aria-label={$songMap && $audioSession.file ? 'BarBro — back to editor' : 'BarBro — import audio'}
   >
     <span
-      class="border-foreground/15 bg-muted/30 text-violet-400/95 inline-flex size-8 items-center justify-center rounded-lg border shadow-sm"
+      class="bg-muted text-foreground inline-flex size-8 items-center justify-center border-2 border-foreground"
       aria-hidden="true"
     >
       <Music class="size-4" strokeWidth={2} />
@@ -160,6 +222,22 @@
           }}
         >
           Save project (.smap)…
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          class="cursor-pointer"
+          onclick={() => {
+            void onExportMusicXml()
+          }}
+        >
+          Export as lead sheet (.musicxml)…
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          class="cursor-pointer"
+          onclick={() => {
+            void onExportPdf()
+          }}
+        >
+          Export as PDF…
         </DropdownMenuItem>
         <DropdownMenuItem
           class="cursor-pointer"
@@ -220,9 +298,9 @@
 
   <div class="ml-auto flex shrink-0 items-center gap-2">
     <span
-      class="inline-flex size-8 items-center justify-center rounded-md border {cloudConnected
-        ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-300'
-        : 'border-rose-400/40 bg-rose-500/10 text-rose-300'} {$serverAutosaveStatus.saving
+      class="inline-flex size-8 items-center justify-center border-2 {cloudConnected
+        ? 'border-emerald-600 bg-emerald-100 text-emerald-800 dark:border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200'
+        : 'border-rose-600 bg-rose-100 text-rose-800 dark:border-rose-300 dark:bg-rose-950 dark:text-rose-200'} {$serverAutosaveStatus.saving
         ? 'animate-pulse'
         : ''}"
       title={cloudStatusTitle}
@@ -236,6 +314,20 @@
     >
       chk {lastCheckedLabel} · save {lastSavedLabel}
     </span>
+    <Button
+      type="button"
+      variant="outline"
+      size="icon"
+      class="size-8"
+      onclick={toggleDarkMode}
+      aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+    >
+      {#if dark}
+        <Sun class="size-4" />
+      {:else}
+        <Moon class="size-4" />
+      {/if}
+    </Button>
     <Button
       type="button"
       variant="outline"

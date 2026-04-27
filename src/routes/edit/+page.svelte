@@ -540,7 +540,7 @@
     <div class="min-h-[50vh]" aria-hidden="true"></div>
   {:else if !$audioSession.file || !$songMap}
     <div
-      class="border-foreground/10 bg-foreground/5 mx-auto w-full max-w-md rounded-2xl border p-8 text-center shadow-xl backdrop-blur-xl"
+      class="brutalist-shadow border-foreground bg-background mx-auto w-full max-w-md border-2 p-8 text-center"
     >
       <p class="text-muted-foreground text-sm">No analyzed clip in session.</p>
       <Button type="button" variant="secondary" class="mt-6 gap-2" onclick={() => goto('/')}>
@@ -556,7 +556,7 @@
     >
       <div class="flex items-center gap-3">
         <div
-          class="border-foreground/15 bg-muted/30 text-violet-400/95 inline-flex size-11 shrink-0 items-center justify-center rounded-xl border shadow-sm"
+          class="brutalist-shadow-sm border-foreground bg-muted text-foreground inline-flex size-11 shrink-0 items-center justify-center border-2"
           aria-hidden="true"
         >
           <Music class="size-6" strokeWidth={2} />
@@ -574,7 +574,7 @@
       </div>
 
       <div
-        class="border-foreground/15 bg-muted/25 inline-flex gap-0.5 self-start rounded-lg border p-0.5 sm:self-auto"
+        class="border-foreground bg-muted inline-grid grid-cols-3 gap-0 self-start overflow-hidden border-2 sm:self-auto"
         role="tablist"
         aria-label="Edit mode"
       >
@@ -582,9 +582,11 @@
           type="button"
           role="tab"
           aria-selected={editMode === 'grid'}
-          variant={editMode === 'grid' ? 'secondary' : 'ghost'}
+          variant="ghost"
           size="sm"
-          class="h-8 rounded-md px-3 text-xs"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'grid'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
           onclick={() => (editMode = 'grid')}
         >
           Grid
@@ -593,9 +595,11 @@
           type="button"
           role="tab"
           aria-selected={editMode === 'sections'}
-          variant={editMode === 'sections' ? 'secondary' : 'ghost'}
+          variant="ghost"
           size="sm"
-          class="h-8 rounded-md px-3 text-xs"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'sections'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
           onclick={() => (editMode = 'sections')}
         >
           Sections
@@ -604,9 +608,11 @@
           type="button"
           role="tab"
           aria-selected={editMode === 'chords'}
-          variant={editMode === 'chords' ? 'secondary' : 'ghost'}
+          variant="ghost"
           size="sm"
-          class="h-8 rounded-md px-3 text-xs"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'chords'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
           onclick={() => (editMode = 'chords')}
         >
           Chords
@@ -616,7 +622,7 @@
 
     {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
       <section
-        class="border-foreground/10 bg-foreground/5 w-full rounded-xl border p-3 shadow-xl backdrop-blur-xl sm:rounded-2xl sm:p-4 md:p-5"
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Edit timeline"
       >
         {#if editMode === 'grid'}
@@ -640,11 +646,11 @@
           </p>
           <div
             data-song-key-picker
-            class="border-foreground/10 bg-muted/20 mb-4 flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2"
+            class="border-foreground bg-muted mb-4 flex flex-wrap items-center gap-2 border-2 px-3 py-2"
           >
             <span class="text-muted-foreground text-xs font-medium tracking-wide uppercase">Song key</span>
             <select
-              class="border-input bg-background text-foreground rounded-md border px-2 py-1 text-xs"
+              class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
               value={keyDraft.root}
               onchange={(e) =>
                 applyKeyPatch({ ...keyDraft, root: e.currentTarget.value as NoteName })}
@@ -654,7 +660,7 @@
               {/each}
             </select>
             <select
-              class="border-input bg-background text-foreground rounded-md border px-2 py-1 text-xs"
+              class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
               value={keyDraft.accidental ?? ''}
               onchange={(e) => {
                 const v = e.currentTarget.value
@@ -669,7 +675,7 @@
               <option value="natural">♮</option>
             </select>
             <select
-              class="border-input bg-background text-foreground rounded-md border px-2 py-1 text-xs"
+              class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
               value={keyDraft.mode}
               onchange={(e) =>
                 applyKeyPatch({
@@ -708,7 +714,7 @@
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>
         {/if}
       </section>
-      <!-- Radial menu must sit outside `backdrop-blur` ancestors: they create a fixed-position containing block and break clientX/Y alignment. -->
+      <!-- Radial menu stays outside container ancestors for stable fixed-position clientX/Y alignment. -->
       {#if editMode === 'chords' && $songMap}
         <ChordRadialQuickSelect
           bind:open={chordPickerOpen}
@@ -722,14 +728,14 @@
       {/if}
     {/if}
 
-    <details class="group border-foreground/10 bg-foreground/5 rounded-xl border">
+    <details class="group border-foreground bg-background border-2">
       <summary
         class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-4 py-3 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
       >
         <span class="underline-offset-2 group-open:underline">Debug tools</span>
         <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview, bar play, click track</span>
       </summary>
-      <div class="border-foreground/10 space-y-6 border-t px-4 py-4">
+      <div class="border-foreground space-y-6 border-t-2 px-4 py-4">
         <dl class="text-foreground/90 space-y-2 text-sm">
           <div class="flex justify-between gap-4">
             <dt class="text-muted-foreground">Bars</dt>
@@ -752,7 +758,7 @@
             <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars (debug)</p>
             <ul class="space-y-3 text-xs">
               {#each sm.timeline.bars.slice(0, previewBars) as bar (bar.id)}
-                <li class="border-foreground/10 border-b pb-3 font-mono last:border-0 last:pb-0">
+                <li class="border-foreground border-b-2 pb-3 font-mono last:border-0 last:pb-0">
                   <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0 flex-1">
                       <div>

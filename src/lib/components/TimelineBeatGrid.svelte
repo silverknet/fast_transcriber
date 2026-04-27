@@ -675,18 +675,18 @@
     class="pointer-events-none absolute inset-0 transition-opacity duration-300 ease-out"
     style:opacity={hideBarChrome ? 0 : 1}
   >
-    {#each barSlices as slice, i (slice.bar.id)}
+    {#each barSlices as slice (slice.bar.id)}
       <div
-        class="absolute inset-y-0 {i % 2 === 0
-            ? 'bg-zinc-500/[0.1]'
-            : 'bg-zinc-400/[0.06]'} {stripMode === 'grid' && isBarSelected(slice.bar.id)
+        class="absolute inset-y-0 {slice.bar.index % 2 === 0
+            ? 'bg-foreground/10'
+            : 'bg-foreground/5'} {stripMode === 'grid' && isBarSelected(slice.bar.id)
           ? 'ring-1 ring-inset ring-amber-400/45'
           : ''}"
         style:left="{slice.x0}px"
         style:width="{slice.w}px"
       ></div>
       <div
-        class="absolute inset-y-0 w-px bg-zinc-400/40"
+        class="absolute inset-y-0 w-px bg-foreground/35"
         style:left="{slice.x0}px"
       ></div>
     {/each}
@@ -737,7 +737,7 @@
         ? stripMode === 'sections' || stripMode === 'chords'
           ? 'top-10'
           : 'top-7'
-        : 'top-2'} {bl.downbeat ? 'w-[1.5px] bg-zinc-200' : 'w-px bg-zinc-500/75'}"
+        : 'top-2'} {bl.downbeat ? 'z-[10] w-[2px] bg-foreground/95' : 'w-px bg-foreground/45'}"
       style:left="{bl.x}px"
       style:opacity={bl.downbeat ? 1 : tickDimmed ? 0.28 : 1}
     ></div>

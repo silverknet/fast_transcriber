@@ -19,6 +19,12 @@ export type RadialMenuNode = {
   weight?: number
 }
 
+export type RelatedChordItem = {
+  chord: ChordSymbol
+  label: string
+  sublabel: string
+}
+
 function dedupeByLabel(nodes: RadialMenuNode[], preferFlats: boolean): RadialMenuNode[] {
   const seen = new Set<string>()
   const result: RadialMenuNode[] = []
@@ -69,6 +75,50 @@ function branchNode(
     children,
     weight,
   }
+}
+
+/**
+ * Build a compact, drill-in list for one diatonic degree:
+ * - current triad
+ * - seventh variation
+ * - secondary dominant to this degree
+ * - tritone substitution of that secondary dominant
+ * - borrowed iv / iv6 when relevant (major-key degree IV)
+ */
+export function relatedChordsForDegree(songKey: SongKey, degreeIndex: number): RelatedChordItem[] {
+  const preferFlats = songKeyPreferFlats(songKey)
+  const triads = diatonicTriadsInKey(songKey, preferFlats)
+  const triad = triads[degreeIndex]
+  if (!triad) return []
+
+  const rootTriad = chordWithoutBass(triad, preferFlats)
+  const seventh = dominantSeventhOfChordRoot(rootTriad, preferFlats)
+  const tritone = tritoneSubOfDominantSeventh(seventh, preferFlats)
+
+  const seen = new Set<string>()
+  const out: RelatedChordItem[] = []
+  const push = (chord: ChordSymbol, sublabel: string) => {
+    const label = formatChordSymbol(chord, { preferFlats })
+    if (seen.has(label)) return
+    seen.add(label)
+    out.push({ chord, label, sublabel })
+  }
+
+  push(rootTriad, 'current')
+  push(seventh, '7th')
+  push(tritone, 'tritone sub')
+
+  // Major-key borrowed iv colors the common modal interchange move.
+  if (songKey.mode === 'major' && degreeIndex === 3) {
+    const ivMinor: ChordSymbol = { ...rootTriad, quality: 'minor', displayRaw: '' }
+    ivMinor.displayRaw = formatChordSymbol(ivMinor, { preferFlats })
+    const ivMinor6: ChordSymbol = { ...rootTriad, quality: 'minor6', displayRaw: '' }
+    ivMinor6.displayRaw = formatChordSymbol(ivMinor6, { preferFlats })
+    push(ivMinor, 'borrowed')
+    push(ivMinor6, 'borrowed')
+  }
+
+  return out
 }
 
 export function buildChordMarkingTree(songKey: SongKey): RadialMenuNode {

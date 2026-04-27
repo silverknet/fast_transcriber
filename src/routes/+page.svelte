@@ -113,12 +113,12 @@
 >
   <div class="flex flex-col items-center gap-3 text-center">
     <div
-      class="border-foreground/15 bg-muted/30 text-violet-400/95 inline-flex size-16 items-center justify-center rounded-2xl border shadow-sm backdrop-blur-md"
+      class="brutalist-shadow-sm border-foreground bg-muted text-foreground inline-flex size-16 items-center justify-center border-2"
       aria-hidden="true"
     >
       <Music class="size-9" strokeWidth={1.75} />
     </div>
-    <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">BarBro</h1>
+    <h1 class="text-4xl font-black tracking-tight md:text-5xl">BarBro</h1>
     <p class="text-muted-foreground max-w-md text-pretty text-sm leading-relaxed">
       Import audio, set your region on the waveform, and open it in the editor with beats detected.
     </p>
@@ -133,7 +133,7 @@
   />
 
   <div
-    class="border-foreground/10 bg-foreground/5 w-full max-w-xl rounded-2xl border p-6 shadow-xl backdrop-blur-xl md:p-8"
+    class="brutalist-shadow border-foreground bg-background w-full max-w-xl border-2 p-6 md:p-8"
   >
     <div class="flex flex-col items-stretch gap-6">
       <Button
