@@ -10,6 +10,6 @@ if ! test -d .venv; then
 fi
 .venv/bin/pip install -U pip
 .venv/bin/pip install 'setuptools>=69,<76' wheel
-.venv/bin/pip install cython "numpy>=1.19,<2" scipy
+.venv/bin/pip install cython "numpy>=1.19,<1.24" scipy
 .venv/bin/pip install madmom==0.16.1 --no-build-isolation
 echo "OK: use PYTHON=\"$ROOT/.venv/bin/python3\" npm run dev"

@@ -177,6 +177,7 @@ export function beatsToSongMap(input: BeatsToSongMapInput): SongMap {
       ...map.metadata,
       ...(bpm !== undefined ? { bpm } : {}),
       updatedAt: now,
+      analyzed: true,
     },
   }
 

@@ -181,6 +181,7 @@ function parseAudio(raw: unknown, path: string): AudioReference {
       endSec: reqNum(trim.endSec, `${path}.trim.endSec`),
     },
     sha256: optString(o.sha256),
+    originalSha256: optString(o.originalSha256),
     source: reqString(o.source, `${path}.source`) as AudioReference['source'],
   }
 }
@@ -202,6 +203,8 @@ function parseMetadata(raw: unknown, path: string): SongMetadata {
     o.keyDetail !== undefined && o.keyDetail !== null
       ? parseSongKey(o.keyDetail, `${path}.keyDetail`)
       : undefined
+  const analyzedRaw = o.analyzed
+  const analyzed = typeof analyzedRaw === 'boolean' ? analyzedRaw : undefined
   return {
     title: reqString(o.title, `${path}.title`),
     artist: optString(o.artist),
@@ -213,6 +216,7 @@ function parseMetadata(raw: unknown, path: string): SongMetadata {
     notes: optString(o.notes),
     createdAt: reqString(o.createdAt, `${path}.createdAt`),
     updatedAt: reqString(o.updatedAt, `${path}.updatedAt`),
+    analyzed,
   }
 }
 
@@ -242,12 +246,18 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
   if (formatVersion !== SONGMAP_FORMAT_VERSION) {
     throw new SongMapParseError(`Unsupported formatVersion: ${String(formatVersion)}`, 'formatVersion')
   }
+  const metadata = parseMetadata(raw.metadata, 'metadata')
+  const timeline = parseTimeline(raw.timeline, 'timeline')
+  // Backward compat: legacy .smap files have no `analyzed` field but always had analysis run.
+  if (metadata.analyzed === undefined) {
+    metadata.analyzed = timeline.bars.length > 0
+  }
   return {
     formatVersion: SONGMAP_FORMAT_VERSION,
     app: parseApp(raw.app, 'app'),
-    metadata: parseMetadata(raw.metadata, 'metadata'),
+    metadata,
     audio: raw.audio !== undefined && raw.audio !== null ? parseAudio(raw.audio, 'audio') : undefined,
-    timeline: parseTimeline(raw.timeline, 'timeline'),
+    timeline,
     sections: Array.isArray(raw.sections)
       ? raw.sections.map((s, i) => parseSection(s, `sections[${i}]`))
       : [],

@@ -18,8 +18,8 @@ const LOG = '[reference-audio]'
 
 const MP3_FRAME_SAMPLES = 1152
 
-/** Reject decoded PCM that is effectively silence (bad lame frames / float noise floor). */
-export const REFERENCE_DECODE_MIN_PEAK = 1e-5
+/** Reject decoded PCM that is effectively silence or near-silent (lamejs produces ~0.0002 max on some systems). */
+export const REFERENCE_DECODE_MIN_PEAK = 0.01
 
 /**
  * Max absolute sample across all channels (same scale as `decodeAudioData` float PCM).
@@ -112,7 +112,17 @@ export function applyReferenceClipToSongMap(map: SongMap, file: File): SongMap {
 }
 
 /**
- * Re-encode WAV to a compact MP3 reference `File` for session + `.smap` export.
+ * Encode any audio file to a compact 64 kbps MP3 reference for `.smap` storage.
+ * Accepts any format `decodeAudioData` can handle (MP3, WAV, etc.).
+ * The full file is encoded — trimming is applied at runtime from `audio.trim` metadata.
+ */
+export async function encodeReferenceAudio(audioFile: File): Promise<File> {
+  return encodeReferenceAudioFromWav(audioFile)
+}
+
+/**
+ * Re-encode audio blob to a compact MP3 reference `File` for session + `.smap` export.
+ * @deprecated Prefer {@link encodeReferenceAudio} for clarity.
  */
 export async function encodeReferenceAudioFromWav(wavBlob: Blob): Promise<File> {
   console.debug(`${LOG} start encode, wav size bytes =`, wavBlob.size)

@@ -3,26 +3,45 @@
   import '../app.css'
   import { beforeNavigate, goto } from '$app/navigation'
   import { browser } from '$app/environment'
+  import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
   import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
-  import { hasActiveSongSession } from '$lib/stores/restorableSong'
+  import { songMap } from '$lib/stores/songMap'
+  import { analyzingState } from '$lib/stores/analyzingState'
 
   let { data } = $props<{ data: { savedSessionId: string | null } }>()
 
   let restoringSession = $state(false)
 
+  function isAnalyzed(sm: typeof $songMap): boolean {
+    if (!sm) return false
+    return sm.metadata.analyzed ?? sm.timeline.bars.length > 0
+  }
+
+  function currentRoute(): '/' | '/analyzing' | '/edit' {
+    const sm = get(songMap)
+    const as = get(analyzingState)
+    if (!sm) return '/'
+    if (as) return '/analyzing'
+    if (isAnalyzed(sm)) return '/edit'
+    return '/'
+  }
+
   onMount(() => {
     if (!browser) return
     startServerAutosave()
-    if (hasActiveSongSession()) return
+    if (isAnalyzed(get(songMap))) return
     if (!data.savedSessionId) return
     restoringSession = true
     void (async () => {
       const r = await loadServerAutosave()
       restoringSession = false
-      if (r.ok && hasActiveSongSession()) {
+      if (!r.ok) return
+      const sm = get(songMap)
+      if (sm && isAnalyzed(sm)) {
         await goto('/edit', { replaceState: true })
       }
+      // If not analyzed, stay on '/' — import page will show the unanalyzed state
     })()
   })
 
@@ -30,16 +49,18 @@
     if (browser) stopServerAutosave()
   })
 
-  /**
-   * The import landing route must not replace an in-memory project casually.
-   * Block client navigations to `/` while a song is loaded; keep the app on the editor.
-   */
   beforeNavigate((nav) => {
     if (!nav.to) return
-    if (nav.to.url.pathname !== '/') return
-    if (!hasActiveSongSession()) return
-    nav.cancel()
-    goto('/edit', { replaceState: true })
+    const dest = nav.to.url.pathname
+    if (dest !== '/') return
+    const sm = get(songMap)
+    if (!sm) return
+    // If analyzed, block going back to / (would lose session)
+    if (isAnalyzed(sm)) {
+      nav.cancel()
+      goto('/edit', { replaceState: true })
+    }
+    // If not analyzed, allow going to / freely
   })
 </script>
 

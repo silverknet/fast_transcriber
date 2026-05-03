@@ -15,5 +15,6 @@ export function emptySongMetadata(nowIso: string): SongMetadata {
     title: 'Untitled',
     createdAt: nowIso,
     updatedAt: nowIso,
+    analyzed: false,
   }
 }

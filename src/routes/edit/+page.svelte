@@ -80,8 +80,9 @@
     else beatEditError = ''
   }
 
-  let rangeStart = $state(0)
-  let rangeEnd = $state(0)
+  // Seed trim from SongMap so WaveformPlayer starts at the correct region in the full reference MP3
+  let rangeStart = $state($audioSession.startSec ?? 0)
+  let rangeEnd = $state($audioSession.endSec ?? 0)
   let waveformReady = $state(false)
 
   /** Main workspace mode. */

@@ -78,6 +78,7 @@
 	--sidebar-accent-foreground: oklch(0.2 0.01 80);
 	--sidebar-border: oklch(0.2 0.01 80);
 	--sidebar-ring: oklch(0.2 0.01 80);
+	--brutalist-shadow-color: var(--foreground);
 }
 
 .dark {
@@ -113,14 +114,15 @@
 	--sidebar-accent-foreground: oklch(0.82 0.01 80);
 	--sidebar-border: oklch(0.48 0.01 260);
 	--sidebar-ring: oklch(0.55 0.01 260);
+	--brutalist-shadow-color: oklch(0.05 0.012 260);
 }
 
 .brutalist-shadow {
-	box-shadow: 4px 4px 0 var(--foreground);
+	box-shadow: 4px 4px 0 var(--brutalist-shadow-color);
 }
 
 .brutalist-shadow-sm {
-	box-shadow: 2px 2px 0 var(--foreground);
+	box-shadow: 2px 2px 0 var(--brutalist-shadow-color);
 }
 
 @layer base {

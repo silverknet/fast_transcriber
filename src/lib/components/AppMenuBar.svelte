@@ -27,7 +27,12 @@
   } from '$lib/songmap/persist'
   import { restorableSongState } from '$lib/songmap/session'
   import { audioSession } from '$lib/stores/audioSession'
-  import { loadServerAutosave, saveServerAutosaveNow } from '$lib/client/serverAutosave'
+  import { saveServerAutosaveNow } from '$lib/client/serverAutosave'
+  import {
+    getCurrentProject,
+    saveCloudProject,
+  } from '$lib/client/projectsCloud'
+  import LoadProjectDialog from '$lib/components/LoadProjectDialog.svelte'
   import { songMapToMusicXml } from '$lib/export/musicxml'
   import { renderLeadSheetPdf } from '$lib/export/pdfLeadSheet'
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
@@ -63,6 +68,7 @@
   }
 
   let menuError = $state('')
+  let loadProjectDialogOpen = $state(false)
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
   let cloudConnected = $derived($serverAutosaveStatus.enabled && !$serverAutosaveStatus.lastError)
@@ -72,6 +78,17 @@
   let lastSavedLabel = $derived(
     $serverAutosaveStatus.lastSavedAt ? $serverAutosaveStatus.lastSavedAt.slice(11, 19) : '--:--:--',
   )
+  let currentProjectName = $derived.by(() => {
+    if (!browser) return null
+    try {
+      const raw = localStorage.getItem('barbro_current_project')
+      if (!raw) return null
+      return (JSON.parse(raw) as { name?: string }).name ?? null
+    } catch {
+      return null
+    }
+  })
+
   let cloudStatusTitle = $derived.by(() => {
     if ($serverAutosaveStatus.saving) return 'Cloud: saving...'
     if (cloudConnected) return 'Cloud: connected'
@@ -155,18 +172,14 @@
 
   async function onSaveToServer() {
     menuError = ''
-    const r = await saveServerAutosaveNow()
-    if (!r.ok) menuError = r.error ?? 'Server save failed'
+    const current = getCurrentProject()
+    const r = await saveCloudProject(current?.id)
+    if (!r.ok) menuError = r.error ?? 'Cloud save failed'
   }
 
-  async function onRestoreFromServer() {
+  function onRestoreFromServer() {
     menuError = ''
-    const r = await loadServerAutosave()
-    if (!r.ok) {
-      menuError = r.error ?? 'Restore failed'
-      return
-    }
-    await goto('/edit')
+    loadProjectDialogOpen = true
   }
 
   async function onImportPicked(e: Event) {
@@ -253,13 +266,11 @@
             void onSaveToServer()
           }}
         >
-          Save to cloud
+          {currentProjectName ? `Save to cloud — "${currentProjectName}"` : 'Save to cloud'}
         </DropdownMenuItem>
         <DropdownMenuItem
           class="cursor-pointer"
-          onclick={() => {
-            void onRestoreFromServer()
-          }}
+          onclick={onRestoreFromServer}
         >
           Load from cloud…
         </DropdownMenuItem>
@@ -339,6 +350,17 @@
     >
       Inspect JSON
     </Button>
+    {#if import.meta.env.DEV}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        class="h-8 opacity-50"
+        onclick={() => goto('/analyzing?preview')}
+      >
+        ∿
+      </Button>
+    {/if}
   </div>
 
   {#if menuError}
@@ -354,6 +376,8 @@
     onchange={onImportPicked}
   />
 </header>
+
+<LoadProjectDialog bind:open={loadProjectDialogOpen} />
 
 <Dialog bind:open={debugOpen}>
   <DialogContent
