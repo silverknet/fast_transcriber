@@ -259,6 +259,47 @@ function onVis() {
   }
 }
 
+export async function fetchAutosaveInfo(): Promise<{
+  hasSongMap: boolean
+  updatedAt: string | null
+}> {
+  if (!browser) return { hasSongMap: false, updatedAt: null }
+
+  // Populate module-level sessionId / fingerprint from localStorage if not already set
+  if (!sessionId || !fingerprint) {
+    try {
+      const raw = localStorage.getItem(META_KEY)
+      if (raw) {
+        const meta = JSON.parse(raw) as LocalMeta
+        sessionId = meta.sessionId
+        fingerprint = meta.fingerprint
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!sessionId || !fingerprint) {
+    const ok = await ensureSession()
+    if (!ok || !sessionId || !fingerprint) return { hasSongMap: false, updatedAt: null }
+  }
+
+  const res = await fetch(
+    `/api/sessions/${sessionId}?fingerprint=${encodeURIComponent(fingerprint)}`,
+  )
+  if (!res.ok) return { hasSongMap: false, updatedAt: null }
+
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean
+    songMap?: unknown
+    updatedAt?: string
+  }
+  return {
+    hasSongMap: !!data.ok && data.songMap != null,
+    updatedAt: data.updatedAt ?? null,
+  }
+}
+
 export function stopServerAutosave(): void {
   autosaveCancelled = true
   if (intervalId) {

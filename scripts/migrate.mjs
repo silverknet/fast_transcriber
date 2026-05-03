@@ -24,7 +24,6 @@ function databaseUrlFromDotEnv() {
     if (k !== 'DATABASE_URL') continue
     const v = s.slice(eq + 1).trim()
     if (!v) return null
-    // Support quoted values: DATABASE_URL="postgresql://..."
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
       return v.slice(1, -1)
     }
@@ -39,13 +38,20 @@ if (!url) {
   process.exit(1)
 }
 
-const sqlPath = path.join(__dirname, '..', 'db', 'migrations', '001_editor_sessions.sql')
-const sql = fs.readFileSync(sqlPath, 'utf8')
+const migrationsDir = path.join(__dirname, '..', 'db', 'migrations')
+const sqlFiles = fs
+  .readdirSync(migrationsDir)
+  .filter((f) => f.endsWith('.sql'))
+  .sort()
 
 const pool = new pg.Pool({ connectionString: url })
 try {
-  await pool.query(sql)
-  console.log('Migration OK:', path.basename(sqlPath))
+  for (const file of sqlFiles) {
+    const sqlPath = path.join(migrationsDir, file)
+    const sql = fs.readFileSync(sqlPath, 'utf8')
+    await pool.query(sql)
+    console.log('Migration OK:', file)
+  }
 } finally {
   await pool.end()
 }

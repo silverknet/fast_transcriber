@@ -789,7 +789,6 @@
 
   /** One place to align authoritative timeline + ranges with media lifecycle. */
   function commitMediaTiming() {
-    if (!audioEl) return
     const d = timelineDurationForUi(decodedDuration)
     timelineSec = d
     setSelection(rangeStart, rangeEnd)
@@ -797,7 +796,7 @@
     viewStart = v.start
     viewEnd = v.end
     // While playing, only rAF reads the element clock — avoid a stray metadata callback resetting UI time.
-    if (!isPlaying) {
+    if (!isPlaying && audioEl) {
       let t = audioEl.currentTime
       if (Number.isFinite(d) && d > 0) t = Math.min(Math.max(0, t), d)
       currentTime = t
@@ -820,7 +819,7 @@
     if (mediaReady) return
     mediaReady = true
     ready = true
-    if (audioEl) commitMediaTiming()
+    commitMediaTiming()
   }
 
   async function loadFile() {
@@ -870,12 +869,15 @@
 
       objectUrl = URL.createObjectURL(file)
 
-      const full = clampSelectionToTimeline(
-        buf.duration,
-        0,
-        buf.duration,
-        MIN_SELECTION_SPAN_SEC,
-      )
+      // If rangeStart/rangeEnd are already set to a valid sub-range (e.g. seeded from saved trim),
+      // keep them. Otherwise default to full file.
+      const hasValidRange =
+        rangeStart >= 0 &&
+        rangeEnd > rangeStart &&
+        rangeEnd <= buf.duration + 0.1
+      const initStart = hasValidRange ? rangeStart : 0
+      const initEnd = hasValidRange ? Math.min(rangeEnd, buf.duration) : buf.duration
+      const full = clampSelectionToTimeline(buf.duration, initStart, initEnd, MIN_SELECTION_SPAN_SEC)
       setSelection(full.start, full.end)
 
       loading = false

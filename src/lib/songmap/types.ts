@@ -80,10 +80,14 @@ export type AudioSource = 'upload' | 'import' | 'unknown'
 export type AudioReference = {
   fileName: string
   mimeType?: string
+  /** Duration of the full (untrimmed) reference audio file in seconds. */
   durationSec?: number
-  /** Relative to decoded file bytes (e.g. after trim). */
+  /** Selected playback region within the full reference audio. */
   trim: { startSec: number; endSec: number }
+  /** SHA-256 of the stored reference (compressed) audio file. */
   sha256?: string
+  /** SHA-256 of the original HQ uploaded file — used to verify re-uploads for full-quality re-analysis. */
+  originalSha256?: string
   source: AudioSource
 }
 
@@ -129,6 +133,12 @@ export type SongMetadata = {
   notes?: string
   createdAt: string
   updatedAt: string
+  /**
+   * True once beat/bar analysis has completed. False (or absent in legacy files) means
+   * the project has audio but no timeline yet — route to import page, not editor.
+   * Legacy .smap files without this field are inferred as analyzed when bars are present.
+   */
+  analyzed?: boolean
 }
 
 export type SongMapAppInfo = {

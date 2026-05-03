@@ -20,11 +20,12 @@ export type RestorableSongState = {
 export function mergeAudioReferenceFromSession(map: SongMap, session: AudioSession): SongMap {
   if (!session.file) return map
 
-  const duration = Math.max(0, session.endSec - session.startSec)
   const audio: AudioReference = {
+    // Preserve existing fields (durationSec is full-file, originalSha256 must not be lost)
+    ...map.audio,
     fileName: session.name,
     mimeType: session.file.type || map.audio?.mimeType,
-    durationSec: duration,
+    // durationSec stays as the full-file duration already stored in map.audio
     trim: { startSec: session.startSec, endSec: session.endSec },
     source: map.audio?.source ?? 'upload',
     sha256: map.audio?.sha256,

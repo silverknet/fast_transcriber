@@ -3,11 +3,23 @@
 		"src/routes/+layout.server.ts",
 		"src/routes/+layout.server.ts"
 	],
+	"/analyzing": [
+		"src/routes/+layout.server.ts"
+	],
 	"/api/analyze": [
 		"src/routes/api/analyze/+server.ts"
 	],
 	"/api/health": [
 		"src/routes/api/health/+server.ts"
+	],
+	"/api/projects": [
+		"src/routes/api/projects/+server.ts"
+	],
+	"/api/projects/[id]": [
+		"src/routes/api/projects/[id]/+server.ts"
+	],
+	"/api/projects/[id]/audio": [
+		"src/routes/api/projects/[id]/audio/+server.ts"
 	],
 	"/api/sessions/ensure": [
 		"src/routes/api/sessions/ensure/+server.ts"
