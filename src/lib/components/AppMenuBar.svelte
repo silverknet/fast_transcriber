@@ -350,6 +350,16 @@
     >
       Inspect JSON
     </Button>
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      class="h-8"
+      onclick={() => goto('/set')}
+      title="Experimental: export Ableton Live set"
+    >
+      Set ⚗
+    </Button>
     {#if import.meta.env.DEV}
       <Button
         type="button"

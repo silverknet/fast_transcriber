@@ -29,7 +29,7 @@ declare module "$app/types" {
 	type MatcherParam<M> = M extends (param : string) => param is (infer U extends string) ? U : string;
 
 	export interface AppTypes {
-		RouteId(): "/" | "/analyzing" | "/api" | "/api/analyze" | "/api/health" | "/api/projects" | "/api/projects/[id]" | "/api/projects/[id]/audio" | "/api/sessions" | "/api/sessions/ensure" | "/api/sessions/[id]" | "/api/sessions/[id]/audio" | "/edit";
+		RouteId(): "/" | "/analyzing" | "/api" | "/api/analyze" | "/api/health" | "/api/projects" | "/api/projects/[id]" | "/api/projects/[id]/audio" | "/api/sessions" | "/api/sessions/ensure" | "/api/sessions/[id]" | "/api/sessions/[id]/audio" | "/edit" | "/set";
 		RouteParams(): {
 			"/api/projects/[id]": { id: string };
 			"/api/projects/[id]/audio": { id: string };
@@ -49,9 +49,10 @@ declare module "$app/types" {
 			"/api/sessions/ensure": Record<string, never>;
 			"/api/sessions/[id]": { id: string };
 			"/api/sessions/[id]/audio": { id: string };
-			"/edit": Record<string, never>
+			"/edit": Record<string, never>;
+			"/set": Record<string, never>
 		};
-		Pathname(): "/" | "/analyzing" | "/api/analyze" | "/api/health" | "/api/projects" | "/api/projects/" | `/api/projects/${string}` & {} | `/api/projects/${string}/` & {} | `/api/projects/${string}/audio` & {} | "/api/sessions/ensure" | `/api/sessions/${string}` & {} | `/api/sessions/${string}/` & {} | `/api/sessions/${string}/audio` & {} | "/edit";
+		Pathname(): "/" | "/analyzing" | "/api/analyze" | "/api/health" | "/api/projects" | "/api/projects/" | `/api/projects/${string}` & {} | `/api/projects/${string}/` & {} | `/api/projects/${string}/audio` & {} | "/api/sessions/ensure" | `/api/sessions/${string}` & {} | `/api/sessions/${string}/` & {} | `/api/sessions/${string}/audio` & {} | "/edit" | "/set";
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
 		Asset(): "/vendor/lame.min.js" | string & {};
 	}

@@ -55,18 +55,31 @@
       const dark = document.documentElement.classList.contains('dark')
       ctx!.fillStyle = dark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.13)'
 
-      const cols = Math.ceil(cssW / SPACING) + 1
-      const rows = Math.ceil(cssH / SPACING) + 1
+      const cx = cssW / 2
+      const cy = cssH / 2
+      const maxRad = Math.hypot(cx, cy) + SPACING
 
-      for (let row = 0; row < rows; row++) {
-        for (let col = 0; col < cols; col++) {
-          const x = col * SPACING
-          const y = row * SPACING
+      // Two sources that drift slowly on independent Lissajous paths
+      const drift = cssW * 0.16
+      const s1x = cx + Math.cos(t * 0.23) * drift - cssW * 0.12
+      const s1y = cy + Math.sin(t * 0.17) * drift * 0.5
+      const s2x = cx + Math.cos(t * 0.19 + 1.9) * drift + cssW * 0.12
+      const s2y = cy + Math.sin(t * 0.29 + 0.7) * drift * 0.5
 
-          // Two overlapping waves for a more organic feel
+      for (let rad = SPACING; rad < maxRad; rad += SPACING) {
+        const numDots = Math.max(6, Math.floor((2 * Math.PI * rad) / SPACING))
+        for (let i = 0; i < numDots; i++) {
+          const theta = (i / numDots) * Math.PI * 2
+          const x = cx + rad * Math.cos(theta)
+          const y = cy + rad * Math.sin(theta)
+
+          const d1 = Math.hypot(x - s1x, y - s1y)
+          const d2 = Math.hypot(x - s2x, y - s2y)
+
+          // Different spatial AND temporal frequencies break standing waves
           const wave =
-            Math.sin(x * 0.016 - t * 4.6) * 0.65 +
-            Math.sin(x * 0.009 + y * 0.011 - t * 1.6) * 0.35
+            Math.sin(d1 * 0.019 - t * 5.1) * 0.5 +
+            Math.sin(d2 * 0.013 - t * 3.3 + 1.1) * 0.5
 
           const r = BASE_R + wave * AMP
           if (r <= 0.3) continue

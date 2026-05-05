@@ -15,6 +15,7 @@
     songKeyPreferFlats,
   } from '$lib/chords'
   import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
+  import { computeCountIn } from '$lib/audio/computeCountIn'
   import { newId } from '$lib/songmap/factory'
   import { clearHarmonyAtBeat, upsertHarmonyAtBeat } from '$lib/songmap/harmonyEdit'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
@@ -24,7 +25,7 @@
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
-  import { ArrowLeft, Music, Pause, Play } from '@lucide/svelte'
+  import { ArrowLeft, Music, Pause, Pencil, Play } from '@lucide/svelte'
 
   /** Half-open bar interval [start, end) — match `audioTransport` end clamp */
   const END_EPS = 0.028
@@ -86,7 +87,7 @@
   let waveformReady = $state(false)
 
   /** Main workspace mode. */
-  let editMode = $state<'grid' | 'sections' | 'chords'>('grid')
+  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue'>('grid')
 
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 
@@ -104,6 +105,28 @@
     const kd = sm?.metadata.keyDetail
     keyDraft = kd ? { ...kd } : { root: 'C', mode: 'major' }
   })
+
+  let editingTitle = $state(false)
+  let titleDraft = $state('')
+
+  function startTitleEdit() {
+    titleDraft = get(songMap)?.metadata.title ?? ''
+    editingTitle = true
+  }
+
+  function commitTitleEdit() {
+    editingTitle = false
+    const t = titleDraft.trim()
+    if (!t) return
+    const sm = get(songMap)
+    if (!sm || t === sm.metadata.title) return
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: t } }))
+  }
+
+  function focusOnMount(el: HTMLElement) {
+    el.focus()
+    if (el instanceof HTMLInputElement) el.select()
+  }
 
   /** Strip labels only on beats with an explicit harmony row (no carry-forward repeat). */
   let chordLabelByBeatId = $derived.by(() => {
@@ -524,6 +547,36 @@
     rafId = requestAnimationFrame(previewTick)
   }
 
+  // Cue tab: derive current count-in selection from saved cues, compute result reactively
+  let cueCountInBeats = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return 0
+    return sm.cues.mode === 'countIn' ? sm.cues.countInBeats : 0
+  })
+
+  let cueCountInResult = $derived.by(() => {
+    const sm = $songMap
+    if (!sm || cueCountInBeats === 0) return null
+    return computeCountIn(sm, cueCountInBeats)
+  })
+
+  function applyCueCountIn(beats: number) {
+    const sm = get(songMap)
+    if (!sm) return
+    const result = beats > 0 ? computeCountIn(sm, beats) : null
+    const p = patchSongMap((m) => ({
+      ...m,
+      cues: {
+        ...m.cues,
+        mode: beats > 0 ? 'countIn' : 'off',
+        countInBeats: beats,
+        prependSec: result?.prependSec,
+      },
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
   onDestroy(() => {
     stopPreviewLoop()
     stopClickLoop()
@@ -565,8 +618,26 @@
         <div>
           <p class="text-muted-foreground text-xs font-medium tracking-wide uppercase">BarBro</p>
           <h1 class="text-2xl font-semibold tracking-tight">Edit</h1>
-          <p class="text-muted-foreground mt-0.5 text-sm">
-            {sm.metadata.title}
+          <p class="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-sm">
+            {#if editingTitle}
+              <input
+                class="border-foreground bg-background text-foreground min-w-0 w-40 border-b px-0.5 text-sm outline-none"
+                bind:value={titleDraft}
+                onblur={commitTitleEdit}
+                onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
+                use:focusOnMount
+              />
+            {:else}
+              <span>{sm.metadata.title}</span>
+              <button
+                type="button"
+                class="text-muted-foreground/50 hover:text-foreground transition-colors"
+                onclick={startTitleEdit}
+                aria-label="Rename song"
+              >
+                <Pencil class="size-3" />
+              </button>
+            {/if}
             <span class="text-muted-foreground/80 font-mono text-xs tabular-nums">
               · {sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}
             </span>
@@ -618,8 +689,93 @@
         >
           Chords
         </Button>
+        <Button
+          type="button"
+          role="tab"
+          aria-selected={editMode === 'cue'}
+          variant="ghost"
+          size="sm"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'cue'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
+          onclick={() => (editMode = 'cue')}
+        >
+          Cue
+        </Button>
       </div>
     </header>
+
+    {#if editMode === 'cue'}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Cue settings"
+      >
+        <p class="text-muted-foreground mb-4 text-xs leading-relaxed">
+          Set how many click beats to count in before bar 1. The prepend value tells you how much silence
+          to add before your stems in the DAW so everything lines up.
+        </p>
+
+        <div class="space-y-4">
+          <fieldset class="border-foreground border-2 px-3 py-3">
+            <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Count-in beats</legend>
+            <div class="flex flex-wrap gap-3 pt-1">
+              {#each [0, 4, 8] as n (n)}
+                <label class="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="countInBeats"
+                    value={n}
+                    checked={cueCountInBeats === n}
+                    onchange={() => applyCueCountIn(n)}
+                    class="accent-foreground"
+                  />
+                  {n === 0 ? 'Off' : `${n} beats`}
+                </label>
+              {/each}
+            </div>
+          </fieldset>
+
+          {#if cueCountInBeats > 0}
+            <dl class="border-foreground border-2 px-3 py-3 font-mono text-xs">
+              <div class="flex justify-between gap-4 py-0.5">
+                <dt class="text-muted-foreground">First downbeat (in trimmed audio)</dt>
+                <dd class="tabular-nums">
+                  {#if cueCountInResult}
+                    {cueCountInResult.effectiveFirstDownbeatSec.toFixed(3)} s
+                  {:else}
+                    —
+                  {/if}
+                </dd>
+              </div>
+              <div class="flex justify-between gap-4 py-0.5">
+                <dt class="text-muted-foreground">Beat duration</dt>
+                <dd class="tabular-nums">
+                  {#if cueCountInResult}
+                    {cueCountInResult.beatDurationSec.toFixed(3)} s ({(60 / cueCountInResult.beatDurationSec).toFixed(1)} BPM)
+                  {:else}
+                    —
+                  {/if}
+                </dd>
+              </div>
+              <div class="flex justify-between gap-4 border-t border-foreground/20 pt-1 mt-1">
+                <dt class="text-foreground font-medium">Prepend before file start</dt>
+                <dd class="tabular-nums font-medium">
+                  {#if cueCountInResult}
+                    {cueCountInResult.prependSec.toFixed(3)} s
+                  {:else}
+                    —
+                  {/if}
+                </dd>
+              </div>
+            </dl>
+          {/if}
+
+          <p class="text-muted-foreground/60 text-xs italic">
+            Song name announcement (text-to-speech) — coming soon
+          </p>
+        </div>
+      </section>
+    {/if}
 
     {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
       <section

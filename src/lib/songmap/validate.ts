@@ -177,6 +177,9 @@ export function validateSongMap(map: SongMap): ValidationResult {
       errors.push('cues.countInBeats invalid')
     }
     if (typeof map.cues.useSectionLabels !== 'boolean') errors.push('cues.useSectionLabels invalid')
+    if (map.cues.prependSec !== undefined && (!Number.isFinite(map.cues.prependSec) || map.cues.prependSec < 0)) {
+      errors.push('cues.prependSec invalid')
+    }
   }
 
   if (!Array.isArray(map.sections)) errors.push('sections must be array')

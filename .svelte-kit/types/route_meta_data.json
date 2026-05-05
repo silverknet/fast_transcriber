@@ -32,5 +32,8 @@
 	],
 	"/edit": [
 		"src/routes/+layout.server.ts"
+	],
+	"/set": [
+		"src/routes/+layout.server.ts"
 	]
 }

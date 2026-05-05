@@ -192,6 +192,7 @@ function parseCues(raw: unknown, path: string): CueSettings {
     mode: reqString(o.mode, `${path}.mode`) as CueSettings['mode'],
     countInBeats: reqNum(o.countInBeats, `${path}.countInBeats`),
     useSectionLabels: Boolean(o.useSectionLabels),
+    prependSec: optNum(o.prependSec),
     template: optString(o.template),
     language: optString(o.language),
   }

@@ -71,6 +71,8 @@ export type CueSettings = {
   mode: CueMode
   countInBeats: number
   useSectionLabels: boolean
+  /** Seconds of audio to prepend before the file start so the count-in lands before bar 1. */
+  prependSec?: number
   template?: string
   language?: string
 }

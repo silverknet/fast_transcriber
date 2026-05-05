@@ -17,7 +17,7 @@
   import { setSongMap, patchSongMap, songMap } from '$lib/stores/songMap'
   import { Music, Upload, ArrowRight } from '@lucide/svelte'
 
-  const accept = 'audio/mpeg,audio/wav,audio/x-wav,audio/wave,.mp3,.wav'
+  const accept = 'audio/mpeg,audio/wav,audio/x-wav,audio/wave,audio/flac,.mp3,.wav,.flac'
 
   let fileInput = $state<HTMLInputElement>()
 
