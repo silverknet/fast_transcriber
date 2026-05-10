@@ -6,6 +6,7 @@
   import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
   import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
+  import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
 
@@ -30,6 +31,7 @@
   onMount(() => {
     if (!browser) return
     startServerAutosave()
+    startProjectAutosave()
     if (isAnalyzed(get(songMap))) return
     if (!data.savedSessionId) return
     restoringSession = true
@@ -46,13 +48,18 @@
   })
 
   onDestroy(() => {
-    if (browser) stopServerAutosave()
+    if (browser) {
+      stopServerAutosave()
+      stopProjectAutosave()
+    }
   })
 
   beforeNavigate((nav) => {
     if (!nav.to) return
     const dest = nav.to.url.pathname
     if (dest !== '/') return
+    // Allow `/?project=...` (the Create-new-song flow inside a project).
+    if (nav.to.url.searchParams.has('project')) return
     const sm = get(songMap)
     if (!sm) return
     // If analyzed, block going back to / (would lose session)

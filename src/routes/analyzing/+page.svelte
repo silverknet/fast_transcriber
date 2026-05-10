@@ -101,8 +101,13 @@
 
   // ── Analysis ─────────────────────────────────────────────────────────────
   import { page } from '$app/stores'
+  import { restorableSongState } from '$lib/songmap/session'
+  import { audioSession } from '$lib/stores/audioSession'
+  import { project as projectStore } from '$lib/stores/project'
+  import { commitNewSongToProject } from '$lib/project/commit'
 
   const preview = browser && $page.url.searchParams.has('preview')
+  const isProjectFlow = browser && $page.url.searchParams.has('project')
 
   onMount(() => {
     if (!browser || preview) return
@@ -162,6 +167,20 @@
       })
 
       if (!patched.ok) throw new Error(patched.errors.join('; '))
+
+      // Project-flow commit: materialize this song into the active project's
+      // folder before navigating to /edit, so autosave has a valid target.
+      if (isProjectFlow && get(projectStore).data) {
+        const sm2 = get(songMap)
+        if (!sm2) throw new Error('Internal: songMap missing after analysis')
+        const sess = get(audioSession)
+        const state = restorableSongState(sm2, sess.file ?? null)
+        try {
+          await commitNewSongToProject(state)
+        } catch (e) {
+          throw new Error(e instanceof Error ? e.message : 'Could not save song into project')
+        }
+      }
 
       analyzingState.set(null)
       status = 'done'

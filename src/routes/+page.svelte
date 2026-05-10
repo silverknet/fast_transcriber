@@ -2,6 +2,7 @@
   import { browser } from '$app/environment'
   import { onMount } from 'svelte'
   import { goto } from '$app/navigation'
+  import { page } from '$app/stores'
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -15,7 +16,16 @@
   import { analyzingState } from '$lib/stores/analyzingState'
   import { audioSession } from '$lib/stores/audioSession'
   import { setSongMap, patchSongMap, songMap } from '$lib/stores/songMap'
-  import { Music, Upload, ArrowRight } from '@lucide/svelte'
+  import { Music, Upload, ArrowRight, ArrowLeft } from '@lucide/svelte'
+  import {
+    project,
+    markEditingStandalone,
+  } from '$lib/stores/project'
+  import {
+    PROJECT_HANDLE_KEY,
+    tryRestoreActiveProject,
+  } from '$lib/project/commit'
+  import { loadFolderHandle } from '$lib/client/folderHandle'
 
   const accept = 'audio/mpeg,audio/wav,audio/x-wav,audio/wave,audio/flac,.mp3,.wav,.flac'
 
@@ -23,6 +33,9 @@
 
   /** Original HQ file — kept in memory for analysis. Never stored in .smap. */
   let originalFile = $state<File | null>(null)
+
+  /** True iff the page mounted with `?project=1` AND a project is actually active. */
+  let inProjectMode = $state(false)
 
   onMount(() => {
     // Ensure a SongMap exists from the moment the user opens the import page.
@@ -37,7 +50,43 @@
         projectName = existing.metadata.title
       }
     }
+
+    void resolveProjectMode()
   })
+
+  /**
+   * `?project=1` means the new song should be added to the active project.
+   * If no project is in memory, try to restore from IndexedDB. If that also
+   * fails, drop the param and stay in standalone mode (with a soft note).
+   */
+  async function resolveProjectMode() {
+    if (!browser) return
+    const wantsProject = get(page).url.searchParams.has('project')
+    if (!wantsProject) {
+      inProjectMode = false
+      return
+    }
+    if (get(project).data) {
+      inProjectMode = true
+      return
+    }
+    try {
+      const handle = await loadFolderHandle(PROJECT_HANDLE_KEY)
+      const data = await tryRestoreActiveProject(handle)
+      if (data) {
+        inProjectMode = true
+        return
+      }
+    } catch {}
+    // Stale ?project=1 — drop it and continue in standalone mode.
+    inProjectMode = false
+    useError = 'No active project found — switching to single-song mode.'
+    void goto('/', { replaceState: true })
+  }
+
+  function cancelToProject() {
+    void goto('/project')
+  }
 
   let rangeStart = $state(0)
   let rangeEnd = $state(0)
@@ -160,8 +209,13 @@
     if (!originalFile || encoding || !referenceFile) return
     useError = ''
 
+    if (!inProjectMode) {
+      // Plain (standalone) song flow — clear any stale project-song context.
+      markEditingStandalone()
+    }
+
     analyzingState.set({ hqFile: originalFile })
-    await goto('/analyzing')
+    await goto(inProjectMode ? '/analyzing?project=1' : '/analyzing')
   }
 
   const canAnalyze = $derived(
@@ -172,6 +226,15 @@
 <main
   class="relative z-10 mx-auto flex min-h-dvh max-w-3xl flex-col items-center justify-center gap-10 px-6 py-16"
 >
+  {#if inProjectMode}
+    <div class="absolute left-4 top-16 sm:left-6">
+      <Button variant="outline" size="sm" class="gap-1" onclick={cancelToProject}>
+        <ArrowLeft class="size-4" aria-hidden="true" />
+        Back to project
+      </Button>
+    </div>
+  {/if}
+
   <div class="flex flex-col items-center gap-3 text-center">
     <div
       class="brutalist-shadow-sm border-foreground bg-muted text-foreground inline-flex size-16 items-center justify-center border-2"
@@ -181,7 +244,12 @@
     </div>
     <h1 class="text-4xl font-black tracking-tight md:text-5xl">BarBro</h1>
     <p class="text-muted-foreground max-w-md text-pretty text-sm leading-relaxed">
-      Import audio, set your region, and open in the editor with beats detected.
+      {#if inProjectMode}
+        New song for project <span class="font-semibold">{$project.data?.name ?? ''}</span>.
+        Import audio, set your region, then analyze.
+      {:else}
+        Import audio, set your region, and open in the editor with beats detected.
+      {/if}
     </p>
   </div>
 

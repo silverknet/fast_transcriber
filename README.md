@@ -50,3 +50,7 @@ The JSON schema is defined in `src/lib/songmap/types.ts` — `SongMapV1`. Key to
 The `SongMap` JSON is the **complete, canonical state**. Every UI element — bars, beats, chords, sections, key, BPM — reads from and writes to this one object. There is no shadow state; if you serialize the JSON you get exactly what the editor shows, and loading it back restores the editor exactly.
 
 Audio is handled the same way: after analysis (on full-quality WAV), the clip is re-encoded to a 64 kbps reference MP3 via lamejs. That MP3 is the audio chunk inside `.smap` — small enough to save and share, good enough for playback and navigation. The editor plays directly from this reference blob.
+
+## Roadmap and maturity
+
+High-level goals and a simple **N → P** completion scale per feature live in [`docs/goal-plan.md`](docs/goal-plan.md). Regression checks after migrations are in [`docs/regression-checklist.md`](docs/regression-checklist.md).

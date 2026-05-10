@@ -1,10 +1,12 @@
 import { browser } from '$app/environment'
 import { get } from 'svelte/store'
 import {
+  encodeSmapFile,
   exportSongMapJson,
   parseSongMapJsonString,
   restorableStateFromJsonAndBlob,
   sha256HexOfBlob,
+  SONG_PROJECT_FORMAT_VERSION,
 } from '$lib/songmap/persist'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import { audioSession } from '$lib/stores/audioSession'
@@ -162,6 +164,63 @@ export async function loadCloudProject(
   setCurrentProject({ id: projectId, name: data.name ?? 'Untitled Project' })
 
   return { ok: true, name: data.name }
+}
+
+/**
+ * Download a cloud-saved song and pack it into a `.smap` Blob, WITHOUT
+ * hydrating the editor or touching `barbro_current_project`. Used by the
+ * project format's "Copy from cloud" flow — the caller writes the bytes
+ * into a project subfolder via `importSmapToProject`.
+ *
+ * Distinct from `loadCloudProject` which does hydrate the editor.
+ */
+export async function fetchCloudSongAsSmap(
+  cloudProjectId: string,
+): Promise<{ ok: true; blob: Blob; name: string } | { ok: false; error: string }> {
+  if (!browser) return { ok: false, error: 'Browser only' }
+  const fp = await getFingerprint()
+
+  const res = await fetch(
+    `/api/projects/${cloudProjectId}?fingerprint=${encodeURIComponent(fp)}`,
+  )
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean
+    name?: string
+    songMap?: unknown
+    hasAudio?: boolean
+    error?: string
+  }
+  if (!res.ok || !data.ok) {
+    return { ok: false, error: data.error ?? `Cloud fetch failed (${res.status})` }
+  }
+  if (data.songMap == null) {
+    return { ok: false, error: 'Cloud song has no saved content yet' }
+  }
+
+  const jsonStr = JSON.stringify(data.songMap)
+  const parsed = parseSongMapJsonString(jsonStr)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+
+  let audioBlob: Blob | undefined = undefined
+  if (data.hasAudio) {
+    const ar = await fetch(
+      `/api/projects/${cloudProjectId}/audio?fingerprint=${encodeURIComponent(fp)}`,
+    )
+    if (!ar.ok) return { ok: false, error: `Audio download failed (${ar.status})` }
+    audioBlob = await ar.blob()
+  }
+
+  let blob: Blob
+  try {
+    blob = await encodeSmapFile({
+      project: { projectFormatVersion: SONG_PROJECT_FORMAT_VERSION, songMap: parsed.map },
+      audioBlob,
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Encoding failed' }
+  }
+
+  return { ok: true, blob, name: data.name ?? parsed.map.metadata.title ?? 'Untitled' }
 }
 
 export async function deleteCloudProject(

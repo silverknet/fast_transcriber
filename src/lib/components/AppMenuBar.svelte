@@ -38,6 +38,14 @@
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
   import { serverAutosaveStatus } from '$lib/stores/serverAutosaveStatus'
   import { songMap } from '$lib/stores/songMap'
+  import {
+    project as projectStore,
+    markEditingStandalone,
+  } from '$lib/stores/project'
+  import {
+    createProjectOnDisk,
+    openProjectFromHandle,
+  } from '$lib/project/commit'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
   import Cloud from '@lucide/svelte/icons/cloud'
   import Moon from '@lucide/svelte/icons/moon'
@@ -194,8 +202,61 @@
       return
     }
     hydrateRestorableSong(result.state)
+    // Loading a standalone .smap clears any project-song editing context.
+    markEditingStandalone()
     await goto('/edit')
   }
+
+  // ── Project actions ───────────────────────────────────────────────────────
+  const hasFsApi = browser && typeof (window as any).showDirectoryPicker === 'function'
+
+  async function onNewProject() {
+    menuError = ''
+    if (!hasFsApi) {
+      menuError = 'New Project needs a Chromium browser (File System Access API).'
+      return
+    }
+    let dir: FileSystemDirectoryHandle
+    try {
+      dir = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
+    } catch {
+      return
+    }
+    const name = window.prompt('Project name', 'Untitled Project')
+    if (name === null) return
+    try {
+      await createProjectOnDisk(dir, name)
+      await goto('/project')
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'Could not create project'
+    }
+  }
+
+  async function onOpenProject() {
+    menuError = ''
+    if (!hasFsApi) {
+      menuError = 'Open Project needs a Chromium browser (File System Access API).'
+      return
+    }
+    let dir: FileSystemDirectoryHandle
+    try {
+      dir = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
+    } catch {
+      return
+    }
+    try {
+      await openProjectFromHandle(dir)
+      await goto('/project')
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'Could not open project'
+    }
+  }
+
+  async function onBackToProject() {
+    await goto('/project')
+  }
+
+  let inProjectSong = $derived($projectStore.editingMode === 'project-song')
 </script>
 
 <header
@@ -234,7 +295,15 @@
             void onExportFull()
           }}
         >
-          Save project (.smap)…
+          Save Song (.smap)…
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          class="cursor-pointer"
+          onclick={() => {
+            importInput?.click()
+          }}
+        >
+          Open Song (.smap)…
         </DropdownMenuItem>
         <DropdownMenuItem
           class="cursor-pointer"
@@ -252,14 +321,19 @@
         >
           Export as PDF…
         </DropdownMenuItem>
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={() => {
-            importInput?.click()
-          }}
-        >
-          Open project…
+        <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+        <DropdownMenuItem class="cursor-pointer" onclick={onNewProject}>
+          New Project…
         </DropdownMenuItem>
+        <DropdownMenuItem class="cursor-pointer" onclick={onOpenProject}>
+          Open Project…
+        </DropdownMenuItem>
+        {#if inProjectSong}
+          <DropdownMenuItem class="cursor-pointer" onclick={onBackToProject}>
+            Back to Project
+          </DropdownMenuItem>
+        {/if}
+        <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
         <DropdownMenuItem
           class="cursor-pointer"
           onclick={() => {

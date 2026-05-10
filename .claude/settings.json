@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gzip -dc *)",
+      "Bash(npx tsc *)",
+      "Bash(curl:*)"
+    ]
+  }
+}

@@ -223,6 +223,19 @@ export function validateSongMap(map: SongMap): ValidationResult {
     })
   }
 
+  if (map.projectFolder !== undefined && typeof map.projectFolder !== 'string') {
+    errors.push('projectFolder must be a string')
+  }
+  if (map.stemRefs !== undefined) {
+    if (typeof map.stemRefs !== 'object' || Array.isArray(map.stemRefs)) {
+      errors.push('stemRefs must be an object')
+    } else {
+      for (const [k, v] of Object.entries(map.stemRefs)) {
+        if (typeof v !== 'string') errors.push(`stemRefs.${k} must be a string`)
+      }
+    }
+  }
+
   return {
     ok: errors.length === 0,
     errors,

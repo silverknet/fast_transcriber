@@ -7,6 +7,12 @@
  */
 
 import type { SongMap } from '$lib/songmap/types'
+// 505-style Drum Rack extracted from a real Ableton-saved project. Verbatim XML;
+// Live's factory samples (paths inside) are referenced by Type=5 (factory library)
+// so they resolve on every Ableton 12 install. Internal IDs 3808-7206 (above our gen range).
+import clickDrumRackXml from './clickDrumRack.xml?raw'
+
+const CLICK_DRUM_RACK_MAX_ID = 7206
 
 // ---------------------------------------------------------------------------
 // ID counter helpers
@@ -74,22 +80,26 @@ function xmlDeviceBoilerplate(nextId: () => number): string {
 					</SourceContext>`
 }
 
-/** 8 empty session clip slots (matching default template). */
-function xmlClipSlotList(count: number): string {
-  return Array.from({ length: count }, (_, i) => `<ClipSlot Id="${i}">
+/** Empty session clip slots (matching default template). */
+function xmlClipSlotList(count: number, sessionClipXml = ''): string {
+  return Array.from({ length: count }, (_, i) => {
+    // First slot gets the session-view clip (if provided); rest are empty.
+    const value = i === 0 && sessionClipXml ? `<Value>${sessionClipXml}</Value>` : '<Value />'
+    return `<ClipSlot Id="${i}">
 							<LomId Value="0" />
 							<ClipSlot>
-								<Value />
+								${value}
 							</ClipSlot>
 							<HasStop Value="true" />
 							<NeedRefreeze Value="true" />
-						</ClipSlot>`).join('\n\t\t\t\t\t\t')
+						</ClipSlot>`
+  }).join('\n\t\t\t\t\t\t')
 }
 
-function xmlSequencerBody(nextId: () => number, monitoringEnum: number, clipXml = '', sceneCount = 1): string {
+function xmlSequencerBody(nextId: () => number, monitoringEnum: number, clipXml = '', sceneCount = 1, sessionClipXml = ''): string {
   return `${xmlDeviceBoilerplate(nextId)}
 					<ClipSlotList>
-						${xmlClipSlotList(sceneCount)}
+						${xmlClipSlotList(sceneCount, sessionClipXml)}
 					</ClipSlotList>
 					<MonitoringEnum Value="${monitoringEnum}" />
 					<KeepRecordMonitoringLatency Value="true" />
@@ -150,8 +160,8 @@ export type StemName = (typeof STEM_TRACKS)[number]['name']
 
 export type StemClip = {
   fileName: string
-  /** Absolute path to the audio file on the user's machine. */
-  absolutePath: string
+  /** Relative path from the project folder (e.g. "drums.wav" or "stems/drums.wav"). */
+  relativePath: string
   durationSec: number
   sampleRate: number
 }
@@ -171,8 +181,15 @@ function xmlMidiControllers(nextId: () => number): string {
 
 /**
  * One MIDI clip spanning the full arrangement with a note per beat:
- * - MIDI note 36 (C1) = downbeat  velocity 127
- * - MIDI note 37 (C#1) = other beats  velocity 64
+ * - MIDI note 36 (C1) = downbeat (GM kick — present in any drum rack)
+ * - MIDI note 42 (F#1) = offbeat (GM closed hi-hat — present in any drum rack)
+ * Velocity also differentiates: 127 (downbeat) vs 64 (offbeat).
+ * Drag any Drum Rack from Live's browser onto this track for sound.
+ */
+/**
+ * Arrangement-view MidiClip — full schema verified against a real Ableton 12-saved .als
+ * (one MIDI note in arrangement view, then saved). Uses NEW format with `<KeyTracks>` wrapper,
+ * `<NoteIdGenerator>`, and all clip-level fields parallel to AudioClip (TimeSignature etc.).
  */
 function xmlMidiClickClip(
   beats: { timeSec: number; indexInBar: number }[],
@@ -187,59 +204,138 @@ function xmlMidiClickClip(
   for (const beat of beats) {
     const pos = secToBeat(beat.timeSec, bpm, trimStart)
     if (pos < 0) continue
-    const line = `<MidiNoteEvent Time="${pos.toFixed(6)}" Duration="${noteDur}" Velocity="${beat.indexInBar === 0 ? 127 : 64}" OffVelocity="64" Probability="1" IsEnabled="true" NoteId="${noteId++}" />`
+    const vel = beat.indexInBar === 0 ? 127 : 64
+    const line = `<MidiNoteEvent Time="${pos.toFixed(6)}" Duration="${noteDur}" Velocity="${vel}" OffVelocity="64" NoteId="${noteId++}" />`
     if (beat.indexInBar === 0) downbeatNotes.push(line)
     else offbeatNotes.push(line)
   }
 
   const lastBeat = beats.at(-1)
   const durationBeats = lastBeat ? secToBeat(lastBeat.timeSec, bpm, trimStart) + 1 : 8
+  const d = durationBeats.toFixed(6)
+  const nextNoteId = noteId
 
   return `<MidiClip Id="0" Time="0">
 						<LomId Value="0" />
 						<LomIdView Value="0" />
 						<CurrentStart Value="0" />
-						<CurrentEnd Value="${durationBeats.toFixed(6)}" />
+						<CurrentEnd Value="${d}" />
 						<Loop>
 							<LoopStart Value="0" />
-							<LoopEnd Value="${durationBeats.toFixed(6)}" />
+							<LoopEnd Value="${d}" />
 							<StartRelative Value="0" />
 							<LoopOn Value="false" />
-							<OutMarker Value="${durationBeats.toFixed(6)}" />
+							<OutMarker Value="${d}" />
 							<HiddenLoopStart Value="0" />
-							<HiddenLoopEnd Value="${durationBeats.toFixed(6)}" />
+							<HiddenLoopEnd Value="${d}" />
 						</Loop>
 						<Name Value="Click" />
 						<Annotation Value="" />
 						<Color Value="6" />
 						<LaunchMode Value="0" />
 						<LaunchQuantisation Value="0" />
+						<TimeSignature>
+							<TimeSignatures>
+								<RemoteableTimeSignature Id="0">
+									<Numerator Value="4" />
+									<Denominator Value="4" />
+									<Time Value="0" />
+								</RemoteableTimeSignature>
+							</TimeSignatures>
+						</TimeSignature>
 						<Envelopes>
 							<Envelopes />
 						</Envelopes>
+						<ScrollerTimePreserver>
+							<LeftTime Value="0" />
+							<RightTime Value="${d}" />
+						</ScrollerTimePreserver>
+						<TimeSelection>
+							<AnchorTime Value="0" />
+							<OtherTime Value="0" />
+						</TimeSelection>
+						<Legato Value="false" />
+						<Ram Value="false" />
+						<GrooveSettings>
+							<GrooveId Value="-1" />
+						</GrooveSettings>
+						<Disabled Value="false" />
+						<VelocityAmount Value="0" />
+						<FollowAction>
+							<FollowTime Value="4" />
+							<IsLinked Value="true" />
+							<LoopIterations Value="1" />
+							<FollowActionA Value="4" />
+							<FollowActionB Value="0" />
+							<FollowChanceA Value="100" />
+							<FollowChanceB Value="0" />
+							<JumpIndexA Value="1" />
+							<JumpIndexB Value="1" />
+							<FollowActionEnabled Value="false" />
+						</FollowAction>
+						<Grid>
+							<FixedNumerator Value="1" />
+							<FixedDenominator Value="16" />
+							<GridIntervalPixel Value="20" />
+							<Ntoles Value="2" />
+							<SnapToGrid Value="true" />
+							<Fixed Value="true" />
+						</Grid>
+						<FreezeStart Value="0" />
+						<FreezeEnd Value="0" />
+						<IsWarped Value="true" />
+						<TakeId Value="1" />
+						<IsInKey Value="true" />
+						<ScaleInformation>
+							<Root Value="0" />
+							<Name Value="0" />
+						</ScaleInformation>
 						<Notes>
-							<KeyTrack Id="0">
-								<MidiKey Value="36" />
-								<Notes>
-									${downbeatNotes.join('\n\t\t\t\t\t\t\t\t\t')}
-								</Notes>
-								<IsRangeSelected Value="false" />
-								<HighlightedTime Value="0" />
-								<TimeableColor Value="-1" />
-							</KeyTrack>
-							<KeyTrack Id="1">
-								<MidiKey Value="37" />
-								<Notes>
-									${offbeatNotes.join('\n\t\t\t\t\t\t\t\t\t')}
-								</Notes>
-								<IsRangeSelected Value="false" />
-								<HighlightedTime Value="0" />
-								<TimeableColor Value="-1" />
-							</KeyTrack>
+							<KeyTracks>
+								<KeyTrack Id="0">
+									<Notes>
+										${downbeatNotes.join('\n\t\t\t\t\t\t\t\t\t\t')}
+									</Notes>
+									<MidiKey Value="36" />
+								</KeyTrack>
+								<KeyTrack Id="1">
+									<Notes>
+										${offbeatNotes.join('\n\t\t\t\t\t\t\t\t\t\t')}
+									</Notes>
+									<MidiKey Value="42" />
+								</KeyTrack>
+							</KeyTracks>
+							<PerNoteEventStore>
+								<EventLists />
+							</PerNoteEventStore>
+							<NoteProbabilityGroups />
+							<ProbabilityGroupIdGenerator>
+								<NextId Value="1" />
+							</ProbabilityGroupIdGenerator>
+							<NoteIdGenerator>
+								<NextId Value="${nextNoteId}" />
+							</NoteIdGenerator>
 						</Notes>
-						<NoteIdCounter Value="${noteId}" />
-						<IsWarped Value="false" />
-						<TakeId Value="0" />
+						<BankSelectCoarse Value="-1" />
+						<BankSelectFine Value="-1" />
+						<ProgramChange Value="-1" />
+						<NoteEditorFoldInZoom Value="-1" />
+						<NoteEditorFoldInScroll Value="0" />
+						<NoteEditorFoldOutZoom Value="-1" />
+						<NoteEditorFoldOutScroll Value="0" />
+						<NoteEditorFoldScaleZoom Value="-1" />
+						<NoteEditorFoldScaleScroll Value="0" />
+						<NoteSpellingPreference Value="0" />
+						<AccidentalSpellingPreference Value="3" />
+						<PreferFlatRootNote Value="false" />
+						<ExpressionGrid>
+							<FixedNumerator Value="1" />
+							<FixedDenominator Value="16" />
+							<GridIntervalPixel Value="20" />
+							<Ntoles Value="2" />
+							<SnapToGrid Value="false" />
+							<Fixed Value="false" />
+						</ExpressionGrid>
 					</MidiClip>`
 }
 
@@ -422,11 +518,34 @@ function xmlMidiClickTrack(
 						${xmlMidiControllers(nextId)}
 					</MidiControllers>
 				</MainSequencer>
+				<FreezeSequencer>
+					<LomId Value="0" />
+					<LomIdView Value="0" />
+					<IsExpanded Value="true" />
+					<BreakoutIsExpanded Value="false" />
+					${xmlOn(nextId)}
+					${xmlSequencerBody(nextId, 1)}
+				</FreezeSequencer>
 				<DeviceChain>
-					<Devices />
+					<Devices>
+						${clickDrumRackXml}
+					</Devices>
 					<SignalModulations />
 				</DeviceChain>
 			</DeviceChain>
+			<ReWireDeviceMidiTargetId Value="0" />
+			<PitchbendRange Value="96" />
+			<IsTuned Value="true" />
+			<ControllerLayoutRemoteable Value="0" />
+			<ControllerLayoutCustomization>
+				<PitchClassSource Value="0" />
+				<OctaveSource Value="2" />
+				<KeyNoteTarget Value="60" />
+				<StepSize Value="1" />
+				<OctaveEvery Value="12" />
+				<AllowedKeys Value="0" />
+				<FillerKeysMapTo Value="0" />
+			</ControllerLayoutCustomization>
 		</MidiTrack>`
 }
 
@@ -434,61 +553,151 @@ function xmlMidiClickTrack(
 // AudioClip XML (arrangement view clip referencing an audio file)
 // ---------------------------------------------------------------------------
 
+/**
+ * Arrangement-view AudioClip — full structure matching Ableton-saved .als output.
+ * Required fields (verified by saving a manually-imported clip and diffing):
+ * - TimeSignature, ScrollerTimePreserver, TimeSelection
+ * - Legato, Ram, GrooveSettings, Disabled, VelocityAmount, FollowAction, Grid
+ * - FreezeStart/End, IsInKey, ScaleInformation
+ * - Granular synth params, Sync/HiQ/Fade, Fades block, PitchCoarse/Fine, SampleVolume
+ * - IsSongTempoLeader (after WarpMarkers)
+ */
 function xmlAudioClip(clip: StemClip, bpm: number): string {
   const durationBeats = (clip.durationSec / 60) * bpm
   const durationSamples = Math.round(clip.durationSec * clip.sampleRate)
+  const d = durationBeats.toFixed(6)
   return `<AudioClip Id="0" Time="0">
 						<LomId Value="0" />
 						<LomIdView Value="0" />
 						<CurrentStart Value="0" />
-						<CurrentEnd Value="${durationBeats.toFixed(6)}" />
+						<CurrentEnd Value="${d}" />
 						<Loop>
 							<LoopStart Value="0" />
-							<LoopEnd Value="${durationBeats.toFixed(6)}" />
+							<LoopEnd Value="${d}" />
 							<StartRelative Value="0" />
 							<LoopOn Value="false" />
-							<OutMarker Value="${durationBeats.toFixed(6)}" />
+							<OutMarker Value="${d}" />
 							<HiddenLoopStart Value="0" />
-							<HiddenLoopEnd Value="${durationBeats.toFixed(6)}" />
+							<HiddenLoopEnd Value="${d}" />
 						</Loop>
 						<Name Value="${clip.fileName}" />
 						<Annotation Value="" />
 						<Color Value="-1" />
 						<LaunchMode Value="0" />
 						<LaunchQuantisation Value="0" />
+						<TimeSignature>
+							<TimeSignatures>
+								<RemoteableTimeSignature Id="0">
+									<Numerator Value="4" />
+									<Denominator Value="4" />
+									<Time Value="0" />
+								</RemoteableTimeSignature>
+							</TimeSignatures>
+						</TimeSignature>
 						<Envelopes>
 							<Envelopes />
 						</Envelopes>
-						<IsWarped Value="true" />
-						<TakeId Value="1" />
+						<ScrollerTimePreserver>
+							<LeftTime Value="0" />
+							<RightTime Value="0" />
+						</ScrollerTimePreserver>
+						<TimeSelection>
+							<AnchorTime Value="0" />
+							<OtherTime Value="0" />
+						</TimeSelection>
+						<Legato Value="false" />
+						<Ram Value="false" />
+						<GrooveSettings>
+							<GrooveId Value="-1" />
+						</GrooveSettings>
+						<Disabled Value="false" />
+						<VelocityAmount Value="0" />
+						<FollowAction>
+							<FollowTime Value="4" />
+							<IsLinked Value="true" />
+							<LoopIterations Value="1" />
+							<FollowActionA Value="4" />
+							<FollowActionB Value="0" />
+							<FollowChanceA Value="100" />
+							<FollowChanceB Value="0" />
+							<JumpIndexA Value="1" />
+							<JumpIndexB Value="1" />
+							<FollowActionEnabled Value="false" />
+						</FollowAction>
+						<Grid>
+							<FixedNumerator Value="1" />
+							<FixedDenominator Value="16" />
+							<GridIntervalPixel Value="20" />
+							<Ntoles Value="2" />
+							<SnapToGrid Value="true" />
+							<Fixed Value="false" />
+						</Grid>
+						<FreezeStart Value="0" />
+						<FreezeEnd Value="0" />
+						<IsWarped Value="false" />
+						<TakeId Value="-1" />
+						<IsInKey Value="true" />
+						<ScaleInformation>
+							<Root Value="0" />
+							<Name Value="0" />
+						</ScaleInformation>
 						<SampleRef>
 							<FileRef>
-								<RelativePathType Value="0" />
-								<RelativePath Value="" />
-								<Path Value="${clip.absolutePath}" />
-								<Type Value="1" />
+								<RelativePathType Value="3" />
+								<RelativePath Value="${clip.relativePath}" />
+								<Path Value="" />
+								<Type Value="2" />
 								<LivePackName Value="" />
 								<LivePackId Value="" />
 								<OriginalFileSize Value="0" />
 								<OriginalCrc Value="0" />
+								<SourceHint Value="" />
 							</FileRef>
 							<LastModDate Value="0" />
 							<SourceContext />
 							<SampleUsageHint Value="0" />
 							<DefaultDuration Value="${durationSamples}" />
 							<DefaultSampleRate Value="${clip.sampleRate}" />
+							<SamplesToAutoWarp Value="1" />
 						</SampleRef>
 						<Onsets>
 							<UserOnsets />
 							<HasUserOnsets Value="false" />
 						</Onsets>
 						<WarpMode Value="0" />
+						<GranularityTones Value="30" />
+						<GranularityTexture Value="65" />
+						<FluctuationTexture Value="25" />
+						<TransientResolution Value="6" />
+						<TransientLoopMode Value="2" />
+						<TransientEnvelope Value="100" />
+						<ComplexProFormants Value="100" />
+						<ComplexProEnvelope Value="128" />
+						<Sync Value="true" />
+						<HiQ Value="true" />
+						<Fade Value="false" />
+						<Fades>
+							<FadeInLength Value="0" />
+							<FadeOutLength Value="0" />
+							<ClipFadesAreInitialized Value="true" />
+							<CrossfadeInState Value="0" />
+							<FadeInCurveSkew Value="0" />
+							<FadeInCurveSlope Value="0" />
+							<FadeOutCurveSkew Value="0" />
+							<FadeOutCurveSlope Value="0" />
+							<IsDefaultFadeIn Value="false" />
+							<IsDefaultFadeOut Value="false" />
+						</Fades>
+						<PitchCoarse Value="0" />
+						<PitchFine Value="0" />
+						<SampleVolume Value="1" />
 						<WarpMarkers>
 							<WarpMarker Id="0" SecTime="0" BeatTime="0" />
-							<WarpMarker Id="1" SecTime="${clip.durationSec.toFixed(6)}" BeatTime="${durationBeats.toFixed(6)}" />
+							<WarpMarker Id="1" SecTime="${clip.durationSec.toFixed(6)}" BeatTime="${d}" />
 						</WarpMarkers>
 						<SavedWarpMarkersForStretched />
-						<MarkersGenerated Value="false" />
+						<MarkersGenerated Value="true" />
+						<IsSongTempoLeader Value="false" />
 					</AudioClip>`
 }
 
@@ -646,7 +855,7 @@ function xmlAudioTrack(id: number, name: string, color: number, nextId: () => nu
 					<IsExpanded Value="true" />
 					<BreakoutIsExpanded Value="false" />
 					${xmlOn(nextId)}
-					${xmlSequencerBody(nextId, 2, clipXml)}
+					${xmlSequencerBody(nextId, 2, clipXml, 1, clipXml)}
 				</MainSequencer>
 				<FreezeSequencer>
 					<LomId Value="0" />
@@ -1152,7 +1361,8 @@ export function generateAbletonSetXml(sm: SongMap, options: AbletonSetOptions = 
   const timeSig = timeSigId(firstBar?.meter.numerator ?? 4, firstBar?.meter.denominator ?? 4)
   const trimStart = sm.audio?.trim.startSec ?? 0
 
-  const nextId = makeCounter(1)
+  // Start IDs above the embedded Click Drum Rack range (max 7206) to avoid collisions.
+  const nextId = makeCounter(CLICK_DRUM_RACK_MAX_ID + 100)
 
   const audioTracksXml = STEM_TRACKS
     .map((t, i) => {
@@ -1200,10 +1410,7 @@ export function generateAbletonSetXml(sm: SongMap, options: AbletonSetOptions = 
 		</Tracks>
 		${mainTrackXml}
 		${preHearTrackXml}
-		<SendsPre>
-			<SendPreBool Id="0" Value="false" />
-			<SendPreBool Id="1" Value="false" />
-		</SendsPre>
+		<SendsPre />
 		<Scenes>
 			${xmlScene(0, bpm, timeSig)}
 		</Scenes>

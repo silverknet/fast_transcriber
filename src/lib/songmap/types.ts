@@ -153,6 +153,12 @@ export type SongMapTimeline = {
   beats: Beat[]
 }
 
+/**
+ * Relative paths (from the project folder) to each stem audio file.
+ * Key = stem name (e.g. "Drums"), value = relative path (e.g. "drums.wav" or "stems/drums.wav").
+ */
+export type StemRefs = Record<string, string>
+
 export type SongMapV1 = {
   formatVersion: typeof SONGMAP_FORMAT_VERSION
   app?: SongMapAppInfo
@@ -162,6 +168,13 @@ export type SongMapV1 = {
   sections: Section[]
   harmony: HarmonyEvent[]
   cues: CueSettings
+  /**
+   * Display hint for the project folder name (e.g. "DangerousSong").
+   * Not a full path — used to show "not found" messaging on a different machine.
+   */
+  projectFolder?: string
+  /** Relative paths within the project folder to each stem audio file. */
+  stemRefs?: StemRefs
 }
 
 export type SongMap = SongMapV1

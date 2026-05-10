@@ -186,6 +186,15 @@ function parseAudio(raw: unknown, path: string): AudioReference {
   }
 }
 
+function parseStemRefs(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const result: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string') result[k] = v
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
 function parseCues(raw: unknown, path: string): CueSettings {
   const o = expectObject(raw, path)
   return {
@@ -267,6 +276,8 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
       : [],
     cues:
       raw.cues !== undefined && raw.cues !== null ? parseCues(raw.cues, 'cues') : defaultCueSettings(),
+    projectFolder: typeof raw.projectFolder === 'string' ? raw.projectFolder : undefined,
+    stemRefs: parseStemRefs(raw.stemRefs),
   }
 }
 
@@ -302,4 +313,6 @@ const KNOWN_TOP_KEYS = new Set([
   'sections',
   'harmony',
   'cues',
+  'projectFolder',
+  'stemRefs',
 ])

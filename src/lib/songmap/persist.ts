@@ -227,6 +227,7 @@ export {
   decodeSmapFile,
   encodeSmapFile,
   looksLikeSmapFile,
+  readSmapJsonOnly,
   SMAP_BLOB_TYPE,
   SMAP_FILE_VERSION,
   SMAP_FLAG_HAS_AUDIO,
