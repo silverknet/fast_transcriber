@@ -54,3 +54,11 @@ Audio is handled the same way: after analysis (on full-quality WAV), the clip is
 ## Roadmap and maturity
 
 High-level goals and a simple **N → P** completion scale per feature live in [`docs/goal-plan.md`](docs/goal-plan.md). Regression checks after migrations are in [`docs/regression-checklist.md`](docs/regression-checklist.md).
+
+The **desktop shell** is a separate package (Electron): [`desktop/README.md`](desktop/README.md). Apple Silicon build + **same-origin** download URL:
+
+```bash
+npm run desktop:dist-mac-sync
+```
+
+This builds the DMG under `desktop/release/`, copies it to **`static/releases/barbro-desktop-<version>-arm64.dmg`**, and updates [`static/desktop-downloads.json`](static/desktop-downloads.json). The app serves it at **`/releases/...`** (large binaries are gitignored — run the command before `npm run build` / deploy). **[`/download`](/download)** reads that manifest (or `PUBLIC_DESKTOP_MANIFEST_URL`). When the desktop app is running, the header **Monitor** icon shows connected (loopback ping).

@@ -5,6 +5,7 @@ import type {
   Beat,
   ChordSymbol,
   CueSettings,
+  CueTrackExport,
   HarmonyEvent,
   Meter,
   Section,
@@ -207,6 +208,23 @@ function parseCues(raw: unknown, path: string): CueSettings {
   }
 }
 
+function parseCueTrackExport(raw: unknown, path: string): CueTrackExport | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  const fingerprint = reqString(o.fingerprint, `${path}.fingerprint`)
+  const durationSec = reqNum(o.durationSec, `${path}.durationSec`)
+  const sampleRate = reqNum(o.sampleRate, `${path}.sampleRate`)
+  const generatedAt = reqString(o.generatedAt, `${path}.generatedAt`)
+  const relativePath = optString(o.relativePath)
+  if (!(durationSec > 0)) {
+    throw new SongMapParseError('cueTrackExport.durationSec must be > 0', `${path}.durationSec`)
+  }
+  if (!(sampleRate > 0)) {
+    throw new SongMapParseError('cueTrackExport.sampleRate must be > 0', `${path}.sampleRate`)
+  }
+  return { fingerprint, durationSec, sampleRate, generatedAt, relativePath }
+}
+
 function parseMetadata(raw: unknown, path: string): SongMetadata {
   const o = expectObject(raw, path)
   const keyDetail =
@@ -278,6 +296,10 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
       raw.cues !== undefined && raw.cues !== null ? parseCues(raw.cues, 'cues') : defaultCueSettings(),
     projectFolder: typeof raw.projectFolder === 'string' ? raw.projectFolder : undefined,
     stemRefs: parseStemRefs(raw.stemRefs),
+    cueTrackExport:
+      raw.cueTrackExport !== undefined && raw.cueTrackExport !== null
+        ? parseCueTrackExport(raw.cueTrackExport, 'cueTrackExport')
+        : undefined,
   }
 }
 
@@ -315,4 +337,5 @@ const KNOWN_TOP_KEYS = new Set([
   'cues',
   'projectFolder',
   'stemRefs',
+  'cueTrackExport',
 ])

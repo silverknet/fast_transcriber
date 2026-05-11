@@ -13,12 +13,18 @@
 import { get, writable } from 'svelte/store'
 import type { ProjectFile } from '$lib/project/types'
 import type { SongKey } from '$lib/songmap'
+import type { StemRefs } from '$lib/songmap/types'
 
 export interface ProjectSongMetadataLite {
   title: string
   artist?: string
   keyDetail?: SongKey
   bpm?: number
+  /**
+   * Persisted stem refs from the song's .smap — used by the project view
+   * to render a stem-status overview without loading the full audio chunk.
+   */
+  stemRefs?: StemRefs
 }
 
 export type ProjectEditingMode = 'project-song' | 'standalone' | null

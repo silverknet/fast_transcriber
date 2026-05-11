@@ -19,6 +19,11 @@
   import { songMap, patchSongMap } from '$lib/stores/songMap'
   import { project as projectStore } from '$lib/stores/project'
   import { SONG_ALS_FILENAME } from '$lib/project/commit'
+  import { audioSession } from '$lib/stores/audioSession'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import StemSplitter from '$lib/components/StemSplitter.svelte'
+  import { fetchStemBlob } from '$lib/client/desktopBridge'
+  import { releaseStemJob, type StemJobEntry } from '$lib/stores/stemJobs'
 
   // ── Folder state ────────────────────────────────────────────────────────────
 
@@ -183,6 +188,38 @@
     return `stems/${(STEM_ALIASES[stemName]?.[0] ?? stemName.toLowerCase())}.wav`
   }
 
+  /**
+   * Finalizer for standalone-mode stem jobs. The page's `folderHandle`
+   * (FS Access picker target) is the destination; bytes flow from the
+   * sidecar's temp dir into `<folder>/stems/<filename>`. Mirror of the
+   * project-mode finalizer in `SongSetPanel.svelte`.
+   */
+  async function finalizeStemsForStandaloneSet(job: StemJobEntry) {
+    if (!folderHandle) return
+    let stemsDir: FileSystemDirectoryHandle
+    try {
+      stemsDir = await folderHandle.getDirectoryHandle('stems', { create: true })
+    } catch {
+      return
+    }
+    for (const filename of job.files) {
+      try {
+        const blob = await fetchStemBlob(job.jobId, filename)
+        const fh = await stemsDir.getFileHandle(filename, { create: true })
+        const w = await (fh as FileSystemFileHandle & {
+          createWritable(): Promise<FileSystemWritableFileStream>
+        }).createWritable()
+        await w.write(blob)
+        await w.close()
+      } catch {
+        /* per-file failures already surface in the stemJobs log */
+      }
+    }
+    await releaseStemJob(job.jobId)
+    folderFiles = await scanAudioFiles(folderHandle)
+    await autoResolveStemRefs()
+  }
+
   // ── Export ──────────────────────────────────────────────────────────────────
 
   let status = $state<'idle' | 'generating' | 'done' | 'error'>('idle')
@@ -235,8 +272,18 @@
 
   // ── Mount ───────────────────────────────────────────────────────────────────
 
+  import { goto } from '$app/navigation'
+
   onMount(() => {
-    if (!browser || !hasFsApi) return
+    if (!browser) return
+    // Project songs get their Set UI inline on /project — redirect there
+    // (auto-expanding this song's card) so there's one canonical surface.
+    const ps = get(projectStore)
+    if (ps.editingMode === 'project-song' && ps.activeSongId) {
+      void goto(`/project?expand=${encodeURIComponent(ps.activeSongId)}`, { replaceState: true })
+      return
+    }
+    if (!hasFsApi) return
     void tryRestoreFolder()
   })
 
@@ -265,10 +312,8 @@
   <div class="mx-auto w-full max-w-2xl space-y-6">
 
     <div class="border-foreground border-b-2 pb-4">
-      <h1 class="text-2xl font-bold tracking-tight">Set Editor</h1>
-      <p class="text-muted-foreground mt-1 text-sm">
-        Generate an Ableton Live 12 set from a BarBro song map.
-      </p>
+      <h1 class="text-2xl font-bold tracking-tight">Set</h1>
+      <p class="text-muted-foreground mt-1 text-xs">Ableton Live 12 · experimental</p>
     </div>
 
     {#if !smSnap}
@@ -308,26 +353,38 @@
           <div class="flex items-center gap-3">
             <span class="text-emerald-600 dark:text-emerald-400 text-xs">✓</span>
             <span class="font-mono text-sm flex-1">{folderHandle.name}</span>
-            <Button variant="outline" size="sm" onclick={() => void pickFolder()}>Change</Button>
+            <Button class="" variant="outline" size="sm" onclick={() => void pickFolder()}>Change</Button>
           </div>
           <p class="text-muted-foreground text-xs">{folderFiles.length} audio file{folderFiles.length !== 1 ? 's' : ''} found</p>
         {:else if folderStatus === 'no-permission'}
           <p class="text-muted-foreground text-xs">
             Last folder: <span class="font-mono">{smSnap.projectFolder ?? '—'}</span> — permission needed.
           </p>
-          <Button variant="outline" size="sm" onclick={() => void pickFolder()}>Re-grant access</Button>
+          <Button class="" variant="outline" size="sm" onclick={() => void pickFolder()}>Re-grant access</Button>
         {:else}
           {#if smSnap.projectFolder}
             <p class="text-muted-foreground text-xs">
               Last folder: <span class="font-mono text-foreground/60">{smSnap.projectFolder}</span> — not found on this machine.
             </p>
           {/if}
-          <Button onclick={() => void pickFolder()}>Pick project folder</Button>
-          <p class="text-muted-foreground text-xs">
-            Pick the folder containing your stems. The .als will be written there automatically.
-          </p>
+          <Button
+            class=""
+            onclick={() => void pickFolder()}
+            title="Choose the folder with your audio/stems. The .als is written there when you export."
+          >
+            Pick project folder
+          </Button>
         {/if}
       </section>
+
+      <!-- Stem Splitter (desktop sidecar) -->
+      <StemSplitter
+        songId="standalone"
+        audioFile={$audioSession.file}
+        {folderHandle}
+        desktopReachable={$desktopCompanionStatus.reachable}
+        finalizeJob={(job) => finalizeStemsForStandaloneSet(job)}
+      />
 
       <!-- Stem slots -->
       <section class="border-foreground border-2 p-4 space-y-3">
@@ -404,11 +461,11 @@
       <section class="border-foreground border-2 p-4 space-y-3">
         <h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Export</h2>
         <div class="flex flex-wrap gap-3 items-center">
-          <Button onclick={() => void exportAbletonSet()} disabled={status === 'generating'}>
+          <Button class="" onclick={() => void exportAbletonSet()} disabled={status === 'generating'}>
             {status === 'generating' ? 'Generating…' : folderHandle ? `Save .als to "${folderHandle.name}"` : 'Download .als'}
           </Button>
           {#if lastXml}
-            <Button variant="outline" size="sm" onclick={() => (showXml = !showXml)}>
+            <Button class="" variant="outline" size="sm" onclick={() => (showXml = !showXml)}>
               {showXml ? 'Hide XML' : 'Inspect XML'}
             </Button>
           {/if}
@@ -427,7 +484,5 @@
         </section>
       {/if}
     {/if}
-
-    <p class="text-muted-foreground/50 text-xs">⚗ Experimental — Ableton Live 12 format.</p>
   </div>
 </main>

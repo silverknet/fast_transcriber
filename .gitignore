@@ -10,6 +10,14 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+desktop/release
+desktop/.venv-beats/
+desktop/.venv-stems/
+
+# Large desktop installers — generate with desktop:dist-mac-sync, do not commit
+static/releases/*.dmg
+static/releases/*.zip
+static/releases/*.blockmap
 *.local
 
 # Editor directories and files

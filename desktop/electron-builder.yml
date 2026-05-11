@@ -1,0 +1,27 @@
+# Dev / unsigned Apple Silicon builds. No Developer ID — Gatekeeper may prompt users.
+# See desktop/README.md for `dist:mac-arm64` and signing later.
+
+appId: com.barbro.desktop
+productName: BarBro Desktop
+asar: true
+
+# Python must live outside asar so subprocess can read script paths reliably.
+asarUnpack:
+  - native/python/**/*
+
+directories:
+  output: release
+
+files:
+  - electron/**/*
+  - native/**/*
+  - package.json
+
+mac:
+  category: public.app-category.music
+  target:
+    - dmg
+    - zip
+
+dmg:
+  title: "${productName} ${version}"

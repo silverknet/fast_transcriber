@@ -9,6 +9,7 @@ export type {
   ChordSymbol,
   CueMode,
   CueSettings,
+  CueTrackExport,
   HarmonyEvent,
   Meter,
   NoteName,

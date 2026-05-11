@@ -1562,17 +1562,27 @@
       </Button>
     </div>
 
-    <p class="text-muted-foreground text-center text-[11px]">
-      {#if isEditorVariant}
-        Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan (waveform, bar strip, minimap) · Grid: click bar,
-        vertical wheel = beats/bar; Sections: drag across bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: drag or
-        Shift+click beat range, ⌘/Ctrl+click toggle; click a beat opens the picker · ⌘/Ctrl+C / ⌘/Ctrl+V copy & paste
-        resolved chords · Esc clears selection
-      {:else}
-        Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan · top waveform: handles resize, body moves, outside
-        drag creates selection, tap seeks · minimap: viewport handles resize, body drags, outside recenters
-      {/if}
-    </p>
+    <details
+      class="text-muted-foreground group mx-auto max-w-3xl text-center text-[11px]"
+      aria-label="Waveform mouse and keyboard shortcuts"
+    >
+      <summary
+        class="text-muted-foreground hover:text-foreground cursor-pointer list-none py-0.5 select-none marker:content-none [&::-webkit-details-marker]:hidden"
+      >
+        <span class="underline-offset-2 group-open:underline">Zoom & shortcuts</span>
+      </summary>
+      <p class="text-muted-foreground mt-2 text-left leading-relaxed">
+        {#if isEditorVariant}
+          Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan (waveform, bar strip, minimap) · Grid: click bar,
+          vertical wheel = beats/bar; Sections: drag across bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: drag or
+          Shift+click beat range, ⌘/Ctrl+click toggle; click a beat opens the picker · ⌘/Ctrl+C / ⌘/Ctrl+V copy & paste
+          resolved chords · Esc clears selection
+        {:else}
+          Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan · top waveform: handles resize, body moves, outside
+          drag creates selection, tap seeks · minimap: viewport handles resize, body drags, outside recenters
+        {/if}
+      </p>
+    </details>
 
     <div
       bind:this={detailEl}

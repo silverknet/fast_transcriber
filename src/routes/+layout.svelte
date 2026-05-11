@@ -5,14 +5,27 @@
   import { browser } from '$app/environment'
   import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
+  import { probeDesktopCompanion } from '$lib/client/desktopBeacon'
   import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
 
   let { data } = $props<{ data: { savedSessionId: string | null } }>()
 
   let restoringSession = $state(false)
+  let companionPollId: ReturnType<typeof setInterval> | null = null
+
+  async function pollDesktopCompanion() {
+    const r = await probeDesktopCompanion()
+    desktopCompanionStatus.set({
+      reachable: r.ok,
+      version: r.version,
+      lastCheckedAt: new Date().toISOString(),
+      lastError: r.error,
+    })
+  }
 
   function isAnalyzed(sm: typeof $songMap): boolean {
     if (!sm) return false
@@ -30,6 +43,8 @@
 
   onMount(() => {
     if (!browser) return
+    void pollDesktopCompanion()
+    companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
     startServerAutosave()
     startProjectAutosave()
     if (isAnalyzed(get(songMap))) return
@@ -49,6 +64,10 @@
 
   onDestroy(() => {
     if (browser) {
+      if (companionPollId != null) {
+        clearInterval(companionPollId)
+        companionPollId = null
+      }
       stopServerAutosave()
       stopProjectAutosave()
     }

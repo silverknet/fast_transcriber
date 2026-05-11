@@ -32,8 +32,8 @@ export function playMetronomeClick(
   const g = ctx.createGain()
   osc.type = 'sine'
   const freq = downbeat ? 1040 : 720
-  const dur = downbeat ? 0.052 : 0.038
-  const peak = downbeat ? 0.42 : 0.2
+  const dur = downbeat ? 0.055 : 0.042
+  const peak = downbeat ? 0.62 : 0.34
 
   osc.frequency.setValueAtTime(freq, startTime)
   g.gain.setValueAtTime(0, startTime)

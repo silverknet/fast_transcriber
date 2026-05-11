@@ -22,6 +22,7 @@ import { projectToBlob } from './serialize'
 import {
   ensurePermission,
   getDirectoryHandleByPath,
+  recordRecentProject,
   removeEntryRecursive,
   removePathBestEffort,
   saveFolderHandle,
@@ -29,12 +30,15 @@ import {
 } from '$lib/client/folderHandle'
 import {
   decodeSmapFile,
+  encodeSmapFile,
   exportRestorableStateAsSmapBlob,
   readSmapJsonOnly,
   safeExportBasename,
   smapFileDataToRestorableState,
+  SONG_PROJECT_FORMAT_VERSION,
 } from '$lib/songmap/persist'
 import type { RestorableSongState, SongMap } from '$lib/songmap'
+import { fetchStemBlob, releaseStemsJob } from '$lib/client/desktopBridge'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import {
   patchMetadataForFolder,
@@ -57,6 +61,9 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   if (m.artist) out.artist = m.artist
   if (m.keyDetail) out.keyDetail = m.keyDetail
   if (m.bpm !== undefined) out.bpm = m.bpm
+  if (map.stemRefs && Object.keys(map.stemRefs).length > 0) {
+    out.stemRefs = { ...map.stemRefs }
+  }
   return out
 }
 
@@ -103,19 +110,61 @@ async function hasChild(parent: FileSystemDirectoryHandle, name: string): Promis
 }
 
 /**
- * Create a new project on disk. Picks a folder, writes
- * `barbro.project.json` with an empty songs array, persists the handle.
- * Caller is responsible for asking the user to pick the folder via
- * `showDirectoryPicker({ mode: 'readwrite' })` and passing the handle in.
+ * Folder name BarBro creates inside the user-picked parent. Slug of the
+ * project name; we don't fall back silently to a different name on
+ * collision — the user picks again.
+ */
+export function projectFolderNameFor(projectName: string): string {
+  return safeExportBasename(projectName)
+}
+
+async function childDirExists(
+  parent: FileSystemDirectoryHandle,
+  name: string,
+): Promise<boolean> {
+  try {
+    await parent.getDirectoryHandle(name)
+    return true
+  } catch (e) {
+    const err = e as { name?: string }
+    if (err?.name === 'NotFoundError') return false
+    // TypeMismatchError: a file (not a directory) exists at that name — treat as collision.
+    if (err?.name === 'TypeMismatchError') return true
+    throw e
+  }
+}
+
+/**
+ * Create a brand-new project on disk. **The picked `parentDir` is the
+ * containing location, not the project folder itself** — BarBro creates a
+ * subfolder named after the project (slugified) and writes the manifest
+ * inside that subfolder. Returns both the new subfolder handle and the
+ * parsed manifest.
+ *
+ * Throws if a folder with that slug already exists inside `parentDir` so
+ * the caller can prompt the user to choose a different name.
  */
 export async function createProjectOnDisk(
-  dir: FileSystemDirectoryHandle,
+  parentDir: FileSystemDirectoryHandle,
   name: string,
-): Promise<ProjectFile> {
+): Promise<{ data: ProjectFile; dir: FileSystemDirectoryHandle; folderName: string }> {
+  const cleanName = name.trim() || 'Untitled Project'
+  const folderName = projectFolderNameFor(cleanName)
+  if (!folderName) {
+    throw new Error('Project name produces an empty folder name — pick a different name')
+  }
+  if (await childDirExists(parentDir, folderName)) {
+    throw new Error(
+      `A folder named "${folderName}" already exists in "${parentDir.name}". Pick a different name or location.`,
+    )
+  }
+
+  const dir = await parentDir.getDirectoryHandle(folderName, { create: true })
+
   const data: ProjectFile = {
     formatVersion: PROJECT_FILE_VERSION,
     id: crypto.randomUUID(),
-    name: name.trim() || 'Untitled Project',
+    name: cleanName,
     createdAt: nowIso(),
     updatedAt: nowIso(),
     songs: [],
@@ -124,8 +173,9 @@ export async function createProjectOnDisk(
   // Pre-create songs/ so the project layout matches the documented shape.
   await ensureSongsDir(dir)
   await saveFolderHandle(PROJECT_HANDLE_KEY, dir)
+  await recordRecentProject(dir, cleanName)
   setActiveProject(dir, data, {})
-  return data
+  return { data, dir, folderName }
 }
 
 /**
@@ -150,6 +200,7 @@ export async function openProjectFromHandle(
     }
   }
   await saveFolderHandle(PROJECT_HANDLE_KEY, dir)
+  await recordRecentProject(dir, data.name)
   setActiveProject(dir, data, metadata)
   return data
 }
@@ -341,6 +392,210 @@ export async function moveProjectSong(songId: string, delta: -1 | 1): Promise<vo
   }
   await writeManifestToHandle(snap.folderHandle, next)
   setProjectData(next)
+}
+
+/**
+ * Map a Demucs output filename like `vocals.wav` to the canonical
+ * `STEM_TRACKS` slot name. Returns null when no obvious match.
+ */
+export function slotForStemFilename(filename: string): string | null {
+  const base = filename.replace(/\.[^.]+$/, '').toLowerCase()
+  const direct: Record<string, string> = {
+    vocals: 'Vocals',
+    drums: 'Drums',
+    bass: 'Bass',
+    other: 'Guitar',
+    guitar: 'Guitar',
+    fx: 'FX',
+  }
+  return direct[base] ?? null
+}
+
+/**
+ * Read `song.smap` from a song folder, merge in extra stem refs, write back.
+ * Used by both the live finalize-after-stems flow and the on-mount
+ * auto-finalize for jobs that completed while the web app was closed.
+ */
+async function mergeStemRefsIntoSmap(
+  songDir: FileSystemDirectoryHandle,
+  newRefs: Record<string, string>,
+): Promise<void> {
+  const fh = await songDir.getFileHandle(SONG_SMAP_FILENAME)
+  const file = await fh.getFile()
+  const data = await decodeSmapFile(file)
+  const mergedMap = {
+    ...data.project.songMap,
+    stemRefs: { ...(data.project.songMap.stemRefs ?? {}), ...newRefs },
+  }
+  const blob = await encodeSmapFile({
+    project: { projectFormatVersion: SONG_PROJECT_FORMAT_VERSION, songMap: mergedMap },
+    audioBlob: data.audioBlob,
+  })
+  await writeFileToHandle(songDir, SONG_SMAP_FILENAME, blob)
+}
+
+/**
+ * Fetch each stem from the sidecar's temp dir, write it under the song
+ * folder's `stems/` directory, merge the canonical refs into the song's
+ * `.smap`, refresh the per-folder metadata cache, and release the
+ * sidecar job. Used both by the live "Split Stems → Done" flow and the
+ * auto-finalize on /project mount.
+ *
+ * Returns the relative paths written so callers can refresh in-memory
+ * folder listings.
+ */
+export async function finalizeStemJobToSong(args: {
+  projectFolderHandle: FileSystemDirectoryHandle
+  entry: ProjectSongEntry
+  jobId: string
+  files: string[]
+}): Promise<{ written: string[]; errors: string[] }> {
+  const { projectFolderHandle, entry, jobId, files } = args
+  const errors: string[] = []
+  const written: string[] = []
+
+  let songDir: FileSystemDirectoryHandle
+  try {
+    songDir = await getDirectoryHandleByPath(projectFolderHandle, entry.folder)
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : 'Could not open song folder')
+    return { written, errors }
+  }
+
+  let stemsDir: FileSystemDirectoryHandle
+  try {
+    stemsDir = await songDir.getDirectoryHandle('stems', { create: true })
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : 'Could not create stems/ folder')
+    return { written, errors }
+  }
+
+  const newRefs: Record<string, string> = {}
+  for (const filename of files) {
+    try {
+      const blob = await fetchStemBlob(jobId, filename)
+      const fh = await stemsDir.getFileHandle(filename, { create: true })
+      const w = await (fh as FileSystemFileHandle & {
+        createWritable(): Promise<FileSystemWritableFileStream>
+      }).createWritable()
+      await w.write(blob)
+      await w.close()
+      written.push(`stems/${filename}`)
+      const slot = slotForStemFilename(filename)
+      if (slot) newRefs[slot] = `stems/${filename}`
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : `Failed saving ${filename}`)
+    }
+  }
+
+  // Persist the new refs in the song's .smap. Always go through disk so the
+  // call is correct whether or not this song happens to be the active one
+  // in the global stores.
+  if (Object.keys(newRefs).length > 0) {
+    try {
+      await mergeStemRefsIntoSmap(songDir, newRefs)
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : 'Could not update song.smap')
+    }
+  }
+
+  // Update the per-card metadata cache so badges refresh.
+  const snap = get(project)
+  const existingMeta = snap.metadataByFolder[entry.folder] ?? { title: entry.folder }
+  if (Object.keys(newRefs).length > 0) {
+    patchMetadataForFolder(entry.folder, {
+      ...existingMeta,
+      stemRefs: { ...existingMeta.stemRefs, ...newRefs },
+    })
+  }
+
+  await releaseStemsJob(jobId).catch(() => {
+    /* sidecar TTL-cleans abandoned jobs eventually */
+  })
+
+  return { written, errors }
+}
+
+/**
+ * Re-scan every song folder in the active project and bring `.smap`
+ * stemRefs in sync with whatever's actually on disk in each `stems/`
+ * subdir. Picks up files the user dropped in manually (or moved around).
+ * Updates each song.smap on disk and refreshes the metadata cache.
+ */
+export async function refreshProjectStemRefs(): Promise<{
+  updatedSongs: number
+  newRefs: number
+  errors: string[]
+}> {
+  const snap = get(project)
+  if (!snap.folderHandle || !snap.data) {
+    return { updatedSongs: 0, newRefs: 0, errors: ['No active project'] }
+  }
+  const errors: string[] = []
+  let updatedSongs = 0
+  let totalNewRefs = 0
+
+  for (const entry of snap.data.songs) {
+    try {
+      const songDir = await getDirectoryHandleByPath(snap.folderHandle, entry.folder)
+
+      // 1. Re-read .smap metadata (in case user hand-edited the file).
+      let smapMap: SongMap | null = null
+      try {
+        const fh = await songDir.getFileHandle(SONG_SMAP_FILENAME)
+        const file = await fh.getFile()
+        const sp = await readSmapJsonOnly(file)
+        smapMap = sp.songMap
+      } catch {
+        /* Missing or unreadable .smap — leave the cache entry alone. */
+      }
+
+      // 2. Discover stems on disk and figure out which slots they should fill.
+      type V = FileSystemDirectoryHandle & {
+        values(): AsyncIterableIterator<FileSystemHandle & { kind: string; name: string }>
+      }
+      const discovered: Record<string, string> = {}
+      try {
+        const stemsDir = (await songDir.getDirectoryHandle('stems')) as V
+        for await (const child of stemsDir.values()) {
+          if (child.kind !== 'file') continue
+          if (!/\.(wav|aif|aiff|flac|mp3|m4a|ogg)$/i.test(child.name)) continue
+          const slot = slotForStemFilename(child.name)
+          if (slot) discovered[slot] = `stems/${child.name}`
+        }
+      } catch {
+        /* No stems/ dir yet — fine. */
+      }
+
+      // 3. Compute the diff against what's already in stemRefs.
+      const existingRefs = smapMap?.stemRefs ?? {}
+      const toAdd: Record<string, string> = {}
+      for (const [slot, rel] of Object.entries(discovered)) {
+        if (existingRefs[slot] !== rel) toAdd[slot] = rel
+      }
+
+      // 4. Persist newly-discovered refs to disk.
+      if (Object.keys(toAdd).length > 0) {
+        await mergeStemRefsIntoSmap(songDir, toAdd)
+        totalNewRefs += Object.keys(toAdd).length
+        updatedSongs++
+      }
+
+      // 5. Refresh the in-memory metadata cache for this song.
+      const mergedRefs = { ...existingRefs, ...toAdd }
+      const cached = snap.metadataByFolder[entry.folder] ?? { title: entry.folder }
+      patchMetadataForFolder(entry.folder, {
+        ...cached,
+        ...(smapMap ? metadataLiteFromSongMap(smapMap) : {}),
+        stemRefs: Object.keys(mergedRefs).length > 0 ? mergedRefs : undefined,
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      errors.push(`${entry.folder}: ${msg}`)
+    }
+  }
+
+  return { updatedSongs, newRefs: totalNewRefs, errors }
 }
 
 /** Toggle the `hidden` flag for a song entry by id. */

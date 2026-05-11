@@ -182,6 +182,20 @@ export function validateSongMap(map: SongMap): ValidationResult {
     }
   }
 
+  if (map.cueTrackExport !== undefined) {
+    const c = map.cueTrackExport
+    if (!c || typeof c !== 'object') errors.push('cueTrackExport invalid')
+    else {
+      if (typeof c.fingerprint !== 'string' || !c.fingerprint) errors.push('cueTrackExport.fingerprint invalid')
+      if (!Number.isFinite(c.durationSec) || c.durationSec <= 0) errors.push('cueTrackExport.durationSec invalid')
+      if (!Number.isFinite(c.sampleRate) || c.sampleRate <= 0) errors.push('cueTrackExport.sampleRate invalid')
+      if (typeof c.generatedAt !== 'string' || !c.generatedAt) errors.push('cueTrackExport.generatedAt invalid')
+      if (c.relativePath !== undefined && typeof c.relativePath !== 'string') {
+        errors.push('cueTrackExport.relativePath invalid')
+      }
+    }
+  }
+
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
   else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
 

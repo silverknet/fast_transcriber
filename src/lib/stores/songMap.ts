@@ -1,4 +1,5 @@
 import { get, writable } from 'svelte/store'
+import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
 import { mergeAudioReferenceFromSession } from '$lib/songmap/session'
 import { validateSongMap, type SongMap } from '$lib/songmap'
 import { audioSession } from './audioSession'
@@ -31,6 +32,12 @@ export function patchSongMap(
     const sess = get(audioSession)
     if (sess.file) {
       next = mergeAudioReferenceFromSession(next, sess)
+    }
+    if (next.cueTrackExport) {
+      const fp = fingerprintCueTrackInputs(next)
+      if (fp !== next.cueTrackExport.fingerprint) {
+        next = { ...next, cueTrackExport: undefined }
+      }
     }
     const v = validateSongMap(next)
     if (!v.ok) {

@@ -1,4 +1,4 @@
-function audioBufferToWavBlob(buffer: AudioBuffer) {
+export function audioBufferToWavBlob(buffer: AudioBuffer) {
   const channels = Math.min(2, buffer.numberOfChannels)
   const sampleRate = buffer.sampleRate
   const frames = buffer.length

@@ -1,0 +1,3 @@
+# Demucs + deps — install PyTorch per https://github.com/facebookresearch/demucs first if needed.
+demucs>=4.0.0
+certifi

@@ -77,6 +77,20 @@ export type CueSettings = {
   language?: string
 }
 
+/**
+ * Last exported click-cue WAV (see `cueTrackFingerprint.ts` + `renderCueTrack.ts`).
+ * Cleared automatically when timeline/trim/cues no longer match `fingerprint`.
+ */
+export type CueTrackExport = {
+  /** Same value as `fingerprintCueTrackInputs()` at generation time. */
+  fingerprint: string
+  durationSec: number
+  sampleRate: number
+  generatedAt: string
+  /** Set when written under a project song folder, e.g. `cue/cue-track.wav`. */
+  relativePath?: string
+}
+
 export type AudioSource = 'upload' | 'import' | 'unknown'
 
 export type AudioReference = {
@@ -175,6 +189,8 @@ export type SongMapV1 = {
   projectFolder?: string
   /** Relative paths within the project folder to each stem audio file. */
   stemRefs?: StemRefs
+  /** Optional rendered metronome cue aligned to trim + count-in prepend. */
+  cueTrackExport?: CueTrackExport
 }
 
 export type SongMap = SongMapV1

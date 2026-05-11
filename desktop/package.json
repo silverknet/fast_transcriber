@@ -1,0 +1,21 @@
+{
+  "name": "barbro-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Orthogonal desktop shell for BarBro — not part of the SvelteKit package graph",
+  "author": "BarBro",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "dev": "electron .",
+    "dist:mac-arm64": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64"
+  },
+  "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

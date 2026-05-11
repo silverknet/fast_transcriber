@@ -1,7 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import ChordRadialQuickSelect from '$lib/components/ChordRadialQuickSelect.svelte'
@@ -14,8 +14,20 @@
     serializeChordClipboard,
     songKeyPreferFlats,
   } from '$lib/chords'
-  import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
+  import { beatsToClickPoints, playMetronomeClick, type BeatClickPoint } from '$lib/audio/debugClickTrack'
   import { computeCountIn } from '$lib/audio/computeCountIn'
+  import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
+  import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
+  import {
+    ensurePermission,
+    getDirectoryHandleByPath,
+    readFileFromHandle,
+    writeFileToHandle,
+  } from '$lib/client/folderHandle'
+  import { metadataLiteFromSongMap } from '$lib/project/commit'
+  import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+  import { safeExportBasename } from '$lib/songmap/persist'
+  import { patchMetadataForFolder, project as projectStore } from '$lib/stores/project'
   import { newId } from '$lib/songmap/factory'
   import { clearHarmonyAtBeat, upsertHarmonyAtBeat } from '$lib/songmap/harmonyEdit'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
@@ -337,6 +349,15 @@
 
   let objectUrl = $state<string | null>(null)
   let audioEl = $state<HTMLAudioElement | null>(null)
+  /** Offline-rendered song + cue WAV for Cue-tab preview (separate from main reference player). */
+  let mixPreviewUrl = $state<string | null>(null)
+  let mixPreviewBusy = $state(false)
+  let mixPreviewErr = $state('')
+  let mixPreviewAudioEl = $state<HTMLAudioElement | null>(null)
+  let mixPreviewClickOverlay = $state(false)
+  let mixClickRaf = 0
+  let mixNextClickIdx = 0
+  let mixClickPoints: BeatClickPoint[] = []
   let playingBarId = $state<string | null>(null)
   let preview = $state<{ start: number; end: number; barId: string } | null>(null)
   let rafId = 0
@@ -349,26 +370,64 @@
   let clickMaster: GainNode | undefined
 
   $effect(() => {
-    const file = $audioSession.file
-    if (!file) {
+    const u = mixPreviewUrl
+    return () => {
+      if (u) queueMicrotask(() => URL.revokeObjectURL(u))
+    }
+  })
+
+  function stopMixClickLoop() {
+    if (mixClickRaf) cancelAnimationFrame(mixClickRaf)
+    mixClickRaf = 0
+  }
+
+  function pauseMixPreview() {
+    stopMixClickLoop()
+    mixPreviewAudioEl?.pause()
+  }
+
+  $effect(() => {
+    if (!mixPreviewClickOverlay) stopMixClickLoop()
+  })
+
+  /**
+   * Main `<audio>` blob URL. `$derived($audioSession.file)` still re-fired when the session *object*
+   * was replaced on trim sync, revoking URLs and breaking the cue mix player — so we key off the
+   * `File` reference via an explicit store subscription instead.
+   */
+  let lastMainFileForObjectUrl: File | null = null
+
+  function applyMainAudioFromSession() {
+    const f = get(audioSession).file
+    if (!f) {
+      lastMainFileForObjectUrl = null
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
       objectUrl = null
       playingBarId = null
       preview = null
       clickWithSongActive = false
+      mixPreviewUrl = null
       stopPreviewLoop()
       stopClickLoop()
+      stopMixClickLoop()
+      mixPreviewAudioEl?.pause()
       audioEl?.pause()
       return
     }
-    const url = URL.createObjectURL(file)
-    objectUrl = url
-    return () => {
-      stopPreviewLoop()
-      stopClickLoop()
-      audioEl?.pause()
-      URL.revokeObjectURL(url)
-    }
-  })
+    if (f === lastMainFileForObjectUrl && objectUrl) return
+
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+    audioEl?.pause()
+    lastMainFileForObjectUrl = f
+    objectUrl = URL.createObjectURL(f)
+    mixPreviewUrl = null
+    stopMixClickLoop()
+    mixPreviewAudioEl?.pause()
+  }
+
+  if (browser) applyMainAudioFromSession()
+
+  onMount(() => audioSession.subscribe(applyMainAudioFromSession))
 
   function beatsForBar(barId: string) {
     const sm = get(songMap)
@@ -438,10 +497,69 @@
     clickLoopRaf = requestAnimationFrame(runClickLoop)
   }
 
+  function syncMixNextClickIdx(t: number) {
+    mixNextClickIdx = mixClickPoints.findIndex((b) => b.timeSec >= t - 0.018)
+    if (mixNextClickIdx < 0) mixNextClickIdx = mixClickPoints.length
+  }
+
+  function runMixClickLoop() {
+    const el = mixPreviewAudioEl
+    const ctx = clickCtx
+    const dest = clickMaster
+    if (!el || !ctx || !dest || !mixPreviewClickOverlay || el.paused) {
+      stopMixClickLoop()
+      return
+    }
+
+    const t = el.currentTime
+    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0
+
+    while (mixNextClickIdx < mixClickPoints.length && mixClickPoints[mixNextClickIdx]!.timeSec <= t + 0.025) {
+      const pt = mixClickPoints[mixNextClickIdx]!
+      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
+      mixNextClickIdx++
+    }
+
+    if (dur > 0 && t >= dur - 0.04) {
+      el.pause()
+      stopMixClickLoop()
+      return
+    }
+
+    mixClickRaf = requestAnimationFrame(runMixClickLoop)
+  }
+
+  function startMixClickLoopFromCurrentTime() {
+    if (!mixPreviewClickOverlay || !mixPreviewAudioEl) return
+    ensureClickGraph()
+    void clickCtx?.resume()
+    syncMixNextClickIdx(mixPreviewAudioEl.currentTime)
+    stopMixClickLoop()
+    mixClickRaf = requestAnimationFrame(runMixClickLoop)
+  }
+
+  function onMixPreviewPlay() {
+    clickWithSongActive = false
+    stopClickLoop()
+    audioEl?.pause()
+    if (!mixPreviewClickOverlay) return
+    startMixClickLoopFromCurrentTime()
+  }
+
+  function onMixPreviewPause() {
+    stopMixClickLoop()
+  }
+
+  function onMixPreviewEnded() {
+    stopMixClickLoop()
+  }
+
   async function toggleSongWithClick() {
     const sm = get(songMap)
     const el = audioEl
     if (!el || !objectUrl || !sm?.timeline.beats.length) return
+
+    pauseMixPreview()
 
     ensureClickGraph()
     await clickCtx!.resume()
@@ -531,6 +649,7 @@
 
     clickWithSongActive = false
     stopClickLoop()
+    pauseMixPreview()
 
     el.pause()
     stopPreviewLoop()
@@ -577,10 +696,156 @@
     else beatEditError = ''
   }
 
+  const CUE_TRACK_REL = 'cue/cue-track.wav'
+
+  let cueGenBusy = $state(false)
+  let cueGenErr = $state('')
+  /** Last blob from a successful generate in this tab (cleared when export record is dropped). */
+  let lastCueDownloadBlob = $state<Blob | null>(null)
+
+  $effect(() => {
+    if (!$songMap?.cueTrackExport) lastCueDownloadBlob = null
+  })
+
+  async function generateCueTrackWav() {
+    const sm = get(songMap)
+    if (!sm) return
+    cueGenBusy = true
+    cueGenErr = ''
+    lastCueDownloadBlob = null
+    try {
+      const blob = await renderCueTrackWavBlob(sm)
+      const dur = cueTrackTotalDurationSec(sm)
+      if (dur == null) throw new Error('Could not derive cue duration from trim + beats')
+      const fp = fingerprintCueTrackInputs(sm)
+      const now = new Date().toISOString()
+      let relativePath: string | undefined
+
+      const ps = get(projectStore)
+      if (ps.editingMode === 'project-song' && ps.folderHandle && ps.activeSongFolder) {
+        const granted = await ensurePermission(ps.folderHandle)
+        if (!granted) {
+          cueGenErr = 'Could not write cue file — project folder permission denied. WAV is still available via Download.'
+        } else {
+          const songDir = await getDirectoryHandleByPath(ps.folderHandle, ps.activeSongFolder)
+          const cueDir = await getDirectoryHandleByPath(songDir, 'cue', { create: true })
+          await writeFileToHandle(cueDir, 'cue-track.wav', blob)
+          relativePath = CUE_TRACK_REL
+        }
+      }
+
+      const p = patchSongMap((m) => ({
+        ...m,
+        cueTrackExport: { fingerprint: fp, durationSec: dur, sampleRate: 44100, generatedAt: now, relativePath },
+      }))
+      if (!p.ok) {
+        cueGenErr = p.errors.join('; ')
+        return
+      }
+      lastCueDownloadBlob = blob
+      const snap = get(projectStore)
+      if (relativePath && snap.activeSongFolder) {
+        const fresh = get(songMap)
+        if (fresh) patchMetadataForFolder(snap.activeSongFolder, metadataLiteFromSongMap(fresh))
+      }
+    } catch (e) {
+      cueGenErr = e instanceof Error ? e.message : String(e)
+    } finally {
+      cueGenBusy = false
+    }
+  }
+
+  function downloadCueTrackFile() {
+    const sm = get(songMap)
+    if (!lastCueDownloadBlob || !sm) return
+    pauseMixPreview()
+    audioEl?.pause()
+    const url = URL.createObjectURL(lastCueDownloadBlob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safeExportBasename(sm.metadata.title)}-cue-track.wav`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  let mixPreviewGate = $derived.by((): { ok: boolean; reason: string } => {
+    const sm = $songMap
+    if (!sm) return { ok: false, reason: 'No song.' }
+    if (!sm.timeline.beats.length) return { ok: false, reason: 'Need beats (Grid).' }
+    if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) {
+      return { ok: false, reason: 'Need trim (Grid).' }
+    }
+    if (lastCueDownloadBlob) return { ok: true, reason: '' }
+    const ps = $projectStore
+    if (
+      sm.cueTrackExport?.relativePath &&
+      ps.editingMode === 'project-song' &&
+      ps.folderHandle &&
+      ps.activeSongFolder
+    ) {
+      return { ok: true, reason: '' }
+    }
+    return { ok: false, reason: 'Generate cue first.' }
+  })
+
+  async function resolveCueBlobForMix(): Promise<Blob | null> {
+    if (lastCueDownloadBlob) return lastCueDownloadBlob
+    const sm = get(songMap)
+    const rel = sm?.cueTrackExport?.relativePath
+    if (!rel) return null
+    const ps = get(projectStore)
+    if (ps.editingMode !== 'project-song' || !ps.folderHandle || !ps.activeSongFolder) return null
+    const ok = await ensurePermission(ps.folderHandle)
+    if (!ok) return null
+    const songDir = await getDirectoryHandleByPath(ps.folderHandle, ps.activeSongFolder)
+    return readFileFromHandle(songDir, rel)
+  }
+
+  async function prepareMixPreview() {
+    const sm = get(songMap)
+    const file = get(audioSession).file
+    if (!sm || !file) {
+      mixPreviewErr = 'No audio.'
+      return
+    }
+    if (!mixPreviewGate.ok) {
+      mixPreviewErr = mixPreviewGate.reason
+      return
+    }
+    const trim = sm.audio?.trim
+    if (!trim || !(trim.endSec > trim.startSec)) {
+      mixPreviewErr = 'Need trim.'
+      return
+    }
+    mixPreviewBusy = true
+    mixPreviewErr = ''
+    try {
+      const cue = await resolveCueBlobForMix()
+      if (!cue) {
+        mixPreviewErr = 'No cue WAV — generate above or open from project with cue file.'
+        return
+      }
+      const blob = await buildSongCueMixWavBlob(sm, file, cue)
+      mixPreviewUrl = URL.createObjectURL(blob)
+      let prependSec = 0
+      if (sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0) {
+        const ci = computeCountIn(sm, sm.cues.countInBeats)
+        if (ci) prependSec = ci.prependSec
+      }
+      mixClickPoints = mixTimelineClickPoints(sm, trim.startSec, trim.endSec, prependSec)
+    } catch (e) {
+      mixPreviewErr = e instanceof Error ? e.message : String(e)
+    } finally {
+      mixPreviewBusy = false
+    }
+  }
+
   onDestroy(() => {
     stopPreviewLoop()
     stopClickLoop()
+    stopMixClickLoop()
     audioEl?.pause()
+    mixPreviewAudioEl?.pause()
     void clickCtx?.close()
     clickCtx = undefined
     clickMaster = undefined
@@ -710,10 +975,17 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Cue settings"
       >
-        <p class="text-muted-foreground mb-4 text-xs leading-relaxed">
-          Set how many click beats to count in before bar 1. The prepend value tells you how much silence
-          to add before your stems in the DAW so everything lines up.
-        </p>
+        <details class="text-muted-foreground mb-3 text-xs">
+          <summary
+            class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
+          >
+            <span class="underline-offset-2 group-open:underline">About count-in</span>
+          </summary>
+          <p class="mt-2 leading-relaxed">
+            Set how many click beats before bar 1. Prepend is how much silence to add before stems in the
+            DAW so everything lines up.
+          </p>
+        </details>
 
         <div class="space-y-4">
           <fieldset class="border-foreground border-2 px-3 py-3">
@@ -770,6 +1042,72 @@
             </dl>
           {/if}
 
+          <div class="border-foreground space-y-3 border-2 px-3 py-3">
+            <h3 class="text-muted-foreground text-xs font-medium uppercase tracking-wide">Cue track (click)</h3>
+            <p class="text-muted-foreground text-xs leading-relaxed">
+              Mono WAV = prepend + trim length (DAW layout). Trim / grid / count-in changes invalidate cue metadata — regenerate; project <span class="font-mono">cue/</span> file may be overwritten.
+            </p>
+            {#if cueGenErr}
+              <p class="text-destructive text-xs" role="status">{cueGenErr}</p>
+            {/if}
+            {#if $songMap?.cueTrackExport}
+              <p class="text-muted-foreground font-mono text-xs" role="status">
+                Last: {$songMap.cueTrackExport.durationSec.toFixed(3)} s @ {$songMap.cueTrackExport.sampleRate} Hz
+                {#if $songMap.cueTrackExport.relativePath}
+                  · {$songMap.cueTrackExport.relativePath}
+                {/if}
+              </p>
+            {/if}
+            <div class="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                class=""
+                disabled={cueGenBusy || !$songMap?.timeline.beats.length}
+                onclick={() => void generateCueTrackWav()}
+              >
+                {cueGenBusy ? 'Rendering…' : 'Generate cue track'}
+              </Button>
+              <Button type="button" class="" variant="outline" disabled={!lastCueDownloadBlob} onclick={downloadCueTrackFile}>
+                Download .wav
+              </Button>
+            </div>
+          </div>
+
+          <div class="border-foreground flex flex-col gap-2 border-2 px-3 py-3">
+            <p class="text-muted-foreground text-xs">Song + cue (mono). Optional extra clicks — off if cue already clicks.</p>
+            {#if mixPreviewErr}
+              <p class="text-destructive text-xs" role="status">{mixPreviewErr}</p>
+            {:else if !mixPreviewGate.ok}
+              <p class="text-muted-foreground text-xs" role="status">{mixPreviewGate.reason}</p>
+            {/if}
+            <label class="text-muted-foreground flex cursor-pointer items-center gap-2 text-xs">
+              <input type="checkbox" bind:checked={mixPreviewClickOverlay} class="accent-foreground shrink-0" />
+              Extra clicks
+            </label>
+            <div class="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                class=""
+                variant="secondary"
+                disabled={cueGenBusy || mixPreviewBusy || !mixPreviewGate.ok}
+                onclick={() => void prepareMixPreview()}
+              >
+                {mixPreviewBusy ? '…' : 'Build preview'}
+              </Button>
+            </div>
+            {#if mixPreviewUrl}
+              <audio
+                bind:this={mixPreviewAudioEl}
+                class="mt-1 w-full max-w-lg"
+                controls
+                src={mixPreviewUrl}
+                onplay={onMixPreviewPlay}
+                onpause={onMixPreviewPause}
+                onended={onMixPreviewEnded}
+              ></audio>
+            {/if}
+          </div>
+
           <p class="text-muted-foreground/60 text-xs italic">
             Song name announcement (text-to-speech) — coming soon
           </p>
@@ -782,25 +1120,33 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Edit timeline"
       >
-        {#if editMode === 'grid'}
-          <p class="text-muted-foreground mb-3 text-xs leading-relaxed sm:mb-4">
-            Edit bars and beats in the strip above the waveform (equal spacing per bar). Add or remove bars at the ends of
-            the timeline; wheel on the strip changes beats per bar when a bar is selected.
-          </p>
-        {:else if editMode === 'sections'}
-          <p class="text-muted-foreground mb-3 text-xs leading-relaxed sm:mb-4">
-            Drag across the bar strip to select a range, or Shift+click / ⌘/Ctrl+click. Section colors and names match
-            tags below. Choose a type and tag the selection; overlapping ranges are replaced. Zoom is shared with Grid.
-          </p>
-        {:else}
-          <p class="text-muted-foreground mb-3 text-xs leading-relaxed sm:mb-4">
-            Drag across the chord strip or Shift+click / ⌘/Ctrl+click to select beats. Click a beat (no modifiers) for the radial
-            menu: common chords are one tap; hover or tap a category for more; hold a chord ~1s for slash bass; Search for
-            anything else. ⌘/Ctrl+C copies the resolved (sounding) chord on each selected beat;
-            ⌘/Ctrl+V pastes in order starting at the earliest selected beat. Only beats with an explicit chord show a
-            label—later beats inherit until the next change. Song key drives spelling and families, not transposition: harmony
-            is stored as absolute chord symbols.
-          </p>
+        <details class="text-muted-foreground mb-3 text-xs sm:mb-4">
+          <summary
+            class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
+          >
+            <span class="underline-offset-2 group-open:underline">How this tab works</span>
+          </summary>
+          <div class="mt-2 space-y-2 leading-relaxed">
+            {#if editMode === 'grid'}
+              <p>
+                Edit bars and beats in the strip above the waveform. Add or remove bars at the ends; wheel on the strip
+                changes beats per bar when a bar is selected.
+              </p>
+            {:else if editMode === 'sections'}
+              <p>
+                Drag on the bar strip or Shift+click / ⌘/Ctrl+click to select a range. Pick a section type and tag it;
+                overlaps are replaced. Zoom matches Grid.
+              </p>
+            {:else}
+              <p>
+                Select beats on the chord strip (drag or Shift+click / ⌘/Ctrl+click). Click a beat for the radial menu.
+                ⌘/Ctrl+C / V copy and paste resolved chords in beat order. Labels only on beats with explicit chords;
+                others inherit. Song key affects spelling, not stored pitch.
+              </p>
+            {/if}
+          </div>
+        </details>
+        {#if editMode === 'chords'}
           <div
             data-song-key-picker
             class="border-foreground bg-muted mb-4 flex flex-wrap items-center gap-2 border-2 px-3 py-2"

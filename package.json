@@ -14,7 +14,9 @@
     "test:watch": "vitest",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:migrate": "node scripts/migrate.mjs"
+    "db:migrate": "node scripts/migrate.mjs",
+    "sync-desktop-release": "node scripts/sync-desktop-release.mjs",
+    "desktop:dist-mac-sync": "npm run dist:mac-arm64 --prefix desktop && npm run sync-desktop-release"
   },
   "devDependencies": {
     "@internationalized/date": "^3.12.0",

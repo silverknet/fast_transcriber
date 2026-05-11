@@ -144,6 +144,135 @@ export async function ensureAbletonProjectFolder(dir: FileSystemDirectoryHandle)
   await dir.getDirectoryHandle('Ableton Project Info', { create: true })
 }
 
+// ── Recent projects ─────────────────────────────────────────────────────────
+
+/**
+ * Single record stored at `RECENT_PROJECTS_KEY` in the same IndexedDB store
+ * as individual handles. The whole list is read/written as one blob — simple
+ * and avoids schema churn.
+ */
+const RECENT_PROJECTS_KEY = 'barbro::recentProjects'
+const RECENT_PROJECTS_MAX = 10
+
+export interface RecentProjectEntry {
+  /** Stable id assigned on first record — useful for `forgetRecentProject`. */
+  id: string
+  /** Display name. */
+  name: string
+  /** ISO timestamp; entries are sorted desc on read. */
+  lastOpenedAt: string
+  /** The handle itself, persisted natively by IndexedDB. */
+  handle: FileSystemDirectoryHandle
+}
+
+type StoredRecents = { entries: RecentProjectEntry[] } | undefined
+
+async function readRecentsRaw(): Promise<RecentProjectEntry[]> {
+  try {
+    const db = await openDb()
+    return await new Promise<RecentProjectEntry[]>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly')
+      const req = tx.objectStore(STORE).get(RECENT_PROJECTS_KEY)
+      req.onsuccess = () => {
+        db.close()
+        const v = req.result as StoredRecents
+        resolve(Array.isArray(v?.entries) ? v.entries : [])
+      }
+      req.onerror = () => {
+        db.close()
+        reject(req.error)
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+async function writeRecentsRaw(entries: RecentProjectEntry[]): Promise<void> {
+  try {
+    const db = await openDb()
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite')
+      tx.objectStore(STORE).put({ entries }, RECENT_PROJECTS_KEY)
+      tx.oncomplete = () => {
+        db.close()
+        resolve()
+      }
+      tx.onerror = () => {
+        db.close()
+        reject(tx.error)
+      }
+    })
+  } catch {
+    /* swallow — recents are non-critical */
+  }
+}
+
+/** Most-recent first. Returns [] on any read failure. */
+export async function listRecentProjects(): Promise<RecentProjectEntry[]> {
+  const entries = await readRecentsRaw()
+  return [...entries].sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt))
+}
+
+type HandleWithIsSameEntry = FileSystemDirectoryHandle & {
+  isSameEntry(other: FileSystemDirectoryHandle): Promise<boolean>
+}
+
+/**
+ * Add or update a recent entry. Dedupes by `isSameEntry` against the picked
+ * handle — re-opening the same folder bumps `lastOpenedAt` rather than
+ * stacking duplicates. List is trimmed to `RECENT_PROJECTS_MAX`.
+ */
+export async function recordRecentProject(
+  handle: FileSystemDirectoryHandle,
+  name: string,
+): Promise<void> {
+  const entries = await readRecentsRaw()
+  const now = new Date().toISOString()
+  const h = handle as HandleWithIsSameEntry
+
+  let matchIndex = -1
+  for (let i = 0; i < entries.length; i++) {
+    try {
+      if (await h.isSameEntry(entries[i]!.handle)) {
+        matchIndex = i
+        break
+      }
+    } catch {
+      /* a stale handle may throw — treat as no match and let it age out */
+    }
+  }
+
+  let next: RecentProjectEntry[]
+  if (matchIndex >= 0) {
+    const existing = entries[matchIndex]!
+    next = [
+      { ...existing, name, lastOpenedAt: now, handle },
+      ...entries.slice(0, matchIndex),
+      ...entries.slice(matchIndex + 1),
+    ]
+  } else {
+    next = [
+      { id: crypto.randomUUID(), name, lastOpenedAt: now, handle },
+      ...entries,
+    ]
+  }
+
+  if (next.length > RECENT_PROJECTS_MAX) next = next.slice(0, RECENT_PROJECTS_MAX)
+  await writeRecentsRaw(next)
+}
+
+/** Remove one entry by id (e.g. when re-permission fails). */
+export async function forgetRecentProject(id: string): Promise<void> {
+  const entries = await readRecentsRaw()
+  await writeRecentsRaw(entries.filter((e) => e.id !== id))
+}
+
+/** Wipe the whole recents list. */
+export async function clearRecentProjects(): Promise<void> {
+  await writeRecentsRaw([])
+}
+
 /**
  * Resolve a nested subdirectory by relative path (forward-slash separated).
  * Each segment is `getDirectoryHandle(seg, { create })`. Throws on missing

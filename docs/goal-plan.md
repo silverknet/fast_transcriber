@@ -40,7 +40,7 @@ All tables share: **Epic** · **Work item** · **Lvl** · **Notes**.
 
 Canonical single-song experience — timeline, waveform, harmony, sections, cues — driven by [`SongMap`](../src/lib/songmap/types.ts).
 
-**Epic rollup:** **M** — core editing surface is real; export/cue satellites uneven (**S**/**N**).
+**Epic rollup:** **M** — core editing surface is real; verbose grid/sections/chords/cue copy folded behind «How this tab works» / «About count-in»; waveform zoom/pan/selection help under «Zoom & shortcuts»; export/cue satellites uneven (**S**/**N**).
 
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
@@ -48,8 +48,8 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
 | SE | Beat / bar grid editing | M | `applyBarGridAction`, strip UX; errors surfaced as `beatEditError`. |
 | SE | Chord edit | M | Radial picker, multi-beat, paste pipeline; some coverage in `chordClipboard.test.ts`. |
 | SE | Section edit | M | Range select + tag + overlap replace (`sectionEdit.ts`); labels default from kind only. |
-| SE | Cue UX — count-in / prepend | M | Radio count-in, live prepend math (`computeCountIn`); `CueSettings` has unused fields (`spoken`, templates…). |
-| SE | Text-to-speech cue audio | N | UI placeholder only (“coming soon”); schema allows `spoken` but no synthesis/export path. |
+| SE | Cue UX — count-in / prepend | M | Radio count-in, live prepend math (`computeCountIn`); **click cue WAV** generate + `cueTrackExport` fingerprint + auto-drop on drift (`renderCueTrack.ts`, `cueTrackFingerprint.ts`, `patchSongMap`); **Cue tab** offline **song + cue** headphone preview (`mixSongCuePreview.ts`, optional live click overlay). `CueSettings` still has unused fields (`spoken`, templates…). |
+| SE | Text-to-speech cue audio | S | Desktop [`piper_tts/`](../desktop/native/python/piper_tts/) + loopback `GET /native/tts/hello-world`; web debug [`/texttospeech`](../src/routes/texttospeech/+page.svelte). Cue track / editor wiring still **N**. |
 | SE | Chord / lead-sheet PDF | S | `pdfLeadSheet.ts` + menu export; slash notation / engraving quality weak vs “gig-ready chart”. |
 
 #### Detail — `SE`
@@ -71,12 +71,12 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
   **Gap:** No UI for custom **labels** or **colors** per section (`Section.label` / `color` exist but flow is kind presets). Medleys / duplicate kinds across disjoint ranges are OK but not “musical director” grade. **→ R** with label/color editing + validation tests.
 
 - **Cue UX — count-in (`M`)**  
-  **Evidence:** `cues.mode` driven to `countIn` / `off`; prepend seconds computed for stem alignment guidance.  
+  **Evidence:** `cues.mode` driven to `countIn` / `off`; prepend seconds computed for stem alignment guidance; `/edit` Cue tab can build a temporary **song + cue** WAV (`buildSongCueMixWavBlob`) from in-tab blob or project `cueTrackExport.relativePath`, with optional Web Audio metronome overlay (may double baked-in clicks).  
   **Gap:** `CueMode` includes `click` / `spoken` but editor does not expose them; `useSectionLabels`, `template`, `language` unused. **→ R** when modes match real rehearsal flows + persisted cues sync with exports.
 
-- **TTS cue audio (`N`)**  
-  **Evidence:** None — placeholder string in [`edit/+page.svelte`](../src/routes/edit/+page.svelte).  
-  **→ M** needs synthesis target (browser vs rendered WAV), file placement, and Ableton/session playback story.
+- **TTS cue audio (`S` on desktop slice, still `N` in editor/export)**  
+  **Evidence:** Isolated Piper module [`piper_tts/`](../desktop/native/python/piper_tts/) (`synthesize_wav.py`, own venv); sidecar `POST /native/setup/piper-tts`, `GET /native/tts/hello-world`; [`desktopBridge.ts`](../src/lib/client/desktopBridge.ts) helpers; debug page [`/texttospeech`](../src/routes/texttospeech/+page.svelte).  
+  **Gap:** No cue clip in `SongMap`, no export to project folder / Ableton. **→ M** when a chosen phrase renders to WAV in the song’s project path and the editor exposes it beside count-in.
 
 - **Lead-sheet PDF (`S`)**  
   **Evidence:** jsPDF path draws staff skeleton, chords, section labels; invoked from menu.  
@@ -88,27 +88,27 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
 
 Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit`.
 
-**Epic rollup:** **M** — disk format + editor bridge solid; **setlist reorder** in UI; **bulk export** still thin (**S**).
+**Epic rollup:** **M** — disk format + editor bridge solid; **setlist reorder** in UI; refresh line shortened with full detail on hover; **bulk export** still thin (**S**).
 
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
-| PV | Open / save project folder layout | M | Parse/serialize + `createProjectOnDisk` / `openProjectFromHandle`; handle in IndexedDB via `PROJECT_HANDLE_KEY`. |
-| PV | Project song structuring | M | Stable IDs, hide/remove/import/new song; **setlist order** via ↑↓ on project page (`moveProjectSong` in `commit.ts`). No grouping / nested sets yet. |
-| PV | Per-song entry → open in song editor | M | `loadProjectSongIntoEditor`; autosave debounced on `/edit` in project mode (`projectAutosave.ts`). |
+| PV | Open / save project folder layout | M | Parse/serialize with path validation (rejects `..` / leading-`/` / `\`); `createProjectOnDisk` / `openProjectFromHandle`; atomic commit ladder with rollback (incl. cleanup-failure surface); handle in IndexedDB via `PROJECT_HANDLE_KEY`; stale `?project=1` URL gracefully degrades to standalone. |
+| PV | Project song structuring | M | Stable IDs, hide/remove (incl. "delete files" checkbox), import-local-`.smap`, copy-from-cloud (`CopyFromCloudDialog` → `fetchCloudSongAsSmap` → `importSmapToProject`), create-new via `?project=1` flow; **setlist order** via ↑↓ on project page (`moveProjectSong` in `commit.ts`). No drag-and-drop, no grouping / nested sets yet. |
+| PV | Per-song entry → open in song editor | M | `loadProjectSongIntoEditor`; autosave debounced on `/edit` in project mode with 7-guard chain incl. fresh permission re-check + manifest `{folder,id}` invariant (`projectAutosave.ts`). |
 | PV | Bulk / project-level export hooks | S | `getExportableSongs` filters hidden; no multi-song Ableton/PDF batch UX wired. |
 
 #### Detail — `PV`
 
 - **Open / save layout (`M`, not `R`)**  
-  **Evidence:** Atomic commit ladder + rollback notes in [`commit.ts`](../src/lib/project/commit.ts); `song.smap` invariant enforced on add/import.  
-  **Gap:** Failure UX across browsers (quota, partial writes) not uniformly surfaced to users; no migration versioning beyond `formatVersion: 1`. **→ R** with user-visible recovery + migration tests.
+  **Evidence:** Atomic commit ladder + rollback notes in [`commit.ts`](../src/lib/project/commit.ts); `song.smap` invariant enforced on add/import; folder name = `<slug>-<id.slice(0,8)>` with up to 3 retries on collision; rollback path raises a "files may remain on disk" error when even cleanup fails so the manifest invariant is never violated; `barbro.project.json` written deterministically with key sort.  
+  **Gap:** Failure UX across browsers (quota, partial writes) lands as raw thrown messages rather than a structured toast/recovery UI; no migration versioning beyond `formatVersion: 1`. **→ R** with user-visible recovery + migration tests.
 
 - **Song structuring (`M`, not `R`)**  
-  **Evidence:** Manifest order is canonical (`ProjectFile.songs` order); `moveProjectSong` rewrites manifest + `updatedAt`; project list rows expose move up/down (`ProjectSongRow`).  
+  **Evidence:** Manifest order is canonical (`ProjectFile.songs` order); `moveProjectSong` rewrites manifest + `updatedAt`; project list rows expose move up/down (`ProjectSongRow`); cloud copy lands via [`CopyFromCloudDialog`](../src/lib/components/CopyFromCloudDialog.svelte) → `fetchCloudSongAsSmap` → same atomic ladder as local import; remove dialog distinguishes "remove from manifest" from "also delete files".  
   **Gap:** No drag-and-drop, no undo, no grouping (sets within a tour). **→ R** when reorder errors/surfaces match other manifest ops + optional keyboard reorder. **→ R** on data when duplicate-folder conflicts are impossible or detected.
 
 - **Per-song → editor (`M`)**  
-  **Evidence:** Mode `project-song`, active folder resolution for picks + Ableton `/set` folder shortcut.  
+  **Evidence:** Mode `project-song`, active folder resolution for picks + Ableton `/set` folder shortcut; in project mode `/set` writes the `.als` next to `song.smap` as `song.als` (constant filename).  
   **Gap:** Edge cases (song deleted on disk while editor open, manifest drift) partially guarded via autosave manifest invariant check — still worth explicit tests. **→ R** with regression tests for drift scenarios.
 
 - **Bulk export (`S`)**  
@@ -162,20 +162,30 @@ Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit
 
 ### Desktop client `DT`
 
-Native shell, OS folders, long jobs, optional Python stems bridge.
+**Headless** native/Python sidecar invoked by the BarBro **web app** over loopback HTTP. Hosts long-running jobs (beats, stems). **No window, no renderer, no IPC** — the Electron main process runs as a background service (dock icon on macOS, Cmd+Q to quit) and exposes everything via HTTP. Logs to the terminal when run from `npm run dev`. An ongoing migration brings functionality from the `frequency_domain` repo into [`desktop/native/`](../desktop/native/README.md) (see [`PROVENANCE.md`](../desktop/native/python/PROVENANCE.md)).
 
-**Epic rollup:** **N** — zero packaging/integration in-repo today.
+**Epic rollup:** **S** — Headless sidecar for beats + stems + **Piper TTS hello-world** (web → loopback → Python). Distribution (signing / Windows) and OS-folder bridge gaps unchanged; stems path migration may still be in flux.
 
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
-| DT | Shell / packaging (Tauri / Electron / …) | N | Ship target undefined; web-only deployment. |
-| DT | Bridge to OS folders | N | Browser FS Access used instead (permission UX differs). |
-| DT | Stems generation | N | External Python program — no spawn/API/worker contract in this repo. |
+| DT | Shell / packaging (Electron) | S | [`desktop/`](../desktop/README.md): `npm run dev` runs headless (no window); **`npm run dist:mac-arm64`**; loopback HTTP exposes `/ping`, beats, stems, **Piper TTS** (`/native/setup/piper-tts`, `/native/tts/hello-world`), jobs/stems cleanup. **[`native/python/`](../desktop/native/python/README.md)** bundles madmom, Demucs, **`piper_tts/`**. No signing/notarization, no Windows builds yet. |
+| DT | Web: installers page + manifest | M | [`/download`](../src/routes/download/+page.svelte), `PUBLIC_DESKTOP_MANIFEST_URL` + [`static/desktop-downloads.json`](../static/desktop-downloads.json); arm64 DMG same-origin via **`npm run desktop:dist-mac-sync`** → [`static/releases/`](../static/releases/README.md). |
+| DT | Web: companion connected indicator | M | [`desktopBeacon.ts`](../src/lib/client/desktopBeacon.ts), layout poll, **Monitor** chip + File → Download in [`AppMenuBar`](../src/lib/components/AppMenuBar.svelte). |
+| DT | Bridge to OS folders | N | Earlier IPC pickers (`native:pick-audio` / `native:pick-output-dir`) removed with the renderer. No loopback HTTP equivalent yet; web app uses FS Access for the project folder. |
+| DT | Local beats analysis | M | Moves beats from server `/api/analyze` to local desktop. [`beats/analyze_downbeats.py`](../desktop/native/python/beats/analyze_downbeats.py) (madmom; parallel-maintained with [server script](../src/lib/server/analysis/python/analyze_downbeats.py) per [`PROVENANCE.md`](../desktop/native/python/PROVENANCE.md)) reachable via `POST /native/analyze-downbeats`; web `/analyzing` flow prefers desktop when companion reachable, falls back to server. |
+| DT | Stems generation | M | First slice of an ongoing frequency_domain → `desktop/native/` migration. [`stems/demucs_separate.py`](../desktop/native/python/stems/demucs_separate.py) (Demucs CLI, derived from frequency_domain `stem_splitter.py` per `PROVENANCE.md`) reachable via **NDJSON-streaming** `POST /native/separate-stems` with progress events; web `StemSplitter.svelte` mirrors the Tk UI (stems checkboxes, quality presets, two progress bars, log). Python deps installed manually per [`native/python/README.md`](../desktop/native/python/README.md). |
+| DT | Piper TTS (cue prep) | S | Separate [`piper_tts/`](../desktop/native/python/piper_tts/) venv under userData; `POST /native/setup/piper-tts` (NDJSON) downloads **en_US-lessac-medium** from Hugging Face; `GET /native/tts/hello-world` returns fixed phrase WAV; web [`/texttospeech`](../src/routes/texttospeech/+page.svelte). **→ M** when wired into real cue export + project paths. |
 | DT | Offline / updates | N | — |
 
 #### Detail — `DT`
 
-- **Shell / folders / stems / offline** — all **N**: no `src-tauri`, no Electron main process, no IPC layer, no bundled Python runtime. **→ S** is a thin spike (open folder + shell echo); **→ M** requires install story, code signing expectations, and stems job lifecycle (progress, cancel, errors).
+- **Shell (`S`)** — **Evidence:** [`desktop/electron/main.mjs`](../desktop/electron/main.mjs) is a headless loopback HTTP server (no `BrowserWindow`, no `ipcMain`); [`nativePython.mjs`](../desktop/electron/nativePython.mjs) resolves bundled script paths + spawn helpers; [`native/python/`](../desktop/native/python/README.md) bundles madmom + Demucs + **`piper_tts/`** scripts; [`electron-builder.yml`](../desktop/electron-builder.yml) unpacks `native/python` from asar. Console banner + per-job logs on the parent terminal. **Gap:** No tray/menu-bar icon yet — Cmd+Q only (terminal `Ctrl+C` works when run via `npm run dev`); no Apple notarization / Windows packaging; deps install is manual. **→ M** when the packaged app is reproducibly installable on a fresh machine (signed + ffmpeg/demucs onboarding handled).
+- **Web download + indicator (`M`)** — **Evidence:** server load merges remote/static manifest; client OS detection; menu links. **Gap:** `electron-builder` + hosted DMG/EXE URLs still manual; HTTPS→loopback mixed-content caveats (see [`desktop/README.md`](../desktop/README.md)).
+- **Bridge to OS folders (`N`)** — **Evidence:** none. The earlier renderer-only IPC pickers were removed when the desktop went headless. **→ S** when loopback HTTP endpoints (`POST /native/pick-audio`, `/native/pick-output-dir`) expose `dialog.showOpenDialog` results to the web app. **→ M** when the picker results actually flow into `SongMap.audio` / `stemRefs` (instead of being a parallel affordance only).
+- **Local beats analysis (`M`)** — **Evidence:** [`beats/analyze_downbeats.py`](../desktop/native/python/beats/analyze_downbeats.py) (madmom; parallel-maintained with `src/lib/server/analysis/python/analyze_downbeats.py`) callable via `POST /native/analyze-downbeats`. `/analyzing` route uses [`analyzeDownbeatsViaDesktop`](../src/lib/client/desktopBridge.ts) when the companion is reachable, falls back to `/api/analyze` otherwise. `beatsToSongMap` was moved to [`$lib/analysis/`](../src/lib/analysis/beatsToSongMap.ts) so the browser can build the `SongMap` from the desktop's beats JSON. **Gap:** No automated tests on the desktop path; Python deps need a separate venv (see `BARBRO_PYTHON`). **→ R** when the server fallback is removed (per desktop-required memory) and the desktop path is the only one tested in CI.
+- **Stems generation (`M`)** — **Evidence:** [`stems/demucs_separate.py`](../desktop/native/python/stems/demucs_separate.py) gained a `--stream-progress` mode that emits NDJSON `log` / `progress` / `done` events parsed from Demucs tqdm output. Loopback HTTP `POST /native/separate-stems` forwards the NDJSON stream straight to the web app; subsequent `GET /native/stems/:jobId/:filename` fetches each WAV. [`StemSplitter.svelte`](../src/lib/components/StemSplitter.svelte) renders the Tk-style UI (stems checkboxes, quality combobox, two progress bars, log) with Demucs install notes behind a help icon and progress/log in `<details>` when idle. Written stems land in `<folder>/stems/<name>.wav` via FS Access and auto-resolve into `/set`'s stem-slot bindings. **Gap:** No cancel during a long run; jobs aren't surfaced anywhere if the browser tab closes mid-run (cleanup is TTL-based at 30 min); no auto-install of Python deps. **→ R** when cancel + resumable jobs + automated deps onboarding exist.
+- **Piper TTS (`S`)** — **Evidence:** [`piper_tts/synthesize_wav.py`](../desktop/native/python/piper_tts/synthesize_wav.py) + dedicated userData venv (`piper-tts-venv`) and model dir; `GET /native/setup/piper-tts/status`, `POST /native/setup/piper-tts` (NDJSON install + HF voice download), `GET /native/tts/hello-world` (fixed “Hello world.” WAV). **Gap:** No arbitrary text/cue API from web yet; no bundling of voices in the DMG (download at setup time). **→ M** when cue pipeline calls Piper with project-relative output paths.
+- **Offline / updates** — still **N**.
 
 ---
 
@@ -187,16 +197,16 @@ Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
 
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
-| PF | `.smap` encode/decode, deterministic saves | R | Tests: [`smapFile.test.ts`](../src/lib/songmap/smapFile.test.ts), [`persist.test.ts`](../src/lib/songmap/persist.test.ts); deterministic key order documented. |
+| PF | `.smap` encode/decode, deterministic saves | R | Tests: [`smapFile.test.ts`](../src/lib/songmap/smapFile.test.ts), [`persist.test.ts`](../src/lib/songmap/persist.test.ts); deterministic key order documented; `readSmapJsonOnly` for fast metadata-only reads (project list view). |
 | PF | Web audio pipeline (upload → analyze → reference MP3) | M | `/analyzing`, server analysis merge, [`encodeReferenceAudio.test.ts`](../src/lib/audio/encodeReferenceAudio.test.ts); failure modes vary by browser codec. |
 | PF | Local folder handles / autosave / Ableton marker | M | [`folderHandle.ts`](../src/lib/client/folderHandle.ts), project autosave guards; permission revoke = silent skip. |
-| PF | Cloud / sync | S | `/api/projects` + fingerprint; list/save/load/copy-from-cloud — **not** full sync or conflict resolution. |
+| PF | Cloud / sync | S | `/api/projects` + fingerprint; list/save/load (`loadCloudProject` hydrates editor) + per-song `fetchCloudSongAsSmap` (returns bytes only, no editor side-effects) used by project copy — **not** full sync or conflict resolution. |
 | PF | Postgres autosave (Docker) | S | Migrations [`001_editor_sessions.sql`](../db/migrations/001_editor_sessions.sql), [`002_projects.sql`](../db/migrations/002_projects.sql); parallel **browser API** path — adoption/ops unclear. |
 
 #### Detail — `PF`
 
 - **`.smap` (`R`)**  
-  **Evidence:** Binary layout tests + JSON round-trips; deterministic serialization called out in [`smap-format.md`](smap-format.md).  
+  **Evidence:** Binary layout tests + JSON round-trips; deterministic serialization called out in [`smap-format.md`](smap-format.md); `readSmapJsonOnly` reads only header + JSON chunk (audio bytes skipped) for fast project list metadata loads, with magic / version / size-invariant / 10 MB JSON-length sanity checks.  
   **Gap:** **P** would add fuzz/import corpus + version migration guides for older files.
 
 - **Web audio pipeline (`M`)**  
@@ -204,12 +214,12 @@ Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
   **Gap:** Large-file memory pressure, analysis API timeouts, re-analysis UX partially manual. **→ R** with job timeouts + user-visible retry semantics.
 
 - **Folder handles / autosave (`M`)**  
-  **Evidence:** Debounced `song.smap` writes with seven guard clauses (`projectAutosave.ts`).  
+  **Evidence:** Debounced 1.5 s `song.smap` writes via `projectAutosave.ts`; seven guard clauses — project open + active song + `editingMode === 'project-song'` + route is `/edit` + fresh `queryPermission('readwrite')` + manifest entry exists with matching `{folder,id}`. Two parallel autosave subscriptions coexist: `serverAutosave.ts` (cloud) and `projectAutosave.ts` (on-disk in project mode). [`folderHandle.ts`](../src/lib/client/folderHandle.ts) provides the `getDirectoryHandleByPath` / `removeEntryRecursive` primitives both autosave + commit ladder share.  
   **Gap:** User may not know when autosave skipped (permission); standalone `/edit` vs project-mode differs. **→ R** with status indicator + failure toasts.
 
 - **Cloud (`S`)**  
-  **Evidence:** [`projectsCloud.ts`](../src/lib/client/projectsCloud.ts) CRUD-shaped calls; fingerprint identity only.  
-  **Gap:** No offline queue, no merge, no multi-device story, no project-scoped cloud matching folder projects. **→ M** when “save to cloud” matches mental model for BarBro projects.
+  **Evidence:** [`projectsCloud.ts`](../src/lib/client/projectsCloud.ts) CRUD-shaped calls; fingerprint identity only. Two import paths now coexist: `loadCloudProject` hydrates the editor (single-song flow), `fetchCloudSongAsSmap` returns bytes only and is composed with `importSmapToProject` for project copies — no shared cloud state between them.  
+  **Gap:** No offline queue, no merge, no multi-device story, no project-scoped cloud matching folder projects (the cloud still stores songs, not BarBro projects). **→ M** when “save to cloud” matches mental model for BarBro projects.
 
 - **Postgres (`S`)**  
   **Evidence:** Schema exists for sessions + named projects.  

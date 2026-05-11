@@ -10,6 +10,7 @@
   import { mergeAnalysisIntoSongMap } from '$lib/songmap/merge'
   import { setAnalyzingSpin } from '$lib/stores/uiAnimations'
   import type { AnalyzeResponse } from '$lib/server/analysis/contracts'
+  import type { SongMap } from '$lib/songmap'
 
   let status = $state<'running' | 'done' | 'error'>('running')
   let errorMsg = $state('')
@@ -105,6 +106,9 @@
   import { audioSession } from '$lib/stores/audioSession'
   import { project as projectStore } from '$lib/stores/project'
   import { commitNewSongToProject } from '$lib/project/commit'
+  import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
+  import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 
   const preview = browser && $page.url.searchParams.has('preview')
   const isProjectFlow = browser && $page.url.searchParams.has('project')
@@ -133,25 +137,52 @@
         trim.endSec,
       )
 
-      const form = new FormData()
-      form.set('file', trimmedWav, trimmedWav.name)
+      // Prefer the local desktop sidecar when the loopback companion is
+      // reachable. Fall back to `/api/analyze` on any failure so the path
+      // stays open for non-desktop users.
+      let analyzedSongMap: SongMap | null = null
+      const useDesktop = get(desktopCompanionStatus).reachable
 
-      const res = await fetch('/api/analyze', { method: 'POST', body: form })
-      let data: AnalyzeResponse
-      try {
-        data = (await res.json()) as AnalyzeResponse
-      } catch {
-        throw new Error('Invalid response from server')
+      if (useDesktop) {
+        const r = await analyzeDownbeatsViaDesktop(trimmedWav)
+        if (r.ok) {
+          try {
+            analyzedSongMap = beatsToSongMap({
+              filename: trimmedWav.name,
+              durationSec: Math.max(0, trim.endSec - trim.startSec),
+              mimeType: trimmedWav.type || 'audio/wav',
+              beats: r.beats,
+            })
+          } catch (e) {
+            console.warn('[analyze] desktop beatsToSongMap failed, falling back to server:', e)
+          }
+        } else {
+          console.warn('[analyze] desktop analyze failed, falling back to server:', r.error)
+        }
       }
 
-      if (!res.ok || !data.ok) {
-        throw new Error(data.ok === false ? data.error : 'Analysis failed')
+      if (!analyzedSongMap) {
+        const form = new FormData()
+        form.set('file', trimmedWav, trimmedWav.name)
+
+        const res = await fetch('/api/analyze', { method: 'POST', body: form })
+        let data: AnalyzeResponse
+        try {
+          data = (await res.json()) as AnalyzeResponse
+        } catch {
+          throw new Error('Invalid response from server')
+        }
+
+        if (!res.ok || !data.ok) {
+          throw new Error(data.ok === false ? data.error : 'Analysis failed')
+        }
+        analyzedSongMap = data.songMap
       }
 
       const fragment = {
-        bars:  data.songMap.timeline.bars,
-        beats: data.songMap.timeline.beats,
-        bpm:   data.songMap.metadata.bpm,
+        bars:  analyzedSongMap.timeline.bars,
+        beats: analyzedSongMap.timeline.beats,
+        bpm:   analyzedSongMap.metadata.bpm,
       }
 
       const patched = patchSongMap((current) => {
