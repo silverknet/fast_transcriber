@@ -1,9 +1,10 @@
 /**
  * BarBro project store — one project at a time.
  *
- * Holds: the picked folder handle, the parsed manifest, a per-song metadata
- * cache for the list view, and which song (if any) is currently being edited
- * via the project flow.
+ * Canonical identity is the project's absolute OS path on disk. The desktop
+ * sidecar is the only I/O layer for project files; the web app does not
+ * touch the filesystem for project mode. A non-null `osPath` means a
+ * project is open.
  *
  * `activeSongFolder` and `activeSongId` are always set together or both
  * null. They drive the autosave guard in `projectAutosave.ts` — if either
@@ -25,12 +26,27 @@ export interface ProjectSongMetadataLite {
    * to render a stem-status overview without loading the full audio chunk.
    */
   stemRefs?: StemRefs
+  /**
+   * Stem renderings on disk grouped by quality preset. See
+   * `ProjectSongMetadataInfo.stemsByPreset` for the schema. Empty/absent
+   * when no stems exist yet.
+   */
+  stemsByPreset?: Record<string, string[]>
+  hasAls?: boolean
+  /** True iff `<song>/cue/cue-track.wav` exists on disk. */
+  hasCueTrack?: boolean
+  /** True iff `<song>/cue/click-track.wav` exists on disk. */
+  hasClickTrack?: boolean
 }
 
 export type ProjectEditingMode = 'project-song' | 'standalone' | null
 
 export interface ProjectStoreState {
-  folderHandle: FileSystemDirectoryHandle | null
+  /**
+   * Absolute OS path to the project folder. Null when no project is open;
+   * always non-null when `data` is non-null.
+   */
+  osPath: string | null
   data: ProjectFile | null
   metadataByFolder: Record<string, ProjectSongMetadataLite>
   activeSongFolder: string | null
@@ -39,7 +55,7 @@ export interface ProjectStoreState {
 }
 
 const empty: ProjectStoreState = {
-  folderHandle: null,
+  osPath: null,
   data: null,
   metadataByFolder: {},
   activeSongFolder: null,
@@ -50,12 +66,12 @@ const empty: ProjectStoreState = {
 export const project = writable<ProjectStoreState>(empty)
 
 export function setActiveProject(
-  folderHandle: FileSystemDirectoryHandle,
+  osPath: string,
   data: ProjectFile,
   metadataByFolder: Record<string, ProjectSongMetadataLite> = {},
 ): void {
   project.set({
-    folderHandle,
+    osPath,
     data,
     metadataByFolder,
     activeSongFolder: null,
@@ -68,11 +84,30 @@ export function setProjectData(data: ProjectFile): void {
   project.update((s) => ({ ...s, data }))
 }
 
-export function patchMetadataForFolder(folder: string, meta: ProjectSongMetadataLite): void {
-  project.update((s) => ({
-    ...s,
-    metadataByFolder: { ...s.metadataByFolder, [folder]: meta },
-  }))
+export function setMetadataByFolder(map: Record<string, ProjectSongMetadataLite>): void {
+  project.update((s) => ({ ...s, metadataByFolder: map }))
+}
+
+/**
+ * Merge a partial patch into the cached lite metadata for one song folder.
+ * Critical: this is a MERGE, not a replace. Disk-state fields (hasCueTrack,
+ * hasClickTrack, hasAls, stemsOnDisk) live alongside songMap-derived fields
+ * (title, bpm, etc.) — a caller updating one shouldn't wipe the other.
+ *
+ * Use `setMetadataByFolder` for the wholesale-replace path (called by
+ * `refreshProjectInfo` with the sidecar's authoritative scan).
+ */
+export function patchMetadataForFolder(folder: string, patch: Partial<ProjectSongMetadataLite>): void {
+  project.update((s) => {
+    const existing = s.metadataByFolder[folder] ?? { title: '' }
+    return {
+      ...s,
+      metadataByFolder: {
+        ...s.metadataByFolder,
+        [folder]: { ...existing, ...patch },
+      },
+    }
+  })
 }
 
 export function setActiveSong(folder: string, id: string): void {

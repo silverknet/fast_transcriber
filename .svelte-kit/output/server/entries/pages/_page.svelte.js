@@ -1,5 +1,15 @@
-import { E as attr, O as escape_html, v as spread_props } from "../../chunks/internal.js";
-import { g as Button, h as Icon, r as Music } from "../../chunks/beatPulse.js";
+import "../../chunks/index-server.js";
+import { A as escape_html, O as attr, a as derived, f as spread_props, h as unsubscribe_stores } from "../../chunks/server.js";
+import "../../chunks/index-server2.js";
+import "../../chunks/timelineEdit.js";
+import "../../chunks/persist.js";
+import "../../chunks/client.js";
+import "../../chunks/commit.js";
+import { t as Button } from "../../chunks/button.js";
+import { t as Icon } from "../../chunks/Icon.js";
+import { n as Music } from "../../chunks/arrow-left.js";
+import "../../chunks/stores.js";
+import "../../chunks/analyzingState.js";
 import "../../chunks/WaveformPlayer.js";
 //#region node_modules/@lucide/svelte/dist/icons/upload.svelte
 function Upload($$renderer, $$props) {
@@ -75,20 +85,28 @@ function Upload($$renderer, $$props) {
 //#region src/routes/+page.svelte
 function _page($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
-		const accept = "audio/mpeg,audio/wav,audio/x-wav,audio/wave,.mp3,.wav";
+		var $$store_subs;
+		const accept = "audio/mpeg,audio/wav,audio/x-wav,audio/wave,audio/flac,.mp3,.wav,.flac";
 		let fileInput = void 0;
+		let projectName = "";
 		function openPicker() {
 			fileInput?.click();
 		}
+		derived(() => false);
 		let $$settled = true;
 		let $$inner_renderer;
 		function $$render_inner($$renderer) {
-			$$renderer.push(`<main class="relative z-10 mx-auto flex min-h-dvh max-w-3xl flex-col items-center justify-center gap-10 px-6 py-16"><div class="flex flex-col items-center gap-3 text-center"><div class="border-foreground/15 bg-muted/30 text-violet-400/95 inline-flex size-16 items-center justify-center rounded-2xl border shadow-sm backdrop-blur-md" aria-hidden="true">`);
+			$$renderer.push(`<main class="relative z-10 mx-auto flex min-h-dvh max-w-3xl flex-col items-center justify-center gap-10 px-6 py-16">`);
+			$$renderer.push("<!--[-1-->");
+			$$renderer.push(`<!--]--> <div class="flex flex-col items-center gap-3 text-center"><div class="brutalist-shadow-sm border-foreground bg-muted text-foreground inline-flex size-16 items-center justify-center border-2" aria-hidden="true">`);
 			Music($$renderer, {
 				class: "size-9",
 				strokeWidth: 1.75
 			});
-			$$renderer.push(`<!----></div> <h1 class="text-3xl font-semibold tracking-tight md:text-4xl">BarBro</h1> <p class="text-muted-foreground max-w-md text-pretty text-sm leading-relaxed">Import audio, set your region on the waveform, and open it in the editor with beats detected.</p></div> <input type="file" class="sr-only"${attr("accept", accept)}/> <div class="border-foreground/10 bg-foreground/5 w-full max-w-xl rounded-2xl border p-6 shadow-xl backdrop-blur-xl md:p-8"><div class="flex flex-col items-stretch gap-6">`);
+			$$renderer.push(`<!----></div> <h1 class="text-4xl font-black tracking-tight md:text-5xl">BarBro</h1> <p class="text-muted-foreground max-w-md text-pretty text-sm leading-relaxed">`);
+			$$renderer.push("<!--[-1-->");
+			$$renderer.push(`Import audio, set your region, and open in the editor with beats detected.`);
+			$$renderer.push(`<!--]--></p></div> <input type="file" class="sr-only"${attr("accept", accept)}/> <div class="brutalist-shadow border-foreground bg-background w-full max-w-xl border-2 p-6 md:p-8"><div class="flex flex-col items-stretch gap-6"><div class="flex flex-col gap-1.5"><label for="project-name" class="text-xs font-semibold uppercase tracking-wide">Project name</label> <input id="project-name" type="text" class="border-foreground bg-background text-foreground w-full border-2 px-3 py-2 text-sm focus:outline-none" placeholder="Untitled"${attr("value", projectName)}/></div> `);
 			Button($$renderer, {
 				type: "button",
 				variant: "secondary",
@@ -100,7 +118,7 @@ function _page($$renderer, $$props) {
 						class: "size-4",
 						"aria-hidden": "true"
 					});
-					$$renderer.push(`<!----> Upload audio`);
+					$$renderer.push(`<!----> ${escape_html("Upload audio")}`);
 				},
 				$$slots: { default: true }
 			});
@@ -116,6 +134,7 @@ function _page($$renderer, $$props) {
 			$$render_inner($$inner_renderer);
 		} while (!$$settled);
 		$$renderer.subsume($$inner_renderer);
+		if ($$store_subs) unsubscribe_stores($$store_subs);
 	});
 }
 //#endregion

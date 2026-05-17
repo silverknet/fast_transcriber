@@ -4,6 +4,7 @@
   import { onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
+  import MixerView from '$lib/components/MixerView.svelte'
   import ChordRadialQuickSelect from '$lib/components/ChordRadialQuickSelect.svelte'
   import { Button } from '$lib/components/ui/button'
   import {
@@ -18,12 +19,9 @@
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
-  import {
-    ensurePermission,
-    getDirectoryHandleByPath,
-    readFileFromHandle,
-    writeFileToHandle,
-  } from '$lib/client/folderHandle'
+  import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
+  import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { metadataLiteFromSongMap } from '$lib/project/commit'
   import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
   import { safeExportBasename } from '$lib/songmap/persist'
@@ -99,7 +97,7 @@
   let waveformReady = $state(false)
 
   /** Main workspace mode. */
-  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue'>('grid')
+  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix'>('grid')
 
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 
@@ -697,56 +695,126 @@
   }
 
   const CUE_TRACK_REL = 'cue/cue-track.wav'
+  const CLICK_TRACK_REL = 'cue/click-track.wav'
 
   let cueGenBusy = $state(false)
   let cueGenErr = $state('')
+  /** Piper venv + voice on disk (desktop beacon). Required to generate cue audio. */
+  let piperCueReady = $state(false)
+  /** Piper / desktop unavailable — clicks-only export. */
+  let cueSpeechNote = $state('')
   /** Last blob from a successful generate in this tab (cleared when export record is dropped). */
   let lastCueDownloadBlob = $state<Blob | null>(null)
+  /** Click-only WAV from the same render pass. Same alignment as cue. */
+  let lastClickDownloadBlob = $state<Blob | null>(null)
 
   $effect(() => {
-    if (!$songMap?.cueTrackExport) lastCueDownloadBlob = null
+    if (!$songMap?.cueTrackExport) {
+      lastCueDownloadBlob = null
+      lastClickDownloadBlob = null
+    }
+  })
+
+  $effect(() => {
+    if (!browser || !$songMap || !$audioSession.file) return
+    let cancelled = false
+    const poll = async () => {
+      const st = await getPiperTtsSetupStatus()
+      if (!cancelled) piperCueReady = !!(st?.ready)
+    }
+    void poll()
+    const id = setInterval(poll, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
   })
 
   async function generateCueTrackWav() {
     const sm = get(songMap)
     if (!sm) return
+    if (!piperCueReady) {
+      cueGenErr = 'BarBro desktop with Piper is required — start the desktop app and finish Piper setup (see TTS debug page).'
+      return
+    }
     cueGenBusy = true
     cueGenErr = ''
+    cueSpeechNote = ''
     lastCueDownloadBlob = null
     try {
-      const blob = await renderCueTrackWavBlob(sm)
+      // Render cue (speech only) AND click (clicks only). The two files are
+      // sample-aligned (same prelude/prepend math) but contain orthogonal
+      // content — mixing them sums to the legacy "cue track" experience
+      // without doubling the clicks. The cue file stops containing clicks
+      // here; old cue files rendered before this split still have them
+      // baked in and will need a fresh "Generate" press to separate.
+      const cueRender = await renderCueTrackWavBlob(sm, { includeSpeech: true, includeClicks: false })
+      const clickRender = await renderCueTrackWavBlob(sm, { includeSpeech: false, includeClicks: true })
+      if (cueRender.speechSkippedReason) cueSpeechNote = cueRender.speechSkippedReason
       const dur = cueTrackTotalDurationSec(sm)
       if (dur == null) throw new Error('Could not derive cue duration from trim + beats')
       const fp = fingerprintCueTrackInputs(sm)
       const now = new Date().toISOString()
-      let relativePath: string | undefined
+      let cueRelativePath: string | undefined
+      let clickWritten = false
 
       const ps = get(projectStore)
-      if (ps.editingMode === 'project-song' && ps.folderHandle && ps.activeSongFolder) {
-        const granted = await ensurePermission(ps.folderHandle)
-        if (!granted) {
-          cueGenErr = 'Could not write cue file — project folder permission denied. WAV is still available via Download.'
+      if (ps.editingMode === 'project-song' && ps.osPath && ps.activeSongFolder) {
+        if (!get(desktopCompanionStatus).reachable) {
+          cueGenErr = 'Desktop client unreachable — tracks were not saved to project. Cue WAV is still available via Download.'
         } else {
-          const songDir = await getDirectoryHandleByPath(ps.folderHandle, ps.activeSongFolder)
-          const cueDir = await getDirectoryHandleByPath(songDir, 'cue', { create: true })
-          await writeFileToHandle(cueDir, 'cue-track.wav', blob)
-          relativePath = CUE_TRACK_REL
+          const cueBytes = new Uint8Array(await cueRender.blob.arrayBuffer())
+          const clickBytes = new Uint8Array(await clickRender.blob.arrayBuffer())
+          const [cueWrite, clickWrite] = await Promise.all([
+            writeProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/cue-track.wav', cueBytes),
+            writeProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/click-track.wav', clickBytes),
+          ])
+          if (cueWrite.ok) {
+            cueRelativePath = CUE_TRACK_REL
+          } else {
+            cueGenErr = `Could not write cue file: ${cueWrite.error}.`
+          }
+          if (clickWrite.ok) {
+            clickWritten = true
+          } else if (!cueGenErr) {
+            cueGenErr = `Cue saved but click file failed: ${clickWrite.error}.`
+          }
         }
       }
 
+      // The cueTrackExport record only tracks the cue file (the one with
+      // speech). The click file lives next to it and is discovered by the
+      // sidecar's project info scan — no separate manifest entry needed.
       const p = patchSongMap((m) => ({
         ...m,
-        cueTrackExport: { fingerprint: fp, durationSec: dur, sampleRate: 44100, generatedAt: now, relativePath },
+        cueTrackExport: {
+          fingerprint: fp,
+          durationSec: dur,
+          sampleRate: 44100,
+          generatedAt: now,
+          relativePath: cueRelativePath,
+        },
       }))
       if (!p.ok) {
         cueGenErr = p.errors.join('; ')
         return
       }
-      lastCueDownloadBlob = blob
+      lastCueDownloadBlob = cueRender.blob
+      lastClickDownloadBlob = clickRender.blob
       const snap = get(projectStore)
-      if (relativePath && snap.activeSongFolder) {
+      if ((cueRelativePath || clickWritten) && snap.activeSongFolder) {
         const fresh = get(songMap)
-        if (fresh) patchMetadataForFolder(snap.activeSongFolder, metadataLiteFromSongMap(fresh))
+        if (fresh) {
+          const existing = snap.metadataByFolder[snap.activeSongFolder] ?? { title: '' }
+          patchMetadataForFolder(snap.activeSongFolder, {
+            ...existing,
+            ...metadataLiteFromSongMap(fresh),
+            // Flip the on-disk flags right away so /project's badges + the
+            // mixer pick up both files without needing a Refresh.
+            hasCueTrack: cueRelativePath ? true : existing.hasCueTrack,
+            hasClickTrack: clickWritten ? true : existing.hasClickTrack,
+          })
+        }
       }
     } catch (e) {
       cueGenErr = e instanceof Error ? e.message : String(e)
@@ -768,6 +836,32 @@
     URL.revokeObjectURL(url)
   }
 
+  function downloadClickTrackFile() {
+    const sm = get(songMap)
+    if (!lastClickDownloadBlob || !sm) return
+    pauseMixPreview()
+    audioEl?.pause()
+    const url = URL.createObjectURL(lastClickDownloadBlob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safeExportBasename(sm.metadata.title)}-click-track.wav`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  /** Generate cue WAV (needs Piper). */
+  let cueRenderGate = $derived.by((): { ok: boolean; reason: string } => {
+    const sm = $songMap
+    if (!sm) return { ok: false, reason: 'No song.' }
+    if (!sm.timeline.beats.length) return { ok: false, reason: 'Need beats (Grid).' }
+    if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) {
+      return { ok: false, reason: 'Need trim (Grid).' }
+    }
+    if (!piperCueReady) return { ok: false, reason: 'BarBro desktop + Piper required.' }
+    return { ok: true, reason: '' }
+  })
+
+  /** Song+cue preview / mix — only this tab’s generated WAV blob (reload clears it). */
   let mixPreviewGate = $derived.by((): { ok: boolean; reason: string } => {
     const sm = $songMap
     if (!sm) return { ok: false, reason: 'No song.' }
@@ -775,31 +869,9 @@
     if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) {
       return { ok: false, reason: 'Need trim (Grid).' }
     }
-    if (lastCueDownloadBlob) return { ok: true, reason: '' }
-    const ps = $projectStore
-    if (
-      sm.cueTrackExport?.relativePath &&
-      ps.editingMode === 'project-song' &&
-      ps.folderHandle &&
-      ps.activeSongFolder
-    ) {
-      return { ok: true, reason: '' }
-    }
-    return { ok: false, reason: 'Generate cue first.' }
+    if (!lastCueDownloadBlob) return { ok: false, reason: 'Generate cue track first (preview uses this tab’s WAV).' }
+    return { ok: true, reason: '' }
   })
-
-  async function resolveCueBlobForMix(): Promise<Blob | null> {
-    if (lastCueDownloadBlob) return lastCueDownloadBlob
-    const sm = get(songMap)
-    const rel = sm?.cueTrackExport?.relativePath
-    if (!rel) return null
-    const ps = get(projectStore)
-    if (ps.editingMode !== 'project-song' || !ps.folderHandle || !ps.activeSongFolder) return null
-    const ok = await ensurePermission(ps.folderHandle)
-    if (!ok) return null
-    const songDir = await getDirectoryHandleByPath(ps.folderHandle, ps.activeSongFolder)
-    return readFileFromHandle(songDir, rel)
-  }
 
   async function prepareMixPreview() {
     const sm = get(songMap)
@@ -820,9 +892,9 @@
     mixPreviewBusy = true
     mixPreviewErr = ''
     try {
-      const cue = await resolveCueBlobForMix()
+      const cue = lastCueDownloadBlob
       if (!cue) {
-        mixPreviewErr = 'No cue WAV — generate above or open from project with cue file.'
+        mixPreviewErr = 'Generate cue track first.'
         return
       }
       const blob = await buildSongCueMixWavBlob(sm, file, cue)
@@ -911,7 +983,7 @@
       </div>
 
       <div
-        class="border-foreground bg-muted inline-grid grid-cols-3 gap-0 self-start overflow-hidden border-2 sm:self-auto"
+        class="border-foreground bg-muted inline-grid grid-cols-5 gap-0 self-start overflow-hidden border-2 sm:self-auto"
         role="tablist"
         aria-label="Edit mode"
       >
@@ -967,6 +1039,19 @@
         >
           Cue
         </Button>
+        <Button
+          type="button"
+          role="tab"
+          aria-selected={editMode === 'mix'}
+          variant="ghost"
+          size="sm"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'mix'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
+          onclick={() => (editMode = 'mix')}
+        >
+          Mix
+        </Button>
       </div>
     </header>
 
@@ -983,7 +1068,9 @@
           </summary>
           <p class="mt-2 leading-relaxed">
             Set how many click beats before bar 1. Prepend is how much silence to add before stems in the
-            DAW so everything lines up.
+            DAW so everything lines up. The cue WAV leaves a short head at the top for the spoken title, then
+            count-in clicks and numbers (pickup beats in the map are not double-clicked). Count numbers are rendered
+            slightly fast so they sit tighter on the grid.
           </p>
         </details>
 
@@ -1045,10 +1132,13 @@
           <div class="border-foreground space-y-3 border-2 px-3 py-3">
             <h3 class="text-muted-foreground text-xs font-medium uppercase tracking-wide">Cue track (click)</h3>
             <p class="text-muted-foreground text-xs leading-relaxed">
-              Mono WAV = prepend + trim length (DAW layout). Trim / grid / count-in changes invalidate cue metadata — regenerate; project <span class="font-mono">cue/</span> file may be overwritten.
+              Mono WAV, prepend + trim. Regenerate after trim/grid/count-in changes; <span class="font-mono">cue/</span> may overwrite.
             </p>
             {#if cueGenErr}
               <p class="text-destructive text-xs" role="status">{cueGenErr}</p>
+            {/if}
+            {#if cueSpeechNote}
+              <p class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</p>
             {/if}
             {#if $songMap?.cueTrackExport}
               <p class="text-muted-foreground font-mono text-xs" role="status">
@@ -1062,13 +1152,17 @@
               <Button
                 type="button"
                 class=""
-                disabled={cueGenBusy || !$songMap?.timeline.beats.length}
+                disabled={cueGenBusy || !cueRenderGate.ok}
+                title={!cueRenderGate.ok ? cueRenderGate.reason : undefined}
                 onclick={() => void generateCueTrackWav()}
               >
-                {cueGenBusy ? 'Rendering…' : 'Generate cue track'}
+                {cueGenBusy ? 'Rendering…' : 'Generate cue + click tracks'}
               </Button>
               <Button type="button" class="" variant="outline" disabled={!lastCueDownloadBlob} onclick={downloadCueTrackFile}>
-                Download .wav
+                Download cue.wav
+              </Button>
+              <Button type="button" class="" variant="outline" disabled={!lastClickDownloadBlob} onclick={downloadClickTrackFile}>
+                Download click.wav
               </Button>
             </div>
           </div>
@@ -1090,6 +1184,7 @@
                 class=""
                 variant="secondary"
                 disabled={cueGenBusy || mixPreviewBusy || !mixPreviewGate.ok}
+                title={!mixPreviewGate.ok ? mixPreviewGate.reason : undefined}
                 onclick={() => void prepareMixPreview()}
               >
                 {mixPreviewBusy ? '…' : 'Build preview'}
@@ -1108,10 +1203,28 @@
             {/if}
           </div>
 
-          <p class="text-muted-foreground/60 text-xs italic">
-            Song name announcement (text-to-speech) — coming soon
-          </p>
         </div>
+      </section>
+    {/if}
+
+    {#if editMode === 'mix'}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Mixer"
+      >
+        <details class="text-muted-foreground mb-3 text-xs sm:mb-4">
+          <summary
+            class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
+          >
+            <span class="underline-offset-2 group-open:underline">How the mixer works</span>
+          </summary>
+          <p class="mt-2 leading-relaxed">
+            Each track on disk (original, stems, cue) loads as its own lane. Volume / mute (M) / solo (S)
+            persist to <code>song.smap</code>. Stems and the original are virtually delayed so beat 1 lines up with
+            the cue track's count-in — the same alignment your Ableton export uses. Click on a waveform to seek.
+          </p>
+        </details>
+        <MixerView />
       </section>
     {/if}
 
@@ -1130,7 +1243,8 @@
             {#if editMode === 'grid'}
               <p>
                 Edit bars and beats in the strip above the waveform. Add or remove bars at the ends; wheel on the strip
-                changes beats per bar when a bar is selected.
+                changes beats per bar when a bar is selected. Drag the left or right edge of a bar to lengthen or shorten
+                it in time; beats inside that bar stay evenly spaced (good for slight ritardandos).
               </p>
             {:else if editMode === 'sections'}
               <p>

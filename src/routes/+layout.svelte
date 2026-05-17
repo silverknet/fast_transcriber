@@ -5,9 +5,17 @@
   import { browser } from '$app/environment'
   import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
+  import ProjectContextBar from '$lib/components/ProjectContextBar.svelte'
+  import { page } from '$app/stores'
+  import { project as projectStore } from '$lib/stores/project'
   import { probeDesktopCompanion } from '$lib/client/desktopBeacon'
   import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
+  import {
+    ACTIVE_SONG_ID_KEY,
+    loadProjectSongIntoEditor,
+    tryRestoreLastProject,
+  } from '$lib/project/commit'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
@@ -16,6 +24,7 @@
 
   let restoringSession = $state(false)
   let companionPollId: ReturnType<typeof setInterval> | null = null
+  let activeSongUnsub: (() => void) | null = null
 
   async function pollDesktopCompanion() {
     const r = await probeDesktopCompanion()
@@ -32,13 +41,27 @@
     return sm.metadata.analyzed ?? sm.timeline.bars.length > 0
   }
 
-  function currentRoute(): '/' | '/analyzing' | '/edit' {
-    const sm = get(songMap)
-    const as = get(analyzingState)
-    if (!sm) return '/'
-    if (as) return '/analyzing'
-    if (isAnalyzed(sm)) return '/edit'
-    return '/'
+  /**
+   * Restore the last-opened project (and its active song, if any). The
+   * project is identified by `localStorage[barbro::lastProjectPath]` and
+   * re-hydrated via the desktop sidecar. Silent on failure — sidecar may
+   * be offline, project folder may be gone, etc.
+   */
+  async function restoreLastProjectIfAny(pendingActiveSongId: string | null) {
+    if (get(projectStore).data) return
+    try {
+      const restored = await tryRestoreLastProject()
+      if (!restored) return
+      if (
+        pendingActiveSongId &&
+        restored.songs.some((s) => s.id === pendingActiveSongId) &&
+        !get(songMap)
+      ) {
+        await loadProjectSongIntoEditor(pendingActiveSongId)
+      }
+    } catch {
+      /* silent — user can re-open from the File menu */
+    }
   }
 
   onMount(() => {
@@ -47,18 +70,53 @@
     companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
     startServerAutosave()
     startProjectAutosave()
+
+    // Read pending active-song id BEFORE attaching the subscriber so its
+    // synchronous initial emit doesn't overwrite localStorage.
+    let pendingActiveSongId: string | null = null
+    try {
+      pendingActiveSongId = localStorage.getItem(ACTIVE_SONG_ID_KEY)
+    } catch {
+      pendingActiveSongId = null
+    }
+    void restoreLastProjectIfAny(pendingActiveSongId)
+
+    let firstEmit = true
+    activeSongUnsub = projectStore.subscribe((state) => {
+      if (firstEmit) {
+        firstEmit = false
+        return
+      }
+      try {
+        if (state.activeSongId) {
+          localStorage.setItem(ACTIVE_SONG_ID_KEY, state.activeSongId)
+        } else if (state.data === null) {
+          // Project fully closed — clear active song too.
+          localStorage.removeItem(ACTIVE_SONG_ID_KEY)
+        }
+      } catch {
+        /* localStorage may be disabled */
+      }
+    })
+
+    // Server-side song autosave restoration. Wrapped in try/finally so the
+    // indicator always clears even on errors.
     if (isAnalyzed(get(songMap))) return
     if (!data.savedSessionId) return
     restoringSession = true
     void (async () => {
-      const r = await loadServerAutosave()
-      restoringSession = false
-      if (!r.ok) return
-      const sm = get(songMap)
-      if (sm && isAnalyzed(sm)) {
-        await goto('/edit', { replaceState: true })
+      try {
+        const r = await loadServerAutosave()
+        if (!r.ok) return
+        const sm = get(songMap)
+        if (sm && isAnalyzed(sm)) {
+          await goto('/edit', { replaceState: true })
+        }
+      } catch {
+        /* swallow */
+      } finally {
+        restoringSession = false
       }
-      // If not analyzed, stay on '/' — import page will show the unanalyzed state
     })()
   })
 
@@ -68,6 +126,8 @@
         clearInterval(companionPollId)
         companionPollId = null
       }
+      activeSongUnsub?.()
+      activeSongUnsub = null
       stopServerAutosave()
       stopProjectAutosave()
     }
@@ -77,17 +137,20 @@
     if (!nav.to) return
     const dest = nav.to.url.pathname
     if (dest !== '/') return
-    // Allow `/?project=...` (the Create-new-song flow inside a project).
     if (nav.to.url.searchParams.has('project')) return
     const sm = get(songMap)
     if (!sm) return
-    // If analyzed, block going back to / (would lose session)
     if (isAnalyzed(sm)) {
       nav.cancel()
       goto('/edit', { replaceState: true })
     }
-    // If not analyzed, allow going to / freely
   })
+
+  // Padding offset: AppMenuBar is fixed (~3rem) and ProjectContextBar adds
+  // another ~2.5rem on top when active. Page content lives under both.
+  let showProjectBar = $derived(
+    $projectStore.data !== null && $page.route?.id !== '/project',
+  )
 </script>
 
 <svelte:head>
@@ -98,9 +161,10 @@
 <div class="relative min-h-dvh overflow-x-hidden overscroll-x-none font-sans">
   <div class="relative z-30">
     <AppMenuBar />
+    <ProjectContextBar />
   </div>
-  <!-- Fixed header (~3rem); keep page content below it -->
-  <div class="pt-12">
+  <!-- Fixed header (~3rem) + optional project context bar (~2.5rem). -->
+  <div class={showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
     {#if restoringSession}
       <div class="text-muted-foreground px-4 pt-3 text-sm">Restoring your session...</div>
     {/if}

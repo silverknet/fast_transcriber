@@ -45,18 +45,14 @@
     markEditingStandalone,
   } from '$lib/stores/project'
   import {
+    clearLastProjectPath,
     createProjectOnDisk,
-    openProjectFromHandle,
+    dropRecentProjectPath,
+    openProjectByPath,
+    readRecentProjectPaths,
   } from '$lib/project/commit'
+  import { pickFolderViaDesktop } from '$lib/client/desktopBridge'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
-  import {
-    clearFolderHandle,
-    ensurePermission,
-    forgetRecentProject,
-    listRecentProjects,
-    type RecentProjectEntry,
-  } from '$lib/client/folderHandle'
-  import { PROJECT_HANDLE_KEY } from '$lib/project/commit'
   import { onMount } from 'svelte'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
   import Cloud from '@lucide/svelte/icons/cloud'
@@ -235,28 +231,34 @@
   }
 
   // ── Project actions ───────────────────────────────────────────────────────
-  const hasFsApi = browser && typeof (window as any).showDirectoryPicker === 'function'
 
+  /**
+   * Project mode is desktop-only. The sidecar's native picker returns the
+   * absolute OS path, and that path is the project's canonical identity —
+   * the web app never touches the filesystem directly for project I/O.
+   */
   async function onNewProject() {
     menuError = ''
-    if (!hasFsApi) {
-      menuError = 'New Project needs a Chromium browser (File System Access API).'
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — install/start BarBro desktop to manage projects.'
       return
     }
-    let parent: FileSystemDirectoryHandle
-    try {
-      parent = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
-    } catch {
+    const pick = await pickFolderViaDesktop({
+      title: 'Pick the folder that will contain the new project',
+    })
+    if (!pick.ok) {
+      if ('cancelled' in pick) return
+      menuError = pick.error ?? 'Could not open picker'
       return
     }
     const name = window.prompt(
-      `Project name (a new folder will be created inside "${parent.name}"):`,
+      `Project name (a new folder will be created inside the chosen location):`,
       'Untitled Project',
     )
     if (name === null) return
     try {
-      await createProjectOnDisk(parent, name)
-      await refreshRecents()
+      await createProjectOnDisk(pick.path, name)
+      refreshRecents()
       await goto('/project')
     } catch (e) {
       menuError = e instanceof Error ? e.message : 'Could not create project'
@@ -265,19 +267,19 @@
 
   async function onOpenProject() {
     menuError = ''
-    if (!hasFsApi) {
-      menuError = 'Open Project needs a Chromium browser (File System Access API).'
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — install/start BarBro desktop to manage projects.'
       return
     }
-    let dir: FileSystemDirectoryHandle
-    try {
-      dir = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
-    } catch {
+    const pick = await pickFolderViaDesktop({ title: 'Open a BarBro project folder' })
+    if (!pick.ok) {
+      if ('cancelled' in pick) return
+      menuError = pick.error ?? 'Could not open picker'
       return
     }
     try {
-      await openProjectFromHandle(dir)
-      await refreshRecents()
+      await openProjectByPath(pick.path)
+      refreshRecents()
       await goto('/project')
     } catch (e) {
       menuError = e instanceof Error ? e.message : 'Could not open project'
@@ -289,52 +291,41 @@
   }
 
   // ── Recent projects ───────────────────────────────────────────────────────
-  let recentProjects = $state<RecentProjectEntry[]>([])
 
-  async function refreshRecents() {
-    if (!browser) return
-    try {
-      recentProjects = await listRecentProjects()
-    } catch {
-      recentProjects = []
-    }
+  type RecentEntry = { path: string; label: string }
+
+  let recentProjects = $state<RecentEntry[]>([])
+
+  function pathLabel(p: string): string {
+    const ix = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    return ix === -1 ? p : p.slice(ix + 1)
   }
 
-  async function onOpenRecent(entry: RecentProjectEntry) {
+  function refreshRecents() {
+    if (!browser) return
+    recentProjects = readRecentProjectPaths().map((p) => ({ path: p, label: pathLabel(p) }))
+  }
+
+  async function onOpenRecent(entry: RecentEntry) {
     menuError = ''
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
     try {
-      const granted = await ensurePermission(entry.handle)
-      if (!granted) {
-        menuError = `Permission denied for "${entry.name}". Pick the folder again via Open Project.`
-        return
-      }
-      await openProjectFromHandle(entry.handle)
-      await refreshRecents()
+      await openProjectByPath(entry.path)
+      refreshRecents()
       await goto('/project')
     } catch (e) {
-      // Stale handle / folder gone — drop from recents and surface the error.
-      await forgetRecentProject(entry.id).catch(() => {})
-      await refreshRecents()
-      menuError = e instanceof Error ? e.message : `Could not open "${entry.name}"`
+      // Project folder gone or unreadable — drop from recents.
+      dropRecentProjectPath(entry.path)
+      refreshRecents()
+      menuError = e instanceof Error ? e.message : `Could not open "${entry.label}"`
     }
-  }
-
-  function formatRecentAge(iso: string): string {
-    const t = new Date(iso).getTime()
-    if (!Number.isFinite(t)) return ''
-    const diffSec = Math.max(0, (Date.now() - t) / 1000)
-    if (diffSec < 60) return 'just now'
-    const min = Math.floor(diffSec / 60)
-    if (min < 60) return `${min}m ago`
-    const hr = Math.floor(min / 60)
-    if (hr < 24) return `${hr}h ago`
-    const days = Math.floor(hr / 24)
-    if (days < 7) return `${days}d ago`
-    return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' })
   }
 
   onMount(() => {
-    void refreshRecents()
+    refreshRecents()
   })
 
   /** Project open on disk (manifest + folder handle). */
@@ -361,10 +352,10 @@
     // Drop any song that was loaded via the project so the user starts
     // fresh on / rather than ambiguously in /edit pointing at a project song.
     clearFullAppSongState()
-    // Forget the IDB-saved active-project handle so a reload doesn't put
-    // the user back into the project they just exited. The Recent Projects
-    // list survives — re-entering is one click away.
-    await clearFolderHandle(PROJECT_HANDLE_KEY)
+    // Forget the last-opened project so a reload doesn't put the user back
+    // into the project they just exited. The Recent Projects list survives
+    // — re-entering is one click away.
+    clearLastProjectPath()
     await goto('/', { replaceState: true })
   }
 </script>
@@ -487,16 +478,14 @@
             <div class="text-muted-foreground px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider">
               Recent
             </div>
-            {#each recentProjects as r (r.id)}
+            {#each recentProjects as r (r.path)}
               <DropdownMenuItem
                 class="cursor-pointer"
                 onclick={() => void onOpenRecent(r)}
               >
-                <div class="flex w-full items-center justify-between gap-3">
-                  <span class="truncate">{r.name}</span>
-                  <span class="text-muted-foreground shrink-0 font-mono text-[10px] tabular-nums">
-                    {formatRecentAge(r.lastOpenedAt)}
-                  </span>
+                <div class="flex w-full min-w-0 flex-col gap-0">
+                  <span class="truncate font-medium">{r.label}</span>
+                  <span class="text-muted-foreground truncate font-mono text-[10px]">{r.path}</span>
                 </div>
               </DropdownMenuItem>
             {/each}

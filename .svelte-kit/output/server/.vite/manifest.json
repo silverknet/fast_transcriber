@@ -5,46 +5,131 @@
     "src": ".svelte-kit/generated/server/internal.js",
     "isEntry": true,
     "imports": [
-      "_internal.js",
       "_environment.js",
+      "_internal.js",
       "_shared-server.js"
+    ]
+  },
+  "_Icon.js": {
+    "file": "chunks/Icon.js",
+    "name": "Icon",
+    "imports": [
+      "_index-server.js",
+      "_server.js"
+    ]
+  },
+  "_StemSplitter.js": {
+    "file": "chunks/StemSplitter.js",
+    "name": "StemSplitter",
+    "imports": [
+      "_Icon.js",
+      "_play.js",
+      "_x.js",
+      "_server.js",
+      "_index-server2.js",
+      "_desktopBridge.js",
+      "_button.js"
     ]
   },
   "_WaveformPlayer.js": {
     "file": "chunks/WaveformPlayer.js",
     "name": "WaveformPlayer",
     "imports": [
-      "_internal.js",
-      "_beatPulse.js"
+      "_index-server.js",
+      "_server.js",
+      "_index-server2.js",
+      "_button.js",
+      "_timelineEdit.js",
+      "_uiAnimations.js"
     ]
   },
-  "_beatPulse.js": {
-    "file": "chunks/beatPulse.js",
-    "name": "beatPulse",
+  "_analyzingState.js": {
+    "file": "chunks/analyzingState.js",
+    "name": "analyzingState",
     "imports": [
-      "_internal.js",
-      "_client.js",
-      "_exports.js",
+      "_server.js",
+      "_index-server2.js"
+    ]
+  },
+  "_arrow-left.js": {
+    "file": "chunks/arrow-left.js",
+    "name": "arrow-left",
+    "imports": [
+      "_Icon.js",
+      "_server.js"
+    ]
+  },
+  "_beatsToSongMap.js": {
+    "file": "chunks/beatsToSongMap.js",
+    "name": "beatsToSongMap",
+    "imports": [
+      "_validate.js",
       "_timelineEdit.js"
     ]
   },
-  "_chevron-down.js": {
-    "file": "chunks/chevron-down.js",
-    "name": "chevron-down",
+  "_button.js": {
+    "file": "chunks/button.js",
+    "name": "button",
     "imports": [
-      "_internal.js",
-      "_beatPulse.js"
+      "_server.js"
     ]
   },
   "_client.js": {
     "file": "chunks/client.js",
     "name": "client",
     "imports": [
-      "_internal.js",
+      "_index-server.js",
       "_environment.js",
+      "_internal.js",
       "_exports.js",
-      "_shared.js"
+      "_shared.js",
+      "_server.js",
+      "_index-server2.js"
     ]
+  },
+  "_cloud.js": {
+    "file": "chunks/cloud.js",
+    "name": "cloud",
+    "imports": [
+      "_index-server.js",
+      "_internal.js",
+      "_Icon.js",
+      "_x.js",
+      "_commit.js",
+      "_server.js",
+      "_index-server2.js",
+      "_button.js",
+      "_persist.js"
+    ]
+  },
+  "_commit.js": {
+    "file": "chunks/commit.js",
+    "name": "commit",
+    "imports": [
+      "_client.js",
+      "_server.js",
+      "_index-server2.js",
+      "_desktopBridge.js",
+      "_validate.js",
+      "_timelineEdit.js",
+      "_persist.js"
+    ]
+  },
+  "_desktopBridge.js": {
+    "file": "chunks/desktopBridge.js",
+    "name": "desktopBridge"
+  },
+  "_desktopCompanionStatus.js": {
+    "file": "chunks/desktopCompanionStatus.js",
+    "name": "desktopCompanionStatus",
+    "imports": [
+      "_server.js",
+      "_index-server2.js"
+    ]
+  },
+  "_downloadsManifest.js": {
+    "file": "chunks/downloadsManifest.js",
+    "name": "downloadsManifest"
   },
   "_environment.js": {
     "file": "chunks/environment.js",
@@ -52,16 +137,85 @@
   },
   "_exports.js": {
     "file": "chunks/exports.js",
-    "name": "exports",
+    "name": "exports"
+  },
+  "_fingerprintHttp.js": {
+    "file": "chunks/fingerprintHttp.js",
+    "name": "fingerprintHttp"
+  },
+  "_index-server.js": {
+    "file": "chunks/index-server.js",
+    "name": "index-server",
     "imports": [
-      "_internal.js"
+      "_server.js"
+    ]
+  },
+  "_index-server2.js": {
+    "file": "chunks/index-server2.js",
+    "name": "index-server",
+    "imports": [
+      "_server.js"
     ]
   },
   "_internal.js": {
     "file": "chunks/internal.js",
     "name": "internal",
     "imports": [
-      "_environment.js"
+      "_index-server.js",
+      "_environment.js",
+      "_server.js"
+    ]
+  },
+  "_persist.js": {
+    "file": "chunks/persist.js",
+    "name": "persist",
+    "imports": [
+      "_validate.js"
+    ]
+  },
+  "_play.js": {
+    "file": "chunks/play.js",
+    "name": "play",
+    "imports": [
+      "_Icon.js",
+      "_server.js"
+    ]
+  },
+  "_pool2.js": {
+    "file": "chunks/pool2.js",
+    "name": "pool",
+    "imports": [
+      "_shared-server.js"
+    ]
+  },
+  "_projectRepo.js": {
+    "file": "chunks/projectRepo.js",
+    "name": "projectRepo",
+    "imports": [
+      "_pool2.js"
+    ]
+  },
+  "_renderCueTrack.js": {
+    "file": "chunks/renderCueTrack.js",
+    "name": "renderCueTrack",
+    "imports": [
+      "_Icon.js",
+      "_commit.js",
+      "_server.js",
+      "_trimAudio.js",
+      "_desktopBridge.js",
+      "_timelineEdit.js"
+    ]
+  },
+  "_server.js": {
+    "file": "chunks/server.js",
+    "name": "server"
+  },
+  "_sessionRepo.js": {
+    "file": "chunks/sessionRepo.js",
+    "name": "sessionRepo",
+    "imports": [
+      "_pool2.js"
     ]
   },
   "_shared-server.js": {
@@ -72,9 +226,33 @@
     "file": "chunks/shared.js",
     "name": "shared"
   },
+  "_stores.js": {
+    "file": "chunks/stores.js",
+    "name": "stores",
+    "imports": [
+      "_index-server.js",
+      "_client.js",
+      "_server.js"
+    ]
+  },
   "_timelineEdit.js": {
     "file": "chunks/timelineEdit.js",
-    "name": "timelineEdit"
+    "name": "timelineEdit",
+    "imports": [
+      "_validate.js"
+    ]
+  },
+  "_trimAudio.js": {
+    "file": "chunks/trimAudio.js",
+    "name": "trimAudio"
+  },
+  "_uiAnimations.js": {
+    "file": "chunks/uiAnimations.js",
+    "name": "uiAnimations",
+    "imports": [
+      "_server.js",
+      "_index-server2.js"
+    ]
   },
   "_utils.js": {
     "file": "chunks/utils.js",
@@ -82,6 +260,18 @@
     "imports": [
       "_shared-server.js",
       "_shared.js"
+    ]
+  },
+  "_validate.js": {
+    "file": "chunks/validate.js",
+    "name": "validate"
+  },
+  "_x.js": {
+    "file": "chunks/x.js",
+    "name": "x",
+    "imports": [
+      "_Icon.js",
+      "_server.js"
     ]
   },
   "node_modules/@sveltejs/kit/src/runtime/app/server/remote/index.js": {
@@ -101,8 +291,9 @@
     "src": "node_modules/@sveltejs/kit/src/runtime/components/svelte-5/error.svelte",
     "isEntry": true,
     "imports": [
-      "_internal.js",
-      "_client.js"
+      "_index-server.js",
+      "_client.js",
+      "_server.js"
     ]
   },
   "node_modules/@sveltejs/kit/src/runtime/server/index.js": {
@@ -111,12 +302,36 @@
     "src": "node_modules/@sveltejs/kit/src/runtime/server/index.js",
     "isEntry": true,
     "imports": [
-      "_internal.js",
       "_environment.js",
+      "_internal.js",
       "_utils.js",
       "_exports.js",
       "_shared-server.js",
-      "_shared.js"
+      "_shared.js",
+      "_server.js",
+      "_index-server2.js"
+    ]
+  },
+  "src/lib/server/db/pool.ts": {
+    "file": "chunks/pool.js",
+    "name": "pool",
+    "src": "src/lib/server/db/pool.ts",
+    "isDynamicEntry": true,
+    "imports": [
+      "_pool2.js"
+    ]
+  },
+  "src/routes/+layout.server.ts": {
+    "file": "entries/pages/_layout.server.ts.js",
+    "name": "entries/pages/_layout.server.ts",
+    "src": "src/routes/+layout.server.ts",
+    "isEntry": true,
+    "imports": [
+      "_pool2.js",
+      "_sessionRepo.js"
+    ],
+    "dynamicImports": [
+      "_pool2.js"
     ]
   },
   "src/routes/+layout.svelte": {
@@ -125,14 +340,23 @@
     "src": "src/routes/+layout.svelte",
     "isEntry": true,
     "imports": [
-      "_internal.js",
-      "_beatPulse.js",
-      "_chevron-down.js",
+      "_index-server.js",
+      "_Icon.js",
+      "_arrow-left.js",
+      "_cloud.js",
+      "_commit.js",
       "_client.js",
-      "_exports.js"
+      "_stores.js",
+      "_server.js",
+      "_index-server2.js",
+      "_desktopBridge.js",
+      "_button.js",
+      "_persist.js",
+      "_analyzingState.js",
+      "_desktopCompanionStatus.js"
     ],
     "css": [
-      "_app/immutable/assets/_layout.BPms4D6k.css"
+      "_app/immutable/assets/_layout.YrQ7FC0s.css"
     ]
   },
   "src/routes/+page.svelte": {
@@ -141,9 +365,41 @@
     "src": "src/routes/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_internal.js",
-      "_beatPulse.js",
-      "_WaveformPlayer.js"
+      "_index-server.js",
+      "_Icon.js",
+      "_arrow-left.js",
+      "_commit.js",
+      "_client.js",
+      "_stores.js",
+      "_server.js",
+      "_index-server2.js",
+      "_WaveformPlayer.js",
+      "_button.js",
+      "_timelineEdit.js",
+      "_persist.js",
+      "_analyzingState.js"
+    ]
+  },
+  "src/routes/analyzing/+page.svelte": {
+    "file": "entries/pages/analyzing/_page.svelte.js",
+    "name": "entries/pages/analyzing/_page.svelte",
+    "src": "src/routes/analyzing/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_index-server.js",
+      "_commit.js",
+      "_client.js",
+      "_stores.js",
+      "_server.js",
+      "_index-server2.js",
+      "_beatsToSongMap.js",
+      "_trimAudio.js",
+      "_desktopBridge.js",
+      "_button.js",
+      "_timelineEdit.js",
+      "_analyzingState.js",
+      "_desktopCompanionStatus.js",
+      "_uiAnimations.js"
     ]
   },
   "src/routes/api/analyze/+server.ts": {
@@ -153,14 +409,107 @@
     "isEntry": true,
     "imports": [
       "_shared-server.js",
-      "_timelineEdit.js"
+      "_beatsToSongMap.js"
     ]
   },
   "src/routes/api/health/+server.ts": {
     "file": "entries/endpoints/api/health/_server.ts.js",
     "name": "entries/endpoints/api/health/_server.ts",
     "src": "src/routes/api/health/+server.ts",
-    "isEntry": true
+    "isEntry": true,
+    "imports": [
+      "_pool2.js"
+    ]
+  },
+  "src/routes/api/projects/+server.ts": {
+    "file": "entries/endpoints/api/projects/_server.ts.js",
+    "name": "entries/endpoints/api/projects/_server.ts",
+    "src": "src/routes/api/projects/+server.ts",
+    "isEntry": true,
+    "imports": [
+      "_fingerprintHttp.js",
+      "_pool2.js",
+      "_projectRepo.js",
+      "_persist.js"
+    ]
+  },
+  "src/routes/api/projects/[id]/+server.ts": {
+    "file": "entries/endpoints/api/projects/_id_/_server.ts.js",
+    "name": "entries/endpoints/api/projects/_id_/_server.ts",
+    "src": "src/routes/api/projects/[id]/+server.ts",
+    "isEntry": true,
+    "imports": [
+      "_fingerprintHttp.js",
+      "_pool2.js",
+      "_projectRepo.js",
+      "_persist.js"
+    ]
+  },
+  "src/routes/api/projects/[id]/audio/+server.ts": {
+    "file": "entries/endpoints/api/projects/_id_/audio/_server.ts.js",
+    "name": "entries/endpoints/api/projects/_id_/audio/_server.ts",
+    "src": "src/routes/api/projects/[id]/audio/+server.ts",
+    "isEntry": true,
+    "imports": [
+      "_fingerprintHttp.js",
+      "_pool2.js",
+      "_projectRepo.js"
+    ]
+  },
+  "src/routes/api/sessions/[id]/+server.ts": {
+    "file": "entries/endpoints/api/sessions/_id_/_server.ts.js",
+    "name": "entries/endpoints/api/sessions/_id_/_server.ts",
+    "src": "src/routes/api/sessions/[id]/+server.ts",
+    "isEntry": true,
+    "imports": [
+      "_fingerprintHttp.js",
+      "_pool2.js",
+      "_sessionRepo.js",
+      "_persist.js"
+    ]
+  },
+  "src/routes/api/sessions/[id]/audio/+server.ts": {
+    "file": "entries/endpoints/api/sessions/_id_/audio/_server.ts.js",
+    "name": "entries/endpoints/api/sessions/_id_/audio/_server.ts",
+    "src": "src/routes/api/sessions/[id]/audio/+server.ts",
+    "isEntry": true,
+    "imports": [
+      "_fingerprintHttp.js",
+      "_pool2.js",
+      "_sessionRepo.js"
+    ]
+  },
+  "src/routes/api/sessions/ensure/+server.ts": {
+    "file": "entries/endpoints/api/sessions/ensure/_server.ts.js",
+    "name": "entries/endpoints/api/sessions/ensure/_server.ts",
+    "src": "src/routes/api/sessions/ensure/+server.ts",
+    "isEntry": true,
+    "imports": [
+      "_pool2.js",
+      "_sessionRepo.js"
+    ]
+  },
+  "src/routes/download/+page.server.ts": {
+    "file": "entries/pages/download/_page.server.ts.js",
+    "name": "entries/pages/download/_page.server.ts",
+    "src": "src/routes/download/+page.server.ts",
+    "isEntry": true,
+    "imports": [
+      "_shared-server.js",
+      "_downloadsManifest.js"
+    ]
+  },
+  "src/routes/download/+page.svelte": {
+    "file": "entries/pages/download/_page.svelte.js",
+    "name": "entries/pages/download/_page.svelte",
+    "src": "src/routes/download/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_index-server.js",
+      "_server.js",
+      "_button.js",
+      "_downloadsManifest.js"
+    ]
   },
   "src/routes/edit/+page.svelte": {
     "file": "entries/pages/edit/_page.svelte.js",
@@ -168,13 +517,73 @@
     "src": "src/routes/edit/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_internal.js",
-      "_beatPulse.js",
-      "_chevron-down.js",
+      "_index-server.js",
+      "_Icon.js",
+      "_arrow-left.js",
+      "_renderCueTrack.js",
+      "_play.js",
+      "_commit.js",
       "_client.js",
-      "_exports.js",
+      "_server.js",
+      "_index-server2.js",
       "_WaveformPlayer.js",
-      "_timelineEdit.js"
+      "_desktopBridge.js",
+      "_button.js",
+      "_timelineEdit.js",
+      "_persist.js",
+      "_desktopCompanionStatus.js"
+    ]
+  },
+  "src/routes/project/+page.svelte": {
+    "file": "entries/pages/project/_page.svelte.js",
+    "name": "entries/pages/project/_page.svelte",
+    "src": "src/routes/project/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_index-server.js",
+      "_Icon.js",
+      "_cloud.js",
+      "_StemSplitter.js",
+      "_renderCueTrack.js",
+      "_commit.js",
+      "_client.js",
+      "_stores.js",
+      "_server.js",
+      "_index-server2.js",
+      "_trimAudio.js",
+      "_desktopBridge.js",
+      "_button.js",
+      "_persist.js",
+      "_desktopCompanionStatus.js"
+    ]
+  },
+  "src/routes/set/+page.svelte": {
+    "file": "entries/pages/set/_page.svelte.js",
+    "name": "entries/pages/set/_page.svelte",
+    "src": "src/routes/set/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_index-server.js",
+      "_StemSplitter.js",
+      "_commit.js",
+      "_server.js",
+      "_index-server2.js",
+      "_desktopBridge.js",
+      "_button.js",
+      "_persist.js",
+      "_desktopCompanionStatus.js"
+    ]
+  },
+  "src/routes/texttospeech/+page.svelte": {
+    "file": "entries/pages/texttospeech/_page.svelte.js",
+    "name": "entries/pages/texttospeech/_page.svelte",
+    "src": "src/routes/texttospeech/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_server.js",
+      "_desktopBridge.js",
+      "_button.js",
+      "_desktopCompanionStatus.js"
     ]
   }
 }

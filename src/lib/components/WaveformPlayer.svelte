@@ -1574,7 +1574,8 @@
       <p class="text-muted-foreground mt-2 text-left leading-relaxed">
         {#if isEditorVariant}
           Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan (waveform, bar strip, minimap) · Grid: click bar,
-          vertical wheel = beats/bar; Sections: drag across bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: drag or
+          vertical wheel = beats/bar; drag bar left/right edge to stretch that bar (beats stay even); Sections: drag across
+          bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: drag or
           Shift+click beat range, ⌘/Ctrl+click toggle; click a beat opens the picker · ⌘/Ctrl+C / ⌘/Ctrl+V copy & paste
           resolved chords · Esc clears selection
         {:else}
@@ -1598,6 +1599,8 @@
           editable={beatGridEditing}
           stripMode={timelineStripMode}
           mapSections={mapSections}
+          timelineMinSec={0}
+          timelineMaxSec={timelineSec}
           onAction={onBarGridAction}
           bind:selectedBarId
           bind:selectedBarIds={sectionsSelectionBarIds}

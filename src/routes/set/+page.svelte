@@ -17,12 +17,11 @@
     getDirectoryHandleByPath,
   } from '$lib/client/folderHandle'
   import { songMap, patchSongMap } from '$lib/stores/songMap'
-  import { project as projectStore } from '$lib/stores/project'
   import { SONG_ALS_FILENAME } from '$lib/project/commit'
   import { audioSession } from '$lib/stores/audioSession'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import StemSplitter from '$lib/components/StemSplitter.svelte'
-  import { fetchStemBlob } from '$lib/client/desktopBridge'
+  import { pickFolderViaDesktop } from '$lib/client/desktopBridge'
   import { releaseStemJob, type StemJobEntry } from '$lib/stores/stemJobs'
 
   // ── Folder state ────────────────────────────────────────────────────────────
@@ -39,19 +38,12 @@
   }
 
   /**
-   * If this song was opened via a project, the song's folder lives at
-   * `<projectRoot>/<activeSongFolder>` and we should use that — not a
-   * per-title-keyed handle. Returns null when not in project mode.
+   * Project-mode songs use the in-card SongSetPanel — this /set route stays
+   * standalone-only. Always returns null so the per-title folder picker path
+   * runs.
    */
   async function projectSongDirHandle(): Promise<FileSystemDirectoryHandle | null> {
-    const ps = get(projectStore)
-    if (ps.editingMode !== 'project-song') return null
-    if (!ps.folderHandle || !ps.activeSongFolder) return null
-    try {
-      return await getDirectoryHandleByPath(ps.folderHandle, ps.activeSongFolder)
-    } catch {
-      return null
-    }
+    return null
   }
 
   async function pickFolder() {
@@ -188,32 +180,73 @@
     return `stems/${(STEM_ALIASES[stemName]?.[0] ?? stemName.toLowerCase())}.wav`
   }
 
+  /** Map a Demucs output filename (e.g. `vocals.wav`) to a STEM_TRACKS slot. */
+  function slotForStandaloneSet(filename: string): string | null {
+    const base = filename.replace(/\.[^.]+$/, '').toLowerCase()
+    const direct: Record<string, string> = {
+      vocals: 'Vocals',
+      drums: 'Drums',
+      bass: 'Bass',
+      other: 'Guitar',
+      guitar: 'Guitar',
+      fx: 'FX',
+    }
+    return direct[base] ?? null
+  }
+
+  // ── Standalone OS path for path-based stems ───────────────────────────────
+  //
+  // /set's folder is picked via the browser FS Access API which doesn't expose
+  // an absolute path. To use the new path-based stems flow we ask the desktop
+  // sidecar to open its OWN folder picker once, kept in-memory for the
+  // session (standalone /set is transient — no persistence needed).
+  let standaloneOsPath = $state<string | null>(null)
+  let osPathPickError = $state('')
+
+  async function pickStandaloneOsPath() {
+    osPathPickError = ''
+    const r = await pickFolderViaDesktop({ title: 'Locate the stems folder on disk' })
+    if (!r.ok) {
+      if (!('cancelled' in r) || !r.cancelled) {
+        osPathPickError = 'error' in r ? r.error : 'Could not pick folder'
+      }
+      return
+    }
+    standaloneOsPath = r.path
+  }
+
   /**
-   * Finalizer for standalone-mode stem jobs. The page's `folderHandle`
-   * (FS Access picker target) is the destination; bytes flow from the
-   * sidecar's temp dir into `<folder>/stems/<filename>`. Mirror of the
-   * project-mode finalizer in `SongSetPanel.svelte`.
+   * Standalone-mode inputPath: there's no .smap on disk for unbound songs,
+   * so the user would need to first save the song into the picked folder
+   * for stems to work. For now we expect `song.smap` to live at the root
+   * of the picked OS path; the legacy "Save Song (.smap)" flow needs to
+   * be aligned with that. Until that's wired, splits won't work in /set
+   * without a manual .smap in place.
+   */
+  const standaloneInputPath = $derived(
+    standaloneOsPath ? `${standaloneOsPath}/song.smap` : null,
+  )
+  const standaloneOutputDir = $derived(
+    standaloneOsPath ? `${standaloneOsPath}/stems` : null,
+  )
+
+  /**
+   * In standalone /set mode the sidecar wrote the stems directly into
+   * `<standaloneOsPath>/stems/<filename>` (path-based flow — no audio
+   * bytes over HTTP). The web side only needs to refresh the in-memory
+   * folder listing + the .smap stemRefs.
    */
   async function finalizeStemsForStandaloneSet(job: StemJobEntry) {
     if (!folderHandle) return
-    let stemsDir: FileSystemDirectoryHandle
-    try {
-      stemsDir = await folderHandle.getDirectoryHandle('stems', { create: true })
-    } catch {
-      return
-    }
+    // Auto-bind matching stem refs in the loaded songMap so /set's slot
+    // list immediately reflects the new files.
+    const newRefs: Record<string, string> = {}
     for (const filename of job.files) {
-      try {
-        const blob = await fetchStemBlob(job.jobId, filename)
-        const fh = await stemsDir.getFileHandle(filename, { create: true })
-        const w = await (fh as FileSystemFileHandle & {
-          createWritable(): Promise<FileSystemWritableFileStream>
-        }).createWritable()
-        await w.write(blob)
-        await w.close()
-      } catch {
-        /* per-file failures already surface in the stemJobs log */
-      }
+      const slot = slotForStandaloneSet(filename)
+      if (slot) newRefs[slot] = `stems/${filename}`
+    }
+    if (Object.keys(newRefs).length > 0) {
+      patchSongMap((m) => ({ ...m, stemRefs: { ...m.stemRefs, ...newRefs } }))
     }
     await releaseStemJob(job.jobId)
     folderFiles = await scanAudioFiles(folderHandle)
@@ -243,10 +276,9 @@
       lastXml = xml
       statusMsg = 'Compressing (gzip)…'
       const blob = await gzipString(xml)
-      // In project mode the .als lives next to song.smap with a fixed name
-      // so renames don't break references.
-      const isProjectMode = get(projectStore).editingMode === 'project-song'
-      const alsName = isProjectMode ? SONG_ALS_FILENAME : `${safeExportBasename(sm.metadata.title)}.als`
+      // Standalone mode only — project songs use the in-card SongSetPanel
+      // (.als export there moves to a sidecar endpoint in a follow-up).
+      const alsName = `${safeExportBasename(sm.metadata.title)}.als`
 
       if (folderHandle) {
         // Mark folder as an Ableton Live Project so RelativePath audio refs resolve
@@ -276,13 +308,6 @@
 
   onMount(() => {
     if (!browser) return
-    // Project songs get their Set UI inline on /project — redirect there
-    // (auto-expanding this song's card) so there's one canonical surface.
-    const ps = get(projectStore)
-    if (ps.editingMode === 'project-song' && ps.activeSongId) {
-      void goto(`/project?expand=${encodeURIComponent(ps.activeSongId)}`, { replaceState: true })
-      return
-    }
     if (!hasFsApi) return
     void tryRestoreFolder()
   })
@@ -377,11 +402,26 @@
         {/if}
       </section>
 
-      <!-- Stem Splitter (desktop sidecar) -->
+      <!-- Stem Splitter (desktop sidecar, path-based) -->
+      {#if !standaloneOsPath && $desktopCompanionStatus.reachable}
+        <section class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border-2 px-4 py-3 space-y-2">
+          <p class="text-xs">
+            <span class="font-semibold">Stems need a disk path.</span>
+            The desktop sidecar reads/writes the project folder directly. Locate it once.
+          </p>
+          <Button class="" variant="default" size="sm" onclick={() => void pickStandaloneOsPath()}>
+            Locate folder on disk…
+          </Button>
+          {#if osPathPickError}
+            <p class="text-destructive text-xs" role="status">{osPathPickError}</p>
+          {/if}
+        </section>
+      {/if}
       <StemSplitter
         songId="standalone"
-        audioFile={$audioSession.file}
-        {folderHandle}
+        inputPath={standaloneInputPath}
+        outputDir={standaloneOutputDir}
+        inputLabel={null}
         desktopReachable={$desktopCompanionStatus.reachable}
         finalizeJob={(job) => finalizeStemsForStandaloneSet(job)}
       />

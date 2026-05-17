@@ -70,6 +70,7 @@ The main process listens on **`127.0.0.1:47842`** with `Access-Control-Allow-Ori
 | `GET` | `/native/setup/piper-tts/status` | `{ ready, venvDir, modelPath, modelPresent, … }` — Piper venv + default voice. |
 | `POST` | `/native/setup/piper-tts` | NDJSON stream: create venv, `pip install -r piper_tts/requirements.txt`, download **en_US-lessac-medium**. |
 | `GET` | `/native/tts/hello-world` | Returns `audio/wav` saying “Hello world.” (web debug: `/texttospeech`). |
+| `POST` | `/native/tts/synthesize` | JSON `{ "text": "…" }` → WAV (cue-track speech via Piper). |
 
 **Browsers:** pages served over **HTTPS** may block or warn on **`http://127.0.0.1`** (mixed content). Chromium typically allows loopback; verify **Safari / Firefox** for your production URL. Local dev on `http://localhost:5173` is fine.
 

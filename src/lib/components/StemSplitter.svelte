@@ -2,15 +2,15 @@
   /**
    * Stem Splitter — web counterpart to the frequency_domain Tkinter app.
    *
-   * In v2 (queued model) this component does NOT run the job itself — the
-   * sidecar holds the queue. On "Split Stems" click we POST audio bytes,
-   * receive a jobId, and register it in the global `stemJobs` store. All
-   * progress/log/state updates flow from the store; the same job persists
-   * even if the user expands a different card (the queue runs serially).
+   * In v3 (path-based) the sidecar reads the input from `inputPath` and
+   * writes flat stem WAVs into `outputDir` directly — **no audio bytes ever
+   * cross HTTP**. The web app's only job is to trigger, observe, and
+   * (lightly) finalize the .smap stemRefs.
    *
    * The parent (`SongSetPanel`) hands us a `finalizeJob` callback that runs
-   * when the job's state becomes `done`. That callback fetches each stem
-   * blob and writes it into the song's project folder.
+   * when the job's state becomes `done`. The stems are already on disk by
+   * then — the callback just refreshes the folder listing and updates the
+   * song's `.smap` `stemRefs`.
    */
   import { Button } from '$lib/components/ui/button'
   import {
@@ -38,17 +38,27 @@
 
   let {
     songId,
-    audioFile,
-    folderHandle,
+    inputPath,
+    outputDir,
+    inputLabel,
     desktopReachable,
     finalizeJob,
   } = $props<{
     /** Stable identity used to associate jobs with this card. */
     songId: string
-    audioFile: File | null
-    folderHandle: FileSystemDirectoryHandle | null
+    /**
+     * Absolute OS path the sidecar reads. Either an audio file or a
+     * BarBro `.smap` (sidecar extracts the audio chunk).
+     */
+    inputPath: string | null
+    /**
+     * Absolute OS path where flat stem WAVs land (sidecar creates if missing).
+     */
+    outputDir: string | null
+    /** Human-friendly label for the Audio File fieldset (filename, etc.). */
+    inputLabel?: string | null
     desktopReachable: boolean
-    /** Runs once when the job's state becomes `done`. Caller writes stems + releases. */
+    /** Runs once when the job's state becomes `done`. Stems are already on disk. */
     finalizeJob: (entry: StemJobEntry) => void | Promise<void>
   }>()
 
@@ -70,14 +80,27 @@
 
   // ── Linked job (from the global store) ─────────────────────────────────────
 
-  /** The most-recent job started from this card. */
-  let lastJobId = $state<string | null>(null)
   let enqueueError = $state('')
 
-  /** Reactive snapshot of the currently-watched job, by id. */
+  /**
+   * The job (if any) the UI should display state for. Derived from the
+   * global store by `songId` so this survives card collapse/expand —
+   * remounting the component picks up whatever the sidecar is currently
+   * doing for this song. Prefers active (queued/running) jobs over
+   * terminal ones; among same-state jobs, the most-recently-created wins.
+   */
   const jobEntry = $derived.by<StemJobEntry | null>(() => {
-    if (!lastJobId) return null
-    return $stemJobs.get(lastJobId) ?? null
+    let active: StemJobEntry | null = null
+    let recentTerminal: StemJobEntry | null = null
+    for (const j of $stemJobs.values()) {
+      if (j.songId !== songId) continue
+      if (j.state === 'queued' || j.state === 'running') {
+        if (!active || j.createdAt > active.createdAt) active = j
+      } else {
+        if (!recentTerminal || j.createdAt > recentTerminal.createdAt) recentTerminal = j
+      }
+    }
+    return active ?? recentTerminal
   })
 
   /** Whether this song has any in-flight (queued/running) job — used to disable button. */
@@ -89,8 +112,8 @@
 
   function canRun(): { ok: true } | { ok: false; reason: string } {
     if (!desktopReachable) return { ok: false, reason: 'Desktop companion not reachable' }
-    if (!audioFile) return { ok: false, reason: 'No audio loaded for this song' }
-    if (!folderHandle) return { ok: false, reason: 'Project folder not bound yet' }
+    if (!inputPath) return { ok: false, reason: 'No audio source resolved on disk yet' }
+    if (!outputDir) return { ok: false, reason: 'Output directory not resolved yet' }
     if (!anySelected) return { ok: false, reason: 'Select at least one stem' }
     if (songIsBusy) return { ok: false, reason: 'Already queued/running for this song' }
     return { ok: true }
@@ -104,18 +127,30 @@
     }
     enqueueError = ''
     const stems = ALL_STEMS.filter((s) => selected[s])
-    const r = await enqueueStemSeparation({ audio: audioFile!, stems, preset, songId })
+    // Per-preset subfolder write so a song can hold multiple renderings
+    // side by side (e.g. a Preview render for iteration + a Best render
+    // for export). The mixer auto-picks the highest quality available.
+    const presetOutputDir = `${outputDir!}/${preset.slug}`
+    const r = await enqueueStemSeparation({
+      inputPath: inputPath!,
+      outputDir: presetOutputDir,
+      stems,
+      preset,
+      songId,
+    })
     if (!r.ok) {
       enqueueError = r.error
       return
     }
-    lastJobId = r.jobId
+    // No need to remember the jobId locally — `jobEntry` derives from the
+    // global store keyed by songId, so the UI picks it up automatically.
     registerStemJob({ jobId: r.jobId, songId, onDone: finalizeJob })
   }
 
   async function cancelCurrent() {
-    if (!lastJobId) return
-    await cancelStemJob(lastJobId)
+    const id = jobEntry?.jobId
+    if (!id) return
+    await cancelStemJob(id)
   }
 
   // ── Python deps setup (one-time pip install of Demucs) ─────────────────────
@@ -203,8 +238,8 @@
 
   function reasonHint(): string {
     if (!desktopReachable) return 'Desktop companion required'
-    if (!audioFile) return 'Load a song with audio first'
-    if (!folderHandle) return 'Project folder not bound yet'
+    if (!inputPath) return 'Audio source on disk not resolved yet'
+    if (!outputDir) return 'Output directory on disk not resolved yet'
     if (!anySelected) return 'Pick at least one stem'
     if (songIsBusy) return 'A job is already queued/running for this song'
     return ''
@@ -235,16 +270,21 @@
 <section class="border-foreground border-2 p-4 space-y-4">
   <h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Stem Splitter</h2>
 
-  <!-- Audio File -->
+  <!-- Audio source on disk -->
   <fieldset class="border-foreground/30 border space-y-1 px-3 py-2">
-    <legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Audio File</legend>
-    {#if audioFile}
-      <p class="font-mono text-sm truncate">{audioFile.name}</p>
-      <p class="text-muted-foreground font-mono text-xs">
-        {(audioFile.size / (1024 * 1024)).toFixed(1)} MB · {audioFile.type || 'audio'}
+    <legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Audio source</legend>
+    {#if inputPath}
+      <p class="font-mono text-sm truncate" title={inputPath}>
+        {inputLabel ?? inputPath.split('/').pop() ?? inputPath}
       </p>
+      <p class="text-muted-foreground font-mono text-[10px] truncate" title={inputPath}>{inputPath}</p>
     {:else}
-      <p class="text-muted-foreground text-xs">No audio loaded. Open a song first.</p>
+      <p class="text-muted-foreground text-xs">Locate the project folder on disk to enable splitting.</p>
+    {/if}
+    {#if outputDir}
+      <p class="text-muted-foreground mt-1 font-mono text-[10px] truncate" title="{outputDir}/{preset.slug}">
+        Output → {outputDir}/{preset.slug}
+      </p>
     {/if}
   </fieldset>
 

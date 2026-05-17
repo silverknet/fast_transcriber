@@ -247,6 +247,592 @@ async function extractAudioFromSmap(smapPath, destPath) {
   await writeFile(destPath, buf.subarray(audioStart, audioEnd))
 }
 
+// ── Project I/O helpers ──────────────────────────────────────────────────────
+
+/** Project manifest filename, must match `src/lib/project/types.ts` PROJECT_FILENAME. */
+const PROJECT_FILENAME = 'barbro.project.json'
+const PROJECT_SONGS_DIR = 'songs'
+const PROJECT_FILE_VERSION = 1
+const SONG_SMAP_FILENAME = 'song.smap'
+const SONG_ALS_FILENAME = 'song.als'
+
+/** Mirrors `safeExportBasename()` in src/lib/songmap/persist.ts. */
+function slugifyName(s) {
+  const t = String(s).trim() || 'project'
+  const out = t.replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').slice(0, 80)
+  return out || 'project'
+}
+
+/**
+ * Validate `songs/<leaf>` style relative path. Throws on violation.
+ * Mirrors `validateProjectFolderPath` in src/lib/project/types.ts.
+ */
+function validateRelSongFolder(p, label = 'songFolder') {
+  if (typeof p !== 'string' || p.length === 0) {
+    throw new Error(`Invalid ${label}: must be a non-empty string`)
+  }
+  if (p.startsWith('/')) throw new Error(`Invalid ${label}: must not start with "/"`)
+  if (p.includes('\\')) throw new Error(`Invalid ${label}: must use forward slashes`)
+  if (p.endsWith('/')) throw new Error(`Invalid ${label}: must not end with "/"`)
+  if (p.includes('//')) throw new Error(`Invalid ${label}: must not contain "//"`)
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.' || seg === '..') {
+      throw new Error(`Invalid ${label}: must not contain "." or ".." segments`)
+    }
+  }
+  if (!p.startsWith(`${PROJECT_SONGS_DIR}/`)) {
+    throw new Error(`Invalid ${label}: must start with "${PROJECT_SONGS_DIR}/"`)
+  }
+  return p
+}
+
+/** Atomic file write: write a sibling temp file then rename over the target. */
+async function atomicWriteFile(targetPath, bytes) {
+  const dir = path.dirname(targetPath)
+  await mkdir(dir, { recursive: true })
+  const tmp = path.join(dir, `.${path.basename(targetPath)}.${randomUUID().slice(0, 8)}.tmp`)
+  await writeFile(tmp, bytes)
+  try {
+    const { rename } = await import('node:fs/promises')
+    await rename(tmp, targetPath)
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw e
+  }
+}
+
+/** Recursively sort object keys (mirrors web-side `sortKeysDeep`). */
+function sortKeysDeep(x) {
+  if (x === undefined) return undefined
+  if (x === null || typeof x !== 'object') return x
+  if (Array.isArray(x)) return x.map(sortKeysDeep)
+  const out = {}
+  for (const k of Object.keys(x).sort()) {
+    const v = x[k]
+    if (v === undefined) continue
+    const inner = sortKeysDeep(v)
+    if (inner !== undefined) out[k] = inner
+  }
+  return out
+}
+
+function serializeProject(manifest) {
+  return JSON.stringify(sortKeysDeep(manifest), null, 2)
+}
+
+/**
+ * Validate + parse a manifest object (after JSON.parse). Throws on schema
+ * violation. Mirrors the parser in src/lib/project/parse.ts.
+ */
+function parseManifestObject(raw) {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Invalid barbro.project.json: root must be an object')
+  }
+  if (raw.formatVersion !== PROJECT_FILE_VERSION) {
+    throw new Error(`Unsupported project formatVersion: ${raw.formatVersion} (expected ${PROJECT_FILE_VERSION})`)
+  }
+  if (typeof raw.id !== 'string' || raw.id.length === 0) {
+    throw new Error('Invalid barbro.project.json: missing or invalid `id`')
+  }
+  if (typeof raw.name !== 'string') {
+    throw new Error('Invalid barbro.project.json: missing or invalid `name`')
+  }
+  if (typeof raw.createdAt !== 'string') {
+    throw new Error('Invalid barbro.project.json: missing or invalid `createdAt`')
+  }
+  if (typeof raw.updatedAt !== 'string') {
+    throw new Error('Invalid barbro.project.json: missing or invalid `updatedAt`')
+  }
+  if (!Array.isArray(raw.songs)) {
+    throw new Error('Invalid barbro.project.json: `songs` must be an array')
+  }
+  const songs = []
+  for (let i = 0; i < raw.songs.length; i++) {
+    const e = raw.songs[i]
+    if (!e || typeof e !== 'object') throw new Error(`Invalid songs[${i}]: must be an object`)
+    if (typeof e.id !== 'string' || e.id.length === 0) {
+      throw new Error(`Invalid songs[${i}].id: must be a non-empty string`)
+    }
+    const folder = validateRelSongFolder(e.folder, `songs[${i}].folder`)
+    const entry = { id: e.id, folder }
+    if (typeof e.hidden === 'boolean' && e.hidden) entry.hidden = true
+    songs.push(entry)
+  }
+  return {
+    formatVersion: PROJECT_FILE_VERSION,
+    id: raw.id,
+    name: raw.name,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    songs,
+  }
+}
+
+async function readProjectManifest(projectPath) {
+  const p = path.join(projectPath, PROJECT_FILENAME)
+  const text = await readFile(p, 'utf-8')
+  let raw
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw new Error(`Invalid ${PROJECT_FILENAME}: not valid JSON`)
+  }
+  return parseManifestObject(raw)
+}
+
+/**
+ * Read just the JSON chunk from a .smap on disk. Used to populate the
+ * project list view without paying for the audio bytes. Returns null on any
+ * error (truncated file, bad magic, unsupported version, bad JSON) — callers
+ * treat that as "song.smap unreadable" and surface in the songsMetadata.
+ */
+async function readSmapHeaderJson(smapPath) {
+  try {
+    // Open by stat to bound reads.
+    const st = await stat(smapPath)
+    if (st.size < 28) return null
+    const fh = await import('node:fs/promises').then((m) => m.open(smapPath, 'r'))
+    try {
+      const headerBuf = Buffer.alloc(28)
+      await fh.read(headerBuf, 0, 28, 0)
+      if (headerBuf.toString('ascii', 0, 4) !== 'SMAP') return null
+      const version = headerBuf.readUInt32LE(4)
+      if (version !== 1) return null
+      const jsonLen = Number(headerBuf.readBigUInt64LE(12))
+      if (jsonLen <= 0 || jsonLen > 10 * 1024 * 1024) return null
+      if (28 + jsonLen > st.size) return null
+      const jsonBuf = Buffer.alloc(jsonLen)
+      await fh.read(jsonBuf, 0, jsonLen, 28)
+      const text = jsonBuf.toString('utf-8')
+      return JSON.parse(text)
+    } finally {
+      await fh.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Pull the lite fields used by the project list from a parsed SongProject. */
+function extractSongMetadataLite(songProject) {
+  if (!songProject || typeof songProject !== 'object') return null
+  const map = songProject.songMap
+  if (!map || typeof map !== 'object') return null
+  const md = map.metadata ?? {}
+  const out = { title: typeof md.title === 'string' ? md.title : '' }
+  if (typeof md.artist === 'string') out.artist = md.artist
+  if (md.keyDetail) out.keyDetail = md.keyDetail
+  if (typeof md.bpm === 'number') out.bpm = md.bpm
+  if (map.stemRefs && typeof map.stemRefs === 'object') out.stemRefs = { ...map.stemRefs }
+  return out
+}
+
+/** Known preset slugs (kept in sync with web-side STEM_QUALITY_PRESETS). */
+const KNOWN_STEM_PRESETS = new Set(['best', 'balanced', 'preview'])
+
+/**
+ * Scan `<songFolder>/stems/` for stem renderings, grouped by preset.
+ *
+ * Two layouts are supported simultaneously so older songs keep working:
+ *  - **Per-preset subfolders**: `stems/best/vocals.wav`, `stems/preview/...`
+ *  - **Flat (legacy)**: `stems/vocals.wav` directly under `stems/`. These
+ *    get reported under the `'legacy'` slug — lowest quality fallback.
+ *
+ * Returns `Record<presetSlug, sortedWavBasenames>`. Empty object when no
+ * stems exist. Empty presets (subfolders with no WAVs inside) are skipped.
+ */
+async function listStemSets(songFolderAbs) {
+  const stemsDir = path.join(songFolderAbs, 'stems')
+  /** @type {Record<string, string[]>} */
+  const out = {}
+  let entries
+  try {
+    const { readdir } = await import('node:fs/promises')
+    entries = await readdir(stemsDir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  const flatWavs = []
+  for (const ent of entries) {
+    if (ent.isFile() && ent.name.toLowerCase().endsWith('.wav')) {
+      flatWavs.push(ent.name)
+      continue
+    }
+    if (ent.isDirectory()) {
+      const sub = path.join(stemsDir, ent.name)
+      try {
+        const inner = await readdir(sub)
+        const wavs = inner.filter((f) => f.toLowerCase().endsWith('.wav')).sort()
+        if (wavs.length > 0) out[ent.name] = wavs
+      } catch {
+        /* unreadable subfolder — skip */
+      }
+    }
+  }
+  if (flatWavs.length > 0) out['legacy'] = flatWavs.sort()
+  return out
+}
+
+function nowIso() {
+  return new Date().toISOString()
+}
+
+function ensureAbsolutePath(p, label) {
+  if (typeof p !== 'string' || !p.trim()) {
+    throw new Error(`${label} is required`)
+  }
+  if (!path.isAbsolute(p)) {
+    throw new Error(`${label} must be an absolute path`)
+  }
+}
+
+/**
+ * `POST /native/project/create` — body `{ parentPath, name }`. Creates a
+ * project folder under `parentPath` with a slugified name, writes an empty
+ * `barbro.project.json`, returns `{ ok, projectPath, manifest }`.
+ *
+ * If the slugified folder name already exists in `parentPath`, retries with
+ * an `-id` suffix up to 3 times before giving up.
+ */
+async function handleProjectCreate(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const parentPath = typeof body.parentPath === 'string' ? body.parentPath.trim() : ''
+    const name = typeof body.name === 'string' ? body.name.trim() : ''
+    ensureAbsolutePath(parentPath, 'parentPath')
+    if (!name) return sendJson(res, 400, { ok: false, error: 'name is required' }, cors)
+    if (!existsSync(parentPath)) {
+      return sendJson(res, 404, { ok: false, error: `parentPath not found: ${parentPath}` }, cors)
+    }
+
+    const baseSlug = slugifyName(name)
+    let chosen = baseSlug
+    let projectPath = path.join(parentPath, chosen)
+    let attempts = 0
+    while (existsSync(projectPath)) {
+      attempts++
+      if (attempts > 3) {
+        return sendJson(res, 409, { ok: false, error: `Folder name already exists: ${chosen}` }, cors)
+      }
+      const suffix = randomUUID().slice(0, 8)
+      chosen = `${baseSlug}-${suffix}`
+      projectPath = path.join(parentPath, chosen)
+    }
+
+    await mkdir(projectPath, { recursive: false })
+
+    const manifest = {
+      formatVersion: PROJECT_FILE_VERSION,
+      id: randomUUID(),
+      name,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      songs: [],
+    }
+    await atomicWriteFile(path.join(projectPath, PROJECT_FILENAME), serializeProject(manifest))
+
+    logInfo(`project/create: ${projectPath}`)
+    sendJson(res, 200, { ok: true, projectPath, manifest }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`project/create: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/info` — body `{ projectPath }`. Reads the manifest,
+ * for each entry scans the song folder for `song.smap` header (title, etc),
+ * `song.als` presence, and stems WAVs. Returns
+ * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
+ *
+ * `stemsByPreset` groups stem WAVs by quality preset (`best`/`balanced`/
+ * `preview`) corresponding to `<song>/stems/<preset>/<file>.wav`. Flat-
+ * layout legacy files (`<song>/stems/<file>.wav`) appear under the
+ * `'legacy'` key.
+ */
+async function handleProjectInfo(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+
+    const manifest = await readProjectManifest(projectPath)
+    const songsMetadata = {}
+    for (const entry of manifest.songs) {
+      const folderAbs = path.join(projectPath, entry.folder)
+      const smapPath = path.join(folderAbs, SONG_SMAP_FILENAME)
+      const alsPath = path.join(folderAbs, SONG_ALS_FILENAME)
+      const cuePath = path.join(folderAbs, 'cue', 'cue-track.wav')
+      const clickPath = path.join(folderAbs, 'cue', 'click-track.wav')
+      const hasSmap = existsSync(smapPath)
+      const hasAls = existsSync(alsPath)
+      const hasCueTrack = existsSync(cuePath)
+      const hasClickTrack = existsSync(clickPath)
+      const songProject = hasSmap ? await readSmapHeaderJson(smapPath) : null
+      const lite = extractSongMetadataLite(songProject) ?? { title: entry.folder }
+      const stemsByPreset = await listStemSets(folderAbs)
+      songsMetadata[entry.folder] = { ...lite, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset }
+    }
+
+    sendJson(res, 200, { ok: true, manifest, songsMetadata }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/manifest/write` — body `{ projectPath, manifest }`.
+ * Validates the manifest then atomically rewrites `barbro.project.json`.
+ */
+async function handleProjectManifestWrite(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const manifest = parseManifestObject(body.manifest)
+    await atomicWriteFile(path.join(projectPath, PROJECT_FILENAME), serializeProject(manifest))
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/song/create` — body `{ projectPath, songFolder, smapBase64 }`.
+ * Creates the song folder if missing and atomically writes `song.smap`.
+ * Errors if the folder already contains a `song.smap` (caller must use
+ * `song/write` for overwrites).
+ */
+async function handleProjectSongCreate(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    if (typeof body.smapBase64 !== 'string' || !body.smapBase64) {
+      return sendJson(res, 400, { ok: false, error: 'smapBase64 is required' }, cors)
+    }
+    const smapBytes = Buffer.from(body.smapBase64, 'base64')
+    const folderAbs = path.join(projectPath, songFolder)
+    const smapPath = path.join(folderAbs, SONG_SMAP_FILENAME)
+    if (existsSync(smapPath)) {
+      return sendJson(res, 409, { ok: false, error: `${SONG_SMAP_FILENAME} already exists in ${songFolder}` }, cors)
+    }
+    await mkdir(folderAbs, { recursive: true })
+    await atomicWriteFile(smapPath, smapBytes)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `GET /native/project/song/read?projectPath=...&songFolder=...` — streams
+ * the song's `song.smap` bytes. 404 if missing.
+ */
+function handleProjectSongRead(req, res, cors, url) {
+  try {
+    const projectPath = url.searchParams.get('projectPath') ?? ''
+    const songFolder = url.searchParams.get('songFolder') ?? ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    validateRelSongFolder(songFolder)
+    const smapPath = path.join(projectPath, songFolder, SONG_SMAP_FILENAME)
+    if (!existsSync(smapPath)) {
+      sendJson(res, 404, { ok: false, error: `${SONG_SMAP_FILENAME} not found` }, cors)
+      return
+    }
+    let size = 0
+    try {
+      size = statSync(smapPath).size
+    } catch {
+      /* ignore */
+    }
+    res.writeHead(200, {
+      ...cors,
+      'Content-Type': 'application/octet-stream',
+      ...(size > 0 ? { 'Content-Length': String(size) } : {}),
+    })
+    const stream = createReadStream(smapPath)
+    stream.on('error', () => {
+      try {
+        res.end()
+      } catch {
+        /* ignore */
+      }
+    })
+    stream.pipe(res)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/song/write` — body `{ projectPath, songFolder, smapBase64 }`.
+ * Atomic overwrite of an existing `song.smap`. Returns 404 if the song
+ * folder doesn't exist.
+ */
+async function handleProjectSongWrite(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    if (typeof body.smapBase64 !== 'string' || !body.smapBase64) {
+      return sendJson(res, 400, { ok: false, error: 'smapBase64 is required' }, cors)
+    }
+    const folderAbs = path.join(projectPath, songFolder)
+    if (!existsSync(folderAbs)) {
+      return sendJson(res, 404, { ok: false, error: `song folder not found: ${songFolder}` }, cors)
+    }
+    const smapBytes = Buffer.from(body.smapBase64, 'base64')
+    await atomicWriteFile(path.join(folderAbs, SONG_SMAP_FILENAME), smapBytes)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/song/asset/write` — body
+ * `{ projectPath, songFolder, subpath, contentBase64 }`. Writes a single
+ * file under the song folder (e.g. `cue/cue-track.wav`). `subpath` is
+ * validated like `songFolder` — no `..`, no leading `/`, no `\\`.
+ * Intermediate directories are created on demand.
+ */
+function validateAssetSubpath(p, label = 'subpath') {
+  if (typeof p !== 'string' || p.length === 0) {
+    throw new Error(`Invalid ${label}: must be a non-empty string`)
+  }
+  if (p.startsWith('/')) throw new Error(`Invalid ${label}: must not start with "/"`)
+  if (p.includes('\\')) throw new Error(`Invalid ${label}: must use forward slashes`)
+  if (p.endsWith('/')) throw new Error(`Invalid ${label}: must not end with "/"`)
+  if (p.includes('//')) throw new Error(`Invalid ${label}: must not contain "//"`)
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.' || seg === '..') {
+      throw new Error(`Invalid ${label}: must not contain "." or ".." segments`)
+    }
+  }
+  return p
+}
+
+/**
+ * `GET /native/project/song/asset/read?projectPath=...&songFolder=...&subpath=...`
+ * — stream a single file from under the song folder. Path traversal blocked
+ * via the same validator as the write endpoint.
+ */
+function handleProjectSongAssetRead(req, res, cors, url) {
+  try {
+    const projectPath = url.searchParams.get('projectPath') ?? ''
+    const songFolder = url.searchParams.get('songFolder') ?? ''
+    const subpath = url.searchParams.get('subpath') ?? ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    validateRelSongFolder(songFolder)
+    validateAssetSubpath(subpath)
+    const filePath = path.join(projectPath, songFolder, subpath)
+    if (!existsSync(filePath)) {
+      sendJson(res, 404, { ok: false, error: 'File not found' }, cors)
+      return
+    }
+    let size = 0
+    try {
+      size = statSync(filePath).size
+    } catch {
+      /* ignore */
+    }
+    const isWav = subpath.toLowerCase().endsWith('.wav')
+    res.writeHead(200, {
+      ...cors,
+      'Content-Type': isWav ? 'audio/wav' : 'application/octet-stream',
+      ...(size > 0 ? { 'Content-Length': String(size) } : {}),
+    })
+    const stream = createReadStream(filePath)
+    stream.on('error', () => {
+      try {
+        res.end()
+      } catch {
+        /* ignore */
+      }
+    })
+    stream.pipe(res)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+async function handleProjectSongAssetWrite(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const subpath = validateAssetSubpath(body.subpath)
+    if (typeof body.contentBase64 !== 'string') {
+      return sendJson(res, 400, { ok: false, error: 'contentBase64 is required' }, cors)
+    }
+    const targetAbs = path.join(projectPath, songFolder, subpath)
+    const bytes = Buffer.from(body.contentBase64, 'base64')
+    await atomicWriteFile(targetAbs, bytes)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/song/remove` — body `{ projectPath, songFolder, deleteFiles }`.
+ * If `deleteFiles` is true, recursively removes the song folder. Otherwise
+ * a no-op (manifest mutation happens via /manifest/write). Always returns ok.
+ */
+async function handleProjectSongRemove(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const deleteFiles = body.deleteFiles === true
+    if (deleteFiles) {
+      const folderAbs = path.join(projectPath, songFolder)
+      await rm(folderAbs, { recursive: true, force: true })
+    }
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
 /**
  * `POST /native/pick-folder` — open the OS folder picker and return the
  * chosen absolute path. Used by the web app for projects that need an OS
@@ -434,7 +1020,12 @@ async function runQueuedJob(job) {
   child.stderr.on('data', (chunk) => {
     for (const raw of String(chunk).split('\n')) {
       const line = raw.trim()
-      if (line) emitJobEvent(job, { type: 'log', msg: line })
+      if (line) {
+        emitJobEvent(job, { type: 'log', msg: line })
+        // Mirror to sidecar console so `npm run dev --prefix desktop`
+        // surfaces the actual Python error when stems fail.
+        logWarn(`stems[${job.jobId.slice(0, 8)}] ${line}`)
+      }
     }
   })
 
@@ -1285,6 +1876,47 @@ function startBeaconServer() {
       return
     }
 
+    // /native/project/* — project-folder I/O over loopback HTTP. The web app
+    // never touches the filesystem for project I/O; the sidecar is the disk.
+    if (req.method === 'POST' && req.url === '/native/project/create') {
+      void handleProjectCreate(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/info') {
+      void handleProjectInfo(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/manifest/write') {
+      void handleProjectManifestWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/create') {
+      void handleProjectSongCreate(req, res, cors)
+      return
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/native/project/song/read')) {
+      const u = new URL(req.url, `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
+      handleProjectSongRead(req, res, cors, u)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/write') {
+      void handleProjectSongWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/remove') {
+      void handleProjectSongRemove(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/asset/write') {
+      void handleProjectSongAssetWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/native/project/song/asset/read')) {
+      const u = new URL(req.url, `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
+      handleProjectSongAssetRead(req, res, cors, u)
+      return
+    }
+
     if (req.method === 'GET' && req.url === '/native/setup/piper-tts/status') {
       handlePiperTtsSetupStatus(res, cors)
       return
@@ -1387,6 +2019,15 @@ app.whenReady().then(() => {
   logInfo(`  GET    /native/setup/stems/status    (check Demucs venv readiness)`)
   logInfo(`  POST   /native/setup/stems           (create venv + pip install demucs)`)
   logInfo(`  POST   /native/pick-folder           (Electron folder picker → absolute path)`)
+  logInfo(`  POST   /native/project/create        (create new project folder + manifest)`)
+  logInfo(`  POST   /native/project/info          (read manifest + per-song lite metadata + stems scan)`)
+  logInfo(`  POST   /native/project/manifest/write`)
+  logInfo(`  POST   /native/project/song/create   (mkdir + atomic write song.smap)`)
+  logInfo(`  GET    /native/project/song/read     (stream song.smap bytes)`)
+  logInfo(`  POST   /native/project/song/write    (atomic overwrite song.smap)`)
+  logInfo(`  POST   /native/project/song/remove   (optionally delete files from disk)`)
+  logInfo(`  POST   /native/project/song/asset/write (write arbitrary file under song folder)`)
+  logInfo(`  GET    /native/project/song/asset/read  (stream a single file under song folder)`)
   logInfo(`  GET    /native/setup/piper-tts/status`)
   logInfo(`  POST   /native/setup/piper-tts       (venv + piper-tts + default voice)`)
   logInfo(`  GET    /native/tts/hello-world         (debug WAV: "Hello world.")`)

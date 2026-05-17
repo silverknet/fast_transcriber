@@ -84,8 +84,15 @@ export async function analyzeDownbeatsViaDesktop(
 
 // ── Stem separation ────────────────────────────────────────────────────────
 
-/** Quality presets mirror the Tkinter stem_splitter app. */
+/**
+ * Quality presets mirror the Tkinter stem_splitter app. Each preset has a
+ * stable `slug` used as the on-disk subfolder name (`<song>/stems/<slug>/`)
+ * so a song can hold multiple renderings side by side and the mixer can
+ * always pick the highest-quality set available.
+ */
 export type StemQualityPreset = {
+  /** Stable identifier, used as the stems subfolder name and as a quality key. */
+  slug: 'best' | 'balanced' | 'preview'
   label: string
   model: string
   shifts: number
@@ -93,10 +100,18 @@ export type StemQualityPreset = {
 }
 
 export const STEM_QUALITY_PRESETS: StemQualityPreset[] = [
-  { label: 'Best — htdemucs_ft, shifts 10 (slow)', model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
-  { label: 'Balanced — htdemucs_ft, shifts 5 (medium)', model: 'htdemucs_ft', shifts: 5, overlap: 0.25 },
-  { label: 'Preview — htdemucs, shifts 1 (fast)', model: 'htdemucs', shifts: 1, overlap: 0.25 },
+  { slug: 'best',     label: 'Best — htdemucs_ft, shifts 10 (slow)',    model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
+  { slug: 'balanced', label: 'Balanced — htdemucs_ft, shifts 5 (medium)', model: 'htdemucs_ft', shifts: 5, overlap: 0.25 },
+  { slug: 'preview',  label: 'Preview — htdemucs, shifts 1 (fast)',       model: 'htdemucs', shifts: 1, overlap: 0.25 },
 ]
+
+/**
+ * Priority order — first wins. The `legacy` slug refers to flat-layout
+ * stems left over from before this split (i.e. `<song>/stems/vocals.wav`
+ * with no preset subfolder). They're treated as the lowest-quality
+ * fallback so a re-render at any tier supersedes them automatically.
+ */
+export const STEM_PRESET_PRIORITY: readonly string[] = ['best', 'balanced', 'preview', 'legacy']
 
 export type StemName = 'vocals' | 'drums' | 'bass' | 'other'
 
@@ -112,7 +127,16 @@ export type StemSeparationEvent =
   | { type: 'cleanup'; jobId: string }
 
 export type EnqueueStemsOptions = {
-  audio: Blob
+  /**
+   * Absolute OS path the sidecar reads. Either a regular audio file or a
+   * BarBro `.smap` container (sidecar extracts the audio chunk).
+   */
+  inputPath: string
+  /**
+   * Absolute OS path where final stem WAVs land flat (`vocals.wav`,
+   * `drums.wav`, …). The sidecar creates this if missing.
+   */
+  outputDir: string
   stems: StemName[]
   preset: StemQualityPreset
   /**
@@ -127,33 +151,30 @@ export type EnqueueStemsResult =
   | { ok: true; jobId: string; queuePosition: number }
   | { ok: false; error: string }
 
-function buildSeparateStemsUrl(
-  preset: StemQualityPreset,
-  stems: StemName[],
-  songId?: string | null,
-): string {
-  const qs = new URLSearchParams({
-    model: preset.model,
-    shifts: String(preset.shifts),
-    overlap: String(preset.overlap),
-    stems: stems.join(','),
-  })
-  if (songId) qs.set('songId', songId)
-  return `${SEPARATE_STEMS_URL}?${qs.toString()}`
-}
-
 /**
- * Enqueue a stem-separation job on the desktop sidecar. Returns the jobId
- * **immediately** — actual Demucs work runs serially in a server-side queue.
- * Subscribe to progress via `subscribeToJobEvents(jobId)`.
+ * Enqueue a stem-separation job on the desktop sidecar. **No audio bytes
+ * cross HTTP** — the sidecar reads from `inputPath` and writes flat stem
+ * files into `outputDir` directly. Returns the jobId immediately; the
+ * sidecar runs jobs serially in a queue.
+ *
+ * Subscribe to progress via `subscribeToJobEvents(jobId)`. On `state:done`
+ * the stems are already on disk — no fetch step needed.
  */
 export async function enqueueStemSeparation(opts: EnqueueStemsOptions): Promise<EnqueueStemsResult> {
   let res: Response
   try {
-    res = await fetch(buildSeparateStemsUrl(opts.preset, opts.stems, opts.songId), {
+    res = await fetch(SEPARATE_STEMS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'audio/wav' },
-      body: opts.audio,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        inputPath: opts.inputPath,
+        outputDir: opts.outputDir,
+        model: opts.preset.model,
+        shifts: opts.preset.shifts,
+        overlap: opts.preset.overlap,
+        stems: opts.stems.join(','),
+        songId: opts.songId ?? undefined,
+      }),
       cache: 'no-store',
     })
   } catch (e) {
@@ -315,22 +336,6 @@ export async function cancelJob(jobId: string): Promise<void> {
   } catch {
     /* best-effort */
   }
-}
-
-/** Fetch one stem WAV by jobId + filename. */
-export async function fetchStemBlob(
-  jobId: string,
-  filename: string,
-  signal?: AbortSignal,
-): Promise<Blob> {
-  const res = await fetch(`${BASE_URL}/native/stems/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`, {
-    signal,
-    cache: 'no-store',
-  })
-  if (!res.ok) {
-    throw new Error(`Stem fetch failed (HTTP ${res.status})`)
-  }
-  return res.blob()
 }
 
 // ── Stems dependency setup ─────────────────────────────────────────────────

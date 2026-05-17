@@ -45,11 +45,11 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
 | SE | Core timeline / waveform / playback | M | Large `WaveformPlayer` surface; manual QA via [`regression-checklist`](regression-checklist.md). |
-| SE | Beat / bar grid editing | M | `applyBarGridAction`, strip UX; errors surfaced as `beatEditError`. |
+| SE | Beat / bar grid editing | M | `applyBarGridAction`, strip UX, **bar-edge drag** (`setBarBoundary` + `TimelineBeatGrid` handles); errors surfaced as `beatEditError`. |
 | SE | Chord edit | M | Radial picker, multi-beat, paste pipeline; some coverage in `chordClipboard.test.ts`. |
 | SE | Section edit | M | Range select + tag + overlap replace (`sectionEdit.ts`); labels default from kind only. |
 | SE | Cue UX — count-in / prepend | M | Radio count-in, live prepend math (`computeCountIn`); **click cue WAV** generate + `cueTrackExport` fingerprint + auto-drop on drift (`renderCueTrack.ts`, `cueTrackFingerprint.ts`, `patchSongMap`); **Cue tab** offline **song + cue** headphone preview (`mixSongCuePreview.ts`, optional live click overlay). `CueSettings` still has unused fields (`spoken`, templates…). |
-| SE | Text-to-speech cue audio | S | Desktop [`piper_tts/`](../desktop/native/python/piper_tts/) + loopback `GET /native/tts/hello-world`; web debug [`/texttospeech`](../src/routes/texttospeech/+page.svelte). Cue track / editor wiring still **N**. |
+| SE | Text-to-speech cue audio | M | Piper `POST /native/tts/synthesize` + mixed into [`renderCueTrack`](../src/lib/audio/renderCueTrack.ts) when BarBro desktop is running; schedule in [`cueTrackSpeechSchedule.ts`](../src/lib/audio/cueTrackSpeechSchedule.ts). Web-only sessions get clicks + on-screen note if desktop is off. |
 | SE | Chord / lead-sheet PDF | S | `pdfLeadSheet.ts` + menu export; slash notation / engraving quality weak vs “gig-ready chart”. |
 
 #### Detail — `SE`
@@ -59,7 +59,7 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
   **Gap:** No automated UI/e2e harness; edge cases (very short clips, permission revoke mid-session, huge MP3 decode) rely on manual passes. **→ R** needs broader automated coverage or a tightened manual matrix.
 
 - **Beat / bar grid (`M`)**  
-  **Evidence:** `timelineEdit` / bar grid actions persist through `patchSongMap`.  
+  **Evidence:** `timelineEdit` / bar grid actions persist through `patchSongMap`; grid mode can **drag bar left/right edges** to stretch/shrink a bar (beats re-equalized); `timelineEdit.test.ts` covers `setBarBoundary`.  
   **Gap:** Complex edits (odd meters mid-song, sparse failure messages) not exhaustively tested in Vitest. **→ R** when destructive edits have invariant tests + clearer recovery.
 
 - **Chord edit (`M`, nearing `R` on clipboard slice)**  
@@ -74,9 +74,9 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
   **Evidence:** `cues.mode` driven to `countIn` / `off`; prepend seconds computed for stem alignment guidance; `/edit` Cue tab can build a temporary **song + cue** WAV (`buildSongCueMixWavBlob`) from in-tab blob or project `cueTrackExport.relativePath`, with optional Web Audio metronome overlay (may double baked-in clicks).  
   **Gap:** `CueMode` includes `click` / `spoken` but editor does not expose them; `useSectionLabels`, `template`, `language` unused. **→ R** when modes match real rehearsal flows + persisted cues sync with exports.
 
-- **TTS cue audio (`S` on desktop slice, still `N` in editor/export)**  
-  **Evidence:** Isolated Piper module [`piper_tts/`](../desktop/native/python/piper_tts/) (`synthesize_wav.py`, own venv); sidecar `POST /native/setup/piper-tts`, `GET /native/tts/hello-world`; [`desktopBridge.ts`](../src/lib/client/desktopBridge.ts) helpers; debug page [`/texttospeech`](../src/routes/texttospeech/+page.svelte).  
-  **Gap:** No cue clip in `SongMap`, no export to project folder / Ableton. **→ M** when a chosen phrase renders to WAV in the song’s project path and the editor exposes it beside count-in.
+- **TTS cue audio (`M` on desktop slice; web = clicks-only + note)**  
+  **Evidence:** `POST /native/tts/synthesize` + `--text-file` in Piper; [`renderCueTrack.ts`](../src/lib/audio/renderCueTrack.ts) mixes title + count-in number words + section callouts; count-in uses a **title prelude** + synthetic grid clicks (no pickup/map double-clicks) + slightly sped-up count TTS; [`cueTrackSpeechSchedule.ts`](../src/lib/audio/cueTrackSpeechSchedule.ts); [`fetchDesktopTtsSynthesizeWav`](../src/lib/client/desktopBridge.ts); cue fingerprint includes `sections` and `titlePreludeSec`.  
+  **Gap:** No in-browser neural TTS (requires sidecar); custom per-section phrasing / languages / `CueMode.spoken` UI still thin. **→ R** when web fallback or cloud TTS exists and copy is user-editable.
 
 - **Lead-sheet PDF (`S`)**  
   **Evidence:** jsPDF path draws staff skeleton, chords, section labels; invoked from menu.  

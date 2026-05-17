@@ -13,26 +13,25 @@
   } from '$lib/components/ui/dropdown-menu'
   import ProjectSongCard from '$lib/components/ProjectSongCard.svelte'
   import RemoveSongDialog from '$lib/components/RemoveSongDialog.svelte'
+  import ExportBackingTrackDialog from '$lib/components/ExportBackingTrackDialog.svelte'
   import CopyFromCloudDialog from '$lib/components/CopyFromCloudDialog.svelte'
   import { Cloud, ListPlus, Plus, RefreshCw } from '@lucide/svelte'
   import {
-    finalizeStemJobToSong,
     importSmapToProject,
     loadProjectSongIntoEditor,
     metadataLiteFromSongMap,
     moveProjectSong,
-    PROJECT_HANDLE_KEY,
-    refreshProjectStemRefs,
+    refreshProjectInfo,
     removeSongFromProject,
     renameProject,
     setSongHidden,
-    tryRestoreActiveProject,
+    tryRestoreLastProject,
   } from '$lib/project/commit'
   import { listJobsViaDesktop } from '$lib/client/desktopBridge'
-  import { hydrateFromSidecar, removeJob } from '$lib/stores/stemJobs'
-  import { loadFolderHandle } from '$lib/client/folderHandle'
+  import { hydrateFromSidecar } from '$lib/stores/stemJobs'
   import { project } from '$lib/stores/project'
   import { readSmapJsonOnly } from '$lib/songmap/persist'
+  import { songMap } from '$lib/stores/songMap'
   import type { ProjectSongEntry } from '$lib/project/types'
 
   let restoring = $state(true)
@@ -43,6 +42,9 @@
   let removeDialogOpen = $state(false)
   let removeTarget = $state<{ id: string; title: string } | null>(null)
 
+  let exportDialogOpen = $state(false)
+  let exportTarget = $state<{ folder: string; title: string } | null>(null)
+
   let smapImportInput = $state<HTMLInputElement | undefined>()
   let copyFromCloudOpen = $state(false)
 
@@ -52,7 +54,6 @@
   /** Refresh button state. */
   let refreshing = $state(false)
   let refreshMsg = $state('')
-  /** Full refresh summary for hover (short line in UI). */
   let refreshMsgTitle = $state('')
 
   async function onRefreshProject() {
@@ -61,16 +62,15 @@
     refreshMsg = ''
     refreshMsgTitle = ''
     try {
-      const r = await refreshProjectStemRefs()
+      const r = await refreshProjectInfo()
       if (r.errors.length > 0) {
-        const errDetail = r.errors.join('; ')
         refreshMsg = `${r.updatedSongs} song(s) updated · ${r.errors.length} error(s)`
-        refreshMsgTitle = `${r.newRefs} new refs. ${errDetail}`
+        refreshMsgTitle = r.errors.join('; ')
       } else if (r.updatedSongs === 0) {
-        refreshMsg = 'Nothing new'
+        refreshMsg = 'Up to date'
         refreshMsgTitle = 'No new stem files detected in song folders.'
       } else {
-        refreshMsg = `${r.newRefs} new stem ref(s) · ${r.updatedSongs} song(s)`
+        refreshMsg = `${r.updatedSongs} song(s) updated`
         refreshMsgTitle = `Re-scanned project folders for stems and metadata.`
       }
     } catch (e) {
@@ -89,29 +89,30 @@
     if (!browser) return
     void (async () => {
       try {
-        if (!$project.data || !$project.folderHandle) {
-          const handle = await loadFolderHandle(PROJECT_HANDLE_KEY)
-          const data = await tryRestoreActiveProject(handle)
+        if (!$project.data || !$project.osPath) {
+          const data = await tryRestoreLastProject()
           if (!data) {
             restoreError = 'No active project. Use File → Open Project to pick one.'
             return
           }
+        } else {
+          // Already loaded — pull fresh info so any stems that landed while
+          // we were elsewhere appear right away.
+          await refreshProjectInfo()
         }
-        // Auto-expand: explicit `?expand=<songId>` wins, otherwise fall back
-        // to the currently-active project song (e.g. user just came from /edit).
+        // Songs are collapsed by default — the overview is the point of
+        // this view. Only auto-expand when the URL says so.
         const url = get(page).url
         const wantExpand = url.searchParams.get('expand')
         const songs = $project.data?.songs ?? []
         if (wantExpand && songs.some((s) => s.id === wantExpand)) {
           expandedSongId = wantExpand
-        } else if ($project.activeSongId && songs.some((s) => s.id === $project.activeSongId)) {
-          expandedSongId = $project.activeSongId
         }
-        // Sidecar jobs may have completed while the web app was closed.
-        // Hydrate the store + auto-finalize any `done` jobs whose songId
-        // matches a song in this project. This makes the "close web
-        // mid-run, reopen later" path land the stems automatically.
-        await syncSidecarJobsAndAutoFinalize()
+        // Hydrate the in-flight sidecar jobs into the store so the active
+        // job pill renders. We no longer need to "finalize" anything — the
+        // sidecar wrote stems straight into the project folder, and
+        // `refreshProjectInfo` above already mirrored those into the manifest.
+        await hydrateSidecarJobs()
       } catch (e) {
         restoreError = e instanceof Error ? e.message : 'Failed to restore project.'
       } finally {
@@ -120,37 +121,9 @@
     })()
   })
 
-  /**
-   * Hydrate stemJobs from the sidecar's authoritative job list, then run
-   * the shared finalizer for any `done` jobs that belong to songs in this
-   * project. Best-effort — sidecar unreachable just leaves the store as-is.
-   */
-  async function syncSidecarJobsAndAutoFinalize() {
+  async function hydrateSidecarJobs() {
     const sidecarJobs = await listJobsViaDesktop()
-    if (sidecarJobs.length === 0) return
-    hydrateFromSidecar(sidecarJobs)
-
-    if (!$project.data || !$project.folderHandle) return
-    const songsById = new Map($project.data.songs.map((s) => [s.id, s]))
-
-    for (const job of sidecarJobs) {
-      if (job.state !== 'done') continue
-      if (!job.songId) continue
-      const entry = songsById.get(job.songId)
-      if (!entry) continue
-      try {
-        await finalizeStemJobToSong({
-          projectFolderHandle: $project.folderHandle,
-          entry,
-          jobId: job.jobId,
-          files: job.files,
-        })
-      } catch {
-        /* per-job failures already get logged into the store + folder error UI */
-      }
-      // Drop the now-finalized job from the local store so the UI clears.
-      removeJob(job.jobId)
-    }
+    if (sidecarJobs.length > 0) hydrateFromSidecar(sidecarJobs)
   }
 
   function commitNameRename() {
@@ -172,11 +145,6 @@
     }
   }
 
-  /**
-   * Expand a song's Set panel. Single-expansion at a time — expanding a
-   * different row collapses the previous and loads the new song into
-   * the global songMap/audioSession stores so the panel's stem UI works.
-   */
   async function onToggleExpand(songId: string) {
     actionError = ''
     if (expandedSongId === songId) {
@@ -215,6 +183,22 @@
     removeDialogOpen = true
   }
 
+  async function askExport(entry: ProjectSongEntry) {
+    const title = $project.metadataByFolder[entry.folder]?.title ?? entry.folder
+    // Load the song into the editor so its SongMap is available for
+    // synthesising the click track on the fly. Cheap if it's already active.
+    if ($project.activeSongId !== entry.id) {
+      try {
+        await loadProjectSongIntoEditor(entry.id)
+      } catch (e) {
+        actionError = e instanceof Error ? e.message : 'Could not load song for export'
+        return
+      }
+    }
+    exportTarget = { folder: entry.folder, title }
+    exportDialogOpen = true
+  }
+
   async function onRemoveConfirmed(deleteFiles: boolean) {
     if (!removeTarget) return
     const id = removeTarget.id
@@ -247,9 +231,6 @@
     try {
       const sp = await readSmapJsonOnly(file)
       const meta = metadataLiteFromSongMap(sp.songMap)
-      // Need the full bytes (including audio chunk) — but readSmapJsonOnly
-      // already validated structure. Pass the raw bytes through to the
-      // project so the audio chunk is preserved.
       await importSmapToProject(file, meta)
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'Import failed'
@@ -327,13 +308,13 @@
             canMoveUp={index > 0}
             canMoveDown={index < songs.length - 1}
             isExpanded={expandedSongId === entry.id}
-            projectFolderHandle={$project.folderHandle}
             onToggleExpand={() => void onToggleExpand(entry.id)}
             onMoveUp={() => void onMoveSong(entry, -1)}
             onMoveDown={() => void onMoveSong(entry, 1)}
             onEdit={() => void onEditSong(entry.id)}
             onToggleHidden={() => void onToggleHidden(entry)}
             onRemove={() => askRemove(entry)}
+            onExport={() => void askExport(entry)}
           />
         {/each}
       </ul>
@@ -379,6 +360,15 @@
   bind:open={removeDialogOpen}
   songTitle={removeTarget?.title ?? ''}
   onConfirm={onRemoveConfirmed}
+/>
+
+<ExportBackingTrackDialog
+  bind:open={exportDialogOpen}
+  projectPath={$project.osPath}
+  songFolder={exportTarget?.folder ?? null}
+  songTitle={exportTarget?.title ?? ''}
+  metadata={exportTarget ? $project.metadataByFolder[exportTarget.folder] : undefined}
+  songMap={$songMap}
 />
 
 <CopyFromCloudDialog bind:open={copyFromCloudOpen} />

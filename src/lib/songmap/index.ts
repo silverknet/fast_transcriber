@@ -87,6 +87,7 @@ export {
   redistributeBeatsEvenly,
   removeBarAtEnd,
   removeBarAtStart,
+  setBarBoundary,
   setBarBeatCount,
   splitBarAtMidpoint,
 } from './timelineEdit'

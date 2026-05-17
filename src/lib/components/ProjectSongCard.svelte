@@ -8,12 +8,14 @@
   import { Button } from '$lib/components/ui/button'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
   import SongSetPanel from '$lib/components/SongSetPanel.svelte'
+  import { selectBestStemSet } from '$lib/project/commit'
   import type { ProjectSongEntry } from '$lib/project/types'
   import type { ProjectSongMetadataLite } from '$lib/stores/project'
   import { stemJobs, type StemJobEntry } from '$lib/stores/stemJobs'
   import {
     ChevronDown,
     ChevronUp,
+    Download,
     Eye,
     EyeOff,
     Pencil,
@@ -26,26 +28,26 @@
     canMoveUp,
     canMoveDown,
     isExpanded,
-    projectFolderHandle,
     onToggleExpand,
     onMoveUp,
     onMoveDown,
     onEdit,
     onToggleHidden,
     onRemove,
+    onExport,
   } = $props<{
     entry: ProjectSongEntry
     metadata?: ProjectSongMetadataLite
     canMoveUp: boolean
     canMoveDown: boolean
     isExpanded: boolean
-    projectFolderHandle: FileSystemDirectoryHandle | null
     onToggleExpand: () => void
     onMoveUp: () => void
     onMoveDown: () => void
     onEdit: () => void
     onToggleHidden: () => void
     onRemove: () => void
+    onExport: () => void
   }>()
 
   function formatKey(k: ProjectSongMetadataLite['keyDetail']): string {
@@ -65,6 +67,22 @@
     STEM_TRACKS.map((t) => ({ name: t.name, present: !!metadata?.stemRefs?.[t.name] })),
   )
   let stemsReadyCount = $derived(stemBadges.filter((b) => b.present).length)
+  /** Highest-quality stem set on disk (or null if none). Used for the summary line. */
+  let bestStems = $derived(selectBestStemSet(metadata))
+  /** Other stem sets on disk besides the best — e.g. "+1 preview" if both exist. */
+  let otherStemPresets = $derived.by<string[]>(() => {
+    const sets = metadata?.stemsByPreset
+    if (!sets || !bestStems) return []
+    return Object.keys(sets).filter((s) => s !== bestStems!.preset && sets[s]!.length > 0)
+  })
+  let hasCueTrack = $derived(!!metadata?.hasCueTrack)
+  /**
+   * Click is always available for project songs — every song was analysed
+   * before joining the project, so beats exist and clicks are derivable on
+   * the fly. The disk file is just a cache for export speed.
+   */
+  let clickOnDisk = $derived(!!metadata?.hasClickTrack)
+  let clickAvailable = $derived(true)
 
   /** Active stem job for this song (queued / running) — drives the status pill. */
   let activeJob = $derived.by<StemJobEntry | null>(() => {
@@ -109,7 +127,7 @@
         {/if}
       </div>
 
-      <!-- Stem status badges -->
+      <!-- Stem + cue status badges -->
       <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
         {#each stemBadges as b (b.name)}
           <span
@@ -125,8 +143,37 @@
             <span class:text-muted-foreground={!b.present}>{b.name}</span>
           </span>
         {/each}
-        <span class="text-muted-foreground ml-auto shrink-0">
-          {stemsReadyCount}/{stemBadges.length} stems
+        <span
+          class="inline-flex items-center gap-1 font-mono"
+          title={hasCueTrack ? 'Cue track: ready (clicks + speech)' : 'Cue track: not generated — open Edit > Cue and render it'}
+        >
+          <span
+            class="size-1.5 shrink-0 rounded-full {hasCueTrack ? 'bg-emerald-500' : 'bg-foreground/20'}"
+            aria-hidden="true"
+          ></span>
+          <span class:text-muted-foreground={!hasCueTrack}>cue</span>
+        </span>
+        <span
+          class="inline-flex items-center gap-1 font-mono"
+          title={clickOnDisk
+            ? 'Click track: ready (file on disk)'
+            : 'Click track: auto-derived from beats — render in Edit > Cue to cache to disk'}
+        >
+          <span
+            class="size-1.5 shrink-0 rounded-full {clickAvailable ? 'bg-emerald-500' : 'bg-foreground/20'}"
+            aria-hidden="true"
+          ></span>
+          <span class:text-muted-foreground={!clickAvailable}>click</span>
+        </span>
+        <span
+          class="text-muted-foreground ml-auto shrink-0"
+          title={otherStemPresets.length > 0
+            ? `Also on disk (unused, lower quality): ${otherStemPresets.join(', ')}`
+            : undefined}
+        >
+          {stemsReadyCount}/{stemBadges.length} stems{bestStems
+            ? ` · ${bestStems.preset}${otherStemPresets.length > 0 ? ` (+${otherStemPresets.length})` : ''}`
+            : ''} · {hasCueTrack ? 'cue ✓' : 'cue —'} · click ✓
         </span>
       </div>
 
@@ -192,6 +239,16 @@
         <Pencil class="size-3.5" aria-hidden="true" />
         Edit
       </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-8 gap-1 px-2"
+        onclick={onExport}
+        title="Mix stems and/or cue track into a single WAV download"
+      >
+        <Download class="size-3.5" aria-hidden="true" />
+        Export
+      </Button>
       <Button variant="outline" size="sm" class="h-8 gap-1 px-2" onclick={onToggleHidden}>
         {#if entry.hidden}
           <Eye class="size-3.5" aria-hidden="true" />
@@ -225,7 +282,7 @@
   </div>
 
   <!-- ── Expanded panel ─────────────────────────────────────────────── -->
-  {#if isExpanded && projectFolderHandle}
-    <SongSetPanel {entry} {projectFolderHandle} />
+  {#if isExpanded}
+    <SongSetPanel {entry} />
   {/if}
 </li>

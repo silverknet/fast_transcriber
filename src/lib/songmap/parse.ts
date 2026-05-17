@@ -208,6 +208,31 @@ function parseCues(raw: unknown, path: string): CueSettings {
   }
 }
 
+function parseMixState(raw: unknown, path: string): import('./types').MixState | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  const tracksRaw = o.tracks
+  if (!Array.isArray(tracksRaw)) {
+    throw new SongMapParseError('mixState.tracks must be an array', `${path}.tracks`)
+  }
+  const tracks: import('./types').MixTrackState[] = []
+  for (let i = 0; i < tracksRaw.length; i++) {
+    const t = expectObject(tracksRaw[i], `${path}.tracks[${i}]`)
+    const key = reqString(t.key, `${path}.tracks[${i}].key`)
+    const volume = reqNum(t.volume, `${path}.tracks[${i}].volume`)
+    if (!(volume >= 0)) {
+      throw new SongMapParseError('volume must be >= 0', `${path}.tracks[${i}].volume`)
+    }
+    const entry: import('./types').MixTrackState = { key, volume }
+    if (typeof t.muted === 'boolean' && t.muted) entry.muted = true
+    if (typeof t.soloed === 'boolean' && t.soloed) entry.soloed = true
+    tracks.push(entry)
+  }
+  const out: import('./types').MixState = { tracks }
+  if (typeof o.master === 'number' && o.master >= 0) out.master = o.master
+  return out
+}
+
 function parseCueTrackExport(raw: unknown, path: string): CueTrackExport | undefined {
   if (raw === undefined || raw === null) return undefined
   const o = expectObject(raw, path)
@@ -300,6 +325,7 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
       raw.cueTrackExport !== undefined && raw.cueTrackExport !== null
         ? parseCueTrackExport(raw.cueTrackExport, 'cueTrackExport')
         : undefined,
+    mixState: parseMixState(raw.mixState, 'mixState'),
   }
 }
 
@@ -338,4 +364,5 @@ const KNOWN_TOP_KEYS = new Set([
   'projectFolder',
   'stemRefs',
   'cueTrackExport',
+  'mixState',
 ])

@@ -249,6 +249,23 @@ export function validateSongMap(map: SongMap): ValidationResult {
       }
     }
   }
+  if (map.mixState !== undefined) {
+    if (!map.mixState || typeof map.mixState !== 'object') {
+      errors.push('mixState invalid')
+    } else {
+      if (!Array.isArray(map.mixState.tracks)) errors.push('mixState.tracks must be an array')
+      else {
+        for (let i = 0; i < map.mixState.tracks.length; i++) {
+          const t = map.mixState.tracks[i]
+          if (!t || typeof t !== 'object') errors.push(`mixState.tracks[${i}] invalid`)
+          else {
+            if (typeof t.key !== 'string' || !t.key) errors.push(`mixState.tracks[${i}].key invalid`)
+            if (!Number.isFinite(t.volume) || t.volume < 0) errors.push(`mixState.tracks[${i}].volume invalid`)
+          }
+        }
+      }
+    }
+  }
 
   return {
     ok: errors.length === 0,

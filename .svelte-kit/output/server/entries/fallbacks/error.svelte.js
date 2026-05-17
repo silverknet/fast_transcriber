@@ -1,4 +1,5 @@
-import { C as getContext, O as escape_html } from "../../chunks/internal.js";
+import "../../chunks/index-server.js";
+import { A as escape_html, b as getContext } from "../../chunks/server.js";
 import { i as navigating$1, r as stores } from "../../chunks/client.js";
 Object.defineProperty({
 	get from() {

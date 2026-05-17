@@ -4,6 +4,11 @@
  */
 import type { BeatClickPoint } from '$lib/audio/debugClickTrack'
 import { computeCountIn } from '$lib/audio/computeCountIn'
+import {
+  countInSpeechOutputTimes,
+  firstBarDownbeatBeat,
+  titleCuePreludeSec,
+} from '$lib/audio/cueTrackSpeechSchedule'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { SongMap } from '$lib/songmap/types'
@@ -12,7 +17,8 @@ const END_EPS = 0.028
 
 /**
  * Click times on the **mix** timeline (0 = start of the mixed preview / cue file):
- * `prependSec + (beat.timeSec - trimStart)` for beats inside the trim window.
+ * `titleCuePreludeSec + prependSec + (beat.timeSec - trimStart)` for trim beats; count-in mode adds
+ * synthetic grid clicks in the prelude and skips pickup beats that would duplicate them.
  */
 export function mixTimelineClickPoints(
   sm: SongMap,
@@ -20,14 +26,29 @@ export function mixTimelineClickPoints(
   trimEnd: number,
   prependSec: number,
 ): BeatClickPoint[] {
+  const preludeSec = titleCuePreludeSec(sm)
+  const trim = { startSec: trimStart, endSec: trimEnd }
+  const fd = firstBarDownbeatBeat(sm)
+  const countInBeats =
+    sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0 ? sm.cues.countInBeats : 0
+  const countInActive = countInBeats > 0 && Boolean(fd)
+
   const out: BeatClickPoint[] = []
+
+  if (countInActive) {
+    for (const t of countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)) {
+      out.push({ timeSec: preludeSec + t, downbeat: false })
+    }
+  }
+
   for (const b of sortBeatsByTime(sm.timeline.beats)) {
     if (b.timeSec < trimStart - 1e-9) continue
     if (b.timeSec >= trimEnd - END_EPS) continue
-    const t = prependSec + (b.timeSec - trimStart)
+    if (countInActive && fd && b.timeSec < fd.timeSec) continue
+    const t = preludeSec + prependSec + (b.timeSec - trimStart)
     if (t >= 0) out.push({ timeSec: t, downbeat: b.indexInBar === 0 })
   }
-  return out
+  return out.sort((a, b) => a.timeSec - b.timeSec)
 }
 
 function linearResampleMono(
@@ -69,6 +90,7 @@ export async function buildSongCueMixWavBlob(
     const ci = computeCountIn(sm, sm.cues.countInBeats)
     if (ci) prependSec = ci.prependSec
   }
+  const preludeSec = titleCuePreludeSec(sm)
 
   const ac = new AudioContext()
   try {
@@ -79,7 +101,7 @@ export async function buildSongCueMixWavBlob(
     const targetLen = cueCh.length
     if (targetLen < 16) throw new Error('Cue buffer too short')
 
-    const prependSamples = Math.min(Math.floor(prependSec * sr), targetLen)
+    const prependSamples = Math.min(Math.floor((preludeSec + prependSec) * sr), targetLen)
     const songSlots = Math.max(0, targetLen - prependSamples)
 
     const i0 = Math.max(0, Math.floor(trim.startSec * songBuf.sampleRate))

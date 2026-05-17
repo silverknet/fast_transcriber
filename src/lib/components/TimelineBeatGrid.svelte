@@ -48,6 +48,9 @@
     /** Chords mode: multi-select beats (timeline order); single-click also sets `selectedBeatId`. */
     chordsSelectionBeatIds = $bindable<string[]>([]),
     chordLabelByBeatId = {} as Record<string, string>,
+    /** Song timeline bounds (sec); required for bar-edge stretch so the last bar can extend to decode end. */
+    timelineMinSec = 0,
+    timelineMaxSec = 0,
   }: {
     viewStart: number
     viewEnd: number
@@ -66,6 +69,8 @@
     selectedBeatId?: string | null
     chordsSelectionBeatIds?: string[]
     chordLabelByBeatId?: Record<string, string>
+    timelineMinSec?: number
+    timelineMaxSec?: number
   } = $props()
 
   let gridEl = $state<HTMLDivElement | undefined>()
@@ -370,11 +375,88 @@
 
   let sectionsDragCleanup: (() => void) | null = null
   let chordsDragCleanup: (() => void) | null = null
+  let barBoundaryResizeCleanup: (() => void) | null = null
 
   onDestroy(() => {
     sectionsDragCleanup?.()
     chordsDragCleanup?.()
+    barBoundaryResizeCleanup?.()
   })
+
+  let barBoundaryStretchReady = $derived(
+    editing && stripMode === 'grid' && Boolean(onAction) && timelineMaxSec > timelineMinSec + 1e-6,
+  )
+
+  function onBarBoundaryPointerDown(e: PointerEvent, barId: string, edge: 'left' | 'right') {
+    if (!onAction || stripMode !== 'grid' || !editing || e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    selectedBarId = barId
+
+    barBoundaryResizeCleanup?.()
+    const pid = e.pointerId
+    let raf = 0
+    let pending: number | null = null
+
+    const emit = (t: number) => {
+      onAction({
+        type: 'setBarBoundary',
+        barId,
+        edge,
+        boundarySec: t,
+        timelineMinSec,
+        timelineMaxSec,
+      })
+    }
+
+    const flush = () => {
+      raf = 0
+      if (pending === null) return
+      const t = pending
+      pending = null
+      emit(t)
+    }
+
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return
+      ev.preventDefault()
+      pending = timeFromClientX(ev.clientX)
+      if (!raf) raf = requestAnimationFrame(flush)
+    }
+
+    const teardown = () => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = 0
+      if (pending !== null) {
+        emit(pending)
+        pending = null
+      }
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      barBoundaryResizeCleanup = null
+      try {
+        gridEl?.releasePointerCapture(pid)
+      } catch {
+        /* not captured */
+      }
+    }
+
+    const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return
+      teardown()
+    }
+
+    try {
+      gridEl?.setPointerCapture(pid)
+    } catch {
+      /* */
+    }
+    window.addEventListener('pointermove', move, { passive: false })
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    barBoundaryResizeCleanup = teardown
+  }
 
   function applySectionsClick(hit: Bar, shift: boolean, meta: boolean) {
     const idx = hit.index
@@ -640,6 +722,25 @@
       data-chord-beat-strip={stripMode === 'chords' ? '' : undefined}
       onpointerdown={onStripPointerDown}
     ></div>
+  {/if}
+
+  {#if barBoundaryStretchReady}
+    {#each barSlices as slice (slice.bar.id)}
+      <div
+        class="absolute top-0 bottom-0 z-[35] w-2 -translate-x-1/2 cursor-ew-resize touch-none select-none"
+        style:left="{slice.x0}px"
+        role="separator"
+        aria-label="Drag to resize bar start"
+        onpointerdown={(ev) => onBarBoundaryPointerDown(ev, slice.bar.id, 'left')}
+      ></div>
+      <div
+        class="absolute top-0 bottom-0 z-[35] w-2 -translate-x-1/2 cursor-ew-resize touch-none select-none"
+        style:left="{slice.x1}px"
+        role="separator"
+        aria-label="Drag to resize bar end"
+        onpointerdown={(ev) => onBarBoundaryPointerDown(ev, slice.bar.id, 'right')}
+      ></div>
+    {/each}
   {/if}
 
   <!-- Section titles (sections mode): above bar fills -->

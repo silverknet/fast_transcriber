@@ -1,14 +1,14 @@
 /**
  * Project song auto-save: subscribes to the songMap store and writes
- * `song.smap` to disk when **all** of the following hold:
+ * `song.smap` to the project folder via the desktop sidecar when **all**
+ * of the following hold:
  *
- * 1. A project is open (`project.data` non-null)
+ * 1. A project is open (`project.osPath` non-null)
  * 2. `project.activeSongFolder` is non-null
  * 3. `project.activeSongId` is non-null
  * 4. `project.editingMode === 'project-song'`
  * 5. Current route is `/edit` (read from `$page.route.id`)
- * 6. Fresh `queryPermission('readwrite')` on the project's folder handle
- *    returns `'granted'`
+ * 6. The desktop companion is reachable (sidecar ping succeeded)
  * 7. **Manifest invariant**: there exists an entry `e` in the manifest with
  *    `e.folder === activeSongFolder` AND `e.id === activeSongId`
  *
@@ -23,19 +23,13 @@
 import { get, type Unsubscriber } from 'svelte/store'
 import { browser } from '$app/environment'
 import { page } from '$app/stores'
-import {
-  getDirectoryHandleByPath,
-  writeFileToHandle,
-} from '$lib/client/folderHandle'
-import { SONG_SMAP_FILENAME } from '$lib/project/commit'
+import { writeProjectSong } from '$lib/client/desktopProjectFs'
+import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
 import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
-import {
-  patchMetadataForFolder,
-  project,
-} from '$lib/stores/project'
-import { metadataLiteFromSongMap } from '$lib/project/commit'
+import { patchMetadataForFolder, project } from '$lib/stores/project'
 import { songMap } from '$lib/stores/songMap'
 
 const DEBOUNCE_MS = 1500
@@ -46,26 +40,13 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let writing = false
 let pendingWhileWriting = false
 
-type FSPermHandle = FileSystemDirectoryHandle & {
-  queryPermission(opts: { mode: 'readwrite' | 'read' }): Promise<PermissionState>
-}
-
-async function isStillGranted(handle: FileSystemDirectoryHandle): Promise<boolean> {
-  try {
-    const status = await (handle as FSPermHandle).queryPermission({ mode: 'readwrite' })
-    return status === 'granted'
-  } catch {
-    return false
-  }
-}
-
 async function tryWriteOnce(): Promise<void> {
   const snap = get(project)
   const sm = get(songMap)
   if (!sm) return
 
   // Guards 1–4
-  if (!snap.data || !snap.folderHandle) return
+  if (!snap.data || !snap.osPath) return
   if (!snap.activeSongFolder || !snap.activeSongId) return
   if (snap.editingMode !== 'project-song') return
 
@@ -79,20 +60,11 @@ async function tryWriteOnce(): Promise<void> {
   )
   if (!entry) return
 
-  // Guard 6: permission re-check (after we know there's something to write)
-  const granted = await isStillGranted(snap.folderHandle)
-  if (!granted) return
+  // Guard 6: sidecar reachable
+  if (!get(desktopCompanionStatus).reachable) return
 
   const sess = get(audioSession)
   const state = restorableSongState(sm, sess.file ?? null)
-
-  let songDir: FileSystemDirectoryHandle
-  try {
-    songDir = await getDirectoryHandleByPath(snap.folderHandle, snap.activeSongFolder)
-  } catch {
-    // Directory doesn't exist (entry was hand-edited / removed). Bail.
-    return
-  }
 
   let blob: Blob
   try {
@@ -101,11 +73,9 @@ async function tryWriteOnce(): Promise<void> {
     return
   }
 
-  try {
-    await writeFileToHandle(songDir, SONG_SMAP_FILENAME, blob)
-  } catch {
-    return
-  }
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  const r = await writeProjectSong(snap.osPath, snap.activeSongFolder, bytes)
+  if (!r.ok) return
 
   patchMetadataForFolder(snap.activeSongFolder, metadataLiteFromSongMap(sm))
 }

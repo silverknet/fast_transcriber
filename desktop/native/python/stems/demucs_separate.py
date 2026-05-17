@@ -148,6 +148,11 @@ def run_demucs_streaming(input_file: Path, tmp: Path, model: str, shifts: int, o
     is_downloading = False
 
     assert proc.stdout is not None
+    # Keep a tail of every non-progress line so a failure can include the
+    # actual error context (the previous version silently dropped anything
+    # that wasn't a tqdm progress line, leaving the web side with a bare
+    # "exited code N" and no clue why).
+    recent_log: list[str] = []
     for raw in proc.stdout:
         line = raw.strip()
         if not line:
@@ -157,7 +162,6 @@ def run_demucs_streaming(input_file: Path, tmp: Path, model: str, shifts: int, o
             is_downloading = True
         elif "Separating track" in line:
             is_downloading = False
-            emit({"type": "log", "msg": line})
 
         m = _TQDM_PCT.search(line)
         if m:
@@ -176,12 +180,22 @@ def run_demucs_streaming(input_file: Path, tmp: Path, model: str, shifts: int, o
                     "current": pct,
                     "overall": overall,
                 })
-        elif any(k in line for k in ("Separated", "Selected model")):
+        else:
+            # Forward every non-progress line as a log event. Demucs writes
+            # tracebacks, "Selected model is …", warnings, and crash messages
+            # here — all useful when the run fails.
             emit({"type": "log", "msg": line})
+            recent_log.append(line)
+            if len(recent_log) > 40:
+                recent_log.pop(0)
 
     proc.wait()
     if proc.returncode != 0:
-        emit({"type": "error", "msg": f"Demucs exited with code {proc.returncode}"})
+        tail = "\n".join(recent_log[-12:]) if recent_log else "(no output captured)"
+        emit({
+            "type": "error",
+            "msg": f"Demucs exited with code {proc.returncode}. Last output:\n{tail}",
+        })
         sys.exit(proc.returncode)
 
 

@@ -21,11 +21,7 @@
     project,
     markEditingStandalone,
   } from '$lib/stores/project'
-  import {
-    PROJECT_HANDLE_KEY,
-    tryRestoreActiveProject,
-  } from '$lib/project/commit'
-  import { loadFolderHandle } from '$lib/client/folderHandle'
+  import { tryRestoreLastProject } from '$lib/project/commit'
 
   const accept = 'audio/mpeg,audio/wav,audio/x-wav,audio/wave,audio/flac,.mp3,.wav,.flac'
 
@@ -56,8 +52,8 @@
 
   /**
    * `?project=1` means the new song should be added to the active project.
-   * If no project is in memory, try to restore from IndexedDB. If that also
-   * fails, drop the param and stay in standalone mode (with a soft note).
+   * If no project is in memory, try to restore via the desktop sidecar. If
+   * that also fails, drop the param and stay in standalone mode.
    */
   async function resolveProjectMode() {
     if (!browser) return
@@ -71,8 +67,7 @@
       return
     }
     try {
-      const handle = await loadFolderHandle(PROJECT_HANDLE_KEY)
-      const data = await tryRestoreActiveProject(handle)
+      const data = await tryRestoreLastProject()
       if (data) {
         inProjectMode = true
         return

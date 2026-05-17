@@ -7,7 +7,7 @@ Self-contained **text-to-speech** module for the BarBro desktop sidecar. Uses [P
 | Path | Role |
 |------|------|
 | `requirements.txt` | `piper-tts` wheel (pulls `onnxruntime` etc.) |
-| `synthesize_wav.py` | CLI: `--model`, `--output`, `--text` |
+| `synthesize_wav.py` | CLI: `--model`, `--output`, `--text` or `--text-file` |
 | `PROVENANCE.md` | Upstream pointers |
 
 ## Endpoints (sidecar)
@@ -15,6 +15,7 @@ Self-contained **text-to-speech** module for the BarBro desktop sidecar. Uses [P
 - `GET /native/setup/piper-tts/status` — venv + default voice files present?
 - `POST /native/setup/piper-tts` — NDJSON stream: create venv, `pip install`, download **en_US-lessac-medium** from Hugging Face.
 - `GET /native/tts/hello-world` — returns `audio/wav` saying **“Hello world.”** (debug).
+- `POST /native/tts/synthesize` — JSON `{ "text": "…" }` → WAV (cue speech; sidecar writes text to a temp file for Piper).
 
 ## Manual test (after venv + model exist)
 
