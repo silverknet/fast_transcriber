@@ -14,6 +14,14 @@ npm run db:up        # starts Postgres on port 5433
 npm run db:migrate   # creates the editor_sessions table
 ```
 
+Desktop sidecar (Electron, headless — required for native jobs like stem splitting & downbeat analysis):
+
+```bash
+npm run dev --prefix desktop   # binds http://127.0.0.1:47842
+```
+
+First time only: `cd desktop && npm install` (downloads the Electron binary). Details in [`desktop/README.md`](desktop/README.md).
+
 ## Tech stack
 
 SvelteKit 2 + Svelte 5 (runes), TypeScript, Tailwind CSS 4, Vite 8.

@@ -92,6 +92,7 @@ _TQDM_PCT = re.compile(r"^\s*(\d+)%\|")
 
 def run_demucs(input_file: Path, tmp: Path, model: str, shifts: int, overlap: float) -> None:
     """Run Demucs and wait for completion. Captures output (non-streaming mode)."""
+    device = detect_torch_device()
     cmd = [
         sys.executable,
         "-m",
@@ -102,6 +103,8 @@ def run_demucs(input_file: Path, tmp: Path, model: str, shifts: int, overlap: fl
         str(shifts),
         "--overlap",
         str(overlap),
+        "--device",
+        device,
         "--out",
         str(tmp),
         str(input_file),
@@ -113,12 +116,46 @@ def run_demucs(input_file: Path, tmp: Path, model: str, shifts: int, overlap: fl
         sys.exit(proc.returncode)
 
 
+def model_bag_size(model: str) -> int:
+    """
+    Number of internal sub-models the named Demucs model ensembles.
+
+    The `_ft` fine-tuned models are bags of 4 checkpoints; Demucs runs each
+    one per `--shifts` and averages, so the tqdm progress emits `shifts × 4`
+    bars in practice. Plain single-model variants emit `shifts` bars.
+
+    Source: facebookresearch/demucs README and the model registry in
+    `demucs.pretrained` — `htdemucs_ft` is documented as a bag of 4.
+    """
+    return 4 if model.endswith("_ft") else 1
+
+
+def detect_torch_device() -> str:
+    """
+    Pick the fastest available compute backend Demucs will accept.
+
+    Priority: CUDA → MPS (Apple Silicon GPU) → CPU. On a typical M-series
+    Mac, switching from CPU to MPS is ~5–10× faster with no quality
+    difference — the same neural net, just running on the Metal backend.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if sys.platform == "darwin" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def run_demucs_streaming(input_file: Path, tmp: Path, model: str, shifts: int, overlap: float) -> None:
     """
     Stream Demucs output, emitting NDJSON `log` and `progress` events.
     Mirrors the pass-tracking logic from frequency_domain/stem_splitter.py so
     the web UI's two progress bars stay aligned with what the Tkinter shows.
     """
+    device = detect_torch_device()
     cmd = [
         sys.executable,
         "-m",
@@ -129,10 +166,13 @@ def run_demucs_streaming(input_file: Path, tmp: Path, model: str, shifts: int, o
         str(shifts),
         "--overlap",
         str(overlap),
+        "--device",
+        device,
         "--out",
         str(tmp),
         str(input_file),
     ]
+    emit({"type": "log", "msg": f"Device: {device}"})
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -142,7 +182,11 @@ def run_demucs_streaming(input_file: Path, tmp: Path, model: str, shifts: int, o
         env=subprocess_env(),
     )
 
-    total_passes = max(1, shifts)
+    # `htdemucs_ft` and other `_ft` bags ensemble 4 sub-models per shift.
+    # Without accounting for this the overall % bar wraps around 4× during
+    # the run and looks like the job is stuck.
+    bag_size = model_bag_size(model)
+    total_passes = max(1, shifts * bag_size)
     completed_passes = 0
     last_was_high = False
     is_downloading = False

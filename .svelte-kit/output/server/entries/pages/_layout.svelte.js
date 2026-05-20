@@ -3,10 +3,11 @@ import { A as escape_html, F as writable, N as get, O as attr, a as derived, c a
 import "../../chunks/index-server2.js";
 import { n as exportRestorableStateAsSmapBlob } from "../../chunks/persist.js";
 import { n as goto, t as beforeNavigate } from "../../chunks/client.js";
-import { C as clearFullAppSongState, D as songMap, I as audioSession, L as restorableSongState, S as project, a as createProjectOnDisk, b as closeProject, d as openProjectByPath, l as metadataLiteFromSongMap, o as dropRecentProjectPath, r as clearLastProjectPath, x as patchMetadataForFolder, y as writeProjectSong } from "../../chunks/commit.js";
+import { B as restorableSongState, C as clearFullAppSongState, D as songMap, S as project, a as createProjectOnDisk, b as closeProject, d as openProjectByPath, l as metadataLiteFromSongMap, o as dropRecentProjectPath, r as clearLastProjectPath, x as patchMetadataForFolder, y as writeProjectSong, z as audioSession } from "../../chunks/commit.js";
 import { t as Button } from "../../chunks/button.js";
 import { _ as Dialog_title, a as getCurrentProject, d as Dropdown_menu_content, f as Dropdown_menu, h as Dialog_header, l as Dropdown_menu_trigger, m as Dialog_content, n as Chevron_down, o as loadCloudProject, p as Dialog_description, r as deleteCloudProject, s as saveCloudProject, t as Cloud, u as Dropdown_menu_item, v as Dialog } from "../../chunks/cloud.js";
 import { t as Icon } from "../../chunks/Icon.js";
+import "../../chunks/iterate.js";
 import { t as desktopCompanionStatus } from "../../chunks/desktopCompanionStatus.js";
 import { u as pickFolderViaDesktop } from "../../chunks/desktopBridge.js";
 import { n as Music, t as Arrow_left } from "../../chunks/arrow-left.js";

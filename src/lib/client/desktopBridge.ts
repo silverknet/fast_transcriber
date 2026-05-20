@@ -99,10 +99,16 @@ export type StemQualityPreset = {
   overlap: number
 }
 
+/**
+ * `htdemucs_ft` is a "bag of 4" — internally ensembles 4 fine-tuned
+ * checkpoints per shift. So `shifts: 10` produces 40 actual passes,
+ * `shifts: 5` produces 20, etc. The Python wrapper accounts for this
+ * when reporting overall progress so the bar tracks linearly to 100%.
+ */
 export const STEM_QUALITY_PRESETS: StemQualityPreset[] = [
-  { slug: 'best',     label: 'Best — htdemucs_ft, shifts 10 (slow)',    model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
-  { slug: 'balanced', label: 'Balanced — htdemucs_ft, shifts 5 (medium)', model: 'htdemucs_ft', shifts: 5, overlap: 0.25 },
-  { slug: 'preview',  label: 'Preview — htdemucs, shifts 1 (fast)',       model: 'htdemucs', shifts: 1, overlap: 0.25 },
+  { slug: 'best',     label: 'Best — htdemucs_ft, shifts 10 (slow)',     model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
+  { slug: 'balanced', label: 'Balanced — htdemucs_ft, shifts 5 (medium)', model: 'htdemucs_ft', shifts: 5,  overlap: 0.25 },
+  { slug: 'preview',  label: 'Preview — htdemucs, shifts 1 (fast)',       model: 'htdemucs',    shifts: 1,  overlap: 0.25 },
 ]
 
 /**

@@ -129,6 +129,14 @@ var SECTION_KIND_OPTIONS = [
 		label: "Solo"
 	},
 	{
+		kind: "riff",
+		label: "Riff"
+	},
+	{
+		kind: "break",
+		label: "Break"
+	},
+	{
 		kind: "outro",
 		label: "Outro"
 	},
@@ -143,31 +151,137 @@ function defaultSectionLabel(kind) {
 function rangesOverlap(a0, a1, b0, b1) {
 	return !(a1 < b0 || b1 < a0);
 }
+/** Inclusive ranges that touch (border) or overlap — `[0..3]` and `[4..7]` are adjacent. */
+function rangesOverlapOrAdjacent(a0, a1, b0, b1) {
+	return !(a1 + 1 < b0 || b1 + 1 < a0);
+}
 /**
-* Assigns a section to an inclusive bar index range. Drops existing sections that overlap
-* the range, then appends the new section.
+* Assigns a section to an inclusive bar index range.
+*
+* Behavior:
+*   - **Same-kind neighbors** that overlap *or border* the new range are folded
+*     into one larger section spanning the union of all touched ranges. Tagging
+*     bars 4-7 as Chorus next to an existing Chorus 0-3 produces a single
+*     Chorus 0-7, not two 4-bar choruses.
+*   - **Different-kind sections** that overlap the (merged) range are dropped —
+*     the new tag wins, same as before.
+*
+* `labelOverride` (when non-empty) replaces the default label. Otherwise, if a
+* same-kind neighbor is being merged in and had a non-default label
+* (e.g. "Big Chorus"), that label is preserved. Falls back to the default for
+* the kind.
 */
-function setSectionForBarRange(map, startBarIndex, endBarIndex, kind, idFactory) {
+function setSectionForBarRange(map, startBarIndex, endBarIndex, kind, idFactory, labelOverride) {
 	const n = map.timeline.bars.length;
 	if (n === 0) return fail("No bars in timeline");
 	const a = Math.max(0, Math.min(startBarIndex, endBarIndex));
 	const b = Math.min(n - 1, Math.max(startBarIndex, endBarIndex));
 	if (a > b) return fail("Invalid bar range");
+	const sameKindNeighbors = map.sections.filter((s) => s.kind === kind && rangesOverlapOrAdjacent(s.barRange.startBarIndex, s.barRange.endBarIndex, a, b));
+	const unionStart = Math.min(a, ...sameKindNeighbors.map((s) => s.barRange.startBarIndex));
+	const unionEnd = Math.max(b, ...sameKindNeighbors.map((s) => s.barRange.endBarIndex));
+	const neighborIds = new Set(sameKindNeighbors.map((s) => s.id));
 	const filtered = map.sections.filter((s) => {
-		return !rangesOverlap(s.barRange.startBarIndex, s.barRange.endBarIndex, a, b);
+		if (neighborIds.has(s.id)) return false;
+		return !rangesOverlap(s.barRange.startBarIndex, s.barRange.endBarIndex, unionStart, unionEnd);
 	});
+	const fallback = defaultSectionLabel(kind);
+	const trimmedOverride = labelOverride?.trim();
+	let label = fallback;
+	if (trimmedOverride && trimmedOverride.length > 0) label = trimmedOverride;
+	else {
+		const inherited = sameKindNeighbors.find((s) => s.label && s.label !== fallback);
+		if (inherited) label = inherited.label;
+	}
 	const section = {
 		id: idFactory(),
 		kind,
-		label: defaultSectionLabel(kind),
+		label,
 		barRange: {
-			startBarIndex: a,
-			endBarIndex: b
+			startBarIndex: unionStart,
+			endBarIndex: unionEnd
 		}
 	};
 	return ok({
 		...map,
 		sections: [...filtered, section]
+	});
+}
+/**
+* Resize an existing section to a new bar range. Preserves the section's id
+* and label. Allows shrinking (unlike re-tagging through `setSectionForBarRange`,
+* which only ever grows the union). Same overlap conventions as
+* `setSectionForBarRange`: same-kind neighbors that border or overlap the new
+* range fold in; different-kind overlaps are dropped.
+*
+* Used by edge-drag in the bar strip to grow / shrink a section.
+*/
+function resizeSectionRange(map, sectionId, newStartBarIndex, newEndBarIndex) {
+	const existing = map.sections.find((s) => s.id === sectionId);
+	if (!existing) return fail("Section not found");
+	const n = map.timeline.bars.length;
+	if (n === 0) return fail("No bars in timeline");
+	const a = Math.max(0, Math.min(newStartBarIndex, newEndBarIndex));
+	const b = Math.min(n - 1, Math.max(newStartBarIndex, newEndBarIndex));
+	if (a > b) return fail("Invalid bar range");
+	const others = map.sections.filter((s) => s.id !== sectionId);
+	const sameKindNeighbors = others.filter((s) => s.kind === existing.kind && rangesOverlapOrAdjacent(s.barRange.startBarIndex, s.barRange.endBarIndex, a, b));
+	const unionStart = Math.min(a, ...sameKindNeighbors.map((s) => s.barRange.startBarIndex));
+	const unionEnd = Math.max(b, ...sameKindNeighbors.map((s) => s.barRange.endBarIndex));
+	const neighborIds = new Set(sameKindNeighbors.map((s) => s.id));
+	const filtered = others.filter((s) => {
+		if (neighborIds.has(s.id)) return false;
+		return !rangesOverlap(s.barRange.startBarIndex, s.barRange.endBarIndex, unionStart, unionEnd);
+	});
+	const updated = {
+		...existing,
+		barRange: {
+			startBarIndex: unionStart,
+			endBarIndex: unionEnd
+		}
+	};
+	return ok({
+		...map,
+		sections: [...filtered, updated]
+	});
+}
+/**
+* Move the shared edge between two adjacent sections — left.endBarIndex + 1 ===
+* right.startBarIndex — by setting a new boundary bar index. The left section
+* ends at `newBoundaryBarIndex - 1`, the right starts at `newBoundaryBarIndex`.
+*
+* Both sections must stay at least 1 bar wide; the boundary is clamped into
+* `[left.start + 1, right.end]`. Used by the boundary drag handle in the bar
+* strip — one drag, two sections updated, no gaps, no dropped sections.
+*/
+function resizeSectionBoundary(map, leftSectionId, rightSectionId, newBoundaryBarIndex) {
+	const left = map.sections.find((s) => s.id === leftSectionId);
+	const right = map.sections.find((s) => s.id === rightSectionId);
+	if (!left || !right) return fail("Section not found");
+	const minBoundary = left.barRange.startBarIndex + 1;
+	const maxBoundary = right.barRange.endBarIndex;
+	if (minBoundary > maxBoundary) return fail("Sections cannot both stay non-empty");
+	const b = Math.max(minBoundary, Math.min(maxBoundary, newBoundaryBarIndex));
+	const updatedSections = map.sections.map((s) => {
+		if (s.id === leftSectionId) return {
+			...s,
+			barRange: {
+				...s.barRange,
+				endBarIndex: b - 1
+			}
+		};
+		if (s.id === rightSectionId) return {
+			...s,
+			barRange: {
+				...s.barRange,
+				startBarIndex: b
+			}
+		};
+		return s;
+	});
+	return ok({
+		...map,
+		sections: updatedSections
 	});
 }
 //#endregion
@@ -1207,4 +1321,4 @@ async function mergeStemRefsIntoSmap(projectPath, songFolder, newRefs) {
 	if (!w.ok) throw new Error(w.error);
 }
 //#endregion
-export { buildCueSpeechEvents as A, clearFullAppSongState as C, songMap as D, setSongMap as E, computeCountIn as F, audioSession as I, restorableSongState as L, firstBarDownbeatBeat as M, titleCuePreludeSec as N, clearHarmonyAtBeat as O, setSectionForBarRange as P, project as S, patchSongMap as T, tryRestoreLastProject as _, createProjectOnDisk as a, closeProject as b, loadProjectSongIntoEditor as c, openProjectByPath as d, readRecentProjectPaths as f, setSongHidden as g, selectBestStemSet as h, commitNewSongToProject as i, countInSpeechOutputTimes as j, upsertHarmonyAtBeat as k, metadataLiteFromSongMap as l, removeSongFromProject as m, SONG_SMAP_FILENAME as n, dropRecentProjectPath as o, refreshProjectInfo as p, clearLastProjectPath as r, importSmapToProject as s, ACTIVE_SONG_ID_KEY as t, moveProjectSong as u, readProjectSongAsset as v, hydrateRestorableSong as w, patchMetadataForFolder as x, writeProjectSong as y };
+export { buildCueSpeechEvents as A, restorableSongState as B, clearFullAppSongState as C, songMap as D, setSongMap as E, resizeSectionBoundary as F, resizeSectionRange as I, setSectionForBarRange as L, firstBarDownbeatBeat as M, titleCuePreludeSec as N, clearHarmonyAtBeat as O, defaultSectionLabel as P, computeCountIn as R, project as S, patchSongMap as T, tryRestoreLastProject as _, createProjectOnDisk as a, closeProject as b, loadProjectSongIntoEditor as c, openProjectByPath as d, readRecentProjectPaths as f, setSongHidden as g, selectBestStemSet as h, commitNewSongToProject as i, countInSpeechOutputTimes as j, upsertHarmonyAtBeat as k, metadataLiteFromSongMap as l, removeSongFromProject as m, SONG_SMAP_FILENAME as n, dropRecentProjectPath as o, refreshProjectInfo as p, clearLastProjectPath as r, importSmapToProject as s, ACTIVE_SONG_ID_KEY as t, moveProjectSong as u, readProjectSongAsset as v, hydrateRestorableSong as w, patchMetadataForFolder as x, writeProjectSong as y, audioSession as z };

@@ -1,4 +1,10 @@
-import type { Beat, HarmonyEvent, SongMap } from '$lib/songmap'
+import type { SongMap } from '$lib/songmap'
+import {
+  beatById,
+  harmonyBeatOffset,
+  harmonyByBarId,
+  sectionAtBar,
+} from '$lib/leadsheet/iterate'
 
 const PAGE_W = 210
 const PAGE_H = 297
@@ -20,31 +26,6 @@ const TIME_SIG_WIDTH = 8
 const SLASH_W = 2.2
 const SLASH_H = STAFF_LINE_GAP * 2.4
 const SLASH_SLANT = 1.4
-
-function harmonyByBarId(songMap: SongMap): Map<string, HarmonyEvent[]> {
-  const map = new Map<string, HarmonyEvent[]>()
-  for (const h of songMap.harmony) {
-    const list = map.get(h.barId) ?? []
-    list.push(h)
-    map.set(h.barId, list)
-  }
-  return map
-}
-
-function beatById(songMap: SongMap): Map<string, Beat> {
-  return new Map(songMap.timeline.beats.map((b) => [b.id, b]))
-}
-
-function harmonyBeatOffset(h: HarmonyEvent, beats: Map<string, Beat>): number {
-  if (h.beatAnchor) return Math.max(0, h.beatAnchor.indexInBar)
-  if (h.beatId) return Math.max(0, beats.get(h.beatId)?.indexInBar ?? 0)
-  return 0
-}
-
-function sectionAtBar(songMap: SongMap, barIndex: number): string | null {
-  const s = songMap.sections.find((sec) => sec.barRange.startBarIndex === barIndex)
-  return s ? s.label || s.kind : null
-}
 
 function drawStaffLines(pdf: any, x: number, y: number, width: number) {
   pdf.setDrawColor(0)

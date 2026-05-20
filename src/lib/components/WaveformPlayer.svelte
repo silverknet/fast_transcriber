@@ -44,7 +44,7 @@
     zoomViewportWithAnchor,
   } from '$lib/audio/viewportMath'
   import { MAX_AUDIO_DURATION_SEC, MAX_WAVE_WIDTH_PX } from '$lib/constants'
-  import TimelineBeatGrid from '$lib/components/TimelineBeatGrid.svelte'
+  import TimelineBeatGrid, { type SuggestionPreview } from '$lib/components/TimelineBeatGrid.svelte'
   import { triggerBeatPulse } from '$lib/stores/beatPulse'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { SECTION_KIND_OPTIONS } from '$lib/songmap/sectionEdit'
@@ -67,8 +67,26 @@
     timelineStripMode = 'grid' as 'grid' | 'sections' | 'chords',
     mapSections = [] as Section[],
     onBarGridAction = undefined as ((action: BarGridAction) => void) | undefined,
-    /** Sections mode: parent applies tag to current multi-selection. */
-    onApplySectionTag = undefined as ((kind: SectionKind) => void) | undefined,
+    /**
+     * Sections mode: parent applies tag to current multi-selection. `customLabel`
+     * is the free-text label entered alongside the "Custom" kind; ignored for
+     * the built-in kinds (parent should fall back to the default label).
+     */
+    onApplySectionTag = undefined as
+      | ((kind: SectionKind, customLabel?: string) => void)
+      | undefined,
+    /** Sections mode: in-strip ghost preview for the next-section suggestion. */
+    suggestionPreview = null as SuggestionPreview | null,
+    onAcceptSuggestion = undefined as (() => void) | undefined,
+    onDismissSuggestion = undefined as (() => void) | undefined,
+    /** Sections mode: commit an edge-drag resize to the section identified by id. */
+    onResizeSection = undefined as
+      | ((sectionId: string, newStartBarIndex: number, newEndBarIndex: number) => void)
+      | undefined,
+    /** Sections mode: commit a boundary drag between two adjacent sections. */
+    onResizeBoundary = undefined as
+      | ((leftSectionId: string, rightSectionId: string, newBoundaryBarIndex: number) => void)
+      | undefined,
     sectionsSelectionBarIds = $bindable<string[]>([]),
     /** Chords mode: multi-selected beats (timeline order). */
     chordsSelectionBeatIds = $bindable<string[]>([]),
@@ -96,6 +114,8 @@
   let selectedBarId = $state<string | null>(null)
 
   let sectionTagChoice = $state<SectionKind>('verse')
+  /** Free-text label, only consulted when sectionTagChoice === 'custom'. */
+  let customSectionLabel = $state('')
 
   $effect(() => {
     const ids = new Set(beatGrid?.bars.map((b) => b.id) ?? [])
@@ -1610,6 +1630,11 @@
           onSectionsSeekCommit={timelineStripMode === 'sections' ? seekToSectionsSelection : undefined}
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}
           onChordBeatInteract={onChordBeatInteract}
+          suggestionPreview={suggestionPreview}
+          onAcceptSuggestion={onAcceptSuggestion}
+          onDismissSuggestion={onDismissSuggestion}
+          onResizeSection={onResizeSection}
+          onResizeBoundary={onResizeBoundary}
         />
         {#if beatGridEditing && timelineStripMode === 'grid' && onBarGridAction}
           <div
@@ -1726,18 +1751,33 @@
                 {/each}
               </select>
             </label>
+            {#if sectionTagChoice === 'custom'}
+              <input
+                type="text"
+                placeholder="Label (e.g. Drop, Hook)"
+                bind:value={customSectionLabel}
+                class="border-input bg-background ring-offset-background focus-visible:ring-ring h-8 w-40 rounded-md border px-2 text-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+                aria-label="Custom section label"
+                maxlength="40"
+              />
+            {/if}
             <Button
               type="button"
               variant="secondary"
               size="sm"
               class="h-8 text-xs"
-              disabled={sectionsSelectionBarIds.length === 0}
-              onclick={() => onApplySectionTag?.(sectionTagChoice)}
+              disabled={sectionsSelectionBarIds.length === 0 ||
+                (sectionTagChoice === 'custom' && customSectionLabel.trim().length === 0)}
+              onclick={() =>
+                onApplySectionTag?.(
+                  sectionTagChoice,
+                  sectionTagChoice === 'custom' ? customSectionLabel : undefined,
+                )}
             >
               Tag selection
             </Button>
             <span class="text-muted-foreground text-[11px]">
-              Drag to select bars · Shift+click range · ⌘/Ctrl+click toggle · Esc clears
+              Drag to select · Shift+drag adds · Shift+click range · ⌘/Ctrl+click toggle · Esc clears
             </span>
           </div>
         {/if}

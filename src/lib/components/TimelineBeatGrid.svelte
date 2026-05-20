@@ -8,6 +8,15 @@
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
 
+  /** Inline preview of an unaccepted suggested next section. */
+  export type SuggestionPreview = {
+    kind: SectionKind
+    label: string
+    /** Inclusive bar indices for the preview range. */
+    startBarIndex: number
+    endBarIndex: number
+  }
+
   const HIDE_BAR_CHROME_ENTER = 18
   const HIDE_BAR_CHROME_EXIT = 52
   const SMOOTH_ALPHA = 0.16
@@ -22,6 +31,8 @@
     chorus: 'text-amber-200',
     bridge: 'text-orange-200',
     solo: 'text-rose-200',
+    riff: 'text-lime-200',
+    break: 'text-stone-200',
     outro: 'text-fuchsia-200',
     custom: 'text-zinc-200',
   }
@@ -51,6 +62,18 @@
     /** Song timeline bounds (sec); required for bar-edge stretch so the last bar can extend to decode end. */
     timelineMinSec = 0,
     timelineMaxSec = 0,
+    /** Sections mode: preview the next-section suggestion as a ghost block on the bar strip. */
+    suggestionPreview = null as SuggestionPreview | null,
+    onAcceptSuggestion = undefined as (() => void) | undefined,
+    onDismissSuggestion = undefined as (() => void) | undefined,
+    /** Sections mode: commit a section edge-drag resize. Inclusive bar indices. */
+    onResizeSection = undefined as
+      | ((sectionId: string, newStartBarIndex: number, newEndBarIndex: number) => void)
+      | undefined,
+    /** Sections mode: commit a boundary drag — `newBoundaryBarIndex` becomes the right section's startBarIndex. */
+    onResizeBoundary = undefined as
+      | ((leftSectionId: string, rightSectionId: string, newBoundaryBarIndex: number) => void)
+      | undefined,
   }: {
     viewStart: number
     viewEnd: number
@@ -71,6 +94,15 @@
     chordLabelByBeatId?: Record<string, string>
     timelineMinSec?: number
     timelineMaxSec?: number
+    suggestionPreview?: SuggestionPreview | null
+    onAcceptSuggestion?: () => void
+    onDismissSuggestion?: () => void
+    onResizeSection?: (sectionId: string, newStartBarIndex: number, newEndBarIndex: number) => void
+    onResizeBoundary?: (
+      leftSectionId: string,
+      rightSectionId: string,
+      newBoundaryBarIndex: number,
+    ) => void
   } = $props()
 
   let gridEl = $state<HTMLDivElement | undefined>()
@@ -107,7 +139,16 @@
   })
 
   /** One label row per section, positioned over the visible time span of that section’s bars. */
-  type SectionSpan = { key: string; label: string; kind: SectionKind; x0: number; w: number }
+  type SectionSpan = {
+    key: string
+    sectionId: string
+    label: string
+    kind: SectionKind
+    x0: number
+    w: number
+    startBarIndex: number
+    endBarIndex: number
+  }
   type SectionLabelSpan = SectionSpan
 
   const SECTION_FILL_CSS: Record<SectionKind, string> = {
@@ -117,6 +158,8 @@
     chorus: 'background-color: rgb(245 158 11 / 0.25)',
     bridge: 'background-color: rgb(249 115 22 / 0.20)',
     solo: 'background-color: rgb(244 63 94 / 0.20)',
+    riff: 'background-color: rgb(132 204 22 / 0.22)',
+    break: 'background-color: rgb(120 113 108 / 0.22)',
     outro: 'background-color: rgb(217 70 239 / 0.20)',
     custom: 'background-color: rgb(113 113 122 / 0.20)',
   }
@@ -128,18 +171,45 @@
     chorus: 'border-left: 2px solid rgb(251 191 36)',
     bridge: 'border-left: 2px solid rgb(251 146 60)',
     solo: 'border-left: 2px solid rgb(251 113 133)',
+    riff: 'border-left: 2px solid rgb(163 230 53)',
+    break: 'border-left: 2px solid rgb(168 162 158)',
     outro: 'border-left: 2px solid rgb(232 121 249)',
     custom: 'border-left: 2px solid rgb(161 161 170)',
   }
 
+  /**
+   * Live-preview ranges for in-progress edge / boundary drags. Layout derives
+   * from this during the drag so sections visually follow the cursor; on
+   * pointer-up the parent commits via `onResizeSection` / `onResizeBoundary`
+   * and this clears. Array because a boundary drag updates *two* sections at
+   * once (left shrinks while right grows or vice versa).
+   */
+  let pendingResize = $state<Array<{
+    sectionId: string
+    startBarIndex: number
+    endBarIndex: number
+  }>>([])
+
+  /** `mapSections` with `pendingResize` applied to each matching section. */
+  let effectiveSections = $derived.by(() => {
+    if (pendingResize.length === 0) return mapSections
+    const overrides = new Map(pendingResize.map((p) => [p.sectionId, p]))
+    return mapSections.map((s) => {
+      const o = overrides.get(s.id)
+      return o
+        ? { ...s, barRange: { startBarIndex: o.startBarIndex, endBarIndex: o.endBarIndex } }
+        : s
+    })
+  })
+
   /** Contiguous section tint fills — always visible, outside the hideBarChrome opacity wrapper. */
   let sectionFillSpans = $derived.by(() => {
-    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || mapSections.length === 0) {
+    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || effectiveSections.length === 0) {
       return [] as SectionSpan[]
     }
     const byIndex = new Map(bars.map((b) => [b.index, b]))
     const out: SectionSpan[] = []
-    for (const sec of mapSections) {
+    for (const sec of effectiveSections) {
       const inRange: Bar[] = []
       for (let i = sec.barRange.startBarIndex; i <= sec.barRange.endBarIndex; i++) {
         const b = byIndex.get(i)
@@ -155,9 +225,47 @@
       const x1 = timeToPxInView(visT1, viewStart, viewEnd, widthPx)
       const w = x1 - x0
       if (w < 0.5) continue
-      out.push({ key: sec.id, label: sec.label.trim() || sec.kind, kind: sec.kind, x0, w })
+      out.push({
+        key: sec.id,
+        sectionId: sec.id,
+        label: sec.label.trim() || sec.kind,
+        kind: sec.kind,
+        x0,
+        w,
+        startBarIndex: sec.barRange.startBarIndex,
+        endBarIndex: sec.barRange.endBarIndex,
+      })
     }
     return out
+  })
+
+  /** Pixel span of the next-section suggestion preview ghost (sections mode only). */
+  let suggestionPreviewPx = $derived.by(() => {
+    if (
+      stripMode !== 'sections' ||
+      !suggestionPreview ||
+      !(widthPx > 0) ||
+      viewEnd <= viewStart
+    ) {
+      return null as { x0: number; w: number; kind: SectionKind; label: string } | null
+    }
+    const byIndex = new Map(bars.map((b) => [b.index, b]))
+    const inRange: Bar[] = []
+    for (let i = suggestionPreview.startBarIndex; i <= suggestionPreview.endBarIndex; i++) {
+      const b = byIndex.get(i)
+      if (b) inRange.push(b)
+    }
+    if (inRange.length === 0) return null
+    const t0 = Math.min(...inRange.map((b) => b.startSec))
+    const t1 = Math.max(...inRange.map((b) => b.endSec))
+    const visT0 = Math.max(t0, viewStart)
+    const visT1 = Math.min(t1, viewEnd)
+    if (!(visT1 > visT0)) return null
+    const x0 = timeToPxInView(visT0, viewStart, viewEnd, widthPx)
+    const x1 = timeToPxInView(visT1, viewStart, viewEnd, widthPx)
+    const w = x1 - x0
+    if (w < 0.5) return null
+    return { x0, w, kind: suggestionPreview.kind, label: suggestionPreview.label }
   })
 
   /** Single horizontal highlight for the full selected time span (sections mode). */
@@ -216,12 +324,12 @@
   })
 
   let sectionLabelSpans = $derived.by(() => {
-    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || mapSections.length === 0) {
+    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || effectiveSections.length === 0) {
       return [] as SectionLabelSpan[]
     }
     const byIndex = new Map(bars.map((b) => [b.index, b]))
     const out: SectionLabelSpan[] = []
-    for (const sec of mapSections) {
+    for (const sec of effectiveSections) {
       const inRange: Bar[] = []
       for (let i = sec.barRange.startBarIndex; i <= sec.barRange.endBarIndex; i++) {
         const b = byIndex.get(i)
@@ -239,14 +347,47 @@
       if (w < 2) continue
       out.push({
         key: sec.id,
+        sectionId: sec.id,
         label: sec.label.trim() || sec.kind,
         kind: sec.kind,
         x0,
         w,
+        startBarIndex: sec.barRange.startBarIndex,
+        endBarIndex: sec.barRange.endBarIndex,
       })
     }
     return out
   })
+
+  /**
+   * Pairs of sections that share a boundary (left.endBarIndex + 1 ===
+   * right.startBarIndex). These get a single shared handle instead of two
+   * overlapping edge handles, so dragging moves the boundary in one motion.
+   */
+  let sectionBoundaries = $derived.by(() => {
+    if (sectionFillSpans.length < 2) {
+      return [] as Array<{ key: string; leftSpan: SectionSpan; rightSpan: SectionSpan }>
+    }
+    const sorted = [...sectionFillSpans].sort((a, b) => a.startBarIndex - b.startBarIndex)
+    const pairs: Array<{ key: string; leftSpan: SectionSpan; rightSpan: SectionSpan }> = []
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const left = sorted[i]
+      const right = sorted[i + 1]
+      if (left.endBarIndex + 1 === right.startBarIndex) {
+        pairs.push({ key: `${left.sectionId}-${right.sectionId}`, leftSpan: left, rightSpan: right })
+      }
+    }
+    return pairs
+  })
+
+  /** Section ids whose left edge is shared with another section — skip standalone left handle. */
+  let sectionsWithLeftNeighbor = $derived(
+    new Set(sectionBoundaries.map((p) => p.rightSpan.sectionId)),
+  )
+  /** Section ids whose right edge is shared with another section — skip standalone right handle. */
+  let sectionsWithRightNeighbor = $derived(
+    new Set(sectionBoundaries.map((p) => p.leftSpan.sectionId)),
+  )
 
   let zoomStableCrowdingPx = $derived.by(() => {
     if (!(widthPx > 0) || viewEnd <= viewStart || bars.length === 0) return 9999
@@ -493,6 +634,8 @@
     const startX = e.clientX
     const startY = e.clientY
     let dragActive = false
+    // Snapshot the pre-drag selection so Shift+drag can add to it (vs. replacing).
+    const preDragSelection = [...selectedBarIds]
 
     const move = (ev: PointerEvent) => {
       if (!dragActive) {
@@ -503,8 +646,19 @@
       if (!cur) return
       const a = Math.min(startIdx, cur.index)
       const b = Math.max(startIdx, cur.index)
-      selectedBarIds = sortedBars.filter((bar) => bar.index >= a && bar.index <= b).map((bar) => bar.id)
-      rangeAnchorIndex = startIdx
+      const dragRangeIds = sortedBars
+        .filter((bar) => bar.index >= a && bar.index <= b)
+        .map((bar) => bar.id)
+      if (downShift) {
+        // Additive: union of prior selection and the current drag range.
+        const merged = new Set(preDragSelection)
+        for (const id of dragRangeIds) merged.add(id)
+        selectedBarIds = sortedBars.filter((bar) => merged.has(bar.id)).map((bar) => bar.id)
+        // Don't clobber rangeAnchorIndex — it powers Shift+click chains.
+      } else {
+        selectedBarIds = dragRangeIds
+        rangeAnchorIndex = startIdx
+      }
     }
 
     const teardown = () => {
@@ -526,6 +680,118 @@
           onSectionsSeekCommit(Math.min(...sel.map((b) => b.startSec)))
         }, 0)
       }
+    }
+
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    sectionsDragCleanup = teardown
+  }
+
+  /**
+   * Edge-drag resize for a section whose edge is NOT shared with a neighbor.
+   * `fixedBarIndex` is the opposite edge of the section, which stays anchored
+   * while the dragged edge follows the cursor.
+   */
+  function onSectionEdgePointerDown(
+    e: PointerEvent,
+    sectionId: string,
+    fixedBarIndex: number,
+  ) {
+    if (!editing || e.button !== 0) return
+    e.stopPropagation()
+    sectionsDragCleanup?.()
+    sectionsDragCleanup = null
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let dragActive = false
+
+    const move = (ev: PointerEvent) => {
+      if (!dragActive) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) <= DRAG_PX) return
+        dragActive = true
+      }
+      const cur = barAtTime(timeFromClientX(ev.clientX))
+      if (!cur) return
+      const a = Math.min(fixedBarIndex, cur.index)
+      const b = Math.max(fixedBarIndex, cur.index)
+      pendingResize = [{ sectionId, startBarIndex: a, endBarIndex: b }]
+    }
+
+    const teardown = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      sectionsDragCleanup = null
+    }
+
+    const up = () => {
+      teardown()
+      const p = pendingResize.find((r) => r.sectionId === sectionId)
+      if (dragActive && p) {
+        onResizeSection?.(sectionId, p.startBarIndex, p.endBarIndex)
+      }
+      pendingResize = []
+    }
+
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    sectionsDragCleanup = teardown
+  }
+
+  /**
+   * Boundary-drag: a shared edge between two adjacent sections. Dragging
+   * shrinks one side while growing the other — the boundary moves but the
+   * outer endpoints stay anchored. Both sections clamp to at least 1 bar.
+   */
+  function onSectionBoundaryPointerDown(
+    e: PointerEvent,
+    leftId: string,
+    rightId: string,
+    leftFixedStart: number,
+    rightFixedEnd: number,
+  ) {
+    if (!editing || e.button !== 0) return
+    e.stopPropagation()
+    sectionsDragCleanup?.()
+    sectionsDragCleanup = null
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let dragActive = false
+
+    const move = (ev: PointerEvent) => {
+      if (!dragActive) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) <= DRAG_PX) return
+        dragActive = true
+      }
+      const cur = barAtTime(timeFromClientX(ev.clientX))
+      if (!cur) return
+      // Boundary = first bar of the right section.
+      // Clamp so each section keeps at least 1 bar: leftStart+1 ≤ b ≤ rightEnd.
+      const b = Math.max(leftFixedStart + 1, Math.min(rightFixedEnd, cur.index))
+      pendingResize = [
+        { sectionId: leftId, startBarIndex: leftFixedStart, endBarIndex: b - 1 },
+        { sectionId: rightId, startBarIndex: b, endBarIndex: rightFixedEnd },
+      ]
+    }
+
+    const teardown = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      sectionsDragCleanup = null
+    }
+
+    const up = () => {
+      teardown()
+      const right = pendingResize.find((r) => r.sectionId === rightId)
+      if (dragActive && right) {
+        onResizeBoundary?.(leftId, rightId, right.startBarIndex)
+      }
+      pendingResize = []
     }
 
     window.addEventListener('pointermove', move)
@@ -770,6 +1036,106 @@
         aria-hidden="true"
       ></div>
     {/each}
+  {/if}
+
+  <!-- Section edge-drag handles (sections mode): drag left/right boundary to resize. -->
+  {#if editing && stripMode === 'sections'}
+    {#each sectionFillSpans as span (span.key)}
+      {#if !sectionsWithLeftNeighbor.has(span.sectionId)}
+        <div
+          class="group absolute top-0 bottom-0 z-[29] w-2 -translate-x-1/2 cursor-ew-resize touch-none select-none"
+          style:left="{span.x0}px"
+          role="separator"
+          aria-label="Drag to resize section start"
+          title="Drag to resize section"
+          onpointerdown={(ev) => onSectionEdgePointerDown(ev, span.sectionId, span.endBarIndex)}
+        >
+          <div class="pointer-events-none absolute inset-y-1 left-1/2 w-px -translate-x-1/2 bg-white/0 transition-colors group-hover:bg-white/80"></div>
+        </div>
+      {/if}
+      {#if !sectionsWithRightNeighbor.has(span.sectionId)}
+        <div
+          class="group absolute top-0 bottom-0 z-[29] w-2 -translate-x-1/2 cursor-ew-resize touch-none select-none"
+          style:left="{span.x0 + span.w}px"
+          role="separator"
+          aria-label="Drag to resize section end"
+          title="Drag to resize section"
+          onpointerdown={(ev) => onSectionEdgePointerDown(ev, span.sectionId, span.startBarIndex)}
+        >
+          <div class="pointer-events-none absolute inset-y-1 left-1/2 w-px -translate-x-1/2 bg-white/0 transition-colors group-hover:bg-white/80"></div>
+        </div>
+      {/if}
+    {/each}
+
+    <!-- Shared boundary handles: dragging moves the boundary between two sections (left shrinks while right grows, or vice versa). -->
+    {#each sectionBoundaries as pair (pair.key)}
+      <div
+        class="group absolute top-0 bottom-0 z-[30] w-3 -translate-x-1/2 cursor-ew-resize touch-none select-none"
+        style:left="{pair.leftSpan.x0 + pair.leftSpan.w}px"
+        role="separator"
+        aria-label="Drag to move section boundary"
+        title="Drag to move boundary"
+        onpointerdown={(ev) =>
+          onSectionBoundaryPointerDown(
+            ev,
+            pair.leftSpan.sectionId,
+            pair.rightSpan.sectionId,
+            pair.leftSpan.startBarIndex,
+            pair.rightSpan.endBarIndex,
+          )}
+      >
+        <div class="pointer-events-none absolute inset-y-1 left-1/2 w-px -translate-x-1/2 bg-white/0 transition-colors group-hover:bg-white"></div>
+      </div>
+    {/each}
+  {/if}
+
+  <!-- Next-section suggestion preview (sections mode): half-height ghost block on the bar strip. -->
+  {#if editing && stripMode === 'sections' && suggestionPreviewPx}
+    {@const sp = suggestionPreviewPx}
+    <div
+      class="pointer-events-none absolute bottom-0 z-[26] top-1/2 border-2 border-dashed border-white/70"
+      style:left="{sp.x0}px"
+      style:width="{sp.w}px"
+      style="{SECTION_FILL_CSS[sp.kind] ?? ''}"
+      aria-hidden="true"
+    ></div>
+    <div
+      class="pointer-events-none absolute z-[27] flex items-center px-1.5 text-[10px] font-bold uppercase tracking-wide drop-shadow-sm {SECTION_LABEL_TEXT[
+        sp.kind
+      ] ?? 'text-zinc-200'}"
+      style:left="{sp.x0}px"
+      style:width="{sp.w}px"
+      style:top="50%"
+      style:height="50%"
+    >
+      <span class="min-w-0 truncate">+ {sp.label}</span>
+    </div>
+    <div
+      class="absolute z-[40] flex gap-1"
+      style:left="{Math.max(2, sp.x0 + sp.w - 42)}px"
+      style:top="calc(50% + 2px)"
+    >
+      <button
+        type="button"
+        class="inline-flex h-5 w-5 items-center justify-center rounded-sm bg-emerald-500 text-[11px] font-bold text-white shadow hover:bg-emerald-400 active:bg-emerald-600"
+        title="Accept suggestion"
+        aria-label="Accept suggestion"
+        onclick={(e) => {
+          e.stopPropagation()
+          onAcceptSuggestion?.()
+        }}
+      >✓</button>
+      <button
+        type="button"
+        class="inline-flex h-5 w-5 items-center justify-center rounded-sm bg-zinc-700 text-[11px] font-bold text-white shadow hover:bg-zinc-600 active:bg-zinc-800"
+        title="Dismiss suggestion"
+        aria-label="Dismiss suggestion"
+        onclick={(e) => {
+          e.stopPropagation()
+          onDismissSuggestion?.()
+        }}
+      >✕</button>
+    </div>
   {/if}
 
   <div

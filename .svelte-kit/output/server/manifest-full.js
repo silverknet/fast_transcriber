@@ -10,7 +10,7 @@ return {
 	assets: new Set(["desktop-downloads.json","releases/.gitkeep","releases/README.md","releases/barbro-desktop-0.1.0-arm64.dmg","vendor/lame.min.js"]),
 	mimeTypes: {".json":"application/json",".md":"text/markdown",".dmg":"application/octet-stream",".js":"text/javascript"},
 	_: {
-		client: {start:"_app/immutable/entry/start.Cv-PRqeh.js",app:"_app/immutable/entry/app.DMYTri29.js",imports:["_app/immutable/entry/start.Cv-PRqeh.js","_app/immutable/chunks/DQb3aXF7.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/DUgX7ckJ.js","_app/immutable/entry/app.DMYTri29.js","_app/immutable/chunks/CbUDssf9.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/D9FQP20W.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
+		client: {start:"_app/immutable/entry/start.CR0YItDz.js",app:"_app/immutable/entry/app.CSIeeDAY.js",imports:["_app/immutable/entry/start.CR0YItDz.js","_app/immutable/chunks/C7tByMZB.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/DUgX7ckJ.js","_app/immutable/entry/app.CSIeeDAY.js","_app/immutable/chunks/CbUDssf9.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/D9FQP20W.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
 		nodes: [
 			__memo(() => import('./nodes/0.js')),
 			__memo(() => import('./nodes/1.js')),

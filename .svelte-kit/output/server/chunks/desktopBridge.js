@@ -124,6 +124,12 @@ async function analyzeDownbeatsViaDesktop(wavBlob, signal) {
 		beats
 	};
 }
+/**
+* `htdemucs_ft` is a "bag of 4" — internally ensembles 4 fine-tuned
+* checkpoints per shift. So `shifts: 10` produces 40 actual passes,
+* `shifts: 5` produces 20, etc. The Python wrapper accounts for this
+* when reporting overall progress so the bar tracks linearly to 100%.
+*/
 var STEM_QUALITY_PRESETS = [
 	{
 		slug: "best",

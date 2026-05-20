@@ -431,6 +431,21 @@ function extractSongMetadataLite(songProject) {
 const KNOWN_STEM_PRESETS = new Set(['best', 'balanced', 'preview'])
 
 /**
+ * Audio file extensions accepted as stems. Demucs produces WAVs; users may
+ * drop in MP3 / FLAC / etc. exported from elsewhere — all decode fine via
+ * the browser's AudioContext, so we accept them all here.
+ */
+const STEM_AUDIO_EXTENSIONS = ['.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aif', '.aiff']
+
+function isStemAudioFile(name) {
+  const lower = name.toLowerCase()
+  for (const ext of STEM_AUDIO_EXTENSIONS) {
+    if (lower.endsWith(ext)) return true
+  }
+  return false
+}
+
+/**
  * Scan `<songFolder>/stems/` for stem renderings, grouped by preset.
  *
  * Two layouts are supported simultaneously so older songs keep working:
@@ -438,8 +453,8 @@ const KNOWN_STEM_PRESETS = new Set(['best', 'balanced', 'preview'])
  *  - **Flat (legacy)**: `stems/vocals.wav` directly under `stems/`. These
  *    get reported under the `'legacy'` slug — lowest quality fallback.
  *
- * Returns `Record<presetSlug, sortedWavBasenames>`. Empty object when no
- * stems exist. Empty presets (subfolders with no WAVs inside) are skipped.
+ * Returns `Record<presetSlug, sortedAudioBasenames>`. Empty object when no
+ * stems exist. Empty presets (subfolders with no audio inside) are skipped.
  */
 async function listStemSets(songFolderAbs) {
   const stemsDir = path.join(songFolderAbs, 'stems')
@@ -452,24 +467,24 @@ async function listStemSets(songFolderAbs) {
   } catch {
     return out
   }
-  const flatWavs = []
+  const flatAudio = []
   for (const ent of entries) {
-    if (ent.isFile() && ent.name.toLowerCase().endsWith('.wav')) {
-      flatWavs.push(ent.name)
+    if (ent.isFile() && isStemAudioFile(ent.name)) {
+      flatAudio.push(ent.name)
       continue
     }
     if (ent.isDirectory()) {
       const sub = path.join(stemsDir, ent.name)
       try {
         const inner = await readdir(sub)
-        const wavs = inner.filter((f) => f.toLowerCase().endsWith('.wav')).sort()
-        if (wavs.length > 0) out[ent.name] = wavs
+        const audio = inner.filter(isStemAudioFile).sort()
+        if (audio.length > 0) out[ent.name] = audio
       } catch {
         /* unreadable subfolder — skip */
       }
     }
   }
-  if (flatWavs.length > 0) out['legacy'] = flatWavs.sort()
+  if (flatAudio.length > 0) out['legacy'] = flatAudio.sort()
   return out
 }
 

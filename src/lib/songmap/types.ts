@@ -53,6 +53,8 @@ export type SectionKind =
   | 'chorus'
   | 'bridge'
   | 'solo'
+  | 'riff'
+  | 'break'
   | 'outro'
   | 'custom'
 

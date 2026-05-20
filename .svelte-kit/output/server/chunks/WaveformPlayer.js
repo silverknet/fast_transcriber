@@ -108,7 +108,7 @@ function WaveformPlayer($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
 		/** Waveform timeline editor orchestration (viewport-driven model). */
 		/** `trim` = home flow (region selection). `editor` = full-timeline editing (same controls, copy tuned). */
-		let { file = null, rangeStart = 0, rangeEnd = 0, ready = false, variant = "trim", beatGrid = null, beatGridEditable = false, timelineStripMode = "grid", mapSections = [], onBarGridAction = void 0, onApplySectionTag = void 0, sectionsSelectionBarIds = [], chordsSelectionBeatIds = [], selectedBeatId = null, chordLabelByBeatId = {}, onChordBeatInteract = void 0 } = $$props;
+		let { file = null, rangeStart = 0, rangeEnd = 0, ready = false, variant = "trim", beatGrid = null, beatGridEditable = false, timelineStripMode = "grid", mapSections = [], onBarGridAction = void 0, onApplySectionTag = void 0, suggestionPreview = null, onAcceptSuggestion = void 0, onDismissSuggestion = void 0, onResizeSection = void 0, onResizeBoundary = void 0, sectionsSelectionBarIds = [], chordsSelectionBeatIds = [], selectedBeatId = null, chordLabelByBeatId = {}, onChordBeatInteract = void 0 } = $$props;
 		let isEditorVariant = derived$1(() => variant === "editor");
 		derived$1(() => Boolean(isEditorVariant() && beatGridEditable && beatGrid && (timelineStripMode === "sections" || timelineStripMode === "chords" || onBarGridAction)));
 		/** Authoritative editor duration consumed by selection / viewport / transport / geometry. */

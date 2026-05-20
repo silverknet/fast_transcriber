@@ -5,6 +5,8 @@
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import MixerView from '$lib/components/MixerView.svelte'
+  import LeadSheet from '$lib/components/LeadSheet.svelte'
+  import SectionSuggestionBanner from '$lib/components/SectionSuggestionBanner.svelte'
   import ChordRadialQuickSelect from '$lib/components/ChordRadialQuickSelect.svelte'
   import { Button } from '$lib/components/ui/button'
   import {
@@ -29,9 +31,15 @@
   import { newId } from '$lib/songmap/factory'
   import { clearHarmonyAtBeat, upsertHarmonyAtBeat } from '$lib/songmap/harmonyEdit'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
-  import { setSectionForBarRange } from '$lib/songmap/sectionEdit'
+  import {
+    defaultSectionLabel,
+    resizeSectionBoundary,
+    resizeSectionRange,
+    setSectionForBarRange,
+  } from '$lib/songmap/sectionEdit'
+  import { predictNextSection } from '$lib/sections/predictNext'
   import { applyBarGridAction, type BarGridAction } from '$lib/songmap/timelineEdit'
-  import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey } from '$lib/songmap/types'
+  import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey, SongMap } from '$lib/songmap/types'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
@@ -69,7 +77,7 @@
 
   let sectionsSelectionBarIds = $state<string[]>([])
 
-  function handleApplySectionTag(kind: SectionKind) {
+  function handleApplySectionTag(kind: SectionKind, customLabel?: string) {
     const sm = get(songMap)
     if (!sm || sectionsSelectionBarIds.length === 0) return
     const byId = new Map(sm.timeline.bars.map((b) => [b.id, b]))
@@ -81,7 +89,106 @@
     if (indices.length === 0) return
     const start = Math.min(...indices)
     const end = Math.max(...indices)
-    const out = setSectionForBarRange(sm, start, end, kind, newId)
+    const out = setSectionForBarRange(sm, start, end, kind, newId, customLabel)
+    if (!out.ok) {
+      beatEditError = out.error
+      return
+    }
+    const p = patchSongMap(() => out.map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  /**
+   * Suggestion lifecycle:
+   *   - `predictNextSection` is purely derived from `$songMap` — it re-fires
+   *     whenever sections / bars change.
+   *   - Dismissals are local: the user clicking ✕ records the suggestion's
+   *     signature (`kind:bars:lastEnd`). The derived `nextSectionSuggestion`
+   *     filters out anything matching the dismissed sig, so the same
+   *     suggestion doesn't reappear until the song state changes.
+   *   - Accepting auto-clears `dismissedSuggestionSig` for the next round.
+   */
+  let dismissedSuggestionSig = $state<string | null>(null)
+
+  function suggestionSig(sm: SongMap | null, sug: { kind: string; bars: number } | null): string | null {
+    if (!sm || !sug || sm.sections.length === 0) return null
+    const lastEnd = Math.max(...sm.sections.map((s) => s.barRange.endBarIndex))
+    return `${sug.kind}:${sug.bars}:${lastEnd}`
+  }
+
+  const nextSectionSuggestion = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return null
+    const raw = predictNextSection(sm)
+    if (!raw) return null
+    const sig = suggestionSig(sm, raw)
+    if (sig && sig === dismissedSuggestionSig) return null
+    return raw
+  })
+
+  /** Inline ghost preview on the bar strip — same range that Accept would tag. */
+  const sectionSuggestionPreview = $derived.by(() => {
+    const sm = $songMap
+    const sug = nextSectionSuggestion
+    if (!sm || !sug || sm.sections.length === 0) return null
+    const lastEnd = Math.max(...sm.sections.map((s) => s.barRange.endBarIndex))
+    const start = lastEnd + 1
+    const end = start + sug.bars - 1
+    if (end >= sm.timeline.bars.length) return null
+    return {
+      kind: sug.kind,
+      label: defaultSectionLabel(sug.kind),
+      startBarIndex: start,
+      endBarIndex: end,
+    }
+  })
+
+  function handleAcceptSectionSuggestion() {
+    const sm = get(songMap)
+    const sug = nextSectionSuggestion
+    if (!sm || !sug) return
+    if (sm.sections.length === 0) return
+    const lastEnd = Math.max(...sm.sections.map((s) => s.barRange.endBarIndex))
+    const start = lastEnd + 1
+    const end = start + sug.bars - 1
+    const out = setSectionForBarRange(sm, start, end, sug.kind, newId)
+    if (!out.ok) {
+      beatEditError = out.error
+      return
+    }
+    const p = patchSongMap(() => out.map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else {
+      beatEditError = ''
+      dismissedSuggestionSig = null
+    }
+  }
+
+  function handleDismissSectionSuggestion() {
+    const sm = get(songMap)
+    const sug = nextSectionSuggestion
+    if (!sm || !sug) return
+    dismissedSuggestionSig = suggestionSig(sm, sug)
+  }
+
+  function handleResizeSection(sectionId: string, newStart: number, newEnd: number) {
+    const sm = get(songMap)
+    if (!sm) return
+    const out = resizeSectionRange(sm, sectionId, newStart, newEnd)
+    if (!out.ok) {
+      beatEditError = out.error
+      return
+    }
+    const p = patchSongMap(() => out.map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function handleResizeBoundary(leftId: string, rightId: string, boundaryBarIndex: number) {
+    const sm = get(songMap)
+    if (!sm) return
+    const out = resizeSectionBoundary(sm, leftId, rightId, boundaryBarIndex)
     if (!out.ok) {
       beatEditError = out.error
       return
@@ -97,7 +204,7 @@
   let waveformReady = $state(false)
 
   /** Main workspace mode. */
-  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix'>('grid')
+  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix' | 'leadsheet'>('grid')
 
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 
@@ -983,7 +1090,7 @@
       </div>
 
       <div
-        class="border-foreground bg-muted inline-grid grid-cols-5 gap-0 self-start overflow-hidden border-2 sm:self-auto"
+        class="border-foreground bg-muted inline-grid grid-cols-6 gap-0 self-start overflow-hidden border-2 sm:self-auto"
         role="tablist"
         aria-label="Edit mode"
       >
@@ -1051,6 +1158,19 @@
           onclick={() => (editMode = 'mix')}
         >
           Mix
+        </Button>
+        <Button
+          type="button"
+          role="tab"
+          aria-selected={editMode === 'leadsheet'}
+          variant="ghost"
+          size="sm"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'leadsheet'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
+          onclick={() => (editMode = 'leadsheet')}
+        >
+          Lead sheet
         </Button>
       </div>
     </header>
@@ -1228,6 +1348,19 @@
       </section>
     {/if}
 
+    {#if editMode === 'leadsheet'}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Lead sheet"
+      >
+        {#if $songMap}
+          <LeadSheet songMap={$songMap} />
+        {:else}
+          <p class="text-muted-foreground p-4 text-sm">Open a song to view its lead sheet.</p>
+        {/if}
+      </section>
+    {/if}
+
     {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
       <section
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
@@ -1260,6 +1393,12 @@
             {/if}
           </div>
         </details>
+        {#if editMode === 'sections'}
+          <SectionSuggestionBanner
+            suggestion={nextSectionSuggestion}
+            onAccept={handleAcceptSectionSuggestion}
+          />
+        {/if}
         {#if editMode === 'chords'}
           <div
             data-song-key-picker
@@ -1321,6 +1460,11 @@
           mapSections={sm.sections}
           onBarGridAction={handleBarGridAction}
           onApplySectionTag={handleApplySectionTag}
+          suggestionPreview={editMode === 'sections' ? sectionSuggestionPreview : null}
+          onAcceptSuggestion={handleAcceptSectionSuggestion}
+          onDismissSuggestion={handleDismissSectionSuggestion}
+          onResizeSection={handleResizeSection}
+          onResizeBoundary={handleResizeBoundary}
           bind:sectionsSelectionBarIds
           bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
