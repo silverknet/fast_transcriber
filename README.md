@@ -14,6 +14,14 @@ npm run db:up        # starts Postgres on port 5433
 npm run db:migrate   # creates the editor_sessions table
 ```
 
+Desktop sidecar (Electron, headless — required for native jobs like stem splitting & downbeat analysis):
+
+```bash
+npm run dev --prefix desktop   # binds http://127.0.0.1:47842
+```
+
+First time only: `cd desktop && npm install` (downloads the Electron binary). Details in [`desktop/README.md`](desktop/README.md).
+
 ## Tech stack
 
 SvelteKit 2 + Svelte 5 (runes), TypeScript, Tailwind CSS 4, Vite 8.
@@ -50,3 +58,15 @@ The JSON schema is defined in `src/lib/songmap/types.ts` — `SongMapV1`. Key to
 The `SongMap` JSON is the **complete, canonical state**. Every UI element — bars, beats, chords, sections, key, BPM — reads from and writes to this one object. There is no shadow state; if you serialize the JSON you get exactly what the editor shows, and loading it back restores the editor exactly.
 
 Audio is handled the same way: after analysis (on full-quality WAV), the clip is re-encoded to a 64 kbps reference MP3 via lamejs. That MP3 is the audio chunk inside `.smap` — small enough to save and share, good enough for playback and navigation. The editor plays directly from this reference blob.
+
+## Roadmap and maturity
+
+High-level goals and a simple **N → P** completion scale per feature live in [`docs/goal-plan.md`](docs/goal-plan.md). Regression checks after migrations are in [`docs/regression-checklist.md`](docs/regression-checklist.md).
+
+The **desktop shell** is a separate package (Electron): [`desktop/README.md`](desktop/README.md). Apple Silicon build + **same-origin** download URL:
+
+```bash
+npm run desktop:dist-mac-sync
+```
+
+This builds the DMG under `desktop/release/`, copies it to **`static/releases/barbro-desktop-<version>-arm64.dmg`**, and updates [`static/desktop-downloads.json`](static/desktop-downloads.json). The app serves it at **`/releases/...`** (large binaries are gitignored — run the command before `npm run build` / deploy). **[`/download`](/download)** reads that manifest (or `PUBLIC_DESKTOP_MANIFEST_URL`). When the desktop app is running, the header **Monitor** icon shows connected (loopback ping).

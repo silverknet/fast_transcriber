@@ -75,6 +75,93 @@ function replaceBarBeats(map: SongMap, barId: string, nextInBar: Beat[]): SongMa
   }
 }
 
+/** Minimum bar length (seconds) when stretching boundaries — keeps room for evenly spaced beats. */
+function minBarDurationSec(bar: Bar): number {
+  return Math.max(0.1, bar.beatCount * 0.032)
+}
+
+/**
+ * Move a bar boundary in time: **left** edge drags the start of `barId` (and the previous bar’s end);
+ * **right** edge drags the end of `barId` (and the next bar’s start, or extends the last bar to `timelineMaxSec`).
+ * Beats in each affected bar are re-equalized on the new interval.
+ *
+ * `timelineMinSec` / `timelineMaxSec` clamp the outer song timeline (e.g. 0 … decoded duration).
+ */
+export function setBarBoundary(
+  map: SongMap,
+  barId: string,
+  edge: 'left' | 'right',
+  boundarySec: number,
+  timelineMinSec: number,
+  timelineMaxSec: number,
+): TimelineEditResult {
+  const sorted = sortBarsByIndex(map.timeline.bars)
+  const i = sorted.findIndex((b) => b.id === barId)
+  if (i < 0) return fail(`Unknown bar ${barId}`)
+  const cur = sorted[i]!
+
+  const replaceTwoBars = (a: Bar, b: Bar): SongMap => {
+    const others = map.timeline.bars.filter((x) => x.id !== a.id && x.id !== b.id)
+    const bars = sortBarsByIndex([...others, a, b]).map((x, j) => ({ ...x, index: j }))
+    return { ...map, timeline: { ...map.timeline, bars } }
+  }
+
+  const replaceOneBar = (a: Bar): SongMap => {
+    const others = map.timeline.bars.filter((x) => x.id !== a.id)
+    const bars = sortBarsByIndex([...others, a]).map((x, j) => ({ ...x, index: j }))
+    return { ...map, timeline: { ...map.timeline, bars } }
+  }
+
+  if (edge === 'left') {
+    if (i === 0) {
+      const hi = cur.endSec - minBarDurationSec(cur)
+      const lo = timelineMinSec
+      if (!(hi > lo + T_EPS)) return fail('Bar is too short to stretch')
+      const newB = Math.min(Math.max(boundarySec, lo), hi)
+      const cur2: Bar = { ...cur, startSec: newB }
+      let nextMap = replaceOneBar(cur2)
+      const r = redistributeBeatsEvenly(nextMap, cur.id)
+      return r
+    }
+    const prev = sorted[i - 1]!
+    const lo = prev.startSec + minBarDurationSec(prev)
+    const hi = cur.endSec - minBarDurationSec(cur)
+    if (!(hi > lo + T_EPS)) return fail('Adjacent bars too tight')
+    const newB = Math.min(Math.max(boundarySec, lo), hi)
+    const prev2: Bar = { ...prev, endSec: newB }
+    const cur2: Bar = { ...cur, startSec: newB }
+    let nextMap = replaceTwoBars(prev2, cur2)
+    const r1 = redistributeBeatsEvenly(nextMap, prev.id)
+    if (!r1.ok) return r1
+    nextMap = r1.map
+    return redistributeBeatsEvenly(nextMap, cur.id)
+  }
+
+  // right edge
+  const hiBound =
+    timelineMaxSec > timelineMinSec + T_EPS ? timelineMaxSec : sorted[sorted.length - 1]!.endSec + 120
+  if (i >= sorted.length - 1) {
+    const lo = cur.startSec + minBarDurationSec(cur)
+    if (!(hiBound > lo + T_EPS)) return fail('No room to extend last bar')
+    const newB = Math.min(Math.max(boundarySec, lo), hiBound)
+    const cur2: Bar = { ...cur, endSec: newB }
+    let nextMap = replaceOneBar(cur2)
+    return redistributeBeatsEvenly(nextMap, cur.id)
+  }
+  const next = sorted[i + 1]!
+  const lo = cur.startSec + minBarDurationSec(cur)
+  const hi = next.endSec - minBarDurationSec(next)
+  if (!(hi > lo + T_EPS)) return fail('Adjacent bars too tight')
+  const newB = Math.min(Math.max(boundarySec, lo), hi)
+  const cur2: Bar = { ...cur, endSec: newB }
+  const next2: Bar = { ...next, startSec: newB }
+  let nextMap = replaceTwoBars(cur2, next2)
+  const r1 = redistributeBeatsEvenly(nextMap, cur.id)
+  if (!r1.ok) return r1
+  nextMap = r1.map
+  return redistributeBeatsEvenly(nextMap, next.id)
+}
+
 /**
  * Rewrite every beat in the bar so `timeSec` matches equal spacing for the current
  * `[startSec,endSec)` and `beatCount`.
@@ -498,6 +585,14 @@ export type BarGridAction =
   | { type: 'splitBarAtMidpoint'; barId: string }
   | { type: 'mergeBarWithPrevious'; barId: string }
   | { type: 'redistributeBar'; barId: string }
+  | {
+      type: 'setBarBoundary'
+      barId: string
+      edge: 'left' | 'right'
+      boundarySec: number
+      timelineMinSec: number
+      timelineMaxSec: number
+    }
   | { type: 'addBarAtStart' }
   | { type: 'addBarAtEnd' }
   | { type: 'removeBarAtStart' }
@@ -509,6 +604,15 @@ export function applyBarGridAction(
   idFactory: IdFactory,
 ): TimelineEditResult {
   switch (action.type) {
+    case 'setBarBoundary':
+      return setBarBoundary(
+        map,
+        action.barId,
+        action.edge,
+        action.boundarySec,
+        action.timelineMinSec,
+        action.timelineMaxSec,
+      )
     case 'setBarBeatCount':
       return setBarBeatCount(map, action.barId, action.count, idFactory)
     case 'splitBarAtMidpoint':

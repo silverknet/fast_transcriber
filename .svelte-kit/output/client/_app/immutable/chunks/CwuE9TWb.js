@@ -1,0 +1,1 @@
+import{bt as e}from"./Dg0BMDbX.js";import"./DUgX7ckJ.js";var t=e({reachable:!1,version:null,lastCheckedAt:null,lastError:null});export{t};

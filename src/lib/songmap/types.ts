@@ -53,6 +53,8 @@ export type SectionKind =
   | 'chorus'
   | 'bridge'
   | 'solo'
+  | 'riff'
+  | 'break'
   | 'outro'
   | 'custom'
 
@@ -71,8 +73,24 @@ export type CueSettings = {
   mode: CueMode
   countInBeats: number
   useSectionLabels: boolean
+  /** Seconds of audio to prepend before the file start so the count-in lands before bar 1. */
+  prependSec?: number
   template?: string
   language?: string
+}
+
+/**
+ * Last exported click-cue WAV (see `cueTrackFingerprint.ts` + `renderCueTrack.ts`).
+ * Cleared automatically when timeline/trim/cues no longer match `fingerprint`.
+ */
+export type CueTrackExport = {
+  /** Same value as `fingerprintCueTrackInputs()` at generation time. */
+  fingerprint: string
+  durationSec: number
+  sampleRate: number
+  generatedAt: string
+  /** Set when written under a project song folder, e.g. `cue/cue-track.wav`. */
+  relativePath?: string
 }
 
 export type AudioSource = 'upload' | 'import' | 'unknown'
@@ -151,6 +169,39 @@ export type SongMapTimeline = {
   beats: Beat[]
 }
 
+/**
+ * Relative paths (from the project folder) to each stem audio file.
+ * Key = stem name (e.g. "Drums"), value = relative path (e.g. "drums.wav" or "stems/drums.wav").
+ */
+export type StemRefs = Record<string, string>
+
+/**
+ * Per-track mixer state used by the in-browser DAW view (`/edit` mix mode).
+ *
+ * Tracks identified by stable `key`:
+ *  - `"original"`              — the song.smap audio chunk (full reference)
+ *  - `"cue"`                   — `cue/cue-track.wav` if present
+ *  - `"stem:<filename>"`       — one of `stemsOnDisk` (e.g. `"stem:vocals.wav"`)
+ *
+ * Tracks not listed get sensible defaults (volume 1, not muted, not soloed).
+ * Unknown keys are tolerated — they may appear after stems get added/removed
+ * on disk between edits.
+ */
+export interface MixTrackState {
+  /** Stable identifier — see top of doc for the schema. */
+  key: string
+  /** Linear gain 0..1.5 (1 = unity, >1 boosts). */
+  volume: number
+  muted?: boolean
+  soloed?: boolean
+}
+
+export interface MixState {
+  tracks: MixTrackState[]
+  /** Master gain 0..1.5. Defaults to 1 when absent. */
+  master?: number
+}
+
 export type SongMapV1 = {
   formatVersion: typeof SONGMAP_FORMAT_VERSION
   app?: SongMapAppInfo
@@ -160,6 +211,17 @@ export type SongMapV1 = {
   sections: Section[]
   harmony: HarmonyEvent[]
   cues: CueSettings
+  /**
+   * Display hint for the project folder name (e.g. "DangerousSong").
+   * Not a full path — used to show "not found" messaging on a different machine.
+   */
+  projectFolder?: string
+  /** Relative paths within the project folder to each stem audio file. */
+  stemRefs?: StemRefs
+  /** Optional rendered metronome cue aligned to trim + count-in prepend. */
+  cueTrackExport?: CueTrackExport
+  /** Optional saved mixer state for the in-browser DAW view. */
+  mixState?: MixState
 }
 
 export type SongMap = SongMapV1

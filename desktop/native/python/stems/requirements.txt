@@ -1,0 +1,7 @@
+# Demucs + deps — install PyTorch per https://github.com/facebookresearch/demucs first if needed.
+demucs>=4.0.0
+certifi
+# torchaudio 2.9+ dropped its built-in WAV writer; Demucs's save step now
+# routes through torchcodec. Without this package the run dies with
+# "ImportError: TorchCodec is required for save_with_torchcodec."
+torchcodec

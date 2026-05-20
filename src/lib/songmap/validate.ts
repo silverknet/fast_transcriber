@@ -177,6 +177,23 @@ export function validateSongMap(map: SongMap): ValidationResult {
       errors.push('cues.countInBeats invalid')
     }
     if (typeof map.cues.useSectionLabels !== 'boolean') errors.push('cues.useSectionLabels invalid')
+    if (map.cues.prependSec !== undefined && (!Number.isFinite(map.cues.prependSec) || map.cues.prependSec < 0)) {
+      errors.push('cues.prependSec invalid')
+    }
+  }
+
+  if (map.cueTrackExport !== undefined) {
+    const c = map.cueTrackExport
+    if (!c || typeof c !== 'object') errors.push('cueTrackExport invalid')
+    else {
+      if (typeof c.fingerprint !== 'string' || !c.fingerprint) errors.push('cueTrackExport.fingerprint invalid')
+      if (!Number.isFinite(c.durationSec) || c.durationSec <= 0) errors.push('cueTrackExport.durationSec invalid')
+      if (!Number.isFinite(c.sampleRate) || c.sampleRate <= 0) errors.push('cueTrackExport.sampleRate invalid')
+      if (typeof c.generatedAt !== 'string' || !c.generatedAt) errors.push('cueTrackExport.generatedAt invalid')
+      if (c.relativePath !== undefined && typeof c.relativePath !== 'string') {
+        errors.push('cueTrackExport.relativePath invalid')
+      }
+    }
   }
 
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
@@ -218,6 +235,36 @@ export function validateSongMap(map: SongMap): ValidationResult {
         warnings.push(`sections[${i}]: barRange extends past last bar index (${maxBarIndex})`)
       }
     })
+  }
+
+  if (map.projectFolder !== undefined && typeof map.projectFolder !== 'string') {
+    errors.push('projectFolder must be a string')
+  }
+  if (map.stemRefs !== undefined) {
+    if (typeof map.stemRefs !== 'object' || Array.isArray(map.stemRefs)) {
+      errors.push('stemRefs must be an object')
+    } else {
+      for (const [k, v] of Object.entries(map.stemRefs)) {
+        if (typeof v !== 'string') errors.push(`stemRefs.${k} must be a string`)
+      }
+    }
+  }
+  if (map.mixState !== undefined) {
+    if (!map.mixState || typeof map.mixState !== 'object') {
+      errors.push('mixState invalid')
+    } else {
+      if (!Array.isArray(map.mixState.tracks)) errors.push('mixState.tracks must be an array')
+      else {
+        for (let i = 0; i < map.mixState.tracks.length; i++) {
+          const t = map.mixState.tracks[i]
+          if (!t || typeof t !== 'object') errors.push(`mixState.tracks[${i}] invalid`)
+          else {
+            if (typeof t.key !== 'string' || !t.key) errors.push(`mixState.tracks[${i}].key invalid`)
+            if (!Number.isFinite(t.volume) || t.volume < 0) errors.push(`mixState.tracks[${i}].volume invalid`)
+          }
+        }
+      }
+    }
   }
 
   return {

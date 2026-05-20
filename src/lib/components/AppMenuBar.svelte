@@ -36,10 +36,27 @@
   import { songMapToMusicXml } from '$lib/export/musicxml'
   import { renderLeadSheetPdf } from '$lib/export/pdfLeadSheet'
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { serverAutosaveStatus } from '$lib/stores/serverAutosaveStatus'
   import { songMap } from '$lib/stores/songMap'
+  import {
+    project as projectStore,
+    closeProject,
+    markEditingStandalone,
+  } from '$lib/stores/project'
+  import {
+    clearLastProjectPath,
+    createProjectOnDisk,
+    dropRecentProjectPath,
+    openProjectByPath,
+    readRecentProjectPaths,
+  } from '$lib/project/commit'
+  import { pickFolderViaDesktop } from '$lib/client/desktopBridge'
+  import { clearFullAppSongState } from '$lib/stores/restorableSong'
+  import { onMount } from 'svelte'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
   import Cloud from '@lucide/svelte/icons/cloud'
+  import Monitor from '@lucide/svelte/icons/monitor'
   import Moon from '@lucide/svelte/icons/moon'
   import Music from '@lucide/svelte/icons/music'
   import Sun from '@lucide/svelte/icons/sun'
@@ -90,9 +107,23 @@
   })
 
   let cloudStatusTitle = $derived.by(() => {
-    if ($serverAutosaveStatus.saving) return 'Cloud: saving...'
-    if (cloudConnected) return 'Cloud: connected'
-    return `Cloud: disconnected${$serverAutosaveStatus.lastError ? ` (${$serverAutosaveStatus.lastError})` : ''}`
+    const times = ` · checked ${lastCheckedLabel} · saved ${lastSavedLabel}`
+    if ($serverAutosaveStatus.saving) return `Cloud: saving…${times}`
+    if (cloudConnected) return `Cloud: connected${times}`
+    return `Cloud: disconnected${$serverAutosaveStatus.lastError ? ` (${$serverAutosaveStatus.lastError})` : ''}${times}`
+  })
+
+  let desktopConnected = $derived($desktopCompanionStatus.reachable)
+  let desktopCheckedLabel = $derived(
+    $desktopCompanionStatus.lastCheckedAt ? $desktopCompanionStatus.lastCheckedAt.slice(11, 19) : '--:--:--',
+  )
+  let desktopStatusTitle = $derived.by(() => {
+    const ping = ` · ping ${desktopCheckedLabel}`
+    if (desktopConnected) {
+      const v = $desktopCompanionStatus.version
+      return v ? `Desktop app: connected (v${v})${ping}` : `Desktop app: connected${ping}`
+    }
+    return `Desktop app: not running${$desktopCompanionStatus.lastError ? ` (${$desktopCompanionStatus.lastError})` : ''}${ping}`
   })
 
   const debugJsonText = $derived.by(() => {
@@ -194,7 +225,138 @@
       return
     }
     hydrateRestorableSong(result.state)
+    // Loading a standalone .smap clears any project-song editing context.
+    markEditingStandalone()
     await goto('/edit')
+  }
+
+  // ── Project actions ───────────────────────────────────────────────────────
+
+  /**
+   * Project mode is desktop-only. The sidecar's native picker returns the
+   * absolute OS path, and that path is the project's canonical identity —
+   * the web app never touches the filesystem directly for project I/O.
+   */
+  async function onNewProject() {
+    menuError = ''
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — install/start BarBro desktop to manage projects.'
+      return
+    }
+    const pick = await pickFolderViaDesktop({
+      title: 'Pick the folder that will contain the new project',
+    })
+    if (!pick.ok) {
+      if ('cancelled' in pick) return
+      menuError = pick.error ?? 'Could not open picker'
+      return
+    }
+    const name = window.prompt(
+      `Project name (a new folder will be created inside the chosen location):`,
+      'Untitled Project',
+    )
+    if (name === null) return
+    try {
+      await createProjectOnDisk(pick.path, name)
+      refreshRecents()
+      await goto('/project')
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'Could not create project'
+    }
+  }
+
+  async function onOpenProject() {
+    menuError = ''
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — install/start BarBro desktop to manage projects.'
+      return
+    }
+    const pick = await pickFolderViaDesktop({ title: 'Open a BarBro project folder' })
+    if (!pick.ok) {
+      if ('cancelled' in pick) return
+      menuError = pick.error ?? 'Could not open picker'
+      return
+    }
+    try {
+      await openProjectByPath(pick.path)
+      refreshRecents()
+      await goto('/project')
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'Could not open project'
+    }
+  }
+
+  async function onBackToProject() {
+    await goto('/project')
+  }
+
+  // ── Recent projects ───────────────────────────────────────────────────────
+
+  type RecentEntry = { path: string; label: string }
+
+  let recentProjects = $state<RecentEntry[]>([])
+
+  function pathLabel(p: string): string {
+    const ix = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    return ix === -1 ? p : p.slice(ix + 1)
+  }
+
+  function refreshRecents() {
+    if (!browser) return
+    recentProjects = readRecentProjectPaths().map((p) => ({ path: p, label: pathLabel(p) }))
+  }
+
+  async function onOpenRecent(entry: RecentEntry) {
+    menuError = ''
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
+    try {
+      await openProjectByPath(entry.path)
+      refreshRecents()
+      await goto('/project')
+    } catch (e) {
+      // Project folder gone or unreadable — drop from recents.
+      dropRecentProjectPath(entry.path)
+      refreshRecents()
+      menuError = e instanceof Error ? e.message : `Could not open "${entry.label}"`
+    }
+  }
+
+  onMount(() => {
+    refreshRecents()
+  })
+
+  /** Project open on disk (manifest + folder handle). */
+  let isInProjectMode = $derived($projectStore.data !== null)
+
+  /**
+   * Logo target: in project mode the project view is home; otherwise fall
+   * back to the song editor if a song's loaded, else the import page.
+   */
+  let logoHref = $derived(
+    isInProjectMode ? '/project' : $songMap && $audioSession.file ? '/edit' : '/',
+  )
+  let logoAria = $derived(
+    isInProjectMode
+      ? `BarBro — back to project ${$projectStore.data?.name ?? ''}`
+      : $songMap && $audioSession.file
+        ? 'BarBro — back to editor'
+        : 'BarBro — import audio',
+  )
+
+  async function onCloseProject() {
+    menuError = ''
+    closeProject()
+    // Drop any song that was loaded via the project so the user starts
+    // fresh on / rather than ambiguously in /edit pointing at a project song.
+    clearFullAppSongState()
+    // Forget the last-opened project so a reload doesn't put the user back
+    // into the project they just exited. The Recent Projects list survives
+    // — re-entering is one click away.
+    clearLastProjectPath()
+    await goto('/', { replaceState: true })
   }
 </script>
 
@@ -204,9 +366,9 @@
   data-app-menu
 >
   <a
-    href={$songMap && $audioSession.file ? '/edit' : '/'}
+    href={logoHref}
     class="text-foreground hover:text-foreground flex shrink-0 items-center gap-2 py-1 pr-2 transition-colors"
-    aria-label={$songMap && $audioSession.file ? 'BarBro — back to editor' : 'BarBro — import audio'}
+    aria-label={logoAria}
   >
     <span
       class="bg-muted text-foreground inline-flex size-8 items-center justify-center border-2 border-foreground"
@@ -217,7 +379,7 @@
     <span class="hidden font-semibold tracking-tight sm:inline">BarBro</span>
   </a>
 
-  <div class="flex flex-1 flex-wrap items-center gap-1">
+  <div class="flex flex-1 flex-wrap items-center gap-1.5">
     <DropdownMenu>
       <DropdownMenuTrigger>
         {#snippet child({ props })}
@@ -228,51 +390,121 @@
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" class="min-w-[12rem]">
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={() => {
-            void onExportFull()
-          }}
-        >
-          Save project (.smap)…
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={() => {
-            void onExportMusicXml()
-          }}
-        >
-          Export as lead sheet (.musicxml)…
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={() => {
-            void onExportPdf()
-          }}
-        >
-          Export as PDF…
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={() => {
-            importInput?.click()
-          }}
-        >
-          Open project…
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={() => {
-            void onSaveToServer()
-          }}
-        >
-          {currentProjectName ? `Save to cloud — "${currentProjectName}"` : 'Save to cloud'}
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          class="cursor-pointer"
-          onclick={onRestoreFromServer}
-        >
-          Load from cloud…
+        {#if isInProjectMode}
+          <!-- In project mode: project actions are the focus; standalone-only
+               flows (Open Song, Load from cloud) would conflict with the
+               project's setlist and are hidden until the user Close Projects. -->
+          <DropdownMenuItem class="cursor-pointer" onclick={onBackToProject}>
+            Back to Project
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportFull()
+            }}
+          >
+            Save current song (.smap)…
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportMusicXml()
+            }}
+          >
+            Export as lead sheet (.musicxml)…
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportPdf()
+            }}
+          >
+            Export as PDF…
+          </DropdownMenuItem>
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onSaveToServer()
+            }}
+          >
+            {currentProjectName ? `Save to cloud — "${currentProjectName}"` : 'Save current song to cloud'}
+          </DropdownMenuItem>
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+          <DropdownMenuItem class="cursor-pointer" onclick={() => void onCloseProject()}>
+            Close Project
+          </DropdownMenuItem>
+        {:else}
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportFull()
+            }}
+          >
+            Save Song (.smap)…
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              importInput?.click()
+            }}
+          >
+            Open Song (.smap)…
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportMusicXml()
+            }}
+          >
+            Export as lead sheet (.musicxml)…
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportPdf()
+            }}
+          >
+            Export as PDF…
+          </DropdownMenuItem>
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+          <DropdownMenuItem class="cursor-pointer" onclick={onNewProject}>
+            New Project…
+          </DropdownMenuItem>
+          <DropdownMenuItem class="cursor-pointer" onclick={onOpenProject}>
+            Open Project…
+          </DropdownMenuItem>
+          {#if recentProjects.length > 0}
+            <div class="text-muted-foreground px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider">
+              Recent
+            </div>
+            {#each recentProjects as r (r.path)}
+              <DropdownMenuItem
+                class="cursor-pointer"
+                onclick={() => void onOpenRecent(r)}
+              >
+                <div class="flex w-full min-w-0 flex-col gap-0">
+                  <span class="truncate font-medium">{r.label}</span>
+                  <span class="text-muted-foreground truncate font-mono text-[10px]">{r.path}</span>
+                </div>
+              </DropdownMenuItem>
+            {/each}
+          {/if}
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onSaveToServer()
+            }}
+          >
+            {currentProjectName ? `Save to cloud — "${currentProjectName}"` : 'Save to cloud'}
+          </DropdownMenuItem>
+          <DropdownMenuItem class="cursor-pointer" onclick={onRestoreFromServer}>
+            Load from cloud…
+          </DropdownMenuItem>
+        {/if}
+        <DropdownMenuItem class="cursor-pointer" onclick={() => goto('/download')}>
+          Download desktop app…
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -308,6 +540,16 @@
   </div>
 
   <div class="ml-auto flex shrink-0 items-center gap-2">
+    <a
+      href="/download"
+      class="inline-flex size-8 items-center justify-center border-2 no-underline {desktopConnected
+        ? 'border-emerald-600 bg-emerald-100 text-emerald-800 dark:border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200'
+        : 'border-muted-foreground/50 bg-muted/40 text-muted-foreground hover:border-foreground/40 hover:bg-muted/60'}"
+      title={desktopStatusTitle}
+      aria-label={desktopStatusTitle}
+    >
+      <Monitor class="size-4" aria-hidden="true" />
+    </a>
     <span
       class="inline-flex size-8 items-center justify-center border-2 {cloudConnected
         ? 'border-emerald-600 bg-emerald-100 text-emerald-800 dark:border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200'
@@ -318,12 +560,6 @@
       aria-label={cloudStatusTitle}
     >
       <Cloud class="size-4" aria-hidden="true" />
-    </span>
-    <span
-      class="text-muted-foreground hidden max-w-[14rem] truncate font-mono text-[10px] tabular-nums sm:inline"
-      title="Cloud check and latest autosave time"
-    >
-      chk {lastCheckedLabel} · save {lastSavedLabel}
     </span>
     <Button
       type="button"
@@ -350,6 +586,18 @@
     >
       Inspect JSON
     </Button>
+    {#if !isInProjectMode}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        class="h-8"
+        onclick={() => goto('/set')}
+        title="Experimental: export Ableton Live set"
+      >
+        Set ⚗
+      </Button>
+    {/if}
     {#if import.meta.env.DEV}
       <Button
         type="button"
@@ -359,6 +607,9 @@
         onclick={() => goto('/analyzing?preview')}
       >
         ∿
+      </Button>
+      <Button type="button" variant="outline" size="sm" class="h-8 opacity-50" onclick={() => goto('/texttospeech')}>
+        TTS
       </Button>
     {/if}
   </div>

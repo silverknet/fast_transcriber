@@ -30,7 +30,20 @@
 	"/api/sessions/[id]/audio": [
 		"src/routes/api/sessions/[id]/audio/+server.ts"
 	],
+	"/download": [
+		"src/routes/download/+page.server.ts",
+		"src/routes/+layout.server.ts"
+	],
 	"/edit": [
+		"src/routes/+layout.server.ts"
+	],
+	"/project": [
+		"src/routes/+layout.server.ts"
+	],
+	"/set": [
+		"src/routes/+layout.server.ts"
+	],
+	"/texttospeech": [
 		"src/routes/+layout.server.ts"
 	]
 }

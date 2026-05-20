@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { env as privateEnv } from '$env/dynamic/private'
 import { json } from '@sveltejs/kit'
 import { getAnalyzeDownbeatsScriptPath } from '$lib/server/analysis/analysisPaths'
-import { beatsToSongMap } from '$lib/server/analysis/beatsToSongMap'
+import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
 import { readWavDurationSec } from '$lib/server/analysis/wavDuration'
 import type { AnalyzeFailure, AnalyzeRequest, AnalyzeSuccess } from '$lib/server/analysis/contracts'
 

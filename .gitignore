@@ -10,6 +10,19 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+desktop/release
+desktop/.venv-beats/
+desktop/.venv-stems/
+
+# Large desktop installers — generate with desktop:dist-mac-sync, do not commit
+static/releases/*.dmg
+static/releases/*.zip
+static/releases/*.blockmap
+# SvelteKit's build step copies static assets into .svelte-kit/output;
+# ignore the binary release artifacts there too so they don't sneak into commits.
+.svelte-kit/output/client/releases/*.dmg
+.svelte-kit/output/client/releases/*.zip
+.svelte-kit/output/client/releases/*.blockmap
 *.local
 
 # Editor directories and files

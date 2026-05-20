@@ -9,6 +9,7 @@ export type {
   ChordSymbol,
   CueMode,
   CueSettings,
+  CueTrackExport,
   HarmonyEvent,
   Meter,
   NoteName,
@@ -86,6 +87,7 @@ export {
   redistributeBeatsEvenly,
   removeBarAtEnd,
   removeBarAtStart,
+  setBarBoundary,
   setBarBeatCount,
   splitBarAtMidpoint,
 } from './timelineEdit'

@@ -1,9 +1,18 @@
-import { a as onDestroy, f as derived, x as unsubscribe_stores, y as store_get } from "../../../chunks/internal.js";
-import "../../../chunks/exports.js";
+import { r as onDestroy } from "../../../chunks/index-server.js";
+import { a as derived, h as unsubscribe_stores, p as store_get } from "../../../chunks/server.js";
+import "../../../chunks/index-server2.js";
 import "../../../chunks/timelineEdit.js";
+import "../../../chunks/persist.js";
 import "../../../chunks/client.js";
-import { s as songMap } from "../../../chunks/beatPulse.js";
-import "../../../chunks/chevron-down.js";
+import { D as songMap, P as defaultSectionLabel, R as computeCountIn, z as audioSession } from "../../../chunks/commit.js";
+import "../../../chunks/button.js";
+import "../../../chunks/Icon.js";
+import "../../../chunks/iterate.js";
+import "../../../chunks/desktopCompanionStatus.js";
+import "../../../chunks/desktopBridge.js";
+import "../../../chunks/arrow-left.js";
+import "../../../chunks/renderCueTrack.js";
+import "../../../chunks/play.js";
 import "../../../chunks/WaveformPlayer.js";
 //#endregion
 //#region src/lib/chords/pitchClass.ts
@@ -24,76 +33,12 @@ function chordRootToPitchClass(root, accidental) {
 	if (accidental === "natural") {}
 	return pc % 12;
 }
-/** Pick spelling with preference for sharps vs flats in key of `preferFlats` (e.g. F major → flats). */
-function pitchClassToRootAcc(pc, preferFlats) {
-	const p = (pc % 12 + 12) % 12;
-	return preferFlats ? [
-		{ root: "C" },
-		{
-			root: "D",
-			accidental: "flat"
-		},
-		{ root: "D" },
-		{
-			root: "E",
-			accidental: "flat"
-		},
-		{ root: "E" },
-		{ root: "F" },
-		{
-			root: "G",
-			accidental: "flat"
-		},
-		{ root: "G" },
-		{
-			root: "A",
-			accidental: "flat"
-		},
-		{ root: "A" },
-		{
-			root: "B",
-			accidental: "flat"
-		},
-		{ root: "B" }
-	][p] : [
-		{ root: "C" },
-		{
-			root: "C",
-			accidental: "sharp"
-		},
-		{ root: "D" },
-		{
-			root: "D",
-			accidental: "sharp"
-		},
-		{ root: "E" },
-		{ root: "F" },
-		{
-			root: "F",
-			accidental: "sharp"
-		},
-		{ root: "G" },
-		{
-			root: "G",
-			accidental: "sharp"
-		},
-		{ root: "A" },
-		{
-			root: "A",
-			accidental: "sharp"
-		},
-		{ root: "B" }
-	][p];
-}
-function transposePitchClass(pc, semitones) {
-	return ((pc + semitones) % 12 + 12) % 12;
-}
 //#endregion
 //#region src/lib/chords/formatChordSymbol.ts
-function formatRoot(root, accidental) {
+function formatRoot(root, accidental, unicode) {
 	let s = root;
-	if (accidental === "sharp") s += "#";
-	else if (accidental === "flat") s += "b";
+	if (accidental === "sharp") s += unicode ? "♯" : "#";
+	else if (accidental === "flat") s += unicode ? "♭" : "b";
 	else if (accidental === "natural") s += "♮";
 	return s;
 }
@@ -120,82 +65,16 @@ function qualitySuffix(quality, extensions) {
 	return base;
 }
 /**
-* Format structured chord for display (ASCII `#` `b`).
+* Format structured chord for display. ASCII by default (`Cm7/Bb`); pass
+* `{ unicode: true }` for typeset accidentals (`Cm7/B♭`) — used by the SVG
+* lead-sheet view where music typography matters and the font supports it.
 */
-function formatChordSymbol(chord, _opts) {
-	let s = formatRoot(chord.root, chord.accidental);
+function formatChordSymbol(chord, opts) {
+	const unicode = opts?.unicode ?? false;
+	let s = formatRoot(chord.root, chord.accidental, unicode);
 	s += qualitySuffix(chord.quality, chord.extensions);
-	if (chord.bass) s += "/" + formatRoot(chord.bass, chord.bassAccidental);
+	if (chord.bass) s += "/" + formatRoot(chord.bass, chord.bassAccidental, unicode);
 	return s;
-}
-//#endregion
-//#region src/lib/chords/diatonic.ts
-var MAJOR_STEPS = [
-	0,
-	2,
-	4,
-	5,
-	7,
-	9,
-	11
-];
-var MINOR_NATURAL_STEPS = [
-	0,
-	2,
-	3,
-	5,
-	7,
-	8,
-	10
-];
-/** Major-key diatonic chord qualities per degree (0-based). */
-var MAJOR_QUALITIES = [
-	"major",
-	"minor",
-	"minor",
-	"major",
-	"major",
-	"minor",
-	"dim"
-];
-/** Natural minor diatonic qualities. */
-var MINOR_QUALITIES = [
-	"minor",
-	"dim",
-	"major",
-	"minor",
-	"minor",
-	"major",
-	"major"
-];
-function scaleStepsForKey(key) {
-	const rootPc = chordRootToPitchClass(key.root, key.accidental);
-	return (key.mode === "major" ? MAJOR_STEPS : MINOR_NATURAL_STEPS).map((s) => transposePitchClass(s, rootPc));
-}
-function buildChordAtDegree(key, degreeIndex, useSeventh, preferFlats) {
-	const pc = scaleStepsForKey(key)[degreeIndex];
-	let q = (key.mode === "major" ? MAJOR_QUALITIES : MINOR_QUALITIES)[degreeIndex];
-	if (useSeventh) {
-		if (q === "dim") q = "min7";
-		else if (q === "major") q = degreeIndex === 4 ? "7" : "maj7";
-		else if (q === "minor") q = "min7";
-	}
-	const { root, accidental } = pitchClassToRootAcc(pc, preferFlats);
-	const chord = {
-		root,
-		accidental,
-		quality: q,
-		displayRaw: ""
-	};
-	chord.displayRaw = formatChordSymbol(chord, { preferFlats });
-	return chord;
-}
-/** Diatonic triads and seventh chords in key (14 entries: 7 triads + 7 sevenths). */
-function diatonicChordsInKey(key, preferFlats) {
-	const out = [];
-	for (let d = 0; d < 7; d++) out.push(buildChordAtDegree(key, d, false, preferFlats));
-	for (let d = 0; d < 7; d++) out.push(buildChordAtDegree(key, d, true, preferFlats));
-	return out;
 }
 function songKeyPreferFlats(key) {
 	const pc = chordRootToPitchClass(key.root, key.accidental);
@@ -220,319 +99,185 @@ function songKeyPreferFlats(key) {
 	return key.mode === "major" ? flatMajor.has(pc) : flatMinor.has(pc);
 }
 //#endregion
-//#region src/lib/chords/parseChordText.ts
-var NOTE_NAMES = new Set([
-	"C",
-	"D",
-	"E",
-	"F",
-	"G",
-	"A",
-	"B"
-]);
-function normalizeUnicode(s) {
-	return s.trim().replace(/\u266F/g, "#").replace(/\u266D/g, "b").replace(/♯/g, "#").replace(/♭/g, "b");
+//#region src/lib/sections/predictNext.ts
+/** Default lengths for kinds we've never seen in this song before. */
+var DEFAULT_BARS = {
+	intro: 4,
+	verse: 8,
+	preChorus: 4,
+	chorus: 8,
+	bridge: 8,
+	solo: 8,
+	riff: 4,
+	break: 2,
+	outro: 4,
+	custom: 4
+};
+function sortedSections(songMap) {
+	return [...songMap.sections].sort((a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex);
 }
-/** Parse leading note letter + accidentals; returns remainder after root. */
-function eatRoot(s) {
-	if (s.length < 1) return null;
-	const L = s[0].toUpperCase();
-	if (!NOTE_NAMES.has(L)) return null;
-	const root = L;
-	let i = 1;
-	let delta = 0;
-	while (i < s.length) {
-		const c = s[i];
-		if (c === "#" || c === "♯") {
-			delta += 1;
-			i++;
-			continue;
-		}
-		if (c === "b" || c === "♭") {
-			delta -= 1;
-			i++;
-			continue;
-		}
-		break;
-	}
-	if (delta < -1 || delta > 1) return null;
-	return {
-		root,
-		accidental: delta === 1 ? "sharp" : delta === -1 ? "flat" : void 0,
-		rest: s.slice(i)
-	};
+function sectionBarCount(s) {
+	return s.barRange.endBarIndex - s.barRange.startBarIndex + 1;
 }
-function parseQuality(rest) {
-	const r = rest;
-	if (!r.length) return {
-		quality: "major",
-		extensions: void 0,
-		restConsumed: ""
-	};
-	for (const { pattern, quality, ext } of [
-		{
-			pattern: /^maj7/i,
-			quality: "maj7"
-		},
-		{
-			pattern: /^ma7/i,
-			quality: "maj7"
-		},
-		{
-			pattern: /^M7(?![a-z])/i,
-			quality: "maj7"
-		},
-		{
-			pattern: /^m7(?![a-z0-9])/i,
-			quality: "min7"
-		},
-		{
-			pattern: /^min7/i,
-			quality: "min7"
-		},
-		{
-			pattern: /^mi7/i,
-			quality: "min7"
-		},
-		{
-			pattern: /^\-7/i,
-			quality: "min7"
-		},
-		{
-			pattern: /^maj(?!or)/i,
-			quality: "major"
-		},
-		{
-			pattern: /^major/i,
-			quality: "major"
-		},
-		{
-			pattern: /^min(?![or])/i,
-			quality: "minor"
-		},
-		{
-			pattern: /^mi(?![nor])/i,
-			quality: "minor"
-		},
-		{
-			pattern: /^dim/i,
-			quality: "dim"
-		},
-		{
-			pattern: /^°/,
-			quality: "dim"
-		},
-		{
-			pattern: /^o(?![0-9])/i,
-			quality: "dim"
-		},
-		{
-			pattern: /^aug/i,
-			quality: "aug"
-		},
-		{
-			pattern: /^\+(?![0-9])/,
-			quality: "aug"
-		},
-		{
-			pattern: /^sus4/i,
-			quality: "sus4"
-		},
-		{
-			pattern: /^sus2/i,
-			quality: "sus2"
-		},
-		{
-			pattern: /^sus/i,
-			quality: "sus4"
-		},
-		{
-			pattern: /^add9/i,
-			quality: "add9"
-		},
-		{
-			pattern: /^m(?![aj0-9])/i,
-			quality: "minor"
-		},
-		{
-			pattern: /^\-(?![0-9])/,
-			quality: "minor"
-		},
-		{
-			pattern: /^7(?![0-9])/i,
-			quality: "7"
-		},
-		{
-			pattern: /^9\b/i,
-			quality: "7",
-			ext: ["9"]
-		},
-		{
-			pattern: /^11\b/i,
-			quality: "7",
-			ext: ["11"]
-		},
-		{
-			pattern: /^13\b/i,
-			quality: "7",
-			ext: ["13"]
-		}
-	]) {
-		const m = r.match(pattern);
-		if (m) {
-			const consumed = m[0].length;
-			return {
-				quality,
-				extensions: ext,
-				restConsumed: r.slice(consumed)
-			};
-		}
-	}
-	return {
-		quality: "major",
-		restConsumed: r
-	};
-}
-/**
-* Parse free-text chord (e.g. `Em`, `ebm`, `F#m7`, `C/E`) into `ChordSymbol`.
-*/
-function parseChordText(raw) {
-	const s0 = normalizeUnicode(raw);
-	if (!s0.length) return {
-		ok: false,
-		error: "Empty chord"
-	};
-	const slashIdx = s0.indexOf("/");
-	const mainPart = slashIdx >= 0 ? s0.slice(0, slashIdx) : s0;
-	const bassPart = slashIdx >= 0 ? s0.slice(slashIdx + 1) : "";
-	const rootParsed = eatRoot(mainPart);
-	if (!rootParsed) return {
-		ok: false,
-		error: "Invalid root"
-	};
-	let { root, accidental, rest } = rootParsed;
-	const q = parseQuality(rest);
-	let quality = q.quality;
-	let extensions = q.extensions;
-	const afterQ = q.restConsumed;
-	if (afterQ.trim().length > 0 && !extensions) {
-		const extM = afterQ.match(/^([0-9]+)/);
-		if (extM && [
-			"9",
-			"11",
-			"13"
-		].includes(extM[1])) extensions = [extM[1]];
-	}
-	let bass;
-	let bassAccidental;
-	if (bassPart.length) {
-		const bp = eatRoot(bassPart);
-		if (!bp || bp.rest.trim().length > 0) return {
-			ok: false,
-			error: "Invalid bass note"
-		};
-		bass = bp.root;
-		bassAccidental = bp.accidental;
-	}
-	const chord = {
-		root,
-		accidental,
-		quality,
-		extensions,
-		bass,
-		bassAccidental,
-		displayRaw: ""
-	};
-	chord.displayRaw = formatChordSymbol(chord, accidental === "flat" || bassAccidental === "flat" ? { preferFlats: true } : void 0);
-	return {
-		ok: true,
-		chord
-	};
-}
-//#endregion
-//#region src/lib/chords/rankSuggestions.ts
-/** Common major triads for quick chromatic browse (subset). */
-function chromaticMajorTriads(preferFlats) {
-	const letters = [
-		"C",
-		"D",
-		"E",
-		"F",
-		"G",
-		"A",
-		"B"
-	];
-	const out = [];
-	for (const r of letters) for (const acc of [
-		void 0,
-		"sharp",
-		"flat"
-	]) {
-		if (r === "C" && acc === "sharp") continue;
-		if (r === "F" && acc === "sharp") continue;
-		const ch = {
-			root: r,
-			accidental: acc,
-			quality: "major",
-			displayRaw: ""
-		};
-		ch.displayRaw = formatChordSymbol(ch, { preferFlats });
-		out.push(ch);
-	}
+function countByKind(sections) {
+	const out = {};
+	for (const s of sections) out[s.kind] = (out[s.kind] ?? 0) + 1;
 	return out;
 }
-function norm(s) {
-	return s.toLowerCase().replace(/\s+/g, "");
+/** Most-frequent prior bar count for this kind; falls back to the default. */
+function predictBarCount(sections, kind) {
+	const sameKind = sections.filter((s) => s.kind === kind);
+	if (sameKind.length === 0) return DEFAULT_BARS[kind];
+	const freq = {};
+	for (const s of sameKind) {
+		const n = sectionBarCount(s);
+		freq[n] = (freq[n] ?? 0) + 1;
+	}
+	let bestN = 0;
+	let bestF = -1;
+	for (const [n, f] of Object.entries(freq)) if (f > bestF) {
+		bestN = Number(n);
+		bestF = f;
+	}
+	return bestN;
 }
 /**
-* Rank chord suggestions: diatonic matches first (when `key` set), then substring matches on labels.
+* Predict the kind of the next section given the chronological history.
+* Riff / break are treated as instrumental detours — they don't drive the
+* macro form, so the prediction "looks past" them at what came before.
 */
-function rankChordSuggestions(query, key, opts) {
-	const q = norm(query);
-	const limit = opts?.limit ?? 24;
-	const preferFlats = key ? songKeyPreferFlats(key) : false;
-	const diatonic = key ? diatonicChordsInKey(key, preferFlats) : [];
-	const diatonicLabels = diatonic.map((c) => formatChordSymbol(c, { preferFlats }));
-	const ranked = [];
-	const seen = /* @__PURE__ */ new Set();
-	const push = (chord, label, inKey) => {
-		const k = label;
-		if (seen.has(k)) return;
-		seen.add(k);
-		ranked.push({
-			chord,
-			label,
-			inKey
-		});
+function predictKind(sections) {
+	if (sections.length === 0) return null;
+	const last = sections[sections.length - 1];
+	if (last.kind === "outro" || last.kind === "custom") return null;
+	const counts = countByKind(sections);
+	const verseCount = counts.verse ?? 0;
+	const chorusCount = counts.chorus ?? 0;
+	const hasBridge = (counts.bridge ?? 0) > 0;
+	const hasPreChorus = (counts.preChorus ?? 0) > 0;
+	let driver = last;
+	if (driver.kind === "riff" || driver.kind === "break") {
+		for (let i = sections.length - 2; i >= 0; i--) {
+			const s = sections[i];
+			if (s.kind !== "riff" && s.kind !== "break") {
+				driver = s;
+				break;
+			}
+		}
+		if (driver === last) return null;
+	}
+	switch (driver.kind) {
+		case "intro": return {
+			kind: "verse",
+			reason: "Intros usually lead into a verse."
+		};
+		case "verse":
+			if (hasPreChorus) return {
+				kind: "preChorus",
+				reason: "You used a pre-chorus earlier — likely the same pattern here."
+			};
+			return {
+				kind: "chorus",
+				reason: "Verse → chorus is the common move."
+			};
+		case "preChorus": return {
+			kind: "chorus",
+			reason: "Pre-chorus → chorus."
+		};
+		case "chorus":
+			if (chorusCount >= 2 && !hasBridge) return {
+				kind: "bridge",
+				reason: "Two choruses in — typically a bridge is up next."
+			};
+			if (verseCount <= chorusCount) return {
+				kind: "verse",
+				reason: "Back to a verse before the next chorus."
+			};
+			return {
+				kind: "chorus",
+				reason: "Chorus repeats — pop song form."
+			};
+		case "bridge": return {
+			kind: "chorus",
+			reason: "Bridge → final chorus."
+		};
+		case "solo": return {
+			kind: "chorus",
+			reason: "Solo → chorus."
+		};
+		default: return null;
+	}
+}
+/**
+* Public entry point. Returns `null` when:
+*   - the song has no sections (cold start),
+*   - the last section is `outro` / `custom`,
+*   - the predicted range would overrun the timeline.
+*/
+function predictNextSection(songMap) {
+	const sections = sortedSections(songMap);
+	const pick = predictKind(sections);
+	if (!pick) return null;
+	const bars = predictBarCount(sections, pick.kind);
+	if (bars <= 0) return null;
+	if (sections[sections.length - 1].barRange.endBarIndex + 1 + bars - 1 >= songMap.timeline.bars.length) return null;
+	const lengthHint = sections.some((s) => s.kind === pick.kind && sectionBarCount(s) === bars) ? ` (${bars} bars to match your other ${defaultSectionLabel(pick.kind).toLowerCase()}s)` : ` (${bars} bars)`;
+	return {
+		kind: pick.kind,
+		bars,
+		reason: pick.reason + lengthHint
 	};
-	if (q.length > 0) {
-		const exact = parseChordText(query.trim());
-		if (exact.ok) push(exact.chord, formatChordSymbol(exact.chord, { preferFlats }), false);
-	}
-	for (let i = 0; i < diatonic.length; i++) {
-		const chord = diatonic[i];
-		const label = diatonicLabels[i];
-		if (!q || norm(label).includes(q) || q.length === 0) push(chord, label, true);
-	}
-	if (opts?.includeAllRoots !== false && q.length > 0) for (const rootChord of chromaticMajorTriads(preferFlats)) {
-		const label = formatChordSymbol(rootChord, { preferFlats });
-		if (norm(label).startsWith(q) || norm(label).includes(q)) push(rootChord, label, false);
-	}
-	if (!q.length) return ranked.slice(0, limit);
-	return ranked.sort((a, b) => {
-		if (a.inKey !== b.inKey) return a.inKey ? -1 : 1;
-		const ap = norm(a.label).startsWith(q) ? 0 : 1;
-		const bp = norm(b.label).startsWith(q) ? 0 : 1;
-		if (ap !== bp) return ap - bp;
-		return a.label.localeCompare(b.label);
-	}).slice(0, limit);
 }
 //#endregion
 //#region src/routes/edit/+page.svelte
 function _page($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
 		var $$store_subs;
-		let chordQuery = "";
+		/**
+		* Suggestion lifecycle:
+		*   - `predictNextSection` is purely derived from `$songMap` — it re-fires
+		*     whenever sections / bars change.
+		*   - Dismissals are local: the user clicking ✕ records the suggestion's
+		*     signature (`kind:bars:lastEnd`). The derived `nextSectionSuggestion`
+		*     filters out anything matching the dismissed sig, so the same
+		*     suggestion doesn't reappear until the song state changes.
+		*   - Accepting auto-clears `dismissedSuggestionSig` for the next round.
+		*/
+		let dismissedSuggestionSig = null;
+		function suggestionSig(sm, sug) {
+			if (!sm || !sug || sm.sections.length === 0) return null;
+			const lastEnd = Math.max(...sm.sections.map((s) => s.barRange.endBarIndex));
+			return `${sug.kind}:${sug.bars}:${lastEnd}`;
+		}
+		const nextSectionSuggestion = derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm) return null;
+			const raw = predictNextSection(sm);
+			if (!raw) return null;
+			const sig = suggestionSig(sm, raw);
+			if (sig && sig === dismissedSuggestionSig) return null;
+			return raw;
+		});
+		derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			const sug = nextSectionSuggestion();
+			if (!sm || !sug || sm.sections.length === 0) return null;
+			const start = Math.max(...sm.sections.map((s) => s.barRange.endBarIndex)) + 1;
+			const end = start + sug.bars - 1;
+			if (end >= sm.timeline.bars.length) return null;
+			return {
+				kind: sug.kind,
+				label: defaultSectionLabel(sug.kind),
+				startBarIndex: start,
+				endBarIndex: end
+			};
+		});
+		store_get($$store_subs ??= {}, "$audioSession", audioSession).startSec;
+		store_get($$store_subs ??= {}, "$audioSession", audioSession).endSec;
+		let keyDraft = {
+			root: "C",
+			mode: "major"
+		};
 		derived(() => {
 			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
 			if (!sm) return {};
@@ -545,11 +290,17 @@ function _page($$renderer, $$props) {
 			}
 			return out;
 		});
-		derived(() => rankChordSuggestions(chordQuery, store_get($$store_subs ??= {}, "$songMap", songMap)?.metadata.keyDetail, { limit: 32 }));
+		derived(() => store_get($$store_subs ??= {}, "$songMap", songMap)?.metadata.keyDetail ?? keyDraft);
 		let audioEl = null;
+		let mixPreviewAudioEl = null;
+		let mixClickRaf = 0;
 		let rafId = 0;
 		let clickLoopRaf = 0;
 		let clickCtx;
+		function stopMixClickLoop() {
+			if (mixClickRaf) cancelAnimationFrame(mixClickRaf);
+			mixClickRaf = 0;
+		}
 		function stopPreviewLoop() {
 			if (rafId) cancelAnimationFrame(rafId);
 			rafId = 0;
@@ -558,10 +309,60 @@ function _page($$renderer, $$props) {
 			if (clickLoopRaf) cancelAnimationFrame(clickLoopRaf);
 			clickLoopRaf = 0;
 		}
+		let cueCountInBeats = derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm) return 0;
+			return sm.cues.mode === "countIn" ? sm.cues.countInBeats : 0;
+		});
+		derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm || cueCountInBeats() === 0) return null;
+			return computeCountIn(sm, cueCountInBeats());
+		});
+		derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm) return {
+				ok: false,
+				reason: "No song."
+			};
+			if (!sm.timeline.beats.length) return {
+				ok: false,
+				reason: "Need beats (Grid)."
+			};
+			if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) return {
+				ok: false,
+				reason: "Need trim (Grid)."
+			};
+			return {
+				ok: false,
+				reason: "BarBro desktop + Piper required."
+			};
+		});
+		derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm) return {
+				ok: false,
+				reason: "No song."
+			};
+			if (!sm.timeline.beats.length) return {
+				ok: false,
+				reason: "Need beats (Grid)."
+			};
+			if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) return {
+				ok: false,
+				reason: "Need trim (Grid)."
+			};
+			return {
+				ok: false,
+				reason: "Generate cue track first (preview uses this tab’s WAV)."
+			};
+		});
 		onDestroy(() => {
 			stopPreviewLoop();
 			stopClickLoop();
+			stopMixClickLoop();
 			audioEl?.pause();
+			mixPreviewAudioEl?.pause();
 			clickCtx?.close();
 			clickCtx = void 0;
 		});

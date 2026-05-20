@@ -355,3 +355,97 @@ export function decodeSmapBytes(buf: Uint8Array): SmapFileData {
 export function looksLikeSmapFile(bytes: Uint8Array): boolean {
   return bytes.byteLength >= 4 && bytes[0] === MAGIC[0] && bytes[1] === MAGIC[1] && bytes[2] === MAGIC[2] && bytes[3] === MAGIC[3]
 }
+
+/** Sanity bound for `jsonLength`: 10 MB. Real projects are <100 KB. */
+const MAX_REASONABLE_JSON_LENGTH = 10 * 1024 * 1024
+
+/**
+ * Fast-path read of just the JSON chunk without decoding the audio bytes.
+ * Used by the project list view (load metadata for many songs cheaply) and
+ * any other place that wants song metadata without paying for audio.
+ *
+ * Validates magic, version, length-sanity, and the size invariant
+ * `28 + jsonLength + audioLength === file.size`. Audio bytes are skipped
+ * entirely.
+ */
+export async function readSmapJsonOnly(fileOrBlob: Blob): Promise<SongProject> {
+  const totalSize = fileOrBlob.size
+  if (totalSize < SMAP_HEADER_BYTE_LENGTH) {
+    throw readTruncatedFileError(SMAP_HEADER_BYTE_LENGTH, totalSize)
+  }
+
+  // Read just the header first.
+  const headerBuf = new Uint8Array(await fileOrBlob.slice(0, SMAP_HEADER_BYTE_LENGTH).arrayBuffer())
+  validateMagic(headerBuf)
+
+  const headerView = new DataView(headerBuf.buffer, headerBuf.byteOffset, headerBuf.byteLength)
+  const version = headerView.getUint32(4, true)
+  if (version !== SMAP_FILE_VERSION) {
+    throw readUnsupportedVersionError(version)
+  }
+
+  const flags = headerView.getUint32(8, true)
+  const jsonLenBI = headerView.getBigUint64(12, true)
+  const audioLenBI = headerView.getBigUint64(20, true)
+  const jsonLen = bigintToSafeNumber(jsonLenBI, 'jsonLength')
+  const audioLen = bigintToSafeNumber(audioLenBI, 'audioLength')
+
+  if (jsonLen > MAX_REASONABLE_JSON_LENGTH) {
+    throw new Error(`Invalid .smap: jsonLength ${jsonLen} exceeds reasonable bound`)
+  }
+
+  const hasAudioFlag = (flags & SMAP_FLAG_HAS_AUDIO) !== 0
+  if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError()
+  if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError()
+
+  const expectedTotal = SMAP_HEADER_BYTE_LENGTH + jsonLen + audioLen
+  if (totalSize !== expectedTotal) {
+    if (totalSize < expectedTotal) {
+      throw readFileShorterThanDeclaredError(expectedTotal, totalSize)
+    }
+    throw readTrailingGarbageError(totalSize - expectedTotal)
+  }
+
+  const jsonStart = SMAP_HEADER_BYTE_LENGTH
+  const jsonEnd = jsonStart + jsonLen
+  const jsonBuf = new Uint8Array(await fileOrBlob.slice(jsonStart, jsonEnd).arrayBuffer())
+
+  let text: string
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(jsonBuf)
+  } catch {
+    throw new Error('Invalid .smap: JSON chunk is not valid UTF-8.')
+  }
+
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw readInvalidJsonError()
+  }
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Invalid .smap: JSON root must be an object.')
+  }
+  const o = raw as Record<string, unknown>
+  if (o.projectFormatVersion !== SONG_PROJECT_FORMAT_VERSION) {
+    throw new Error(
+      `Invalid .smap: unsupported SongProject version ${String(o.projectFormatVersion)} (expected ${SONG_PROJECT_FORMAT_VERSION}).`,
+    )
+  }
+  if (!o.songMap || typeof o.songMap !== 'object') {
+    throw new Error('Invalid .smap: missing or invalid songMap in JSON.')
+  }
+
+  let songMap: SongMap
+  try {
+    songMap = parseSongMap(JSON.stringify(o.songMap))
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'parse failed'
+    throw new Error(`Invalid .smap: songMap does not parse: ${msg}`)
+  }
+
+  return {
+    projectFormatVersion: SONG_PROJECT_FORMAT_VERSION,
+    songMap,
+  }
+}
