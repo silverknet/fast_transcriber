@@ -8,7 +8,8 @@
   "main": "electron/main.mjs",
   "scripts": {
     "dev": "electron .",
-    "dist:mac-arm64": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64"
+    "dist:mac-arm64": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64",
+    "dist:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --x64"
   },
   "devDependencies": {
     "electron": "^42.0.1",

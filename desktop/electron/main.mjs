@@ -526,29 +526,46 @@ async function listStemSets(songFolderAbs) {
 }
 
 /**
- * Some songs end up with both `bass.wav` and `Bass.wav` in the same folder
- * (e.g. when a user re-imports stems with a different splitter that picks a
- * different case). Both map to the same logical stem slot in the mixer, so
- * loading both produces a doubled track. Dedupe here — prefer the all-
- * lowercase variant (canonical Demucs output) when both exist; otherwise
- * keep the first alphabetically.
+ * Stems can end up duplicated in two ways:
+ *   1. Different case for the same name: `bass.wav` + `Bass.wav`.
+ *   2. Same stem in multiple formats: `bass.wav` + `bass.mp3` (e.g. after a
+ *      previous Ableton export wrote an MP3 sibling).
+ *
+ * Both forms collapse to the same mixer slot, so we dedupe here by
+ * case-folded basename (without extension) and keep the highest-quality
+ * format. Lossless beats lossy, then alphabetical name as a tiebreaker
+ * (lowercase wins over uppercase since it sorts later).
  */
+const STEM_FORMAT_PRIORITY = ['.wav', '.flac', '.aif', '.aiff', '.m4a', '.ogg', '.mp3']
+
+function stemFormatScore(name) {
+  const lower = name.toLowerCase()
+  for (let i = 0; i < STEM_FORMAT_PRIORITY.length; i++) {
+    if (lower.endsWith(STEM_FORMAT_PRIORITY[i])) return i
+  }
+  return STEM_FORMAT_PRIORITY.length
+}
+
 function dedupeStemsByLowerCase(names) {
   /** @type {Map<string, string>} */
-  const byLower = new Map()
+  const byBase = new Map()
   for (const name of names) {
-    const key = name.toLowerCase()
-    const existing = byLower.get(key)
+    const key = name.replace(/\.[^.]+$/, '').toLowerCase()
+    const existing = byBase.get(key)
     if (!existing) {
-      byLower.set(key, name)
+      byBase.set(key, name)
       continue
     }
-    // Prefer the lowercase original (matches Demucs).
-    if (name === name.toLowerCase() && existing !== existing.toLowerCase()) {
-      byLower.set(key, name)
+    const challengerScore = stemFormatScore(name)
+    const existingScore = stemFormatScore(existing)
+    if (challengerScore < existingScore) {
+      byBase.set(key, name)
+    } else if (challengerScore === existingScore && name > existing) {
+      // Same format — prefer the lowercase variant (sorts later in ASCII).
+      byBase.set(key, name)
     }
   }
-  return [...byLower.values()].sort()
+  return [...byBase.values()].sort()
 }
 
 function nowIso() {

@@ -1,11 +1,13 @@
-# Dev / unsigned Apple Silicon builds. No Developer ID — Gatekeeper may prompt users.
-# See desktop/README.md for `dist:mac-arm64` and signing later.
+# Unsigned Mac builds for now — no Developer ID; users see Gatekeeper "can't
+# be opened" on first launch and right-click → Open to bypass. Add signing
+# + notarization once we have an Apple Developer Program account.
+# See desktop/README.md.
 
 appId: com.barbro.desktop
 productName: BarBro Desktop
 asar: true
 
-# Python must live outside asar so subprocess can read script paths reliably.
+# Python scripts must live outside asar so subprocess can read them.
 asarUnpack:
   - native/python/**/*
 
@@ -17,11 +19,30 @@ files:
   - native/**/*
   - package.json
 
+# Predictable, version-agnostic filenames so `releases/latest/download/<file>`
+# URLs in static/desktop-downloads.json keep resolving forever.
+artifactName: "BarBro-Desktop-${arch}.${ext}"
+
 mac:
   category: public.app-category.music
   target:
-    - dmg
-    - zip
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
 
 dmg:
   title: "${productName} ${version}"
+
+# electron-builder uploads the built DMG/ZIP + latest-mac.yml directly to a
+# GitHub Release matching the git tag. `GH_TOKEN` is provided by the
+# desktop-release workflow.
+publish:
+  provider: github
+  owner: silverknet
+  repo: fast_transcriber
+  releaseType: release
