@@ -96,6 +96,86 @@ function xmlClipSlotList(count: number, sessionClipXml = ''): string {
   }).join('\n\t\t\t\t\t\t')
 }
 
+/**
+ * Session clip slots populated from a per-scene array.
+ * Array length = scene count; each entry is the audio-clip XML or null
+ * for an empty slot. Used by the project-set (setlist) export where each
+ * scene = one song and each track has at most one clip per scene.
+ */
+function xmlClipSlotListMulti(slotClipXml: Array<string | null>): string {
+  return slotClipXml
+    .map((clipXml, i) => {
+      const value = clipXml ? `<Value>${clipXml}</Value>` : '<Value />'
+      return `<ClipSlot Id="${i}">
+							<LomId Value="0" />
+							<ClipSlot>
+								${value}
+							</ClipSlot>
+							<HasStop Value="true" />
+							<NeedRefreeze Value="true" />
+						</ClipSlot>`
+    })
+    .join('\n\t\t\t\t\t\t')
+}
+
+/**
+ * Multi-scene variant of `xmlSequencerBody` — emits one ClipSlot per scene
+ * (each potentially holding a different session-view clip) and NO
+ * arrangement-view clip. Used by the project setlist export where each
+ * scene = one song.
+ */
+function xmlSequencerBodyMulti(
+  nextId: () => number,
+  monitoringEnum: number,
+  sessionClipsXml: Array<string | null>,
+): string {
+  return `${xmlDeviceBoilerplate(nextId)}
+						<ClipSlotList>
+							${xmlClipSlotListMulti(sessionClipsXml)}
+						</ClipSlotList>
+						<MonitoringEnum Value="${monitoringEnum}" />
+						<KeepRecordMonitoringLatency Value="true" />
+						<Sample>
+							<ArrangerAutomation>
+								<Events />
+								<AutomationTransformViewState>
+									<IsTransformPending Value="false" />
+									<TimeAndValueTransforms />
+								</AutomationTransformViewState>
+							</ArrangerAutomation>
+						</Sample>
+						<VolumeModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</VolumeModulationTarget>
+						<TranspositionModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</TranspositionModulationTarget>
+						<TransientEnvelopeModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</TransientEnvelopeModulationTarget>
+						<GrainSizeModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</GrainSizeModulationTarget>
+						<FluxModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</FluxModulationTarget>
+						<SampleOffsetModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</SampleOffsetModulationTarget>
+						<ComplexProFormantsModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</ComplexProFormantsModulationTarget>
+						<ComplexProEnvelopeModulationTarget Id="${nextId()}">
+							<LockEnvelope Value="0" />
+						</ComplexProEnvelopeModulationTarget>
+						<PitchViewScrollPosition Value="-1073741824" />
+						<SampleOffsetModulationScrollPosition Value="-1073741824" />
+						<Recorder>
+							<IsArmed Value="false" />
+							<TakeCounter Value="1" />
+						</Recorder>`
+}
+
 function xmlSequencerBody(nextId: () => number, monitoringEnum: number, clipXml = '', sceneCount = 1, sessionClipXml = ''): string {
   return `${xmlDeviceBoilerplate(nextId)}
 					<ClipSlotList>
@@ -164,7 +244,55 @@ export type StemClip = {
   relativePath: string
   durationSec: number
   sampleRate: number
+  /**
+   * Absolute filesystem path. Ableton falls back to this when the relative
+   * path doesn't resolve (e.g. project hasn't been marked as an Ableton
+   * Project folder). Without it, Ableton shows "media not found."
+   */
+  absolutePath?: string
+  /** Used by Ableton to verify the file hasn't been replaced. 0 when unknown. */
+  fileSize?: number
+  /**
+   * Play region within the file, in seconds. Used to virtually trim a clip
+   * in Session View: stems can start past `audio.trim.startSec`, click
+   * WAVs can skip the prelude+count-in head. Default `[0, durationSec]`.
+   */
+  playStartSec?: number
+  playEndSec?: number
+  /**
+   * Per-clip linear gain ("SampleVolume" in Live), default `1.0`. Driven by
+   * the BarBro mixer's per-song volume so the user's headphone mix shows up
+   * 1:1 in the exported scene. Range mirrors Live: 0..~2 (anything > ~1.995
+   * is over-the-top loud but valid).
+   */
+  volume?: number
+  /**
+   * When true, the clip plays silently — implemented as `SampleVolume=0`
+   * (Live has no native per-clip enable/disable for Session-View clips
+   * that we want to rely on across versions; muting the sample is robust).
+   */
+  muted?: boolean
 }
+
+/**
+ * One song's contribution to the project setlist export — all the
+ * resolved file paths and durations needed to build that song's scene.
+ * `relativePath` values are PROJECT-relative (e.g.
+ * `"songs/opener-7f3a9c2d/stems/best/drums.wav"`) so they resolve from
+ * the .als sitting at the project root.
+ */
+export type ProjectSongExportInput = {
+  title: string
+  bpm: number
+  /** "Drums" → StemClip; only entries in `STEM_TRACKS` are honored. */
+  stems: Map<string, StemClip>
+  /** Rendered, song-aligned click WAV (always present per V1 preflight). */
+  click: StemClip
+}
+
+/** Track row identifier used to label the Click row. */
+const CLICK_TRACK_NAME = 'Click'
+const CLICK_TRACK_COLOR = 26 // grey-ish
 
 // ---------------------------------------------------------------------------
 // MIDI click track
@@ -565,20 +693,32 @@ function xmlMidiClickTrack(
 function xmlAudioClip(clip: StemClip, bpm: number): string {
   const durationBeats = (clip.durationSec / 60) * bpm
   const durationSamples = Math.round(clip.durationSec * clip.sampleRate)
+  // Full-file duration in beats — used by the WarpMarker anchored at the end
+  // of the audio file (independent of the play region).
   const d = durationBeats.toFixed(6)
+  // Per-clip play range. Defaults to the full file. For session-view clips,
+  // Ableton uses LoopStart/LoopEnd/OutMarker/HiddenLoop* as the load-bearing
+  // playback region (even with LoopOn=false); we set all six fields to the
+  // same range so arrangement-view positions agree too.
+  const playStartSec = Math.max(0, clip.playStartSec ?? 0)
+  const playEndSec = Math.max(playStartSec, clip.playEndSec ?? clip.durationSec)
+  const playStartBeats = (playStartSec / 60) * bpm
+  const playEndBeats = (playEndSec / 60) * bpm
+  const ps = playStartBeats.toFixed(6)
+  const pe = playEndBeats.toFixed(6)
   return `<AudioClip Id="0" Time="0">
 						<LomId Value="0" />
 						<LomIdView Value="0" />
-						<CurrentStart Value="0" />
-						<CurrentEnd Value="${d}" />
+						<CurrentStart Value="${ps}" />
+						<CurrentEnd Value="${pe}" />
 						<Loop>
-							<LoopStart Value="0" />
-							<LoopEnd Value="${d}" />
+							<LoopStart Value="${ps}" />
+							<LoopEnd Value="${pe}" />
 							<StartRelative Value="0" />
 							<LoopOn Value="false" />
-							<OutMarker Value="${d}" />
-							<HiddenLoopStart Value="0" />
-							<HiddenLoopEnd Value="${d}" />
+							<OutMarker Value="${pe}" />
+							<HiddenLoopStart Value="${ps}" />
+							<HiddenLoopEnd Value="${pe}" />
 						</Loop>
 						<Name Value="${clip.fileName}" />
 						<Annotation Value="" />
@@ -644,12 +784,12 @@ function xmlAudioClip(clip: StemClip, bpm: number): string {
 						<SampleRef>
 							<FileRef>
 								<RelativePathType Value="3" />
-								<RelativePath Value="${clip.relativePath}" />
-								<Path Value="" />
+								<RelativePath Value="${escapeXmlAttr(clip.relativePath)}" />
+								<Path Value="${escapeXmlAttr(clip.absolutePath ?? '')}" />
 								<Type Value="2" />
 								<LivePackName Value="" />
 								<LivePackId Value="" />
-								<OriginalFileSize Value="0" />
+								<OriginalFileSize Value="${clip.fileSize ?? 0}" />
 								<OriginalCrc Value="0" />
 								<SourceHint Value="" />
 							</FileRef>
@@ -690,7 +830,7 @@ function xmlAudioClip(clip: StemClip, bpm: number): string {
 						</Fades>
 						<PitchCoarse Value="0" />
 						<PitchFine Value="0" />
-						<SampleVolume Value="1" />
+						<SampleVolume Value="${(clip.muted ? 0 : Math.max(0, clip.volume ?? 1)).toFixed(6)}" />
 						<WarpMarkers>
 							<WarpMarker Id="0" SecTime="0" BeatTime="0" />
 							<WarpMarker Id="1" SecTime="${clip.durationSec.toFixed(6)}" BeatTime="${d}" />
@@ -864,6 +1004,185 @@ function xmlAudioTrack(id: number, name: string, color: number, nextId: () => nu
 					<BreakoutIsExpanded Value="false" />
 					${xmlOn(nextId)}
 					${xmlSequencerBody(nextId, 1)}
+				</FreezeSequencer>
+				<DeviceChain>
+					<Devices />
+					<SignalModulations />
+				</DeviceChain>
+			</DeviceChain>
+		</AudioTrack>`
+}
+
+/**
+ * Multi-scene variant of `xmlAudioTrack`. `sessionClips` length equals the
+ * scene count; each entry is a clip to place in that scene's slot for this
+ * track (or null for an empty slot). Used by the project setlist export.
+ */
+function xmlAudioTrackMulti(
+  id: number,
+  name: string,
+  color: number,
+  nextId: () => number,
+  sessionClips: Array<{ clip: StemClip; bpm: number } | null>,
+): string {
+  const slotXml = sessionClips.map((s) => (s ? xmlAudioClip(s.clip, s.bpm) : null))
+  return `<AudioTrack Id="${id}" SelectedToolPanel="7" SelectedTransformationName="" SelectedGeneratorName="">
+			<LomId Value="0" />
+			<LomIdView Value="0" />
+			<IsContentSelectedInDocument Value="false" />
+			<PreferredContentViewMode Value="0" />
+			<TrackDelay>
+				<Value Value="0" />
+				<IsValueSampleBased Value="false" />
+			</TrackDelay>
+			<Name>
+				<EffectiveName Value="${name}" />
+				<UserName Value="${name}" />
+				<Annotation Value="" />
+				<MemorizedFirstClipName Value="" />
+			</Name>
+			<Color Value="${color}" />
+			<AutomationEnvelopes>
+				<Envelopes />
+			</AutomationEnvelopes>
+			<TrackGroupId Value="-1" />
+			<TrackUnfolded Value="false" />
+			<DevicesListWrapper LomId="0" />
+			<ClipSlotsListWrapper LomId="0" />
+			<ViewData Value="{}" />
+			<TakeLanes>
+				<TakeLanes />
+				<AreTakeLanesFolded Value="true" />
+			</TakeLanes>
+			<LinkedTrackGroupId Value="-1" />
+			<SavedPlayingSlot Value="-1" />
+			<SavedPlayingOffset Value="0" />
+			<Freeze Value="false" />
+			<NeedArrangerRefreeze Value="true" />
+			<PostProcessFreezeClips Value="0" />
+			<DeviceChain>
+				<AutomationLanes>
+					<AutomationLanes>
+						<AutomationLane Id="0">
+							<SelectedDevice Value="0" />
+							<SelectedEnvelope Value="0" />
+							<IsContentSelectedInDocument Value="false" />
+							<LaneHeight Value="68" />
+						</AutomationLane>
+					</AutomationLanes>
+					<AreAdditionalAutomationLanesFolded Value="false" />
+				</AutomationLanes>
+				<ClipEnvelopeChooserViewState>
+					<SelectedDevice Value="1" />
+					<SelectedEnvelope Value="2" />
+					<PreferModulationVisible Value="false" />
+				</ClipEnvelopeChooserViewState>
+				<AudioInputRouting>
+					<Target Value="AudioIn/External/M0" />
+					<UpperDisplayString Value="Ext. In" />
+					<LowerDisplayString Value="1" />
+					${xmlMpeSettings()}
+				</AudioInputRouting>
+				<MidiInputRouting>
+					<Target Value="MidiIn/External.All/-1" />
+					<UpperDisplayString Value="Ext: All Ins" />
+					<LowerDisplayString Value="" />
+					${xmlMpeSettings()}
+				</MidiInputRouting>
+				<AudioOutputRouting>
+					<Target Value="AudioOut/Main" />
+					<UpperDisplayString Value="Master" />
+					<LowerDisplayString Value="" />
+					${xmlMpeSettings()}
+				</AudioOutputRouting>
+				<MidiOutputRouting>
+					<Target Value="MidiOut/None" />
+					<UpperDisplayString Value="None" />
+					<LowerDisplayString Value="" />
+					${xmlMpeSettings()}
+				</MidiOutputRouting>
+				<Mixer>
+					<LomId Value="0" />
+					<LomIdView Value="0" />
+					<IsExpanded Value="true" />
+					<BreakoutIsExpanded Value="false" />
+					${xmlOn(nextId)}
+					${xmlDeviceBoilerplate(nextId)}
+					<Sends />
+					<Speaker>
+						<LomId Value="0" />
+						<Manual Value="true" />
+						${xmlAutomationTarget(nextId)}
+						<MidiCCOnOffThresholds>
+							<Min Value="64" />
+							<Max Value="127" />
+						</MidiCCOnOffThresholds>
+					</Speaker>
+					<SoloSink Value="false" />
+					<PanMode Value="0" />
+					<Pan>
+						<LomId Value="0" />
+						<Manual Value="0" />
+						<MidiControllerRange>
+							<Min Value="-1" />
+							<Max Value="1" />
+						</MidiControllerRange>
+						${xmlAutomationTarget(nextId)}
+						${xmlModulationTarget(nextId)}
+					</Pan>
+					<SplitStereoPanL>
+						<LomId Value="0" />
+						<Manual Value="-1" />
+						<MidiControllerRange>
+							<Min Value="-1" />
+							<Max Value="1" />
+						</MidiControllerRange>
+						${xmlAutomationTarget(nextId)}
+						${xmlModulationTarget(nextId)}
+					</SplitStereoPanL>
+					<SplitStereoPanR>
+						<LomId Value="0" />
+						<Manual Value="1" />
+						<MidiControllerRange>
+							<Min Value="-1" />
+							<Max Value="1" />
+						</MidiControllerRange>
+						${xmlAutomationTarget(nextId)}
+						${xmlModulationTarget(nextId)}
+					</SplitStereoPanR>
+					<Volume>
+						<LomId Value="0" />
+						<Manual Value="1" />
+						<MidiControllerRange>
+							<Min Value="0.0003162277571" />
+							<Max Value="1.99526238" />
+						</MidiControllerRange>
+						${xmlAutomationTarget(nextId)}
+						${xmlModulationTarget(nextId)}
+					</Volume>
+					<ViewStateSessionTrackWidth Value="93" />
+					<CrossFadeState>
+						<LomId Value="0" />
+						<Manual Value="1" />
+						${xmlAutomationTarget(nextId)}
+					</CrossFadeState>
+					<SendsListWrapper LomId="0" />
+				</Mixer>
+				<MainSequencer>
+					<LomId Value="0" />
+					<LomIdView Value="0" />
+					<IsExpanded Value="true" />
+					<BreakoutIsExpanded Value="false" />
+					${xmlOn(nextId)}
+					${xmlSequencerBodyMulti(nextId, 2, slotXml)}
+				</MainSequencer>
+				<FreezeSequencer>
+					<LomId Value="0" />
+					<LomIdView Value="0" />
+					<IsExpanded Value="true" />
+					<BreakoutIsExpanded Value="false" />
+					${xmlOn(nextId)}
+					${xmlSequencerBody(nextId, 1, '', slotXml.length)}
 				</FreezeSequencer>
 				<DeviceChain>
 					<Devices />
@@ -1301,6 +1620,48 @@ function xmlScene(id: number, bpm: number, timeSigId: number): string {
 			</Scene>`
 }
 
+/**
+ * Named scene with tempo + time-sig enabled — launching the scene changes
+ * Ableton's master tempo. Used in the project setlist export so each song
+ * plays at its own BPM when the performer fires that scene.
+ */
+function xmlSceneForSong(id: number, name: string, bpm: number, timeSigId: number): string {
+  const safeName = escapeXmlAttr(name)
+  return `<Scene Id="${id}">
+				<FollowAction>
+					<FollowTime Value="4" />
+					<IsLinked Value="true" />
+					<LoopIterations Value="1" />
+					<FollowActionA Value="4" />
+					<FollowActionB Value="0" />
+					<FollowChanceA Value="100" />
+					<FollowChanceB Value="0" />
+					<JumpIndexA Value="0" />
+					<JumpIndexB Value="0" />
+					<FollowActionEnabled Value="false" />
+				</FollowAction>
+				<Name Value="${safeName}" />
+				<Annotation Value="" />
+				<Color Value="-1" />
+				<Tempo Value="${bpm}" />
+				<IsTempoEnabled Value="true" />
+				<TimeSignatureId Value="${timeSigId}" />
+				<IsTimeSignatureEnabled Value="true" />
+				<LomId Value="0" />
+				<ClipSlotsListWrapper LomId="0" />
+			</Scene>`
+}
+
+/** XML attribute-safe escape (handles & < > " '). */
+function escapeXmlAttr(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
 // ---------------------------------------------------------------------------
 // Locator
 // ---------------------------------------------------------------------------
@@ -1461,6 +1822,149 @@ export function generateAbletonSetXml(sm: SongMap, options: AbletonSetOptions = 
 		<CuePointsListWrapper LomId="0" />
 		<SelectedDocumentViewInMainWindow Value="1" />
 		<Annotation Value="" />
+		<SoloOrPflSavedValue Value="true" />
+		<SoloInPlace Value="true" />
+		<CrossfadeCurve Value="2" />
+		<LatencyCompensation Value="2" />
+		<HighlightedTrackIndex Value="0" />
+		<GroovePool>
+			<Grooves />
+		</GroovePool>
+	</LiveSet>
+</Ableton>`
+}
+
+// ---------------------------------------------------------------------------
+// Project setlist export — one .als for the whole project (Session View)
+// ---------------------------------------------------------------------------
+
+export type AbletonProjectSetOptions = {
+  projectTitle: string
+  /** One entry per song in setlist order. */
+  songs: ProjectSongExportInput[]
+}
+
+/**
+ * Generate the raw .als XML for a project-level Session View setlist.
+ *
+ * Layout: rows = 5 stem audio tracks + Click [+ Cue when any song has
+ * one]. Columns/scenes = one per song. Each scene carries its own tempo
+ * (`IsTempoEnabled=true`), so launching it in Ableton auto-sets master
+ * BPM to that song. Per-clip warp is off — clips play at their native
+ * tempo, which matches the scene tempo.
+ *
+ * Audio clip references are PROJECT-relative; the caller is expected to
+ * save the .als at the project root so paths resolve.
+ *
+ * Caller must gzip the result before saving as `.als`.
+ */
+export function generateAbletonProjectSetXml(options: AbletonProjectSetOptions): string {
+  const { projectTitle, songs } = options
+  if (songs.length === 0) {
+    throw new Error('Project setlist export needs at least one song')
+  }
+  const sceneCount = songs.length
+  const timeSig = timeSigId(4, 4)
+  const nextId = makeCounter(CLICK_DRUM_RACK_MAX_ID + 100)
+
+  // First scene's BPM doubles as the default master tempo.
+  const masterBpm = songs[0].bpm
+
+  // Audio-track rows: 5 stems + a single click. (Cue tracks are deferred —
+  // see `src/lib/export/setlist/` for the live-export architecture.)
+  const stemTracksXml = STEM_TRACKS.map((track, i) => {
+    const slots: Array<{ clip: StemClip; bpm: number } | null> = songs.map((song) => {
+      const clip = song.stems.get(track.name)
+      return clip ? { clip, bpm: song.bpm } : null
+    })
+    return xmlAudioTrackMulti(i, track.name, track.color, nextId, slots)
+  }).join('\n\t\t\t')
+
+  const clickSlots: Array<{ clip: StemClip; bpm: number } | null> = songs.map((song) => ({
+    clip: song.click,
+    bpm: song.bpm,
+  }))
+  const clickTrackXml = xmlAudioTrackMulti(
+    STEM_TRACKS.length,
+    CLICK_TRACK_NAME,
+    CLICK_TRACK_COLOR,
+    nextId,
+    clickSlots,
+  )
+
+  const mainTrackXml = xmlMainTrack(masterBpm, timeSig, nextId)
+  const preHearTrackXml = xmlPreHearTrack(nextId)
+
+  // One scene per song. Scene tempo + time-sig enabled so launching sets
+  // master BPM to that song's tempo.
+  const scenesXml = songs
+    .map((song, i) => xmlSceneForSong(i, song.title, song.bpm, timeSig))
+    .join('\n\t\t\t')
+
+  const nextPointeeId = nextId() + 50
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="12.0_12117" SchemaChangeCount="10" Creator="Ableton Live 12.0" Revision="">
+	<LiveSet>
+		<NextPointeeId Value="${nextPointeeId}" />
+		<OverwriteProtectionNumber Value="3072" />
+		<LomId Value="0" />
+		<LomIdView Value="0" />
+		<Tracks>
+			${stemTracksXml}
+			${clickTrackXml}
+		</Tracks>
+		${mainTrackXml}
+		${preHearTrackXml}
+		<SendsPre />
+		<Scenes>
+			${scenesXml}
+		</Scenes>
+		<Transport>
+			<PhaseNudgeTempo Value="10" />
+			<LoopOn Value="false" />
+			<LoopStart Value="8" />
+			<LoopLength Value="16" />
+			<LoopIsSongStart Value="false" />
+			<CurrentTime Value="0" />
+			<PunchIn Value="false" />
+			<PunchOut Value="false" />
+			<MetronomeTickDuration Value="0" />
+			<DrawMode Value="false" />
+		</Transport>
+		<SessionScrollPos X="0" Y="0" />
+		<SignalModulations />
+		<GlobalQuantisation Value="4" />
+		<AutoQuantisation Value="0" />
+		<Grid>
+			<FixedNumerator Value="1" />
+			<FixedDenominator Value="16" />
+			<GridIntervalPixel Value="20" />
+			<Ntoles Value="2" />
+			<SnapToGrid Value="true" />
+			<Fixed Value="false" />
+		</Grid>
+		<ScaleInformation>
+			<Root Value="0" />
+			<Name Value="0" />
+		</ScaleInformation>
+		<InKey Value="true" />
+		<SmpteFormat Value="0" />
+		<TimeSelection>
+			<AnchorTime Value="0" />
+			<OtherTime Value="0" />
+		</TimeSelection>
+		<Locators>
+			<Locators />
+		</Locators>
+		<DetailClipKeyMidis />
+		<TracksListWrapper LomId="0" />
+		<VisibleTracksListWrapper LomId="0" />
+		<ReturnTracksListWrapper LomId="0" />
+		<ScenesListWrapper LomId="0" />
+		<CuePointsListWrapper LomId="0" />
+		<SelectedDocumentViewInMainWindow Value="0" />
+		<Annotation Value="${escapeXmlAttr(`BarBro setlist: ${projectTitle}`)}" />
 		<SoloOrPflSavedValue Value="true" />
 		<SoloInPlace Value="true" />
 		<CrossfadeCurve Value="2" />

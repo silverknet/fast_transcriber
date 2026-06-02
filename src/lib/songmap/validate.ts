@@ -182,19 +182,45 @@ export function validateSongMap(map: SongMap): ValidationResult {
     }
   }
 
-  if (map.cueTrackExport !== undefined) {
-    const c = map.cueTrackExport
-    if (!c || typeof c !== 'object') errors.push('cueTrackExport invalid')
-    else {
-      if (typeof c.fingerprint !== 'string' || !c.fingerprint) errors.push('cueTrackExport.fingerprint invalid')
-      if (!Number.isFinite(c.durationSec) || c.durationSec <= 0) errors.push('cueTrackExport.durationSec invalid')
-      if (!Number.isFinite(c.sampleRate) || c.sampleRate <= 0) errors.push('cueTrackExport.sampleRate invalid')
-      if (typeof c.generatedAt !== 'string' || !c.generatedAt) errors.push('cueTrackExport.generatedAt invalid')
-      if (c.relativePath !== undefined && typeof c.relativePath !== 'string') {
-        errors.push('cueTrackExport.relativePath invalid')
-      }
+  if (map.countInBeats !== undefined) {
+    if (!Number.isInteger(map.countInBeats) || map.countInBeats < 0) {
+      errors.push('countInBeats must be a non-negative integer')
     }
   }
+  if (map.startBeatId !== undefined) {
+    if (typeof map.startBeatId !== 'string' || map.startBeatId.length === 0) {
+      errors.push('startBeatId must be a non-empty string')
+    } else if (Array.isArray(beats) && !beats.some((b) => b.id === map.startBeatId)) {
+      // Soft fail: the override beat is missing. Plan says to drop the field
+      // with a warning; here we surface a warning so the parser can decide to
+      // drop it. The validator itself doesn't mutate.
+      warnings.push(`startBeatId references missing beat "${map.startBeatId}"`)
+    }
+  }
+
+  const validateRenderedExport = (c: unknown, label: string) => {
+    if (!c || typeof c !== 'object') {
+      errors.push(`${label} invalid`)
+      return
+    }
+    const r = c as Record<string, unknown>
+    if (typeof r.fingerprint !== 'string' || !r.fingerprint) errors.push(`${label}.fingerprint invalid`)
+    if (!Number.isFinite(r.durationSec as number) || (r.durationSec as number) <= 0) {
+      errors.push(`${label}.durationSec invalid`)
+    }
+    if (!Number.isFinite(r.sampleRate as number) || (r.sampleRate as number) <= 0) {
+      errors.push(`${label}.sampleRate invalid`)
+    }
+    if (typeof r.generatedAt !== 'string' || !r.generatedAt) errors.push(`${label}.generatedAt invalid`)
+    if (!Number.isFinite(r.preludeOffsetSec as number) || (r.preludeOffsetSec as number) < 0) {
+      errors.push(`${label}.preludeOffsetSec invalid`)
+    }
+    if (r.relativePath !== undefined && typeof r.relativePath !== 'string') {
+      errors.push(`${label}.relativePath invalid`)
+    }
+  }
+  if (map.cueTrackExport !== undefined) validateRenderedExport(map.cueTrackExport, 'cueTrackExport')
+  if (map.clickTrackExport !== undefined) validateRenderedExport(map.clickTrackExport, 'clickTrackExport')
 
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
   else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))

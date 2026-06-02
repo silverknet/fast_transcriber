@@ -18,28 +18,15 @@
       "_server.js"
     ]
   },
-  "_StemSplitter.js": {
-    "file": "chunks/StemSplitter.js",
-    "name": "StemSplitter",
-    "imports": [
-      "_Icon.js",
-      "_play.js",
-      "_x.js",
-      "_server.js",
-      "_index-server2.js",
-      "_desktopBridge.js",
-      "_button.js"
-    ]
-  },
   "_WaveformPlayer.js": {
     "file": "chunks/WaveformPlayer.js",
     "name": "WaveformPlayer",
     "imports": [
       "_index-server.js",
+      "_commit.js",
       "_server.js",
       "_index-server2.js",
-      "_button.js",
-      "_timelineEdit.js",
+      "_desktopBridge.js",
       "_uiAnimations.js"
     ]
   },
@@ -56,21 +43,6 @@
     "name": "arrow-left",
     "imports": [
       "_Icon.js",
-      "_server.js"
-    ]
-  },
-  "_beatsToSongMap.js": {
-    "file": "chunks/beatsToSongMap.js",
-    "name": "beatsToSongMap",
-    "imports": [
-      "_validate.js",
-      "_timelineEdit.js"
-    ]
-  },
-  "_button.js": {
-    "file": "chunks/button.js",
-    "name": "button",
-    "imports": [
       "_server.js"
     ]
   },
@@ -98,7 +70,7 @@
       "_commit.js",
       "_server.js",
       "_index-server2.js",
-      "_button.js",
+      "_desktopBridge.js",
       "_persist.js"
     ]
   },
@@ -109,15 +81,22 @@
       "_client.js",
       "_server.js",
       "_index-server2.js",
+      "_desktopBeacon.js",
       "_desktopBridge.js",
-      "_validate.js",
-      "_timelineEdit.js",
       "_persist.js"
     ]
   },
+  "_desktopBeacon.js": {
+    "file": "chunks/desktopBeacon.js",
+    "name": "desktopBeacon"
+  },
   "_desktopBridge.js": {
     "file": "chunks/desktopBridge.js",
-    "name": "desktopBridge"
+    "name": "desktopBridge",
+    "imports": [
+      "_server.js",
+      "_desktopBeacon.js"
+    ]
   },
   "_desktopCompanionStatus.js": {
     "file": "chunks/desktopCompanionStatus.js",
@@ -142,6 +121,18 @@
   "_fingerprintHttp.js": {
     "file": "chunks/fingerprintHttp.js",
     "name": "fingerprintHttp"
+  },
+  "_gzip.js": {
+    "file": "chunks/gzip.js",
+    "name": "gzip",
+    "imports": [
+      "_Icon.js",
+      "_play.js",
+      "_x.js",
+      "_server.js",
+      "_index-server2.js",
+      "_desktopBridge.js"
+    ]
   },
   "_index-server.js": {
     "file": "chunks/index-server.js",
@@ -172,10 +163,7 @@
   },
   "_persist.js": {
     "file": "chunks/persist.js",
-    "name": "persist",
-    "imports": [
-      "_validate.js"
-    ]
+    "name": "persist"
   },
   "_play.js": {
     "file": "chunks/play.js",
@@ -199,6 +187,14 @@
       "_pool2.js"
     ]
   },
+  "_refresh-cw.js": {
+    "file": "chunks/refresh-cw.js",
+    "name": "refresh-cw",
+    "imports": [
+      "_Icon.js",
+      "_server.js"
+    ]
+  },
   "_renderCueTrack.js": {
     "file": "chunks/renderCueTrack.js",
     "name": "renderCueTrack",
@@ -207,8 +203,7 @@
       "_commit.js",
       "_server.js",
       "_trimAudio.js",
-      "_desktopBridge.js",
-      "_timelineEdit.js"
+      "_desktopBridge.js"
     ]
   },
   "_server.js": {
@@ -239,13 +234,6 @@
       "_server.js"
     ]
   },
-  "_timelineEdit.js": {
-    "file": "chunks/timelineEdit.js",
-    "name": "timelineEdit",
-    "imports": [
-      "_validate.js"
-    ]
-  },
   "_trimAudio.js": {
     "file": "chunks/trimAudio.js",
     "name": "trimAudio"
@@ -265,10 +253,6 @@
       "_shared-server.js",
       "_shared.js"
     ]
-  },
-  "_validate.js": {
-    "file": "chunks/validate.js",
-    "name": "validate"
   },
   "_x.js": {
     "file": "chunks/x.js",
@@ -353,15 +337,15 @@
       "_stores.js",
       "_server.js",
       "_index-server2.js",
+      "_desktopBeacon.js",
       "_desktopBridge.js",
-      "_button.js",
       "_iterate.js",
       "_persist.js",
       "_analyzingState.js",
       "_desktopCompanionStatus.js"
     ],
     "css": [
-      "_app/immutable/assets/_layout.zfczsvlH.css"
+      "_app/immutable/assets/_layout.C3ic9LYD.css"
     ]
   },
   "src/routes/+page.svelte": {
@@ -379,8 +363,7 @@
       "_server.js",
       "_index-server2.js",
       "_WaveformPlayer.js",
-      "_button.js",
-      "_timelineEdit.js",
+      "_desktopBridge.js",
       "_persist.js",
       "_analyzingState.js"
     ]
@@ -397,24 +380,12 @@
       "_stores.js",
       "_server.js",
       "_index-server2.js",
-      "_beatsToSongMap.js",
       "_trimAudio.js",
       "_desktopBridge.js",
-      "_button.js",
-      "_timelineEdit.js",
+      "_persist.js",
       "_analyzingState.js",
       "_desktopCompanionStatus.js",
       "_uiAnimations.js"
-    ]
-  },
-  "src/routes/api/analyze/+server.ts": {
-    "file": "entries/endpoints/api/analyze/_server.ts.js",
-    "name": "entries/endpoints/api/analyze/_server.ts",
-    "src": "src/routes/api/analyze/+server.ts",
-    "isEntry": true,
-    "imports": [
-      "_shared-server.js",
-      "_beatsToSongMap.js"
     ]
   },
   "src/routes/api/health/+server.ts": {
@@ -450,17 +421,6 @@
       "_persist.js"
     ]
   },
-  "src/routes/api/projects/[id]/audio/+server.ts": {
-    "file": "entries/endpoints/api/projects/_id_/audio/_server.ts.js",
-    "name": "entries/endpoints/api/projects/_id_/audio/_server.ts",
-    "src": "src/routes/api/projects/[id]/audio/+server.ts",
-    "isEntry": true,
-    "imports": [
-      "_fingerprintHttp.js",
-      "_pool2.js",
-      "_projectRepo.js"
-    ]
-  },
   "src/routes/api/sessions/[id]/+server.ts": {
     "file": "entries/endpoints/api/sessions/_id_/_server.ts.js",
     "name": "entries/endpoints/api/sessions/_id_/_server.ts",
@@ -471,17 +431,6 @@
       "_pool2.js",
       "_sessionRepo.js",
       "_persist.js"
-    ]
-  },
-  "src/routes/api/sessions/[id]/audio/+server.ts": {
-    "file": "entries/endpoints/api/sessions/_id_/audio/_server.ts.js",
-    "name": "entries/endpoints/api/sessions/_id_/audio/_server.ts",
-    "src": "src/routes/api/sessions/[id]/audio/+server.ts",
-    "isEntry": true,
-    "imports": [
-      "_fingerprintHttp.js",
-      "_pool2.js",
-      "_sessionRepo.js"
     ]
   },
   "src/routes/api/sessions/ensure/+server.ts": {
@@ -511,9 +460,11 @@
     "isEntry": true,
     "imports": [
       "_index-server.js",
+      "_refresh-cw.js",
       "_server.js",
-      "_button.js",
-      "_downloadsManifest.js"
+      "_desktopBeacon.js",
+      "_downloadsManifest.js",
+      "_desktopCompanionStatus.js"
     ]
   },
   "src/routes/edit/+page.svelte": {
@@ -527,15 +478,15 @@
       "_arrow-left.js",
       "_renderCueTrack.js",
       "_play.js",
+      "_refresh-cw.js",
+      "_x.js",
       "_commit.js",
       "_client.js",
       "_server.js",
       "_index-server2.js",
       "_WaveformPlayer.js",
       "_desktopBridge.js",
-      "_button.js",
       "_iterate.js",
-      "_timelineEdit.js",
       "_persist.js",
       "_desktopCompanionStatus.js"
     ],
@@ -552,8 +503,9 @@
       "_index-server.js",
       "_Icon.js",
       "_cloud.js",
-      "_StemSplitter.js",
+      "_gzip.js",
       "_renderCueTrack.js",
+      "_refresh-cw.js",
       "_commit.js",
       "_client.js",
       "_stores.js",
@@ -561,9 +513,11 @@
       "_index-server2.js",
       "_trimAudio.js",
       "_desktopBridge.js",
-      "_button.js",
       "_persist.js",
       "_desktopCompanionStatus.js"
+    ],
+    "css": [
+      "_app/immutable/assets/_page.ChlOiwgq.css"
     ]
   },
   "src/routes/set/+page.svelte": {
@@ -573,12 +527,11 @@
     "isEntry": true,
     "imports": [
       "_index-server.js",
-      "_StemSplitter.js",
+      "_gzip.js",
       "_commit.js",
       "_server.js",
       "_index-server2.js",
       "_desktopBridge.js",
-      "_button.js",
       "_persist.js",
       "_desktopCompanionStatus.js"
     ]
@@ -591,7 +544,6 @@
     "imports": [
       "_server.js",
       "_desktopBridge.js",
-      "_button.js",
       "_desktopCompanionStatus.js"
     ]
   }

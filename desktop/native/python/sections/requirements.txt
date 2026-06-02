@@ -1,0 +1,13 @@
+# Lightweight section-border suggester (no madmom).
+# librosa = ISC, numpy / scipy / soundfile = BSD.
+#
+# Why these pins (don't loosen without testing):
+#   - numpy 2.x broke ABI for several native operations librosa wraps;
+#     librosa 0.10 + numpy 1.26 is the most-tested stack and doesn't crash
+#     inside chroma / STFT pathways on macOS.
+#   - librosa 0.11 is the first version that *claims* numpy 2 support but
+#     in practice produces native SIGKILLs during chroma_stft on Apple
+#     Silicon — pin under it until that settles.
+numpy>=1.22,<2
+scipy>=1.10,<2
+librosa>=0.10.1,<0.11

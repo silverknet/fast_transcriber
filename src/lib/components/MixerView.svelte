@@ -22,6 +22,7 @@
   import { Pause, Play, Square } from '@lucide/svelte'
   import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
   import { computeCountIn } from '$lib/audio/computeCountIn'
+  import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import {
     bufferWithPrepend,
     MixerEngine,
@@ -101,8 +102,9 @@
     if (forKey === 'cue' || forKey === 'click') return 0
     const preludeSec = titleCuePreludeSec(sm)
     let prependSec = 0
-    if (sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0) {
-      const ci = computeCountIn(sm, sm.cues.countInBeats)
+    const countInBeats = effectiveCountInBeats(sm)
+    if (countInBeats > 0) {
+      const ci = computeCountIn(sm, countInBeats)
       if (ci) prependSec = ci.prependSec
     }
     const trimStart = sm.audio?.trim?.startSec ?? 0
@@ -188,19 +190,27 @@
     }
 
     // Click track (clicks only). Always present for a song with beats —
-    // either fetched from disk if generated, or synthesized client-side
-    // from the SongMap on the fly. The user never needs to "render" it.
+    // either fetched from disk WHEN THE CACHE IS FRESH, or synthesized
+    // client-side from the current SongMap. The user never has to "render".
+    //
+    // Freshness check: `sm.clickTrackExport` is auto-cleared on fingerprint
+    // mismatch (see `stores/songMap.ts`), so its presence is the source-of-
+    // truth that the disk WAV matches the current count-in / start-beat /
+    // beat-grid. The on-disk file lingers when stale (we don't delete it
+    // proactively) — so loading by file-existence alone gives back a stale
+    // click track that drifts from the live beat grid. Synthesize instead.
     if (sm && sm.timeline.beats.length > 0) {
       plan.push({
         key: 'click',
         label: 'Click',
         loader: async () => {
-          if (folderMeta?.hasClickTrack && ps.osPath && ps.activeSongFolder) {
+          const cacheIsFresh = !!sm.clickTrackExport && !!folderMeta?.hasClickTrack
+          if (cacheIsFresh && ps.osPath && ps.activeSongFolder) {
             const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/click-track.wav')
             if (r.ok) return r.blob
           }
-          // No file on disk — synthesize from beats. This is pure DSP (no
-          // TTS needed), so it works offline and is fast.
+          // Stale or missing — synthesize fresh from the current SongMap.
+          // Pure DSP, no TTS, fast (~100 ms).
           try {
             const r = await renderCueTrackWavBlob(sm, { includeSpeech: false, includeClicks: true })
             return r.blob

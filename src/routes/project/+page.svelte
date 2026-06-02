@@ -15,18 +15,28 @@
   import RemoveSongDialog from '$lib/components/RemoveSongDialog.svelte'
   import ExportBackingTrackDialog from '$lib/components/ExportBackingTrackDialog.svelte'
   import CopyFromCloudDialog from '$lib/components/CopyFromCloudDialog.svelte'
-  import { Cloud, ListPlus, Plus, RefreshCw } from '@lucide/svelte'
+  import SetlistExportDialog from '$lib/components/SetlistExportDialog.svelte'
+  import { Cloud, ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
+  import {
+    exportProjectSetAls,
+    preflightProjectSetlist,
+    type SetlistPreflightStatus,
+  } from '$lib/export/setlist'
+  import { safeExportBasename } from '$lib/songmap/persist'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import {
     importSmapToProject,
     loadProjectSongIntoEditor,
     metadataLiteFromSongMap,
-    moveProjectSong,
     refreshProjectInfo,
     removeSongFromProject,
     renameProject,
     setSongHidden,
+    setSongOrder,
     tryRestoreLastProject,
   } from '$lib/project/commit'
+  import { dndzone } from 'svelte-dnd-action'
+  import { STEM_TRACKS } from '$lib/export/abletonSet'
   import { listJobsViaDesktop } from '$lib/client/desktopBridge'
   import { hydrateFromSidecar } from '$lib/stores/stemJobs'
   import { project } from '$lib/stores/project'
@@ -55,6 +65,52 @@
   let refreshing = $state(false)
   let refreshMsg = $state('')
   let refreshMsgTitle = $state('')
+
+  /** Setlist .als export state. */
+  let setlistExportStatus = $state<'idle' | 'preflight' | 'generating' | 'done' | 'error'>('idle')
+  let setlistExportMsg = $state('')
+  let setlistPreflight = $state<SetlistPreflightStatus | null>(null)
+  let setlistExportOpen = $state(false)
+
+  function openSetlistExport() {
+    const proj = $project.data
+    if (!proj) return
+    setlistExportMsg = ''
+    setlistPreflight = preflightProjectSetlist(proj, $project.metadataByFolder)
+    setlistExportStatus = 'preflight'
+    setlistExportOpen = true
+  }
+
+  async function runSetlistExport() {
+    const proj = $project.data
+    const osPath = $project.osPath
+    if (!proj || !osPath) {
+      setlistExportStatus = 'error'
+      setlistExportMsg = 'Project path unavailable.'
+      return
+    }
+    setlistExportStatus = 'generating'
+    setlistExportMsg = 'Building setlist .als…'
+    const filename = `${safeExportBasename(proj.name)}.als`
+    const res = await exportProjectSetAls({
+      projectPath: osPath,
+      project: proj,
+      metadataByFolder: $project.metadataByFolder,
+      filename,
+    })
+    if (res.ok) {
+      setlistExportStatus = 'done'
+      setlistExportMsg = `Wrote ${filename} (${(res.alsBytes / 1024).toFixed(1)} KB) to the project folder.`
+    } else {
+      setlistExportStatus = 'error'
+      setlistExportMsg = res.error
+    }
+  }
+
+  function closeSetlistExport() {
+    if (setlistExportStatus === 'generating') return
+    setlistExportOpen = false
+  }
 
   async function onRefreshProject() {
     if (refreshing) return
@@ -159,12 +215,37 @@
     }
   }
 
-  async function onMoveSong(entry: ProjectSongEntry, delta: -1 | 1) {
+  /**
+   * Local mirror of the project store's `songs` list that drag-and-drop can
+   * mutate during a drag (`consider`) and on drop (`finalize`). When the
+   * underlying store changes (refresh, add, remove) we re-sync — but never
+   * mid-drag, since svelte-dnd-action owns the array during the gesture.
+   */
+  let dragSongs = $state<ProjectSongEntry[]>([])
+  let isDragging = $state(false)
+  $effect(() => {
+    const next = $project.data?.songs ?? []
+    if (isDragging) return // owned by the drag in flight
+    dragSongs = [...next]
+  })
+
+  function onDndConsider(e: CustomEvent<{ items: ProjectSongEntry[] }>) {
+    isDragging = true
+    dragSongs = e.detail.items
+  }
+
+  async function onDndFinalize(e: CustomEvent<{ items: ProjectSongEntry[] }>) {
+    dragSongs = e.detail.items
     actionError = ''
+    // Keep `isDragging` true until the manifest write resolves. Otherwise the
+    // sync $effect re-mirrors the store before our commit lands, briefly
+    // reverting the list to its pre-drop order (the visual "snap-back" bug).
     try {
-      await moveProjectSong(entry.id, delta)
-    } catch (e) {
-      actionError = e instanceof Error ? e.message : 'Reorder failed'
+      await setSongOrder(dragSongs.map((s) => s.id))
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : 'Reorder failed'
+    } finally {
+      isDragging = false
     }
   }
 
@@ -245,7 +326,7 @@
   let songs = $derived($project.data?.songs ?? [])
 </script>
 
-<main class="relative z-10 mx-auto flex min-h-dvh w-full max-w-3xl flex-col gap-6 px-4 py-12 sm:px-6">
+<main class="relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col gap-6 px-4 py-12 sm:px-6">
   {#if restoring}
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}
@@ -295,29 +376,63 @@
       <p class="text-destructive text-sm" role="status">{actionError}</p>
     {/if}
 
-    {#if songs.length === 0}
+    {#if dragSongs.length === 0}
       <div class="border-foreground/40 border-2 border-dashed p-8 text-center">
         <p class="text-muted-foreground text-sm">No songs yet. Add the first one below.</p>
       </div>
     {:else}
-      <ul class="flex flex-col gap-2">
-        {#each songs as entry, index (entry.id)}
-          <ProjectSongCard
-            {entry}
-            metadata={$project.metadataByFolder[entry.folder]}
-            canMoveUp={index > 0}
-            canMoveDown={index < songs.length - 1}
-            isExpanded={expandedSongId === entry.id}
-            onToggleExpand={() => void onToggleExpand(entry.id)}
-            onMoveUp={() => void onMoveSong(entry, -1)}
-            onMoveDown={() => void onMoveSong(entry, 1)}
-            onEdit={() => void onEditSong(entry.id)}
-            onToggleHidden={() => void onToggleHidden(entry)}
-            onRemove={() => askRemove(entry)}
-            onExport={() => void askExport(entry)}
-          />
-        {/each}
-      </ul>
+      <div class="flex flex-col">
+        <!--
+          Sticky column header. Single-letter stem labels with full names in
+          `title` for hover (the rows below are dots only, so the letter is
+          enough to anchor the column visually).
+        -->
+        <div
+          class="song-row-grid border-foreground bg-muted text-muted-foreground sticky top-0 z-10 h-8 items-center gap-2 border-2 px-2 text-[10px] font-semibold uppercase tracking-wider"
+          role="row"
+        >
+          <span aria-hidden="true"></span>
+          <span class="truncate text-center" title="Setlist position">#</span>
+          <span class="truncate">Song</span>
+          <span class="truncate">Key</span>
+          <span class="truncate text-right">BPM</span>
+          {#each STEM_TRACKS as t (t.name)}
+            <span class="truncate text-center" title={t.name === 'FX' ? 'Other' : t.name}>
+              {t.name === 'FX' ? 'O' : t.name.charAt(0)}
+            </span>
+          {/each}
+          <span class="truncate text-center" title="Cue track">C</span>
+          <span aria-hidden="true"></span>
+          <span aria-hidden="true"></span>
+        </div>
+
+        <!--
+          Drag-and-drop reorderable list. svelte-dnd-action uses `id` on each
+          item by default, which ProjectSongEntry already provides. We mirror
+          the store into `dragSongs` so the action can mutate it during the
+          gesture; the commit happens in `onDndFinalize`.
+        -->
+        <ul
+          use:dndzone={{ items: dragSongs, flipDurationMs: 260, dropTargetStyle: {} }}
+          onconsider={(e) => onDndConsider(e as CustomEvent<{ items: ProjectSongEntry[] }>)}
+          onfinalize={(e) => onDndFinalize(e as CustomEvent<{ items: ProjectSongEntry[] }>)}
+          class="mt-1 flex flex-col gap-1"
+        >
+          {#each dragSongs as entry, index (entry.id)}
+            <ProjectSongCard
+              {entry}
+              position={index + 1}
+              metadata={$project.metadataByFolder[entry.folder]}
+              isExpanded={expandedSongId === entry.id}
+              onToggleExpand={() => void onToggleExpand(entry.id)}
+              onEdit={() => void onEditSong(entry.id)}
+              onToggleHidden={() => void onToggleHidden(entry)}
+              onRemove={() => askRemove(entry)}
+              onExport={() => void askExport(entry)}
+            />
+          {/each}
+        </ul>
+      </div>
     {/if}
 
     <div class="border-foreground border-2 p-4">
@@ -346,6 +461,30 @@
       </DropdownMenu>
     </div>
 
+    {#if songs.length > 0}
+      <div class="border-foreground/40 flex items-center gap-3 border-2 border-dashed px-4 py-3">
+        <div class="min-w-0 flex-1">
+          <p class="text-xs font-semibold">Setlist · Ableton Live 12</p>
+          <p class="text-muted-foreground text-[11px]">
+            One .als with a scene per song. Click track is re-rendered fresh on every export.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          class="shrink-0 gap-1"
+          disabled={!$desktopCompanionStatus.reachable}
+          onclick={openSetlistExport}
+          title={!$desktopCompanionStatus.reachable
+            ? 'Setlist export needs the BarBro desktop client running.'
+            : 'Open the export dialog'}
+        >
+          <Music4 class="size-3.5" aria-hidden="true" />
+          Export .als
+        </Button>
+      </div>
+    {/if}
+
     <input
       bind:this={smapImportInput}
       type="file"
@@ -372,3 +511,37 @@
 />
 
 <CopyFromCloudDialog bind:open={copyFromCloudOpen} />
+
+<SetlistExportDialog
+  bind:open={setlistExportOpen}
+  preflight={setlistPreflight}
+  status={setlistExportStatus}
+  message={setlistExportMsg}
+  onConfirm={() => void runSetlistExport()}
+  onClose={closeSetlistExport}
+/>
+
+<!--
+  `:global` puts this class in the document's stylesheet so it stays in scope
+  for the dragged-row shadow that `svelte-dnd-action` lifts out of the dndzone
+  (the shadow's CSS-variable inheritance is lost when it's reparented under
+  <body>). The header and every row share this template so columns line up
+  even mid-drag.
+    handle (24) | # (24) | title (1fr) | key (80) | bpm (40) | 5× stem (28) |
+    cue (28) | edit (32) | ⋮ (32)
+-->
+<style>
+  :global(.song-row-grid) {
+    display: grid;
+    grid-template-columns:
+      1.5rem
+      1.5rem
+      minmax(0, 1fr)
+      5rem
+      2.5rem
+      repeat(5, 1.75rem)
+      1.75rem
+      2rem
+      2rem;
+  }
+</style>

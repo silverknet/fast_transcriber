@@ -1,3 +1,12 @@
+/**
+ * Editor-session persistence — anonymous browser-fingerprint keyed.
+ *
+ * Only the musical document (`song_map_json`) is stored. Audio bytes are
+ * NEVER persisted server-side; the BarBro Desktop sidecar owns the user's
+ * audio files on their local disk. This module assumes the schema after
+ * migration `003_drop_audio_storage.sql` (no `audio_bytes` / `audio_sha256`
+ * columns).
+ */
 import { getPgPool } from './pool'
 
 const UUID_RE =
@@ -44,8 +53,6 @@ export async function ensureEditorSession(
 export type LoadedSession = {
   id: string
   songMapJson: unknown | null
-  audioSha256: string | null
-  hasAudio: boolean
   updatedAt: string
 }
 
@@ -59,11 +66,9 @@ export async function loadEditorSession(
   const r = await pool.query<{
     id: string
     song_map_json: unknown
-    audio_sha256: string | null
-    audio_bytes: Buffer | null
     updated_at: Date
   }>(
-    `SELECT id::text AS id, song_map_json, audio_sha256, audio_bytes, updated_at
+    `SELECT id::text AS id, song_map_json, updated_at
      FROM editor_sessions
      WHERE id = $1::uuid AND fingerprint_hash = $2`,
     [sessionId, fingerprintHash],
@@ -75,49 +80,17 @@ export async function loadEditorSession(
   return {
     id: row.id,
     songMapJson: row.song_map_json,
-    audioSha256: row.audio_sha256,
-    hasAudio: row.audio_bytes != null && row.audio_bytes.length > 0,
     updatedAt: row.updated_at.toISOString(),
   }
-}
-
-export async function loadSessionAudio(
-  sessionId: string,
-  fingerprintHash: string,
-): Promise<Buffer | null> {
-  const pool = getPgPool()
-  if (!pool || !isValidSessionId(sessionId)) return null
-
-  const r = await pool.query<{ audio_bytes: Buffer | null }>(
-    `SELECT audio_bytes FROM editor_sessions
-     WHERE id = $1::uuid AND fingerprint_hash = $2`,
-    [sessionId, fingerprintHash],
-  )
-  const b = r.rows[0]?.audio_bytes
-  return b && b.length > 0 ? Buffer.from(b) : null
 }
 
 export async function saveEditorSession(
   sessionId: string,
   fingerprintHash: string,
   songMapJsonText: string,
-  audio?: { bytes: Buffer; sha256: string },
 ): Promise<boolean> {
   const pool = getPgPool()
   if (!pool || !isValidSessionId(sessionId)) return false
-
-  if (audio) {
-    const r = await pool.query(
-      `UPDATE editor_sessions
-       SET song_map_json = $1::jsonb,
-           audio_bytes = $2,
-           audio_sha256 = $3,
-           updated_at = now()
-       WHERE id = $4::uuid AND fingerprint_hash = $5`,
-      [songMapJsonText, audio.bytes, audio.sha256, sessionId, fingerprintHash],
-    )
-    return r.rowCount === 1
-  }
 
   const r = await pool.query(
     `UPDATE editor_sessions

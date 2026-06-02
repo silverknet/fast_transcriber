@@ -9,6 +9,8 @@ import { clearSongMap, setSongMap, songMap } from './songMap'
  */
 export function hydrateRestorableSong(state: RestorableSongState): void {
   setSongMap(state.songMap)
+  // Fresh session — no missingReason carried over from a previous song.
+  // Callers that need to flag missing audio set it AFTER this returns.
   audioSession.set(audioSessionFromMapAndBlob(state.songMap, state.audioBlob))
 }
 

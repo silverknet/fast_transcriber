@@ -3,10 +3,7 @@ import { i as parseSongMapJsonString } from "../../../../chunks/persist.js";
 import { t as parseFingerprintHeaderOrQuery } from "../../../../chunks/fingerprintHttp.js";
 import { i as listProjects, t as createProject } from "../../../../chunks/projectRepo.js";
 import { json } from "@sveltejs/kit";
-import { createHash } from "node:crypto";
 //#region src/routes/api/projects/+server.ts
-var config = { maxRequestBodySize: 100 * 1024 * 1024 };
-var MAX_AUDIO_BYTES = 80 * 1024 * 1024;
 async function GET({ request, url }) {
 	if (!isDatabaseConfigured()) return json({
 		ok: false,
@@ -32,17 +29,17 @@ async function POST({ request }) {
 		ok: false,
 		error: "Missing or invalid X-BarBro-Fingerprint header"
 	}, { status: 400 });
-	let form;
+	let body;
 	try {
-		form = await request.formData();
+		body = await request.json();
 	} catch {
 		return json({
 			ok: false,
-			error: "Expected multipart form data"
+			error: "Expected JSON body"
 		}, { status: 400 });
 	}
-	const name = (form.get("name") ?? "").trim() || "Untitled Project";
-	const songMapJson = form.get("songMapJson");
+	const name = (body.name ?? "").trim() || "Untitled Project";
+	const songMapJson = body.songMapJson;
 	if (typeof songMapJson !== "string") return json({
 		ok: false,
 		error: "songMapJson field required"
@@ -52,21 +49,7 @@ async function POST({ request }) {
 		ok: false,
 		error: parsed.error
 	}, { status: 400 });
-	const audio = form.get("audio");
-	let audioPart;
-	if (audio instanceof File && audio.size > 0) {
-		if (audio.size > MAX_AUDIO_BYTES) return json({
-			ok: false,
-			error: `Audio too large (max ${MAX_AUDIO_BYTES / (1024 * 1024)} MB)`
-		}, { status: 413 });
-		const ab = await audio.arrayBuffer();
-		const bytes = Buffer.from(ab);
-		audioPart = {
-			bytes,
-			sha256: createHash("sha256").update(bytes).digest("hex")
-		};
-	}
-	const id = await createProject(fingerprint, name, songMapJson, audioPart);
+	const id = await createProject(fingerprint, name, songMapJson);
 	if (!id) return json({
 		ok: false,
 		error: "Failed to create project"
@@ -74,9 +57,8 @@ async function POST({ request }) {
 	return json({
 		ok: true,
 		id,
-		audioSha256: audioPart?.sha256 ?? null,
 		updatedAt: (/* @__PURE__ */ new Date()).toISOString()
 	}, { status: 201 });
 }
 //#endregion
-export { GET, POST, config };
+export { GET, POST };

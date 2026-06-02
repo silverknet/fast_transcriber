@@ -4,7 +4,7 @@ import "./index-server2.js";
 import { a as on } from "./internal.js";
 import "./persist.js";
 import "./commit.js";
-import { n as cn, t as Button } from "./button.js";
+import { v as Button, y as cn } from "./desktopBridge.js";
 import { t as Icon } from "./Icon.js";
 import { t as X } from "./x.js";
 import { clsx } from "clsx";
@@ -2709,6 +2709,31 @@ var MenuItemState = class MenuItemState {
 		return this.#props($$value);
 	}
 };
+var MenuSeparatorState = class MenuSeparatorState {
+	static create(opts) {
+		return new MenuSeparatorState(opts, MenuRootContext.get());
+	}
+	opts;
+	root;
+	attachment;
+	constructor(opts, root) {
+		this.opts = opts;
+		this.root = root;
+		this.attachment = attachRef(this.opts.ref);
+	}
+	#props = derived(() => ({
+		id: this.opts.id.current,
+		role: "group",
+		[this.root.getBitsAttr("separator")]: "",
+		...this.attachment
+	}));
+	get props() {
+		return this.#props();
+	}
+	set props($$value) {
+		return this.#props($$value);
+	}
+};
 var DropdownMenuTriggerState = class DropdownMenuTriggerState {
 	static create(opts) {
 		return new DropdownMenuTriggerState(opts, MenuMenuContext.get());
@@ -4319,6 +4344,31 @@ function Menu_item($$renderer, $$props) {
 	});
 }
 //#endregion
+//#region node_modules/bits-ui/dist/bits/menu/components/menu-separator.svelte
+function Menu_separator($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		const uid = props_id($$renderer);
+		let { ref = null, id = createId(uid), child, children, $$slots, $$events, ...restProps } = $$props;
+		const separatorState = MenuSeparatorState.create({
+			id: boxWith(() => id),
+			ref: boxWith(() => ref, (v) => ref = v)
+		});
+		const mergedProps = derived(() => mergeProps(restProps, separatorState.props));
+		if (child) {
+			$$renderer.push("<!--[0-->");
+			child($$renderer, { props: mergedProps() });
+			$$renderer.push(`<!---->`);
+		} else {
+			$$renderer.push("<!--[-1-->");
+			$$renderer.push(`<div${attributes({ ...mergedProps() })}>`);
+			children?.($$renderer);
+			$$renderer.push(`<!----></div>`);
+		}
+		$$renderer.push(`<!--]-->`);
+		bind_props($$props, { ref });
+	});
+}
+//#endregion
 //#region node_modules/bits-ui/dist/bits/dialog/components/dialog.svelte
 function Dialog$1($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
@@ -5087,6 +5137,47 @@ function Dropdown_menu_item($$renderer, $$props) {
 	});
 }
 //#endregion
+//#region src/lib/components/ui/dropdown-menu/dropdown-menu-separator.svelte
+function Dropdown_menu_separator($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		let { ref = null, class: className, $$slots, $$events, ...restProps } = $$props;
+		let $$settled = true;
+		let $$inner_renderer;
+		function $$render_inner($$renderer) {
+			if (Menu_separator) {
+				$$renderer.push("<!--[-->");
+				Menu_separator($$renderer, spread_props([
+					{
+						"data-slot": "dropdown-menu-separator",
+						class: cn("bg-border -mx-1 my-1 h-px", className)
+					},
+					restProps,
+					{
+						get ref() {
+							return ref;
+						},
+						set ref($$value) {
+							ref = $$value;
+							$$settled = false;
+						}
+					}
+				]));
+				$$renderer.push("<!--]-->");
+			} else {
+				$$renderer.push("<!--[!-->");
+				$$renderer.push("<!--]-->");
+			}
+		}
+		do {
+			$$settled = true;
+			$$inner_renderer = $$renderer.copy();
+			$$render_inner($$inner_renderer);
+		} while (!$$settled);
+		$$renderer.subsume($$inner_renderer);
+		bind_props($$props, { ref });
+	});
+}
+//#endregion
 //#region src/lib/components/ui/dropdown-menu/dropdown-menu-trigger.svelte
 function Dropdown_menu_trigger($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
@@ -5314,4 +5405,4 @@ function Cloud($$renderer, $$props) {
 	});
 }
 //#endregion
-export { Dialog_title as _, getCurrentProject as a, computeBrowserFingerprintHash as c, Dropdown_menu_content as d, Dropdown_menu as f, Dialog_footer as g, Dialog_header as h, fetchCloudSongAsSmap as i, Dropdown_menu_trigger as l, Dialog_content as m, Chevron_down as n, loadCloudProject as o, Dialog_description as p, deleteCloudProject as r, saveCloudProject as s, Cloud as t, Dropdown_menu_item as u, Dialog as v };
+export { Dialog_footer as _, getCurrentProject as a, computeBrowserFingerprintHash as c, Dropdown_menu_item as d, Dropdown_menu_content as f, Dialog_header as g, Dialog_content as h, fetchCloudSongAsSmap as i, Dropdown_menu_trigger as l, Dialog_description as m, Chevron_down as n, loadCloudProject as o, Dropdown_menu as p, deleteCloudProject as r, saveCloudProject as s, Cloud as t, Dropdown_menu_separator as u, Dialog_title as v, Dialog as y };

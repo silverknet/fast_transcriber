@@ -24,6 +24,7 @@
     anchorY = 0,
     songKey,
     selectedBeatId = null as string | null,
+    suggestion = null as { primary: { chord: ChordSymbol; confidenceLabel: string }; alternatives: ChordSymbol[] } | null,
     onCommit,
     onClearChord,
   }: {
@@ -32,6 +33,11 @@
     anchorY?: number
     songKey: SongKey
     selectedBeatId?: string | null
+    /** When set, the menu shows a prominent "Use suggestion" panel above the clock. */
+    suggestion?: {
+      primary: { chord: ChordSymbol; confidenceLabel: string }
+      alternatives: ChordSymbol[]
+    } | null
     onCommit?: (chord: ChordSymbol) => void
     onClearChord?: () => void
   } = $props()
@@ -313,6 +319,66 @@
         >
           Tap chord to commit · hold 1s for slash bass
         </p>
+
+        {#if suggestion && !stagedChord && !searchOpen && drilledDegreeIndex == null}
+          <!-- Suggestion panel: anchored above the center, prominent 1-click commit
+               for the audio-derived chord suggestion + up to 2 alternates. -->
+          <div
+            class="brutalist-shadow bg-background text-foreground border-foreground absolute left-1/2 top-1/2 flex w-[220px] flex-col gap-1 border-2 p-2"
+            style="transform: translate(-50%, calc(-50% - 200px));"
+          >
+            <div class="text-muted-foreground flex items-center gap-1 text-[9px] uppercase tracking-wide">
+              <span>✨</span><span>Suggested ({suggestion.primary.confidenceLabel})</span>
+            </div>
+            <button
+              type="button"
+              class="bg-foreground text-background border-foreground hover:bg-foreground/85 cursor-pointer border-2 px-2 py-1.5 text-center font-mono text-[14px] font-bold"
+              onpointerdown={(e) => onCommitPointerDown(e, suggestion.primary.chord)}
+              onpointerup={(e) => onCommitPointerUp(e, suggestion.primary.chord)}
+              onpointerleave={onCommitPointerLeave}
+              onpointercancel={(e) => {
+                try {
+                  ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+                } catch {
+                  /* ignore */
+                }
+                onCommitPointerLeave()
+                longPressDidFire = false
+              }}
+              oncontextmenu={(e) => e.preventDefault()}
+              title={`Use suggestion: ${labelFor(suggestion.primary.chord)} (${suggestion.primary.confidenceLabel})`}
+            >
+              {labelFor(suggestion.primary.chord)}
+            </button>
+            {#if suggestion.alternatives.length > 0}
+              <div class="text-muted-foreground text-[8px] leading-tight">Alternates:</div>
+              <div class="flex gap-1">
+                {#each suggestion.alternatives as alt, ai (`alt-${ai}`)}
+                  <button
+                    type="button"
+                    class="bg-background border-foreground hover:bg-foreground/10 flex-1 cursor-pointer border-2 px-1 py-1 text-center font-mono text-[11px]"
+                    onpointerdown={(e) => onCommitPointerDown(e, alt)}
+                    onpointerup={(e) => onCommitPointerUp(e, alt)}
+                    onpointerleave={onCommitPointerLeave}
+                    onpointercancel={(e) => {
+                      try {
+                        ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+                      } catch {
+                        /* ignore */
+                      }
+                      onCommitPointerLeave()
+                      longPressDidFire = false
+                    }}
+                    oncontextmenu={(e) => e.preventDefault()}
+                    title={`Use alternate: ${labelFor(alt)}`}
+                  >
+                    {labelFor(alt)}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
 
         {#if !stagedChord && !searchOpen && drilledDegreeIndex == null}
           {#each homeSlots as slot, i (`home-${i}`)}

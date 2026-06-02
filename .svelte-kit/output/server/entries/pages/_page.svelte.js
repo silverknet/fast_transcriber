@@ -1,11 +1,10 @@
 import "../../chunks/index-server.js";
 import { A as escape_html, O as attr, a as derived, f as spread_props, h as unsubscribe_stores } from "../../chunks/server.js";
 import "../../chunks/index-server2.js";
-import "../../chunks/timelineEdit.js";
 import "../../chunks/persist.js";
 import "../../chunks/client.js";
 import "../../chunks/commit.js";
-import { t as Button } from "../../chunks/button.js";
+import { v as Button } from "../../chunks/desktopBridge.js";
 import { t as Icon } from "../../chunks/Icon.js";
 import { n as Music } from "../../chunks/arrow-left.js";
 import "../../chunks/stores.js";

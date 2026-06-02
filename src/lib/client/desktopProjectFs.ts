@@ -24,6 +24,8 @@ export interface ProjectSongMetadataInfo {
   artist?: string
   keyDetail?: SongKey
   bpm?: number
+  /** Count-in beats when `cues.mode === 'countIn'`; 0/absent otherwise. */
+  countInBeats?: number
   stemRefs?: StemRefs
   hasSmap: boolean
   hasAls: boolean
@@ -181,6 +183,116 @@ export async function writeProjectSongAsset(
     songFolder,
     subpath,
     contentBase64: bytesToBase64(bytes),
+  })
+}
+
+/**
+ * Write a single file at the PROJECT ROOT (e.g. `<projectName>.als`).
+ * Path is validated by the sidecar; no `..` segments allowed. Intermediate
+ * directories are created.
+ */
+export async function writeProjectAsset(
+  projectPath: string,
+  subpath: string,
+  bytes: Uint8Array,
+): Promise<ProjectOkResult> {
+  return await postJson<ProjectOkResult>(`${BASE_URL}/native/project/asset/write`, {
+    projectPath,
+    subpath,
+    contentBase64: bytesToBase64(bytes),
+  })
+}
+
+/** One entry in a `getProjectWavInfoBatch` response. */
+export type ProjectWavInfo =
+  | {
+      songFolder: string
+      subpath: string
+      durationSec: number
+      sampleRate: number
+      channels: number
+      fileSize: number
+    }
+  | {
+      songFolder: string
+      subpath: string
+      error: string
+    }
+
+export type ProjectWavInfoBatchResult =
+  | { ok: true; items: ProjectWavInfo[] }
+  | { ok: false; error: string }
+
+/**
+ * Read WAV header info (duration / sample rate / channels) for a batch of
+ * files under the project tree. Per-file errors don't abort the batch
+ * — each item either has the info fields or an `error` field.
+ */
+export async function getProjectWavInfoBatch(
+  projectPath: string,
+  files: Array<{ songFolder: string; subpath: string }>,
+): Promise<ProjectWavInfoBatchResult> {
+  return await postJson<ProjectWavInfoBatchResult>(`${BASE_URL}/native/project/wav-info/batch`, {
+    projectPath,
+    files,
+  })
+}
+
+export type TranscodeToWavResult =
+  | { ok: true; cached: boolean }
+  | { ok: false; error: string }
+
+/**
+ * Transcode a compressed audio file (typically MP3) to 16-bit PCM WAV
+ * inside the project tree. Cache-aware via sidecar mtime check — the
+ * actual ffmpeg call only runs when needed.
+ *
+ * Used by the Ableton setlist export to ensure every clip is uncompressed
+ * (no encoder priming offsets) for sample-accurate alignment.
+ */
+export async function transcodeProjectAudioToWav(
+  projectPath: string,
+  songFolder: string,
+  srcSubpath: string,
+  dstSubpath: string,
+): Promise<TranscodeToWavResult> {
+  return await postJson<TranscodeToWavResult>(`${BASE_URL}/native/project/transcode-to-wav`, {
+    projectPath,
+    songFolder,
+    srcSubpath,
+    dstSubpath,
+  })
+}
+
+export type RelinkAudioResult =
+  | {
+      ok: true
+      /** Relative POSIX path under the song folder, e.g. `audio/song.mp3`. */
+      relPath: string
+      /** Basename component of `relPath`. */
+      fileName: string
+      /** SHA-256 hex of the bytes that were just copied to disk. */
+      sha256: string
+      size: number
+    }
+  | { ok: false; cancelled: true }
+  | { ok: false; error: string }
+
+/**
+ * Open the OS file picker, copy the chosen audio file into
+ * `<song>/audio/<filename>`, and return the relative path + SHA-256 in one
+ * round-trip. Callers compare the returned `sha256` against the SongMap's
+ * `audio.originalSha256` to detect a content mismatch.
+ */
+export async function relinkProjectSongAudio(
+  projectPath: string,
+  songFolder: string,
+  defaultName?: string,
+): Promise<RelinkAudioResult> {
+  return await postJson<RelinkAudioResult>(`${BASE_URL}/native/project/song/audio/relink`, {
+    projectPath,
+    songFolder,
+    defaultName: defaultName ?? null,
   })
 }
 

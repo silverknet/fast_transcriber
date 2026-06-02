@@ -12,13 +12,13 @@
  */
 
 import { app, BrowserWindow, dialog } from 'electron'
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import {
   beatsScriptPath,
@@ -34,8 +34,20 @@ import {
   piperTtsVenvIsReady,
   pythonBeatsExe,
   pythonPiperTtsExe,
+  pythonSectionsExe,
   pythonStemsExe,
   runPythonCapture,
+  sectionsScriptPath,
+  chordChromaScriptPath,
+  getSectionsVenvDir,
+  getSectionsVenvPythonExe,
+  sectionsLibrosaReady,
+  invalidateSectionsLibrosaCache,
+  writeSectionsVenvMarker,
+  uvBinaryIsReady,
+  getUvBinaryPath,
+  downloadAndExtractUv,
+  UV_PINNED_VERSION,
   stemsScriptPath,
   stemsVenvIsReady,
 } from './nativePython.mjs'
@@ -385,24 +397,45 @@ async function readProjectManifest(projectPath) {
  * project list view without paying for the audio bytes. Returns null on any
  * error (truncated file, bad magic, unsupported version, bad JSON) — callers
  * treat that as "song.smap unreadable" and surface in the songsMetadata.
+ *
+ * Supports both container versions:
+ *   - v1: 28-byte header (magic + version + flags + jsonLen + audioLen),
+ *         json begins at offset 28.
+ *   - v2: 16-byte header (magic + version + jsonLen), json begins at
+ *         offset 16. No audio chunk — audio lives at `<song>/audio/<file>`.
  */
 async function readSmapHeaderJson(smapPath) {
   try {
-    // Open by stat to bound reads.
     const st = await stat(smapPath)
-    if (st.size < 28) return null
+    if (st.size < 16) return null
     const fh = await import('node:fs/promises').then((m) => m.open(smapPath, 'r'))
     try {
-      const headerBuf = Buffer.alloc(28)
-      await fh.read(headerBuf, 0, 28, 0)
-      if (headerBuf.toString('ascii', 0, 4) !== 'SMAP') return null
-      const version = headerBuf.readUInt32LE(4)
-      if (version !== 1) return null
-      const jsonLen = Number(headerBuf.readBigUInt64LE(12))
+      const probe = Buffer.alloc(8)
+      await fh.read(probe, 0, 8, 0)
+      if (probe.toString('ascii', 0, 4) !== 'SMAP') return null
+      const version = probe.readUInt32LE(4)
+
+      let headerLen
+      let jsonLenOffset
+      if (version === 2) {
+        headerLen = 16
+        jsonLenOffset = 8
+      } else if (version === 1) {
+        headerLen = 28
+        jsonLenOffset = 12
+      } else {
+        return null
+      }
+      if (st.size < headerLen) return null
+
+      const headerBuf = Buffer.alloc(headerLen)
+      await fh.read(headerBuf, 0, headerLen, 0)
+      const jsonLen = Number(headerBuf.readBigUInt64LE(jsonLenOffset))
       if (jsonLen <= 0 || jsonLen > 10 * 1024 * 1024) return null
-      if (28 + jsonLen > st.size) return null
+      if (headerLen + jsonLen > st.size) return null
+
       const jsonBuf = Buffer.alloc(jsonLen)
-      await fh.read(jsonBuf, 0, jsonLen, 28)
+      await fh.read(jsonBuf, 0, jsonLen, headerLen)
       const text = jsonBuf.toString('utf-8')
       return JSON.parse(text)
     } finally {
@@ -423,6 +456,10 @@ function extractSongMetadataLite(songProject) {
   if (typeof md.artist === 'string') out.artist = md.artist
   if (md.keyDetail) out.keyDetail = md.keyDetail
   if (typeof md.bpm === 'number') out.bpm = md.bpm
+  const cues = map.cues
+  if (cues && cues.mode === 'countIn' && typeof cues.countInBeats === 'number' && cues.countInBeats > 0) {
+    out.countInBeats = cues.countInBeats
+  }
   if (map.stemRefs && typeof map.stemRefs === 'object') out.stemRefs = { ...map.stemRefs }
   return out
 }
@@ -477,15 +514,41 @@ async function listStemSets(songFolderAbs) {
       const sub = path.join(stemsDir, ent.name)
       try {
         const inner = await readdir(sub)
-        const audio = inner.filter(isStemAudioFile).sort()
+        const audio = dedupeStemsByLowerCase(inner.filter(isStemAudioFile))
         if (audio.length > 0) out[ent.name] = audio
       } catch {
         /* unreadable subfolder — skip */
       }
     }
   }
-  if (flatAudio.length > 0) out['legacy'] = flatAudio.sort()
+  if (flatAudio.length > 0) out['legacy'] = dedupeStemsByLowerCase(flatAudio)
   return out
+}
+
+/**
+ * Some songs end up with both `bass.wav` and `Bass.wav` in the same folder
+ * (e.g. when a user re-imports stems with a different splitter that picks a
+ * different case). Both map to the same logical stem slot in the mixer, so
+ * loading both produces a doubled track. Dedupe here — prefer the all-
+ * lowercase variant (canonical Demucs output) when both exist; otherwise
+ * keep the first alphabetically.
+ */
+function dedupeStemsByLowerCase(names) {
+  /** @type {Map<string, string>} */
+  const byLower = new Map()
+  for (const name of names) {
+    const key = name.toLowerCase()
+    const existing = byLower.get(key)
+    if (!existing) {
+      byLower.set(key, name)
+      continue
+    }
+    // Prefer the lowercase original (matches Demucs).
+    if (name === name.toLowerCase() && existing !== existing.toLowerCase()) {
+      byLower.set(key, name)
+    }
+  }
+  return [...byLower.values()].sort()
 }
 
 function nowIso() {
@@ -560,7 +623,7 @@ async function handleProjectCreate(req, res, cors) {
  * `POST /native/project/info` — body `{ projectPath }`. Reads the manifest,
  * for each entry scans the song folder for `song.smap` header (title, etc),
  * `song.als` presence, and stems WAVs. Returns
- * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
+ * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, countInBeats?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
  *
  * `stemsByPreset` groups stem WAVs by quality preset (`best`/`balanced`/
  * `preview`) corresponding to `<song>/stems/<preset>/<file>.wav`. Flat-
@@ -822,6 +885,399 @@ async function handleProjectSongAssetWrite(req, res, cors) {
 }
 
 /**
+ * `POST /native/project/song/audio/relink` — open an OS file picker, copy
+ * the user-chosen file to `<song>/audio/<filename>`, compute its SHA-256,
+ * and return the relative path + hash. Used by the relink banner when the
+ * SongMap's `audio.originalPath` doesn't resolve on disk anymore.
+ *
+ * Request body: `{ projectPath, songFolder, defaultName? }`.
+ * Response: one of:
+ *   `{ ok: true, relPath, fileName, sha256, size }`
+ *   `{ ok: false, cancelled: true }`
+ *   `{ ok: false, error }`
+ */
+async function handleProjectSongAudioRelink(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const defaultName = typeof body.defaultName === 'string' ? body.defaultName : null
+
+    const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? undefined
+    const dlg = await dialog.showOpenDialog(parent, {
+      title: 'Locate audio file',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Audio', extensions: ['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'aif', 'aiff'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    })
+    if (dlg.canceled || !dlg.filePaths[0]) {
+      return sendJson(res, 200, { ok: false, cancelled: true }, cors)
+    }
+    const src = dlg.filePaths[0]
+    const srcInfo = statSync(src)
+    if (!srcInfo.isFile()) {
+      return sendJson(res, 400, { ok: false, error: 'Selected path is not a file' }, cors)
+    }
+
+    // Name the destination file. Prefer the explicit defaultName when provided
+    // (so a re-relink keeps the SongMap's audio.fileName stable); otherwise
+    // sanitize the picker's basename.
+    const baseFromPicker = path.basename(src)
+    const desiredRaw = (defaultName && defaultName.trim()) || baseFromPicker
+    const desired = desiredRaw.replace(/[/\\ -]/g, '_').trim() || 'audio.bin'
+    const relPath = `audio/${desired}`
+    const destAbs = path.join(projectPath, songFolder, relPath)
+
+    const bytes = await readFile(src)
+    await atomicWriteFile(destAbs, bytes)
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+
+    sendJson(res, 200, {
+      ok: true,
+      relPath,
+      fileName: desired,
+      sha256,
+      size: bytes.byteLength,
+    }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/asset/write` — body `{ projectPath, subpath, contentBase64 }`.
+ * Writes a single file at the PROJECT ROOT (e.g. `<projectName>.als`).
+ * Validated like the song-level variant — no `..`, no leading `/`, no `\\`.
+ * Intermediate directories are created.
+ */
+async function handleProjectAssetWrite(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const subpath = validateAssetSubpath(body.subpath)
+    if (typeof body.contentBase64 !== 'string') {
+      return sendJson(res, 400, { ok: false, error: 'contentBase64 is required' }, cors)
+    }
+    const targetAbs = path.join(projectPath, subpath)
+    const bytes = Buffer.from(body.contentBase64, 'base64')
+    await atomicWriteFile(targetAbs, bytes)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * Read a WAV header and return `{ durationSec, sampleRate, channels }`.
+ * Minimal parser — handles the standard RIFF/WAVE 'fmt '/'data' chunks.
+ * Throws on unsupported / corrupt files.
+ */
+function parseWavHeader(filePath) {
+  const fd = openSync(filePath, 'r')
+  try {
+    // First 12 bytes: RIFF<size>WAVE
+    const head = Buffer.alloc(12)
+    readSync(fd, head, 0, 12, 0)
+    if (head.toString('ascii', 0, 4) !== 'RIFF' || head.toString('ascii', 8, 12) !== 'WAVE') {
+      throw new Error('Not a RIFF/WAVE file')
+    }
+    let cursor = 12
+    let fmt = null
+    let dataSize = null
+    const chunkHeader = Buffer.alloc(8)
+    while (true) {
+      const got = readSync(fd, chunkHeader, 0, 8, cursor)
+      if (got < 8) break
+      const id = chunkHeader.toString('ascii', 0, 4)
+      const size = chunkHeader.readUInt32LE(4)
+      cursor += 8
+      if (id === 'fmt ') {
+        const fmtBuf = Buffer.alloc(size)
+        readSync(fd, fmtBuf, 0, size, cursor)
+        fmt = {
+          format: fmtBuf.readUInt16LE(0),
+          channels: fmtBuf.readUInt16LE(2),
+          sampleRate: fmtBuf.readUInt32LE(4),
+          byteRate: fmtBuf.readUInt32LE(8),
+          blockAlign: fmtBuf.readUInt16LE(12),
+          bitsPerSample: fmtBuf.readUInt16LE(14),
+        }
+      } else if (id === 'data') {
+        dataSize = size
+        break // duration only needs fmt + data size, stop here
+      }
+      cursor += size
+      if (size % 2 === 1) cursor += 1 // RIFF chunk padding
+    }
+    if (!fmt) throw new Error('Missing fmt chunk')
+    if (dataSize == null) throw new Error('Missing data chunk')
+    const bytesPerSample = fmt.bitsPerSample / 8
+    const totalSamples = dataSize / (bytesPerSample * fmt.channels)
+    const durationSec = totalSamples / fmt.sampleRate
+    return {
+      durationSec,
+      sampleRate: fmt.sampleRate,
+      channels: fmt.channels,
+    }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * Read an MP3 file's duration, sample rate, and channel count.
+ *
+ * Skips any ID3v2 tag at the start, then reads the first MPEG-1/2 frame
+ * header to get sample rate + channel mode. If the first frame contains
+ * a Xing / Info / VBRI VBR header, uses its total-frames field for an
+ * accurate duration. Otherwise falls back to a CBR estimate:
+ * `durationSec = (fileSize - id3Size) / (bitrate / 8)`.
+ *
+ * Demucs MP3 output is CBR at 320 kbps — handled by the fallback path.
+ */
+function parseMp3Duration(filePath) {
+  const fileSize = statSync(filePath).size
+  const fd = openSync(filePath, 'r')
+  try {
+    // -- Skip ID3v2 tag if present ---------------------------------------
+    let cursor = 0
+    const head = Buffer.alloc(10)
+    readSync(fd, head, 0, 10, 0)
+    if (head.toString('ascii', 0, 3) === 'ID3') {
+      // Synchsafe int: 4 bytes, each holds 7 bits of size data.
+      const sz = ((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f)
+      cursor = 10 + sz
+    }
+
+    // -- Find the first MPEG sync word (0xFFFB / 0xFFFA / etc.) ----------
+    const SCAN = 4096
+    const scanBuf = Buffer.alloc(SCAN)
+    let frameStart = -1
+    const got = readSync(fd, scanBuf, 0, SCAN, cursor)
+    for (let i = 0; i < got - 1; i++) {
+      if (scanBuf[i] === 0xff && (scanBuf[i + 1] & 0xe0) === 0xe0) {
+        frameStart = cursor + i
+        break
+      }
+    }
+    if (frameStart < 0) throw new Error('No MPEG audio frame sync found')
+
+    // -- Parse the first frame's header ----------------------------------
+    const hdrBuf = Buffer.alloc(4)
+    readSync(fd, hdrBuf, 0, 4, frameStart)
+    const b1 = hdrBuf[1], b2 = hdrBuf[2], b3 = hdrBuf[3]
+    const versionBits = (b1 >> 3) & 0x03 // 00=MPEG2.5, 10=MPEG2, 11=MPEG1
+    const layerBits = (b1 >> 1) & 0x03 // 01=Layer3, 10=Layer2, 11=Layer1
+    const bitrateIndex = (b2 >> 4) & 0x0f
+    const sampleRateIndex = (b2 >> 2) & 0x03
+    const padding = (b2 >> 1) & 0x01
+    const channelMode = (b3 >> 6) & 0x03
+
+    if (layerBits !== 0x01) throw new Error('Only MPEG Layer III (MP3) supported')
+
+    // Bitrate tables (kbps). Index 0 = free, 15 = invalid.
+    const BITRATE_MPEG1_L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, -1]
+    const BITRATE_MPEG2_L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, -1]
+    const SAMPLE_RATES_MPEG1 = [44100, 48000, 32000, 0]
+    const SAMPLE_RATES_MPEG2 = [22050, 24000, 16000, 0]
+    const SAMPLE_RATES_MPEG25 = [11025, 12000, 8000, 0]
+
+    const isMpeg1 = versionBits === 0x03
+    const isMpeg2 = versionBits === 0x02
+    const bitrate = (isMpeg1 ? BITRATE_MPEG1_L3 : BITRATE_MPEG2_L3)[bitrateIndex] * 1000
+    if (!(bitrate > 0)) throw new Error('Invalid MP3 bitrate index')
+    const sampleRate = (isMpeg1
+      ? SAMPLE_RATES_MPEG1
+      : isMpeg2
+        ? SAMPLE_RATES_MPEG2
+        : SAMPLE_RATES_MPEG25)[sampleRateIndex]
+    if (!(sampleRate > 0)) throw new Error('Invalid MP3 sample rate index')
+    const samplesPerFrame = isMpeg1 ? 1152 : 576
+    const channels = channelMode === 0x03 ? 1 : 2 // 11=mono, others=stereo-ish
+
+    // -- VBR header (Xing / Info / VBRI) ---------------------------------
+    // For MPEG1 stereo, side-info starts at offset 36 from frame; for MPEG1
+    // mono or MPEG2, offset 21. The VBR header tag sits right after that.
+    const sideInfoOffset = isMpeg1 ? (channels === 1 ? 17 : 32) : (channels === 1 ? 9 : 17)
+    const probe = Buffer.alloc(160)
+    readSync(fd, probe, 0, 160, frameStart + 4 + sideInfoOffset)
+    let totalFrames = 0
+    for (let i = 0; i + 8 <= probe.length; i++) {
+      const tag = probe.toString('ascii', i, i + 4)
+      if (tag === 'Xing' || tag === 'Info') {
+        const flags = probe.readUInt32BE(i + 4)
+        if (flags & 0x01) {
+          totalFrames = probe.readUInt32BE(i + 8)
+        }
+        break
+      }
+      if (tag === 'VBRI') {
+        totalFrames = probe.readUInt32BE(i + 14)
+        break
+      }
+    }
+
+    let durationSec
+    if (totalFrames > 0) {
+      durationSec = (totalFrames * samplesPerFrame) / sampleRate
+    } else {
+      // CBR fallback — `bitrate` (bits/sec) lets us compute duration directly
+      // from the audio-payload bytes.
+      const audioBytes = fileSize - frameStart
+      durationSec = audioBytes / (bitrate / 8)
+    }
+
+    return { durationSec, sampleRate, channels }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Dispatch by file extension. Adds new formats here as needed. */
+function readAudioInfo(filePath) {
+  const ext = filePath.toLowerCase().split('.').pop() ?? ''
+  if (ext === 'wav') return parseWavHeader(filePath)
+  if (ext === 'mp3') return parseMp3Duration(filePath)
+  throw new Error(`Unsupported audio format: .${ext}`)
+}
+
+/**
+ * `POST /native/project/wav-info/batch` — body `{ projectPath, files: [{ songFolder, subpath }, ...] }`.
+ * Returns `{ ok: true, items: [{ songFolder, subpath, durationSec, sampleRate, channels } | { songFolder, subpath, error }] }`.
+ * Despite the legacy "/wav-info/" path, handles MP3 as well — dispatch by
+ * file extension. Per-file errors don't abort the batch.
+ */
+async function handleProjectWavInfoBatch(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    if (!Array.isArray(body.files)) {
+      return sendJson(res, 400, { ok: false, error: 'files must be an array' }, cors)
+    }
+    const items = []
+    for (const f of body.files) {
+      const songFolder = f?.songFolder
+      const subpath = f?.subpath
+      try {
+        validateRelSongFolder(songFolder)
+        validateAssetSubpath(subpath)
+        const abs = path.join(projectPath, songFolder, subpath)
+        if (!existsSync(abs)) {
+          items.push({ songFolder, subpath, error: 'File not found' })
+          continue
+        }
+        const info = readAudioInfo(abs)
+        const fileSize = statSync(abs).size
+        items.push({ songFolder, subpath, ...info, fileSize })
+      } catch (e) {
+        items.push({ songFolder, subpath, error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    sendJson(res, 200, { ok: true, items }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/project/transcode-to-wav` — body
+ * `{ projectPath, songFolder, srcSubpath, dstSubpath }`.
+ *
+ * Transcodes a compressed audio file (MP3, M4A, …) to 16-bit PCM WAV via
+ * ffmpeg. Used by the Ableton setlist export to sidestep MP3 encoder
+ * priming, which Ableton plays back as silence at the start of the clip
+ * (~13 ms for LAME-encoded files) and which would offset stems vs. the
+ * click track.
+ *
+ * Cache-aware: if `dstSubpath` already exists AND is newer than
+ * `srcSubpath`, returns `{ ok: true, cached: true }` without re-running
+ * ffmpeg. Otherwise transcodes and returns `{ ok: true, cached: false }`.
+ */
+async function handleProjectTranscodeToWav(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const srcSubpath = validateAssetSubpath(body.srcSubpath)
+    const dstSubpath = validateAssetSubpath(body.dstSubpath)
+    const srcAbs = path.join(projectPath, songFolder, srcSubpath)
+    const dstAbs = path.join(projectPath, songFolder, dstSubpath)
+    if (!existsSync(srcAbs)) {
+      return sendJson(res, 404, { ok: false, error: `Source file not found: ${srcAbs}` }, cors)
+    }
+    // Cache: if dst is newer than src, skip.
+    try {
+      const srcStat = statSync(srcAbs)
+      const dstStat = statSync(dstAbs)
+      if (dstStat.mtimeMs >= srcStat.mtimeMs && dstStat.size > 0) {
+        return sendJson(res, 200, { ok: true, cached: true }, cors)
+      }
+    } catch {
+      /* dst doesn't exist — proceed to transcode */
+    }
+    // Spawn ffmpeg.
+    const result = await runFfmpegTranscode(srcAbs, dstAbs)
+    if (!result.ok) {
+      return sendJson(res, 500, { ok: false, error: result.error }, cors)
+    }
+    sendJson(res, 200, { ok: true, cached: false }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/** Run `ffmpeg -y -i SRC -acodec pcm_s16le -ar 44100 DST`. ffmpeg must be on PATH. */
+function runFfmpegTranscode(srcAbs, dstAbs) {
+  return new Promise((resolve) => {
+    const args = ['-y', '-i', srcAbs, '-acodec', 'pcm_s16le', '-ar', '44100', dstAbs]
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (b) => {
+      stderr += b.toString()
+    })
+    proc.on('error', (e) => {
+      resolve({ ok: false, error: `ffmpeg failed to start: ${e.message}. Is ffmpeg on PATH?` })
+    })
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve({ ok: true })
+      } else {
+        resolve({
+          ok: false,
+          error: `ffmpeg exited ${code}: ${stderr.slice(-2000)}`,
+        })
+      }
+    })
+  })
+}
+
+/**
  * `POST /native/project/song/remove` — body `{ projectPath, songFolder, deleteFiles }`.
  * If `deleteFiles` is true, recursively removes the song folder. Otherwise
  * a no-op (manifest mutation happens via /manifest/write). Always returns ok.
@@ -924,6 +1380,230 @@ async function handleAnalyzeDownbeats(req, res, cors) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     logError(`analyze-downbeats: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  } finally {
+    if (workDir) {
+      rm(workDir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+/**
+ * `POST /native/suggest-section-borders` — lightweight section-border
+ * suggester. Request body is raw WAV bytes (same pattern as
+ * /native/analyze-downbeats). Bar timing data is supplied via the
+ * `X-Bars-Json` header — URL-encoded JSON of shape
+ * `{ "bars": [{ "startSec": number }, ...] }`.
+ *
+ * Response: `{ ok: true, data: { borders: [{ bar, confidence }] } }`.
+ *
+ * librosa lives in the beats venv, so the same `BARBRO_PYTHON` interpreter
+ * powers this endpoint by default.
+ */
+async function handleSuggestSectionBorders(req, res, cors) {
+  let workDir = null
+  const t0 = Date.now()
+  try {
+    const headerValue = req.headers['x-bars-json']
+    if (!headerValue || typeof headerValue !== 'string') {
+      sendJson(res, 400, { ok: false, error: 'Missing X-Bars-Json header' }, cors)
+      return
+    }
+    let barsPayload
+    try {
+      barsPayload = decodeURIComponent(headerValue)
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: 'X-Bars-Json header not URL-decodable' }, cors)
+      return
+    }
+    // Sanity-check it parses as the expected shape — fail fast vs. having
+    // Python sigh and return empty borders.
+    try {
+      const parsed = JSON.parse(barsPayload)
+      if (!parsed || !Array.isArray(parsed.bars)) {
+        throw new Error('expected { bars: [...] }')
+      }
+    } catch (e) {
+      sendJson(
+        res,
+        400,
+        { ok: false, error: `X-Bars-Json not valid JSON: ${e instanceof Error ? e.message : e}` },
+        cors,
+      )
+      return
+    }
+
+    const buf = await readRequestBody(req)
+    logInfo(
+      `suggest-section-borders: received ${(buf.byteLength / (1024 * 1024)).toFixed(1)} MB audio`,
+    )
+    if (buf.byteLength === 0) {
+      sendJson(res, 400, { ok: false, error: 'Empty audio body' }, cors)
+      return
+    }
+
+    const script = sectionsScriptPath()
+    if (!existsSync(script)) {
+      logError(`suggest-section-borders: missing script ${script}`)
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+
+    workDir = await mkdtemp(path.join(tmpdir(), 'barbro-sections-'))
+    const wavPath = path.join(workDir, 'clip.wav')
+    await writeFile(wavPath, buf)
+
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      [wavPath],
+      120_000,
+      barsPayload,
+    )
+    if (code !== 0) {
+      const sigPart = signal ? ` (signal ${signal})` : ''
+      logWarn(
+        `suggest-section-borders: python exit ${code}${sigPart}: ${stderr?.slice(0, 2000) ?? ''}`,
+      )
+      const errMsg = stderr
+        ? stderr
+        : signal
+          ? `Python killed by ${signal} (no stderr — likely crashed in a native lib).`
+          : `Python exited with code ${code} and no stderr.`
+      sendJson(res, 503, { ok: false, error: errMsg }, cors)
+      return
+    }
+
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      logError('suggest-section-borders: invalid JSON from analyzer')
+      sendJson(res, 500, { ok: false, error: 'Invalid JSON from analyzer' }, cors)
+      return
+    }
+    const borderCount = Array.isArray(data?.borders) ? data.borders.length : 0
+    logInfo(
+      `suggest-section-borders: done — ${borderCount} borders in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+    )
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`suggest-section-borders: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  } finally {
+    if (workDir) {
+      rm(workDir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+/**
+ * `POST /native/analyze-chord-chroma` — per-beat 12-d chroma + song-level
+ * key detection.
+ *
+ * The body is length-prefixed binary:
+ *   [uint32 LE = N]  // beats-JSON byte length
+ *   [N bytes      ]  // UTF-8 JSON: `{ "beats": [{ "startSec": number }, ...] }`
+ *   [rest of body ]  // raw WAV bytes
+ *
+ * Headers won't fit the beats list — 1000+ beats blows past Node's 8 KB
+ * header cap with HTTP 431 — so we pack them into the body.
+ *
+ * Response: `{ ok: true, data: { beatChroma: number[][], detectedKey: { tonic, mode, confidence } | null } }`.
+ *
+ * Reuses the sections venv (same numpy+librosa deps as border_suggest.py).
+ */
+async function handleAnalyzeChordChroma(req, res, cors) {
+  let workDir = null
+  const t0 = Date.now()
+  try {
+    const buf = await readRequestBody(req)
+    if (buf.byteLength < 4) {
+      sendJson(res, 400, { ok: false, error: 'Body too small to contain length prefix' }, cors)
+      return
+    }
+    const jsonLen = buf.readUInt32LE(0)
+    if (jsonLen <= 0 || jsonLen > buf.byteLength - 4) {
+      sendJson(res, 400, { ok: false, error: `Invalid beats-JSON length prefix (${jsonLen})` }, cors)
+      return
+    }
+    const beatsPayload = buf.slice(4, 4 + jsonLen).toString('utf8')
+    try {
+      const parsed = JSON.parse(beatsPayload)
+      if (!parsed || !Array.isArray(parsed.beats)) {
+        throw new Error('expected { beats: [...] }')
+      }
+    } catch (e) {
+      sendJson(
+        res,
+        400,
+        { ok: false, error: `Beats payload not valid JSON: ${e instanceof Error ? e.message : e}` },
+        cors,
+      )
+      return
+    }
+
+    const audioBuf = buf.slice(4 + jsonLen)
+    logInfo(
+      `analyze-chord-chroma: received ${(audioBuf.byteLength / (1024 * 1024)).toFixed(1)} MB audio + ${jsonLen}B beats JSON`,
+    )
+    if (audioBuf.byteLength === 0) {
+      sendJson(res, 400, { ok: false, error: 'Empty audio body' }, cors)
+      return
+    }
+
+    const script = chordChromaScriptPath()
+    if (!existsSync(script)) {
+      logError(`analyze-chord-chroma: missing script ${script}`)
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+
+    workDir = await mkdtemp(path.join(tmpdir(), 'barbro-chord-chroma-'))
+    const wavPath = path.join(workDir, 'clip.wav')
+    await writeFile(wavPath, audioBuf)
+
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      [wavPath],
+      180_000,
+      beatsPayload,
+    )
+    if (code !== 0) {
+      const sigPart = signal ? ` (signal ${signal})` : ''
+      logWarn(
+        `analyze-chord-chroma: python exit ${code}${sigPart}: ${stderr?.slice(0, 2000) ?? ''}`,
+      )
+      const errMsg = stderr
+        ? stderr
+        : signal
+          ? `Python killed by ${signal} (no stderr — likely crashed in a native lib).`
+          : `Python exited with code ${code} and no stderr.`
+      sendJson(res, 503, { ok: false, error: errMsg }, cors)
+      return
+    }
+
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      logError('analyze-chord-chroma: invalid JSON from analyzer')
+      sendJson(res, 500, { ok: false, error: 'Invalid JSON from analyzer' }, cors)
+      return
+    }
+    const beatCount = Array.isArray(data?.beatChroma) ? data.beatChroma.length : 0
+    const keyDesc = data?.detectedKey
+      ? `${data.detectedKey.tonic}/${data.detectedKey.mode} (${data.detectedKey.confidence})`
+      : 'none'
+    logInfo(
+      `analyze-chord-chroma: done — ${beatCount} beats, key=${keyDesc}, ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+    )
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`analyze-chord-chroma: ${msg}`)
     sendJson(res, 500, { ok: false, error: msg }, cors)
   } finally {
     if (workDir) {
@@ -1479,6 +2159,172 @@ async function handleSetupStems(req, res, cors) {
   }
 }
 
+/**
+ * `GET /native/setup/sections/status` — confirms the sections interpreter
+ * can actually `import librosa, numpy, scipy`. A "venv exists" check isn't
+ * enough: a failed earlier pip install can leave a stub venv that still
+ * exists but has nothing inside it, and the UI would then skip auto-install.
+ */
+async function handleSectionsSetupStatus(res, cors) {
+  const ready = await sectionsLibrosaReady()
+  sendJson(
+    res,
+    200,
+    {
+      ok: true,
+      ready,
+      venvDir: getSectionsVenvDir(),
+      venvPython: ready ? getSectionsVenvPythonExe() : null,
+    },
+    cors,
+  )
+}
+
+/**
+ * `POST /native/setup/sections` — create the sections venv under userData
+ * and pip-install librosa + scipy + numpy. NDJSON event stream (same shape
+ * as `/native/setup/stems`). Idempotent — re-running is safe.
+ *
+ * Footprint is much smaller than stems (no torch / madmom). Typically
+ * finishes in under a minute on a fresh install.
+ */
+async function handleSetupSections(req, res, cors) {
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  })
+  const emit = (ev) => {
+    try {
+      res.write(JSON.stringify(ev) + '\n')
+    } catch {
+      /* socket closed */
+    }
+  }
+
+  const venvDir = getSectionsVenvDir()
+  const venvPython = getSectionsVenvPythonExe()
+  const reqPath = path.join(getNativePythonRoot(), 'sections', 'requirements.txt')
+
+  emit({ type: 'log', msg: `Sections venv target: ${venvDir}` })
+
+  try {
+    // ── Phase 1 — make sure uv is available ────────────────────────────
+    if (!uvBinaryIsReady()) {
+      emit({
+        type: 'progress',
+        label: `Downloading uv ${UV_PINNED_VERSION} (~14 MB)…`,
+        current: 0,
+        overall: 5,
+      })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+    const uvBin = getUvBinaryPath()
+    emit({ type: 'log', msg: `Using uv at ${uvBin}` })
+    emit({ type: 'progress', label: 'uv ready', current: 100, overall: 15 })
+
+    // ── Phase 2 — nuke any stale / broken venv ─────────────────────────
+    if (existsSync(venvDir)) {
+      const aliveAndWorking = await sectionsLibrosaReady()
+      if (!aliveAndWorking) {
+        emit({ type: 'log', msg: 'Existing venv is incomplete — removing it.' })
+        await rm(venvDir, { recursive: true, force: true })
+        invalidateSectionsLibrosaCache()
+      }
+    }
+
+    // ── Phase 3 — create the venv. uv will download a sealed
+    //    Python 3.12 from python-build-standalone if no usable one is
+    //    on the system, so we never depend on system Python health. ──
+    if (!existsSync(venvPython)) {
+      emit({
+        type: 'progress',
+        label: 'Setting up Python 3.12 (uv downloads it if missing)…',
+        current: 0,
+        overall: 25,
+      })
+      const v = await runPipelineNdjson(
+        uvBin,
+        ['venv', '--python', '3.12', venvDir],
+        emit,
+      )
+      if (v.code !== 0 || !existsSync(venvPython)) {
+        emit({
+          type: 'error',
+          msg: `uv venv failed (exit ${v.code}). Check the log above for the underlying reason.`,
+        })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+      emit({ type: 'progress', label: 'Venv ready', current: 100, overall: 50 })
+    } else {
+      emit({ type: 'log', msg: 'Venv already exists — re-using.' })
+    }
+
+    // ── Phase 4 — install requirements ────────────────────────────────
+    if (!existsSync(reqPath)) {
+      emit({ type: 'error', msg: `Missing requirements.txt at ${reqPath}` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({
+      type: 'progress',
+      label: 'Installing librosa + scipy + numpy (≈ 60 MB)…',
+      current: 0,
+      overall: 60,
+    })
+    const inst = await runPipelineNdjson(
+      uvBin,
+      ['pip', 'install', '--python', venvPython, '-r', reqPath],
+      emit,
+    )
+    if (inst.code !== 0) {
+      emit({ type: 'error', msg: `uv pip install failed (exit ${inst.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Dependencies installed', current: 100, overall: 90 })
+
+    // ── Phase 5 — smoke test ──────────────────────────────────────────
+    const smoke = await runPipelineNdjson(
+      venvPython,
+      ['-c', "import librosa; print('librosa', librosa.__version__)"],
+      emit,
+    )
+    if (smoke.code !== 0) {
+      emit({ type: 'error', msg: `librosa smoke test failed (exit ${smoke.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    await writeSectionsVenvMarker()
+    invalidateSectionsLibrosaCache()
+    emit({ type: 'progress', label: 'Done', current: 100, overall: 100 })
+    emit({ type: 'done', venvPython })
+    emit({ type: 'state', state: 'done' })
+    logInfo(`setup/sections: venv ready at ${venvPython}`)
+    res.end()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`setup/sections: ${msg}`)
+    emit({ type: 'error', msg })
+    emit({ type: 'state', state: 'error' })
+    res.end()
+  }
+}
+
 // ── Piper TTS (isolated `piper_tts/` module) ─────────────────────────────────
 
 /**
@@ -1842,7 +2688,7 @@ function startBeaconServer() {
     const cors = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Bars-Json, X-Beats-Json',
     }
 
     if (req.method === 'OPTIONS') {
@@ -1871,8 +2717,28 @@ function startBeaconServer() {
       return
     }
 
+    if (req.method === 'POST' && req.url === '/native/suggest-section-borders') {
+      void handleSuggestSectionBorders(req, res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/analyze-chord-chroma') {
+      void handleAnalyzeChordChroma(req, res, cors)
+      return
+    }
+
     if (req.method === 'POST' && (req.url === '/native/separate-stems' || req.url?.startsWith('/native/separate-stems?'))) {
       void handleSeparateStems(req, res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/native/setup/sections/status') {
+      handleSectionsSetupStatus(res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/setup/sections') {
+      void handleSetupSections(req, res, cors)
       return
     }
 
@@ -1929,6 +2795,22 @@ function startBeaconServer() {
     if (req.method === 'GET' && req.url?.startsWith('/native/project/song/asset/read')) {
       const u = new URL(req.url, `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
       handleProjectSongAssetRead(req, res, cors, u)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/audio/relink') {
+      void handleProjectSongAudioRelink(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/asset/write') {
+      void handleProjectAssetWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/wav-info/batch') {
+      void handleProjectWavInfoBatch(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/transcode-to-wav') {
+      void handleProjectTranscodeToWav(req, res, cors)
       return
     }
 
@@ -2025,6 +2907,10 @@ app.whenReady().then(() => {
   logInfo(`Endpoints:`)
   logInfo(`  GET    /ping`)
   logInfo(`  POST   /native/analyze-downbeats`)
+  logInfo(`  POST   /native/suggest-section-borders  (X-Bars-Json header; body = WAV)`)
+  logInfo(`  POST   /native/analyze-chord-chroma     (X-Beats-Json header; body = WAV)`)
+  logInfo(`  GET    /native/setup/sections/status    (check librosa venv readiness)`)
+  logInfo(`  POST   /native/setup/sections           (create venv + pip install librosa)`)
   logInfo(`  POST   /native/separate-stems        (returns jobId immediately; queue runs serially)`)
   logInfo(`  GET    /native/jobs`)
   logInfo(`  GET    /native/jobs/:jobId/events    (NDJSON stream + replay)`)
@@ -2043,6 +2929,10 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/project/song/remove   (optionally delete files from disk)`)
   logInfo(`  POST   /native/project/song/asset/write (write arbitrary file under song folder)`)
   logInfo(`  GET    /native/project/song/asset/read  (stream a single file under song folder)`)
+  logInfo(`  POST   /native/project/song/audio/relink (OS file picker → copy into <song>/audio + SHA)`)
+  logInfo(`  POST   /native/project/asset/write     (write file at project root, e.g. setlist .als)`)
+  logInfo(`  POST   /native/project/wav-info/batch  (batched WAV header info — duration/sr/channels)`)
+  logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
   logInfo(`  GET    /native/setup/piper-tts/status`)
   logInfo(`  POST   /native/setup/piper-tts       (venv + piper-tts + default voice)`)
   logInfo(`  GET    /native/tts/hello-world         (debug WAV: "Hello world.")`)

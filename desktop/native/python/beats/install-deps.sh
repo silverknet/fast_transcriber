@@ -15,3 +15,5 @@ fi
 "$VENV/bin/pip" install madmom==0.16.1 --no-build-isolation
 echo "OK: beats venv at $VENV"
 echo "    Launch Electron with BARBRO_PYTHON=$VENV/bin/python3 (or add to shell profile)"
+echo "    NOTE: section-border analysis lives in its own auto-managed venv;"
+echo "          no manual install needed for that one."

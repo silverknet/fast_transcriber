@@ -39,6 +39,7 @@
     "clsx": "^2.1.1",
     "jspdf": "^4.2.1",
     "pg": "^8.14.1",
+    "svelte-dnd-action": "^0.9.69",
     "svg2pdf.js": "^2.7.0",
     "tailwind-merge": "^3.5.0",
     "tailwind-variants": "^3.2.2",

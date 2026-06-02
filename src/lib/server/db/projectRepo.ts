@@ -1,3 +1,12 @@
+/**
+ * Cloud project persistence — fingerprint-keyed manual saves used by the
+ * legacy "save to cloud" flow.
+ *
+ * Audio bytes are NEVER persisted server-side. The desktop sidecar holds the
+ * canonical audio files on the user's local disk; the DB only stores the
+ * musical document (`song_map_json`). This module assumes the schema after
+ * migration `003_drop_audio_storage.sql`.
+ */
 import { getPgPool } from './pool'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -18,8 +27,6 @@ export type LoadedProject = {
   id: string
   name: string
   songMapJson: unknown | null
-  audioSha256: string | null
-  hasAudio: boolean
   updatedAt: string
 }
 
@@ -56,20 +63,9 @@ export async function createProject(
   fingerprintHash: string,
   name: string,
   songMapJsonText: string,
-  audio?: { bytes: Buffer; sha256: string },
 ): Promise<string | null> {
   const pool = getPgPool()
   if (!pool) return null
-
-  if (audio) {
-    const r = await pool.query<{ id: string }>(
-      `INSERT INTO projects (fingerprint_hash, name, song_map_json, audio_bytes, audio_sha256)
-       VALUES ($1, $2, $3::jsonb, $4, $5)
-       RETURNING id::text AS id`,
-      [fingerprintHash, name, songMapJsonText, audio.bytes, audio.sha256],
-    )
-    return r.rows[0]?.id ?? null
-  }
 
   const r = await pool.query<{ id: string }>(
     `INSERT INTO projects (fingerprint_hash, name, song_map_json)
@@ -91,11 +87,9 @@ export async function loadProject(
     id: string
     name: string
     song_map_json: unknown
-    audio_sha256: string | null
-    audio_bytes: Buffer | null
     updated_at: Date
   }>(
-    `SELECT id::text AS id, name, song_map_json, audio_sha256, audio_bytes, updated_at
+    `SELECT id::text AS id, name, song_map_json, updated_at
      FROM projects
      WHERE id = $1::uuid AND fingerprint_hash = $2`,
     [projectId, fingerprintHash],
@@ -108,8 +102,6 @@ export async function loadProject(
     id: row.id,
     name: row.name,
     songMapJson: row.song_map_json,
-    audioSha256: row.audio_sha256,
-    hasAudio: row.audio_bytes != null && row.audio_bytes.length > 0,
     updatedAt: row.updated_at.toISOString(),
   }
 }
@@ -118,23 +110,9 @@ export async function updateProject(
   projectId: string,
   fingerprintHash: string,
   songMapJsonText: string,
-  audio?: { bytes: Buffer; sha256: string },
 ): Promise<boolean> {
   const pool = getPgPool()
   if (!pool || !isValidProjectId(projectId)) return false
-
-  if (audio) {
-    const r = await pool.query(
-      `UPDATE projects
-       SET song_map_json = $1::jsonb,
-           audio_bytes = $2,
-           audio_sha256 = $3,
-           updated_at = now()
-       WHERE id = $4::uuid AND fingerprint_hash = $5`,
-      [songMapJsonText, audio.bytes, audio.sha256, projectId, fingerprintHash],
-    )
-    return (r.rowCount ?? 0) > 0
-  }
 
   const r = await pool.query(
     `UPDATE projects
@@ -158,20 +136,4 @@ export async function deleteProject(
     [projectId, fingerprintHash],
   )
   return (r.rowCount ?? 0) > 0
-}
-
-export async function loadProjectAudio(
-  projectId: string,
-  fingerprintHash: string,
-): Promise<Buffer | null> {
-  const pool = getPgPool()
-  if (!pool || !isValidProjectId(projectId)) return null
-
-  const r = await pool.query<{ audio_bytes: Buffer | null }>(
-    `SELECT audio_bytes FROM projects
-     WHERE id = $1::uuid AND fingerprint_hash = $2`,
-    [projectId, fingerprintHash],
-  )
-  const b = r.rows[0]?.audio_bytes
-  return b && b.length > 0 ? Buffer.from(b) : null
 }

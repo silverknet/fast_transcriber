@@ -3,13 +3,13 @@ import { A as escape_html, F as writable, N as get, O as attr, a as derived, c a
 import "../../chunks/index-server2.js";
 import { n as exportRestorableStateAsSmapBlob } from "../../chunks/persist.js";
 import { n as goto, t as beforeNavigate } from "../../chunks/client.js";
-import { B as restorableSongState, C as clearFullAppSongState, D as songMap, S as project, a as createProjectOnDisk, b as closeProject, d as openProjectByPath, l as metadataLiteFromSongMap, o as dropRecentProjectPath, r as clearLastProjectPath, x as patchMetadataForFolder, y as writeProjectSong, z as audioSession } from "../../chunks/commit.js";
-import { t as Button } from "../../chunks/button.js";
-import { _ as Dialog_title, a as getCurrentProject, d as Dropdown_menu_content, f as Dropdown_menu, h as Dialog_header, l as Dropdown_menu_trigger, m as Dialog_content, n as Chevron_down, o as loadCloudProject, p as Dialog_description, r as deleteCloudProject, s as saveCloudProject, t as Cloud, u as Dropdown_menu_item, v as Dialog } from "../../chunks/cloud.js";
+import { $ as audioSession, D as project, E as patchMetadataForFolder, M as songMap, O as clearFullAppSongState, S as writeProjectSong, T as closeProject, a as createProjectOnDisk, et as restorableSongState, l as metadataLiteFromSongMap, o as dropRecentProjectPath, r as clearLastProjectPath, u as openProjectByPath } from "../../chunks/commit.js";
+import { d as pickFolderViaDesktop, v as Button } from "../../chunks/desktopBridge.js";
+import { a as getCurrentProject, d as Dropdown_menu_item, f as Dropdown_menu_content, g as Dialog_header, h as Dialog_content, l as Dropdown_menu_trigger, m as Dialog_description, n as Chevron_down, o as loadCloudProject, p as Dropdown_menu, r as deleteCloudProject, s as saveCloudProject, t as Cloud, v as Dialog_title, y as Dialog } from "../../chunks/cloud.js";
 import { t as Icon } from "../../chunks/Icon.js";
 import "../../chunks/iterate.js";
 import { t as desktopCompanionStatus } from "../../chunks/desktopCompanionStatus.js";
-import { u as pickFolderViaDesktop } from "../../chunks/desktopBridge.js";
+import "../../chunks/desktopBeacon.js";
 import { n as Music, t as Arrow_left } from "../../chunks/arrow-left.js";
 import { t as page } from "../../chunks/stores.js";
 import "../../chunks/analyzingState.js";
@@ -1127,31 +1127,30 @@ function ProjectContextBar($$renderer, $$props) {
 		}
 		if (visible()) {
 			$$renderer.push("<!--[0-->");
-			$$renderer.push(`<div class="border-foreground bg-foreground text-background fixed top-12 right-0 left-0 z-40 flex flex-wrap items-center gap-3 border-b-2 px-3 py-1.5 text-sm" role="navigation" aria-label="Project context">`);
+			$$renderer.push(`<div class="border-foreground bg-foreground text-background fixed top-12 right-0 left-0 z-40 flex h-11 items-center gap-3 border-b-2 px-3 text-sm" role="navigation" aria-label="Project context">`);
 			Button($$renderer, {
 				variant: "secondary",
-				size: "sm",
-				class: "h-8 shrink-0 gap-1.5 px-2.5",
+				class: "shrink-0 gap-1.5 [&_svg]:translate-y-0.5",
 				onclick: () => void backToProject(),
 				"aria-label": `Back to project ${stringify(projectName())}`,
 				children: ($$renderer) => {
 					Arrow_left($$renderer, {
-						class: "size-4",
+						class: "size-4 shrink-0",
 						"aria-hidden": "true"
 					});
-					$$renderer.push(`<!----> Back to project`);
+					$$renderer.push(`<!----> <span class="translate-y-0.5">Back to project</span>`);
 				},
 				$$slots: { default: true }
 			});
 			$$renderer.push(`<!----> <div class="flex min-w-0 flex-1 items-center gap-2">`);
 			Folder_open($$renderer, {
-				class: "size-4 shrink-0 opacity-70",
+				class: "size-4 shrink-0 translate-y-0.5 opacity-70",
 				"aria-hidden": "true"
 			});
-			$$renderer.push(`<!----> <span class="truncate font-semibold tracking-tight">${escape_html(projectName())}</span> `);
+			$$renderer.push(`<!----> <span class="truncate translate-y-0.5 font-semibold tracking-tight">${escape_html(projectName())}</span> `);
 			if (songTitle()) {
 				$$renderer.push("<!--[0-->");
-				$$renderer.push(`<span class="opacity-50" aria-hidden="true">/</span> <span class="text-background/80 truncate font-mono text-xs">${escape_html(songTitle())}</span>`);
+				$$renderer.push(`<span class="translate-y-0.5 opacity-50" aria-hidden="true">/</span> <span class="text-background/80 truncate translate-y-0.5 font-mono text-xs">${escape_html(songTitle())}</span>`);
 			} else $$renderer.push("<!--[-1-->");
 			$$renderer.push(`<!--]--></div></div>`);
 		} else $$renderer.push("<!--[-1-->");
@@ -1247,6 +1246,8 @@ function _layout($$renderer, $$props) {
 				goto("/edit", { replaceState: true });
 			}
 		});
+		let onDownloadRoute = derived(() => store_get($$store_subs ??= {}, "$page", page).route?.id === "/download");
+		let showChrome = derived(() => !onDownloadRoute());
 		let showProjectBar = derived(() => store_get($$store_subs ??= {}, "$projectStore", project).data !== null && store_get($$store_subs ??= {}, "$page", page).route?.id !== "/project");
 		head("12qhfyh", $$renderer, ($$renderer) => {
 			$$renderer.title(($$renderer) => {
@@ -1254,11 +1255,16 @@ function _layout($$renderer, $$props) {
 			});
 			$$renderer.push(`<meta name="description" content="BarBro — bar-first songs, beats, and cues."/>`);
 		});
-		$$renderer.push(`<div class="relative min-h-dvh overflow-x-hidden overscroll-x-none font-sans"><div class="relative z-30">`);
-		AppMenuBar($$renderer, {});
-		$$renderer.push(`<!----> `);
-		ProjectContextBar($$renderer, {});
-		$$renderer.push(`<!----></div> <div${attr_class(clsx(showProjectBar() ? "pt-[5.25rem]" : "pt-12"))}>`);
+		$$renderer.push(`<div class="relative min-h-dvh overflow-x-hidden overscroll-x-none font-sans">`);
+		if (showChrome()) {
+			$$renderer.push("<!--[0-->");
+			$$renderer.push(`<div class="relative z-30">`);
+			AppMenuBar($$renderer, {});
+			$$renderer.push(`<!----> `);
+			ProjectContextBar($$renderer, {});
+			$$renderer.push(`<!----></div>`);
+		} else $$renderer.push("<!--[-1-->");
+		$$renderer.push(`<!--]--> <div${attr_class(clsx(!showChrome() ? "" : showProjectBar() ? "pt-[5.25rem]" : "pt-12"))}>`);
 		$$renderer.push("<!--[-1-->");
 		$$renderer.push(`<!--]--> <!--[-->`);
 		slot($$renderer, $$props, "default", {}, null);

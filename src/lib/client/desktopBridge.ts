@@ -15,6 +15,8 @@ import type { RawBeatRow } from '$lib/analysis/beatsToSongMap'
 const BASE_URL = `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`
 
 const ANALYZE_DOWNBEATS_URL = `${BASE_URL}/native/analyze-downbeats`
+const SUGGEST_SECTION_BORDERS_URL = `${BASE_URL}/native/suggest-section-borders`
+const ANALYZE_CHORD_CHROMA_URL = `${BASE_URL}/native/analyze-chord-chroma`
 const SEPARATE_STEMS_URL = `${BASE_URL}/native/separate-stems`
 const PIPER_TTS_SETUP_STATUS_URL = `${BASE_URL}/native/setup/piper-tts/status`
 const PIPER_TTS_SETUP_URL = `${BASE_URL}/native/setup/piper-tts`
@@ -80,6 +82,191 @@ export async function analyzeDownbeatsViaDesktop(
   }
 
   return { ok: true, beats }
+}
+
+// ── Section-border suggestions (half-smart) ────────────────────────────────
+
+/** Bar timing input — the predictor needs each bar's start time in seconds. */
+export type SectionBorderBarInput = { startSec: number }
+
+/** One suggested section border. `bar` is the index where a new section starts. */
+export type SectionBorder = { bar: number; confidence: number }
+
+export type SuggestSectionBordersResult =
+  | { ok: true; borders: SectionBorder[] }
+  | { ok: false; error: string }
+
+/**
+ * Send WAV audio + bar timing to the sidecar and receive suggested section
+ * borders (bar indices where novelty in the audio implies a new section, with
+ * a confidence score in [0, 1]). Bars are passed in the `X-Bars-Json` header
+ * as URL-encoded JSON.
+ *
+ * Display-only signal — callers should render these as weak hints the user
+ * can accept; never commit them to the SongMap automatically.
+ */
+export async function suggestSectionBordersViaDesktop(
+  wavBlob: Blob,
+  bars: SectionBorderBarInput[],
+  signal?: AbortSignal,
+): Promise<SuggestSectionBordersResult> {
+  const barsHeader = encodeURIComponent(JSON.stringify({ bars }))
+  let res: Response
+  try {
+    res = await fetch(SUGGEST_SECTION_BORDERS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'audio/wav',
+        'X-Bars-Json': barsHeader,
+      },
+      body: wavBlob,
+      signal,
+      cache: 'no-store',
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+
+  let data: unknown
+  try {
+    data = await res.json()
+  } catch {
+    return { ok: false, error: `Desktop sidecar returned non-JSON (HTTP ${res.status})` }
+  }
+
+  const o = data as {
+    ok?: boolean
+    error?: string
+    data?: { borders?: unknown }
+  }
+  if (!res.ok || o.ok !== true) {
+    return { ok: false, error: o.error ?? `Border suggest failed (HTTP ${res.status})` }
+  }
+
+  const raw = o.data?.borders
+  if (!Array.isArray(raw)) {
+    return { ok: true, borders: [] }
+  }
+
+  const borders: SectionBorder[] = []
+  for (const item of raw) {
+    const r = item as Record<string, unknown>
+    const bar = Number(r.bar)
+    const confidence = Number(r.confidence)
+    if (Number.isFinite(bar) && Number.isFinite(confidence)) {
+      borders.push({
+        bar: Math.trunc(bar),
+        confidence: Math.max(0, Math.min(1, confidence)),
+      })
+    }
+  }
+  return { ok: true, borders }
+}
+
+// ── Chord chroma + key detection ───────────────────────────────────────────
+
+export type ChordChromaBeatInput = { startSec: number }
+
+/** Tonic returned by the sidecar (0-11, C=0, C#=1, …, B=11). */
+export type DetectedKeyRaw = {
+  tonic: number
+  mode: 'major' | 'minor'
+  confidence: number
+}
+
+export type AnalyzeChordChromaResult =
+  | { ok: true; beatChroma: number[][]; detectedKey: DetectedKeyRaw | null }
+  | { ok: false; error: string }
+
+/**
+ * Send WAV audio + beat timings to the sidecar; receive per-beat 12-d chroma
+ * vectors plus a song-level key fit (Krumhansl–Kessler). Display-only — the
+ * detected key is shown as a hint next to the manual key picker, never
+ * forced onto the SongMap silently except when the existing key field is
+ * empty (cold-start UX).
+ */
+export async function analyzeChordChromaViaDesktop(
+  wavBlob: Blob,
+  beats: ChordChromaBeatInput[],
+  signal?: AbortSignal,
+): Promise<AnalyzeChordChromaResult> {
+  // Body layout: [uint32 LE = N][N bytes JSON][rest = WAV bytes].
+  // Beats can be 1000+ entries on a long song — JSON-as-header would blow
+  // past Node's 8 KB header cap (HTTP 431). Body is unlimited.
+  const beatsJson = new TextEncoder().encode(JSON.stringify({ beats }))
+  const lenPrefix = new Uint8Array(4)
+  new DataView(lenPrefix.buffer).setUint32(0, beatsJson.byteLength, true)
+  const body = new Blob([lenPrefix, beatsJson, wavBlob], {
+    type: 'application/octet-stream',
+  })
+
+  let res: Response
+  try {
+    res = await fetch(ANALYZE_CHORD_CHROMA_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body,
+      signal,
+      cache: 'no-store',
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+
+  let data: unknown
+  try {
+    data = await res.json()
+  } catch {
+    return { ok: false, error: `Desktop sidecar returned non-JSON (HTTP ${res.status})` }
+  }
+
+  const o = data as {
+    ok?: boolean
+    error?: string
+    data?: { beatChroma?: unknown; detectedKey?: unknown }
+  }
+  if (!res.ok || o.ok !== true) {
+    return { ok: false, error: o.error ?? `Chord chroma analysis failed (HTTP ${res.status})` }
+  }
+
+  const rawChroma = o.data?.beatChroma
+  const beatChroma: number[][] = []
+  if (Array.isArray(rawChroma)) {
+    for (const row of rawChroma) {
+      if (!Array.isArray(row) || row.length !== 12) {
+        beatChroma.push([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        continue
+      }
+      const vec: number[] = []
+      for (const v of row) {
+        const n = Number(v)
+        vec.push(Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0)
+      }
+      beatChroma.push(vec)
+    }
+  }
+
+  let detectedKey: DetectedKeyRaw | null = null
+  const rawKey = o.data?.detectedKey as
+    | { tonic?: unknown; mode?: unknown; confidence?: unknown }
+    | null
+    | undefined
+  if (rawKey && typeof rawKey === 'object') {
+    const tonic = Number(rawKey.tonic)
+    const mode = rawKey.mode === 'minor' ? 'minor' : 'major'
+    const confidence = Number(rawKey.confidence)
+    if (Number.isFinite(tonic) && Number.isFinite(confidence)) {
+      detectedKey = {
+        tonic: ((Math.trunc(tonic) % 12) + 12) % 12,
+        mode,
+        confidence: Math.max(0, Math.min(1, confidence)),
+      }
+    }
+  }
+
+  return { ok: true, beatChroma, detectedKey }
 }
 
 // ── Stem separation ────────────────────────────────────────────────────────
@@ -413,6 +600,104 @@ export async function setupStemsDeps(
     let ev: StemsSetupEvent
     try {
       ev = JSON.parse(trimmed) as StemsSetupEvent
+    } catch {
+      ev = { type: 'log', msg: trimmed }
+    }
+    if (ev.type === 'done') venvPython = ev.venvPython
+    else if (ev.type === 'error') errorMsg = ev.msg
+    onEvent(ev)
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx = buffer.indexOf('\n')
+      while (idx !== -1) {
+        handle(buffer.slice(0, idx))
+        buffer = buffer.slice(idx + 1)
+        idx = buffer.indexOf('\n')
+      }
+    }
+    if (buffer.trim()) handle(buffer)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Setup stream interrupted: ${msg}` }
+  }
+
+  if (errorMsg) return { ok: false, error: errorMsg }
+  if (!venvPython) return { ok: false, error: 'Setup did not report a venv path' }
+  return { ok: true, venvPython }
+}
+
+// ── Section-border venv setup (lightweight, librosa-only) ─────────────────
+
+export type SectionsSetupStatus = {
+  ok: true
+  ready: boolean
+  venvDir: string
+  venvPython: string | null
+}
+
+export async function getSectionsSetupStatus(): Promise<SectionsSetupStatus | null> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/setup/sections/status`, { cache: 'no-store' })
+    if (!res.ok) return null
+    return (await res.json()) as SectionsSetupStatus
+  } catch {
+    return null
+  }
+}
+
+export type SectionsSetupEvent =
+  | { type: 'log'; msg: string }
+  | { type: 'progress'; label: string; current: number; overall: number }
+  | { type: 'done'; venvPython: string }
+  | { type: 'error'; msg: string }
+  | { type: 'state'; state: 'done' | 'error' }
+
+export type SetupSectionsResult =
+  | { ok: true; venvPython: string }
+  | { ok: false; error: string }
+
+/**
+ * Create the sections venv on the sidecar and pip-install librosa + scipy.
+ * Streams NDJSON events the caller can render as a progress UI.
+ *
+ * Footprint is small (~60 MB) vs. stems (~1 GB torch). Typically finishes
+ * in <30s on a fast network.
+ */
+export async function setupSectionsDeps(
+  onEvent: (ev: SectionsSetupEvent) => void,
+  signal?: AbortSignal,
+): Promise<SetupSectionsResult> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/native/setup/sections`, {
+      method: 'POST',
+      cache: 'no-store',
+      signal,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+  if (!res.ok || !res.body) {
+    return { ok: false, error: `Setup failed (HTTP ${res.status})` }
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let venvPython: string | null = null
+  let errorMsg: string | null = null
+
+  const handle = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let ev: SectionsSetupEvent
+    try {
+      ev = JSON.parse(trimmed) as SectionsSetupEvent
     } catch {
       ev = { type: 'log', msg: trimmed }
     }

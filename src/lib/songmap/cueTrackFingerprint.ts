@@ -1,4 +1,5 @@
 import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
+import { effectiveCountInBeats } from '$lib/songmap/countIn'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { SongMap } from '$lib/songmap/types'
 
@@ -35,13 +36,14 @@ export function cueTrackFingerprintPayload(sm: SongMap): unknown {
   }))
 
   return {
-    v: 2,
+    v: 3,
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
+    countInBeats: effectiveCountInBeats(sm),
+    startBeatId: sm.startBeatId ?? null,
     cues: {
       mode: sm.cues.mode,
-      countInBeats: sm.cues.countInBeats,
-      prependSec: sm.cues.prependSec !== undefined ? round6(sm.cues.prependSec) : null,
+      useSectionLabels: sm.cues.useSectionLabels,
       /** Headroom before count-in clicks for spoken title (regenerates cue when title length changes). */
       titlePreludeSec: round6(titleCuePreludeSec(sm)),
     },

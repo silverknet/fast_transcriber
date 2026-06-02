@@ -6,9 +6,6 @@
 	"/analyzing": [
 		"src/routes/+layout.server.ts"
 	],
-	"/api/analyze": [
-		"src/routes/api/analyze/+server.ts"
-	],
 	"/api/health": [
 		"src/routes/api/health/+server.ts"
 	],
@@ -18,17 +15,11 @@
 	"/api/projects/[id]": [
 		"src/routes/api/projects/[id]/+server.ts"
 	],
-	"/api/projects/[id]/audio": [
-		"src/routes/api/projects/[id]/audio/+server.ts"
-	],
 	"/api/sessions/ensure": [
 		"src/routes/api/sessions/ensure/+server.ts"
 	],
 	"/api/sessions/[id]": [
 		"src/routes/api/sessions/[id]/+server.ts"
-	],
-	"/api/sessions/[id]/audio": [
-		"src/routes/api/sessions/[id]/audio/+server.ts"
 	],
 	"/download": [
 		"src/routes/download/+page.server.ts",

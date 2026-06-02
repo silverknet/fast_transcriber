@@ -140,13 +140,16 @@ function looksLikeZip(bytes: Uint8Array): boolean {
 
 /**
  * Encode full restorable state as a single binary `.smap` file (see `smapFile.ts`).
+ *
+ * v2 `.smap` is JSON-only — `state.audioBlob` is intentionally **not**
+ * embedded. The user's audio file lives on disk under `<song>/audio/` via
+ * the sidecar and is referenced by `songMap.audio.originalPath`. Saving
+ * a legacy session that still carries audio bytes simply drops them
+ * here; on next load the audio comes back from `originalPath`.
  */
 export async function exportRestorableStateAsSmapBlob(state: RestorableSongState): Promise<Blob> {
   const project = songProjectFromRestorableState(state)
-  return encodeSmapFile({
-    project,
-    audioBlob: state.audioBlob ?? undefined,
-  })
+  return encodeSmapFile({ project })
 }
 
 /**

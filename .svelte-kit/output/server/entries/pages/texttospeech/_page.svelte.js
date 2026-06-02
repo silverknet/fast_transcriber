@@ -1,7 +1,6 @@
 import { A as escape_html, O as attr, c as head, h as unsubscribe_stores, p as store_get } from "../../../chunks/server.js";
-import { t as Button } from "../../../chunks/button.js";
+import { o as fetchDesktopTtsHelloWorldWav, p as setupPiperTtsDeps, v as Button } from "../../../chunks/desktopBridge.js";
 import { t as desktopCompanionStatus } from "../../../chunks/desktopCompanionStatus.js";
-import { f as setupPiperTtsDeps, o as fetchDesktopTtsHelloWorldWav } from "../../../chunks/desktopBridge.js";
 //#region src/routes/texttospeech/+page.svelte
 function _page($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {

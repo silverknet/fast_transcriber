@@ -7,10 +7,10 @@ function __memo(fn) {
 return {
 	appDir: "_app",
 	appPath: "_app",
-	assets: new Set(["desktop-downloads.json","releases/.gitkeep","releases/README.md","releases/barbro-desktop-0.1.0-arm64.dmg","vendor/lame.min.js"]),
-	mimeTypes: {".json":"application/json",".md":"text/markdown",".dmg":"application/octet-stream",".js":"text/javascript"},
+	assets: new Set(["desktop-downloads.json","releases/.gitkeep","releases/README.md","releases/barbro-desktop-0.1.0-arm64.dmg"]),
+	mimeTypes: {".json":"application/json",".md":"text/markdown",".dmg":"application/octet-stream"},
 	_: {
-		client: {start:"_app/immutable/entry/start.CR0YItDz.js",app:"_app/immutable/entry/app.CSIeeDAY.js",imports:["_app/immutable/entry/start.CR0YItDz.js","_app/immutable/chunks/C7tByMZB.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/DUgX7ckJ.js","_app/immutable/entry/app.CSIeeDAY.js","_app/immutable/chunks/CbUDssf9.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/D9FQP20W.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
+		client: {start:"_app/immutable/entry/start.DUO7JbWu.js",app:"_app/immutable/entry/app.BCvjytG0.js",imports:["_app/immutable/entry/start.DUO7JbWu.js","_app/immutable/chunks/BPO8baVh.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/DUgX7ckJ.js","_app/immutable/entry/app.BCvjytG0.js","_app/immutable/chunks/CbUDssf9.js","_app/immutable/chunks/Dg0BMDbX.js","_app/immutable/chunks/DMpSmtiB.js","_app/immutable/chunks/D9FQP20W.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
 		nodes: [
 			__memo(() => import('./nodes/0.js')),
 			__memo(() => import('./nodes/1.js')),
@@ -41,13 +41,6 @@ return {
 				endpoint: null
 			},
 			{
-				id: "/api/analyze",
-				pattern: /^\/api\/analyze\/?$/,
-				params: [],
-				page: null,
-				endpoint: __memo(() => import('./entries/endpoints/api/analyze/_server.ts.js'))
-			},
-			{
 				id: "/api/health",
 				pattern: /^\/api\/health\/?$/,
 				params: [],
@@ -69,13 +62,6 @@ return {
 				endpoint: __memo(() => import('./entries/endpoints/api/projects/_id_/_server.ts.js'))
 			},
 			{
-				id: "/api/projects/[id]/audio",
-				pattern: /^\/api\/projects\/([^/]+?)\/audio\/?$/,
-				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: null,
-				endpoint: __memo(() => import('./entries/endpoints/api/projects/_id_/audio/_server.ts.js'))
-			},
-			{
 				id: "/api/sessions/ensure",
 				pattern: /^\/api\/sessions\/ensure\/?$/,
 				params: [],
@@ -88,13 +74,6 @@ return {
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
 				page: null,
 				endpoint: __memo(() => import('./entries/endpoints/api/sessions/_id_/_server.ts.js'))
-			},
-			{
-				id: "/api/sessions/[id]/audio",
-				pattern: /^\/api\/sessions\/([^/]+?)\/audio\/?$/,
-				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: null,
-				endpoint: __memo(() => import('./entries/endpoints/api/sessions/_id_/audio/_server.ts.js'))
 			},
 			{
 				id: "/download",

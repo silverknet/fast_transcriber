@@ -1,8 +1,7 @@
 import { f as spread_props } from "./server.js";
-import { r as sortBeatsByTime } from "./timelineEdit.js";
-import { A as buildCueSpeechEvents, M as firstBarDownbeatBeat, N as titleCuePreludeSec, R as computeCountIn, j as countInSpeechOutputTimes } from "./commit.js";
-import { t as Icon } from "./Icon.js";
+import { G as titleCuePreludeSec, H as clickWavSongStartSec, K as sortBeatsByTime, Q as computeCountIn, U as countInSpeechOutputTimes, V as buildCueSpeechEvents, W as songStartBeat, Z as effectiveCountInBeats } from "./commit.js";
 import { s as fetchDesktopTtsSynthesizeWav } from "./desktopBridge.js";
+import { t as Icon } from "./Icon.js";
 import { t as audioBufferToWavBlob } from "./trimAudio.js";
 //#region node_modules/@lucide/svelte/dist/icons/pencil.svelte
 function Pencil($$renderer, $$props) {
@@ -61,78 +60,6 @@ function Pencil($$renderer, $$props) {
 			props,
 			{
 				iconNode: [["path", { "d": "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" }], ["path", { "d": "m15 5 4 4" }]],
-				children: ($$renderer) => {
-					props.children?.($$renderer);
-					$$renderer.push(`<!---->`);
-				},
-				$$slots: { default: true }
-			}
-		]));
-	});
-}
-//#endregion
-//#region node_modules/@lucide/svelte/dist/icons/refresh-cw.svelte
-function Refresh_cw($$renderer, $$props) {
-	$$renderer.component(($$renderer) => {
-		/**
-		* @license @lucide/svelte v1.7.0 - ISC
-		*
-		* ISC License
-		*
-		* Copyright (c) 2026 Lucide Icons and Contributors
-		*
-		* Permission to use, copy, modify, and/or distribute this software for any
-		* purpose with or without fee is hereby granted, provided that the above
-		* copyright notice and this permission notice appear in all copies.
-		*
-		* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-		* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-		* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-		* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-		* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-		* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-		* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-		*
-		* ---
-		*
-		* The following Lucide icons are derived from the Feather project:
-		*
-		* airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
-		*
-		* The MIT License (MIT) (for the icons listed above)
-		*
-		* Copyright (c) 2013-present Cole Bemis
-		*
-		* Permission is hereby granted, free of charge, to any person obtaining a copy
-		* of this software and associated documentation files (the "Software"), to deal
-		* in the Software without restriction, including without limitation the rights
-		* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-		* copies of the Software, and to permit persons to whom the Software is
-		* furnished to do so, subject to the following conditions:
-		*
-		* The above copyright notice and this permission notice shall be included in all
-		* copies or substantial portions of the Software.
-		*
-		* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-		* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-		* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-		* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-		* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-		* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-		* SOFTWARE.
-		*
-		*/
-		let { $$slots, $$events, ...props } = $$props;
-		Icon($$renderer, spread_props([
-			{ name: "refresh-cw" },
-			props,
-			{
-				iconNode: [
-					["path", { "d": "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
-					["path", { "d": "M21 3v5h-5" }],
-					["path", { "d": "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
-					["path", { "d": "M8 16H3v5" }]
-				],
 				children: ($$renderer) => {
 					props.children?.($$renderer);
 					$$renderer.push(`<!---->`);
@@ -231,11 +158,10 @@ async function renderCueTrackWavBlob(sm, opts = {}) {
 	const sorted = sortBeatsByTime(sm.timeline.beats);
 	if (sorted.length === 0) throw new Error("Cue track needs at least one beat");
 	let prependSec = 0;
-	let countInBeats = 0;
-	if (sm.cues.mode === "countIn" && sm.cues.countInBeats > 0) {
-		const ci = computeCountIn(sm, sm.cues.countInBeats);
+	const countInBeats = effectiveCountInBeats(sm);
+	if (countInBeats > 0) {
+		const ci = computeCountIn(sm, countInBeats);
 		if (ci) prependSec = ci.prependSec;
-		countInBeats = sm.cues.countInBeats;
 	}
 	const preludeSec = titleCuePreludeSec(sm);
 	const trimLen = trim.endSec - trim.startSec;
@@ -246,21 +172,21 @@ async function renderCueTrackWavBlob(sm, opts = {}) {
 	const data = new Float32Array(frames);
 	const trimStart = trim.startSec;
 	const trimEnd = trim.endSec;
-	const fd = firstBarDownbeatBeat(sm);
-	const countInActive = countInBeats > 0 && Boolean(fd);
+	const fd = songStartBeat(sm);
+	const songStartSec = clickWavSongStartSec(sm, {
+		preludeSec,
+		prependSec
+	});
+	const countInActive = countInBeats > 0 && Boolean(fd) && songStartSec !== null;
 	if (includeClicks && countInActive) {
 		const grid = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats);
-		for (const t of grid) {
-			const tClick = preludeSec + t;
-			if (tClick < 0 || tClick >= totalSec - 1e-6) continue;
-			mixClickKernel(data, sampleRate, tClick, false);
-		}
+		for (const t of grid) mixClickKernel(data, sampleRate, preludeSec + t, false);
 	}
 	if (includeClicks) for (const b of sorted) {
 		if (b.timeSec < trimStart - 1e-9) continue;
 		if (b.timeSec >= trimEnd - END_EPS) continue;
 		if (countInActive && fd && b.timeSec < fd.timeSec) continue;
-		const tClick = preludeSec + prependSec + (b.timeSec - trimStart);
+		const tClick = fd && songStartSec !== null ? songStartSec + (b.timeSec - fd.timeSec) : preludeSec + prependSec + (b.timeSec - trimStart);
 		if (tClick < 0 || tClick >= totalSec - 1e-6) continue;
 		mixClickKernel(data, sampleRate, tClick, b.indexInBar === 0);
 	}
@@ -329,6 +255,7 @@ async function renderCueTrackWavBlob(sm, opts = {}) {
 		buf.copyToChannel(data, 0, 0);
 		return {
 			blob: await audioBufferToWavBlob(buf),
+			preludeOffsetSec: preludeSec + prependSec,
 			speechSkippedReason: !includeSpeech || speechOk ? void 0 : `No voice in this file — ${speechFail ?? "desktop unreachable"}. Run BarBro desktop and set up Piper (TTS debug page).`
 		};
 	} finally {
@@ -336,4 +263,4 @@ async function renderCueTrackWavBlob(sm, opts = {}) {
 	}
 }
 //#endregion
-export { Refresh_cw as n, Pencil as r, renderCueTrackWavBlob as t };
+export { Pencil as n, renderCueTrackWavBlob as t };

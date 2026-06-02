@@ -51,6 +51,7 @@ declare module '$env/static/private' {
 	export const HOMEBREW_REPOSITORY: string;
 	export const npm_config_global_prefix: string;
 	export const FPATH: string;
+	export const CLAUDE_AGENT_SDK_VERSION: string;
 	export const MallocNanoZone: string;
 	export const COLOR: string;
 	export const npm_config_noproxy: string;
@@ -89,6 +90,7 @@ declare module '$env/static/private' {
 	export const CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: string;
 	export const SHLVL: string;
 	export const HOME: string;
+	export const npm_config_loglevel: string;
 	export const CLAUDE_CODE_EXECPATH: string;
 	export const VSCODE_NLS_CONFIG: string;
 	export const HOMEBREW_PREFIX: string;
@@ -109,7 +111,13 @@ declare module '$env/static/private' {
 	export const VSCODE_CWD: string;
 	export const npm_node_execpath: string;
 	export const npm_config_prefix: string;
+	export const TEST: string;
+	export const VITEST: string;
 	export const NODE_ENV: string;
+	export const PROD: string;
+	export const DEV: string;
+	export const BASE_URL: string;
+	export const MODE: string;
 }
 
 /**
@@ -209,6 +217,7 @@ declare module '$env/dynamic/private' {
 		HOMEBREW_REPOSITORY: string;
 		npm_config_global_prefix: string;
 		FPATH: string;
+		CLAUDE_AGENT_SDK_VERSION: string;
 		MallocNanoZone: string;
 		COLOR: string;
 		npm_config_noproxy: string;
@@ -247,6 +256,7 @@ declare module '$env/dynamic/private' {
 		CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: string;
 		SHLVL: string;
 		HOME: string;
+		npm_config_loglevel: string;
 		CLAUDE_CODE_EXECPATH: string;
 		VSCODE_NLS_CONFIG: string;
 		HOMEBREW_PREFIX: string;
@@ -267,7 +277,13 @@ declare module '$env/dynamic/private' {
 		VSCODE_CWD: string;
 		npm_node_execpath: string;
 		npm_config_prefix: string;
+		TEST: string;
+		VITEST: string;
 		NODE_ENV: string;
+		PROD: string;
+		DEV: string;
+		BASE_URL: string;
+		MODE: string;
 		[key: `PUBLIC_${string}`]: undefined;
 		[key: `${string}`]: string | undefined;
 	}

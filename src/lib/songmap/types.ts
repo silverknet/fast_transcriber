@@ -80,7 +80,7 @@ export type CueSettings = {
 }
 
 /**
- * Last exported click-cue WAV (see `cueTrackFingerprint.ts` + `renderCueTrack.ts`).
+ * Last exported spoken-cue WAV (see `cueTrackFingerprint.ts` + `renderCueTrack.ts`).
  * Cleared automatically when timeline/trim/cues no longer match `fingerprint`.
  */
 export type CueTrackExport = {
@@ -89,9 +89,26 @@ export type CueTrackExport = {
   durationSec: number
   sampleRate: number
   generatedAt: string
+  /**
+   * Silence + count-in clicks at the start of the WAV before the first
+   * song-aligned sample, in seconds. Equals
+   * `titleCuePreludeSec(sm) + computeCountIn(sm, …)?.prependSec ?? 0`
+   * at render time. Stored explicitly so consumers (e.g. the Ableton
+   * setlist export) can offset playback without re-deriving from `sm.cues`.
+   */
+  preludeOffsetSec: number
   /** Set when written under a project song folder, e.g. `cue/cue-track.wav`. */
   relativePath?: string
 }
+
+/**
+ * Last exported click-only WAV. Same render path and fingerprint as
+ * `CueTrackExport` — every field has the same semantics, but the on-disk
+ * file is `cue/click-track.wav` and contains only clicks (no spoken
+ * cues). Tracked separately from `cueTrackExport` so the two layers can
+ * be regenerated independently.
+ */
+export type ClickTrackExport = CueTrackExport
 
 export type AudioSource = 'upload' | 'import' | 'unknown'
 
@@ -106,6 +123,13 @@ export type AudioReference = {
   sha256?: string
   /** SHA-256 of the original HQ uploaded file — used to verify re-uploads for full-quality re-analysis. */
   originalSha256?: string
+  /**
+   * POSIX-style path to the original audio file, **relative to the `.smap` file's directory**.
+   * Typical value: `"audio/<fileName>"`. Resolves to `<projectPath>/<songFolder>/audio/<fileName>`
+   * in project mode and to a sibling `audio/` folder when a single-song bundle is shared.
+   * Absent on legacy/web-only `.smap` files; the app shows a relink banner in that case.
+   */
+  originalPath?: string
   source: AudioSource
 }
 
@@ -202,6 +226,56 @@ export interface MixState {
   master?: number
 }
 
+/**
+ * Cached output of the Python section-border suggester
+ * (`desktop/native/python/sections/border_suggest.py`). Persisted so we don't
+ * re-analyze on every song open. Invalidated when the audio fingerprint or
+ * `analyzerVersion` no longer matches; old `.smap` files (no hints) trigger
+ * a one-time analysis on first sections-mode entry.
+ */
+export type SectionBorderHints = {
+  borders: { bar: number; confidence: number }[]
+  /** Fingerprint of the audio used: sha256 if present, else `<name>:<size>`. */
+  audioFingerprint: string
+  generatedAt: string
+  /** Bump when `border_suggest.py` algorithm changes to force re-analysis. */
+  analyzerVersion: number
+}
+
+/**
+ * Cached output of the Python chord-chroma analyzer
+ * (`desktop/native/python/sections/chord_chroma.py`). Per-beat 12-dim chroma
+ * vectors + a derived song-level key. Persisted so we don't re-analyze on
+ * every song open. Invalidated when the audio fingerprint, beat count, or
+ * `analyzerVersion` no longer matches; old `.smap` files (no hints) trigger
+ * a one-time analysis on first chords-mode entry.
+ *
+ * The raw `beatChroma` is the foundation for future per-beat chord-template
+ * matching and modulation detection — keep it stored even after the key is
+ * derived so phase 2/3 features can build on it without a second audio pass.
+ */
+export type ChordHints = {
+  /**
+   * 12-dim chroma per beat, in the same order as `sortBeatsByTime(beats)`.
+   * Each value 0–1, L1-normalized per beat. Length must equal beats.length;
+   * mismatch → treat as stale.
+   */
+  beatChroma: number[][]
+  /** Krumhansl–Kessler best fit over song-average chroma. Null if too flat. */
+  detectedKey: {
+    root: NoteName
+    accidental?: Accidental
+    mode: SongKeyMode
+    /** Top-vs-runner-up margin, clipped to [0, 1]. */
+    confidence: number
+  } | null
+  /** Fingerprint of the audio used: sha256 if present, else `<name>:<size>`. */
+  audioFingerprint: string
+  generatedAt: string
+  /** Bump when `chord_chroma.py` algorithm changes to force re-analysis. */
+  analyzerVersion: number
+}
+
 export type SongMapV1 = {
   formatVersion: typeof SONGMAP_FORMAT_VERSION
   app?: SongMapAppInfo
@@ -212,16 +286,34 @@ export type SongMapV1 = {
   harmony: HarmonyEvent[]
   cues: CueSettings
   /**
+   * Count-in beats before the song start, independent of `cues.mode`. When
+   * absent or `0`, no count-in is rendered. Decoupled from cue speech so a
+   * song can have both spoken cues AND a count-in.
+   */
+  countInBeats?: number
+  /**
+   * Optional override of the song-start anchor. References an id from
+   * `timeline.beats`. When absent, the song start is bar 1 beat 1 (the
+   * first beat with `indexInBar === 0` on bar 1) — the historical default.
+   */
+  startBeatId?: string
+  /**
    * Display hint for the project folder name (e.g. "DangerousSong").
    * Not a full path — used to show "not found" messaging on a different machine.
    */
   projectFolder?: string
   /** Relative paths within the project folder to each stem audio file. */
   stemRefs?: StemRefs
-  /** Optional rendered metronome cue aligned to trim + count-in prepend. */
+  /** Optional rendered spoken-cue WAV aligned to trim + count-in prepend. */
   cueTrackExport?: CueTrackExport
+  /** Optional rendered click-only WAV aligned to trim + count-in prepend. */
+  clickTrackExport?: ClickTrackExport
   /** Optional saved mixer state for the in-browser DAW view. */
   mixState?: MixState
+  /** Cached audio-derived section-border hints (display-only). */
+  sectionBorderHints?: SectionBorderHints
+  /** Cached per-beat chroma + detected key (display-only / hint source). */
+  chordHints?: ChordHints
 }
 
 export type SongMap = SongMapV1

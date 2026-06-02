@@ -17,6 +17,18 @@
     endBarIndex: number
   }
 
+  /**
+   * Audio-derived candidate where a new section *might* start. Rendered as
+   * a thin tick over the bar strip (advisory only — the user does not need
+   * to accept or reject; they just inform the user's eye + the next-section
+   * suggestion's bar count).
+   */
+  export type AudioBorderTick = {
+    bar: number
+    /** 0..1 — drives opacity of the tick. */
+    confidence: number
+  }
+
   const HIDE_BAR_CHROME_ENTER = 18
   const HIDE_BAR_CHROME_EXIT = 52
   const SMOOTH_ALPHA = 0.16
@@ -59,6 +71,8 @@
     /** Chords mode: multi-select beats (timeline order); single-click also sets `selectedBeatId`. */
     chordsSelectionBeatIds = $bindable<string[]>([]),
     chordLabelByBeatId = {} as Record<string, string>,
+    /** Per-bar chord suggestions from cached chroma — keyed by the bar's downbeat id. */
+    chordSuggestionByBeatId = {} as Record<string, { label: string; confidence: number }>,
     /** Song timeline bounds (sec); required for bar-edge stretch so the last bar can extend to decode end. */
     timelineMinSec = 0,
     timelineMaxSec = 0,
@@ -74,6 +88,8 @@
     onResizeBoundary = undefined as
       | ((leftSectionId: string, rightSectionId: string, newBoundaryBarIndex: number) => void)
       | undefined,
+    /** Sections mode: audio-derived candidate borders shown as ghost ticks. */
+    audioBorderTicks = [] as AudioBorderTick[],
   }: {
     viewStart: number
     viewEnd: number
@@ -92,6 +108,7 @@
     selectedBeatId?: string | null
     chordsSelectionBeatIds?: string[]
     chordLabelByBeatId?: Record<string, string>
+    chordSuggestionByBeatId?: Record<string, { label: string; confidence: number }>
     timelineMinSec?: number
     timelineMaxSec?: number
     suggestionPreview?: SuggestionPreview | null
@@ -103,6 +120,7 @@
       rightSectionId: string,
       newBoundaryBarIndex: number,
     ) => void
+    audioBorderTicks?: AudioBorderTick[]
   } = $props()
 
   let gridEl = $state<HTMLDivElement | undefined>()
@@ -202,9 +220,16 @@
     })
   })
 
-  /** Contiguous section tint fills — always visible, outside the hideBarChrome opacity wrapper. */
+  /** Contiguous section tint fills — visible in sections AND chords mode so the
+   * user can place chords with section context in view. (Interactive edge
+   * handles below stay sections-only — chords mode is read-only for sections.) */
   let sectionFillSpans = $derived.by(() => {
-    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || effectiveSections.length === 0) {
+    if (
+      (stripMode !== 'sections' && stripMode !== 'chords') ||
+      !(widthPx > 0) ||
+      viewEnd <= viewStart ||
+      effectiveSections.length === 0
+    ) {
       return [] as SectionSpan[]
     }
     const byIndex = new Map(bars.map((b) => [b.index, b]))
@@ -324,7 +349,12 @@
   })
 
   let sectionLabelSpans = $derived.by(() => {
-    if (stripMode !== 'sections' || !(widthPx > 0) || viewEnd <= viewStart || effectiveSections.length === 0) {
+    if (
+      (stripMode !== 'sections' && stripMode !== 'chords') ||
+      !(widthPx > 0) ||
+      viewEnd <= viewStart ||
+      effectiveSections.length === 0
+    ) {
       return [] as SectionLabelSpan[]
     }
     const byIndex = new Map(bars.map((b) => [b.index, b]))
@@ -355,6 +385,28 @@
         startBarIndex: sec.barRange.startBarIndex,
         endBarIndex: sec.barRange.endBarIndex,
       })
+    }
+    return out
+  })
+
+  /** Pixel positions of audio-derived border ticks (sections mode). */
+  let audioBorderTickPx = $derived.by(() => {
+    if (
+      stripMode !== 'sections' ||
+      !(widthPx > 0) ||
+      viewEnd <= viewStart ||
+      audioBorderTicks.length === 0
+    ) {
+      return [] as Array<{ key: string; x: number; confidence: number }>
+    }
+    const byIndex = new Map(bars.map((b) => [b.index, b]))
+    const out: Array<{ key: string; x: number; confidence: number }> = []
+    for (const tick of audioBorderTicks) {
+      const b = byIndex.get(tick.bar)
+      if (!b) continue
+      if (b.startSec < viewStart || b.startSec > viewEnd) continue
+      const x = timeToPxInView(b.startSec, viewStart, viewEnd, widthPx)
+      out.push({ key: `audio-${tick.bar}`, x, confidence: tick.confidence })
     }
     return out
   })
@@ -1009,8 +1061,9 @@
     {/each}
   {/if}
 
-  <!-- Section titles (sections mode): above bar fills -->
-  {#if editing && stripMode === 'sections'}
+  <!-- Section titles: above bar fills. Visible in sections + chords modes
+       so users have section context while placing chords. -->
+  {#if editing && (stripMode === 'sections' || stripMode === 'chords')}
     {#each sectionLabelSpans as span (span.key)}
       <div
         class="pointer-events-none absolute top-0 z-[25] flex h-5 items-center justify-center overflow-hidden px-1 text-center text-[10px] font-semibold leading-none tracking-tight {SECTION_LABEL_TEXT[
@@ -1018,6 +1071,7 @@
         ] ?? 'text-zinc-200'}"
         style:left="{span.x0}px"
         style:width="{span.w}px"
+        style:opacity={stripMode === 'chords' ? 0.65 : 1}
         title={span.label}
       >
         <span class="min-w-0 truncate drop-shadow-sm">{span.label}</span>
@@ -1025,14 +1079,43 @@
     {/each}
   {/if}
 
-  <!-- Section tint fills: always visible (outside the hideBarChrome opacity wrapper). -->
-  {#if editing && stripMode === 'sections'}
+  <!-- Section tint fills: visible in sections + chords modes. Dimmed in
+       chords mode so the chord strip stays the visual focus. -->
+  {#if editing && (stripMode === 'sections' || stripMode === 'chords')}
     {#each sectionFillSpans as span (span.key)}
       <div
         class="pointer-events-none absolute inset-y-0"
         style:left="{span.x0}px"
         style:width="{span.w}px"
         style="{SECTION_FILL_CSS[span.kind] ?? ''}; {SECTION_LEFT_BORDER_CSS[span.kind] ?? ''}"
+        style:opacity={stripMode === 'chords' ? 0.4 : 1}
+        aria-hidden="true"
+      ></div>
+    {/each}
+  {/if}
+
+  <!-- Audio-derived border ticks: advisory hint, not user-actionable on its own.
+       Drawn as a 2px dashed vertical line + a downward chevron at the top so it
+       reads as "the analyzer thinks something happens here" rather than just
+       being mistaken for a bar line. Opacity scales with confidence. -->
+  {#if editing && stripMode === 'sections'}
+    {#each audioBorderTickPx as tick (tick.key)}
+      {@const alpha = Math.max(0.45, Math.min(0.95, tick.confidence))}
+      <div
+        class="pointer-events-none absolute top-0 bottom-0 z-[28] w-[2px] -translate-x-1/2"
+        style:left="{tick.x}px"
+        style:background="repeating-linear-gradient(to bottom, rgba(56, 189, 248, {alpha}) 0 4px, transparent 4px 7px)"
+        aria-hidden="true"
+        title="Detected border (confidence {Math.round(tick.confidence * 100)}%)"
+      ></div>
+      <div
+        class="pointer-events-none absolute top-0 z-[29] -translate-x-1/2"
+        style:left="{tick.x}px"
+        style:border-top="5px solid rgba(56, 189, 248, {alpha})"
+        style:border-left="4px solid transparent"
+        style:border-right="4px solid transparent"
+        style:width="0"
+        style:height="0"
         aria-hidden="true"
       ></div>
     {/each}
@@ -1174,6 +1257,21 @@
             title={chordLabelByBeatId[seg.beat.id]}
           >
             {chordLabelByBeatId[seg.beat.id]}
+          </div>
+        {:else if chordSuggestionByBeatId[seg.beat.id]}
+          {@const sug = chordSuggestionByBeatId[seg.beat.id]}
+          {@const tier = sug.confidence >= 0.10 ? 'high' : sug.confidence >= 0.05 ? 'medium' : 'low'}
+          <div
+            class="pointer-events-none absolute bottom-1 z-[9] truncate text-center font-mono text-[11px] tabular-nums text-foreground/90 {tier === 'high'
+              ? 'font-semibold opacity-55'
+              : tier === 'medium'
+                ? 'italic opacity-40'
+                : 'italic opacity-30'}"
+            style:left="{seg.x0}px"
+            style:width="{seg.x1 - seg.x0}px"
+            title={`Suggested: ${sug.label} (margin ${sug.confidence.toFixed(3)})`}
+          >
+            {sug.label}{tier === 'low' ? '?' : ''}
           </div>
         {/if}
       {/each}

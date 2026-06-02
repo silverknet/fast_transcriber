@@ -1,8 +1,8 @@
 import { r as onDestroy } from "./index-server.js";
 import { M as derived, a as derived$1, i as bind_props } from "./server.js";
 import "./index-server2.js";
-import { r as sortBeatsByTime } from "./timelineEdit.js";
-import "./button.js";
+import { K as sortBeatsByTime } from "./commit.js";
+import "./desktopBridge.js";
 import { n as uiAnimations } from "./uiAnimations.js";
 //#region src/lib/audio/audioTransport.ts
 var END_EPS = .028;
@@ -108,7 +108,7 @@ function WaveformPlayer($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
 		/** Waveform timeline editor orchestration (viewport-driven model). */
 		/** `trim` = home flow (region selection). `editor` = full-timeline editing (same controls, copy tuned). */
-		let { file = null, rangeStart = 0, rangeEnd = 0, ready = false, variant = "trim", beatGrid = null, beatGridEditable = false, timelineStripMode = "grid", mapSections = [], onBarGridAction = void 0, onApplySectionTag = void 0, suggestionPreview = null, onAcceptSuggestion = void 0, onDismissSuggestion = void 0, onResizeSection = void 0, onResizeBoundary = void 0, sectionsSelectionBarIds = [], chordsSelectionBeatIds = [], selectedBeatId = null, chordLabelByBeatId = {}, onChordBeatInteract = void 0 } = $$props;
+		let { file = null, rangeStart = 0, rangeEnd = 0, ready = false, variant = "trim", beatGrid = null, beatGridEditable = false, timelineStripMode = "grid", mapSections = [], onBarGridAction = void 0, onApplySectionTag = void 0, suggestionPreview = null, onAcceptSuggestion = void 0, onDismissSuggestion = void 0, onResizeSection = void 0, onResizeBoundary = void 0, audioBorderTicks = [], audioBordersStatus = "idle", audioBordersError = null, showAudioBorders = true, onReanalyzeBorders = void 0, sectionsInstallProgress = 0, sectionsSelectionBarIds = [], chordsSelectionBeatIds = [], selectedBeatId = null, chordLabelByBeatId = {}, chordSuggestionByBeatId = {}, onChordBeatInteract = void 0 } = $$props;
 		let isEditorVariant = derived$1(() => variant === "editor");
 		derived$1(() => Boolean(isEditorVariant() && beatGridEditable && beatGrid && (timelineStripMode === "sections" || timelineStripMode === "chords" || onBarGridAction)));
 		/** Authoritative editor duration consumed by selection / viewport / transport / geometry. */
@@ -262,6 +262,7 @@ function WaveformPlayer($$renderer, $$props) {
 			rangeStart,
 			rangeEnd,
 			ready,
+			showAudioBorders,
 			sectionsSelectionBarIds,
 			chordsSelectionBeatIds,
 			selectedBeatId

@@ -35,27 +35,26 @@
 
 {#if visible}
   <div
-    class="border-foreground bg-foreground text-background fixed top-12 right-0 left-0 z-40 flex flex-wrap items-center gap-3 border-b-2 px-3 py-1.5 text-sm"
+    class="border-foreground bg-foreground text-background fixed top-12 right-0 left-0 z-40 flex h-11 items-center gap-3 border-b-2 px-3 text-sm"
     role="navigation"
     aria-label="Project context"
   >
     <Button
       variant="secondary"
-      size="sm"
-      class="h-8 shrink-0 gap-1.5 px-2.5"
+      class="shrink-0 gap-1.5 [&_svg]:translate-y-0.5"
       onclick={() => void backToProject()}
       aria-label="Back to project {projectName}"
     >
-      <ArrowLeft class="size-4" aria-hidden="true" />
-      Back to project
+      <ArrowLeft class="size-4 shrink-0" aria-hidden="true" />
+      <span class="translate-y-0.5">Back to project</span>
     </Button>
 
     <div class="flex min-w-0 flex-1 items-center gap-2">
-      <FolderOpen class="size-4 shrink-0 opacity-70" aria-hidden="true" />
-      <span class="truncate font-semibold tracking-tight">{projectName}</span>
+      <FolderOpen class="size-4 shrink-0 translate-y-0.5 opacity-70" aria-hidden="true" />
+      <span class="truncate translate-y-0.5 font-semibold tracking-tight">{projectName}</span>
       {#if songTitle}
-        <span class="opacity-50" aria-hidden="true">/</span>
-        <span class="text-background/80 truncate font-mono text-xs">{songTitle}</span>
+        <span class="translate-y-0.5 opacity-50" aria-hidden="true">/</span>
+        <span class="text-background/80 truncate translate-y-0.5 font-mono text-xs">{songTitle}</span>
       {/if}
     </div>
   </div>

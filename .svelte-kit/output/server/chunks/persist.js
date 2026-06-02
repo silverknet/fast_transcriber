@@ -1,4 +1,220 @@
-import { n as defaultCueSettings, t as validateSongMap } from "./validate.js";
+//#region src/lib/songmap/defaults.ts
+function defaultCueSettings() {
+	return {
+		mode: "off",
+		countInBeats: 4,
+		useSectionLabels: true
+	};
+}
+function emptySongMetadata(nowIso) {
+	return {
+		title: "Untitled",
+		createdAt: nowIso,
+		updatedAt: nowIso,
+		analyzed: false
+	};
+}
+//#endregion
+//#region src/lib/songmap/validate.ts
+function isFiniteNumber(n) {
+	return typeof n === "number" && Number.isFinite(n);
+}
+var NOTE_NAMES = new Set([
+	"C",
+	"D",
+	"E",
+	"F",
+	"G",
+	"A",
+	"B"
+]);
+var KEY_MODES = new Set(["major", "minor"]);
+function validateSongKey(k, path, errors) {
+	if (!NOTE_NAMES.has(k.root)) errors.push(`${path}.root invalid`);
+	if (!KEY_MODES.has(k.mode)) errors.push(`${path}.mode invalid`);
+}
+function validateMetadata(m, path, errors) {
+	if (typeof m.title !== "string" || !m.title.trim()) errors.push(`${path}.title required`);
+	if (typeof m.createdAt !== "string") errors.push(`${path}.createdAt must be ISO string`);
+	if (typeof m.updatedAt !== "string") errors.push(`${path}.updatedAt must be ISO string`);
+	if (m.keyDetail != null) validateSongKey(m.keyDetail, `${path}.keyDetail`, errors);
+}
+function validateBar(bar, path, errors) {
+	if (typeof bar.id !== "string" || !bar.id) errors.push(`${path}.id required`);
+	if (!Number.isInteger(bar.index) || bar.index < 0) errors.push(`${path}.index invalid`);
+	if (!isFiniteNumber(bar.startSec)) errors.push(`${path}.startSec invalid`);
+	if (!isFiniteNumber(bar.endSec)) errors.push(`${path}.endSec invalid`);
+	if (bar.endSec <= bar.startSec) errors.push(`${path}.endSec must be > startSec (half-open [start,end))`);
+	if (!bar.meter || typeof bar.meter.numerator !== "number" || bar.meter.numerator < 1) errors.push(`${path}.meter.numerator invalid`);
+	if (!bar.meter || typeof bar.meter.denominator !== "number" || bar.meter.denominator < 1) errors.push(`${path}.meter.denominator invalid`);
+	if (!Number.isInteger(bar.beatCount) || bar.beatCount < 0) errors.push(`${path}.beatCount invalid`);
+	if (!Array.isArray(bar.beatIds)) errors.push(`${path}.beatIds must be array`);
+	else if (bar.beatIds.length !== bar.beatCount) errors.push(`${path}.beatIds length must equal beatCount`);
+}
+function validateBeat(b, path, errors) {
+	if (typeof b.id !== "string" || !b.id) errors.push(`${path}.id required`);
+	if (typeof b.barId !== "string" || !b.barId) errors.push(`${path}.barId required`);
+	if (!Number.isInteger(b.indexInBar) || b.indexInBar < 0) errors.push(`${path}.indexInBar invalid`);
+	if (!isFiniteNumber(b.timeSec)) errors.push(`${path}.timeSec invalid`);
+}
+var SECTION_KINDS = new Set([
+	"intro",
+	"verse",
+	"preChorus",
+	"chorus",
+	"bridge",
+	"solo",
+	"outro",
+	"custom"
+]);
+function validateSection(s, path, errors) {
+	if (typeof s.id !== "string" || !s.id) errors.push(`${path}.id required`);
+	if (typeof s.kind !== "string" || !SECTION_KINDS.has(s.kind)) errors.push(`${path}.kind invalid`);
+	if (typeof s.label !== "string") errors.push(`${path}.label required`);
+	if (!s.barRange || !Number.isInteger(s.barRange.startBarIndex) || !Number.isInteger(s.barRange.endBarIndex)) errors.push(`${path}.barRange invalid`);
+	else if (s.barRange.endBarIndex < s.barRange.startBarIndex) errors.push(`${path}.barRange end must be >= start`);
+}
+function validateChordSymbol(c, path, errors) {
+	if (!NOTE_NAMES.has(c.root)) errors.push(`${path}.root invalid`);
+	if (c.bass != null && !NOTE_NAMES.has(c.bass)) errors.push(`${path}.bass invalid`);
+	if (typeof c.displayRaw !== "string") errors.push(`${path}.displayRaw required`);
+}
+function validateHarmony(h, path, errors) {
+	if (typeof h.id !== "string" || !h.id) errors.push(`${path}.id required`);
+	if (typeof h.barId !== "string" || !h.barId) errors.push(`${path}.barId required`);
+	if (!isFiniteNumber(h.startSec)) errors.push(`${path}.startSec invalid`);
+	if (!isFiniteNumber(h.endSec)) errors.push(`${path}.endSec invalid`);
+	if (h.endSec <= h.startSec) errors.push(`${path}.endSec must be > startSec`);
+	validateChordSymbol(h.chord, `${path}.chord`, errors);
+}
+function validateSongMap(map) {
+	const errors = [];
+	const warnings = [];
+	if (map.formatVersion !== 1) errors.push(`formatVersion must be 1`);
+	validateMetadata(map.metadata, "metadata", errors);
+	const bars = map.timeline?.bars;
+	const beats = map.timeline?.beats;
+	if (!Array.isArray(bars)) errors.push("timeline.bars must be array");
+	if (!Array.isArray(beats)) errors.push("timeline.beats must be array");
+	if (Array.isArray(bars)) {
+		bars.forEach((bar, i) => validateBar(bar, `timeline.bars[${i}]`, errors));
+		for (let i = 1; i < bars.length; i++) if (bars[i].index <= bars[i - 1].index) warnings.push(`timeline.bars: bar index not strictly increasing at ${i}`);
+		if (new Set(bars.map((b) => b.id)).size !== bars.length) errors.push("timeline.bars: duplicate bar id");
+		for (let i = 1; i < bars.length; i++) {
+			const prev = bars[i - 1];
+			const cur = bars[i];
+			if (prev.endSec > cur.startSec + 1e-9) warnings.push(`timeline.bars[${i}]: may overlap previous bar end (${prev.endSec}) vs current start (${cur.startSec})`);
+		}
+	}
+	if (Array.isArray(beats)) {
+		const beatIds = /* @__PURE__ */ new Set();
+		beats.forEach((b, i) => {
+			validateBeat(b, `timeline.beats[${i}]`, errors);
+			if (beatIds.has(b.id)) errors.push(`timeline.beats[${i}]: duplicate beat id`);
+			beatIds.add(b.id);
+		});
+		if (Array.isArray(bars)) {
+			const barById = new Map(bars.map((b) => [b.id, b]));
+			for (let i = 0; i < beats.length; i++) {
+				const b = beats[i];
+				const bar = barById.get(b.barId);
+				if (!bar) {
+					errors.push(`timeline.beats[${i}]: unknown barId ${b.barId}`);
+					continue;
+				}
+				if (b.indexInBar >= bar.beatCount) errors.push(`timeline.beats[${i}]: indexInBar out of range for bar`);
+				if (b.timeSec < bar.startSec || b.timeSec >= bar.endSec) errors.push(`timeline.beats[${i}]: timeSec must fall within bar [startSec,endSec)`);
+			}
+			for (const bar of bars) {
+				if (beats.filter((b) => b.barId === bar.id).length !== bar.beatCount) errors.push(`bar ${bar.id}: beat count mismatch (beatIds vs beats list)`);
+				for (const bid of bar.beatIds) {
+					const beat = beats.find((b) => b.id === bid);
+					if (!beat || beat.barId !== bar.id) errors.push(`bar ${bar.id}: beatId ${bid} missing or wrong bar`);
+				}
+			}
+		}
+	}
+	if (!map.cues || typeof map.cues.mode !== "string") errors.push("cues invalid");
+	else {
+		if (!Number.isInteger(map.cues.countInBeats) || map.cues.countInBeats < 0) errors.push("cues.countInBeats invalid");
+		if (typeof map.cues.useSectionLabels !== "boolean") errors.push("cues.useSectionLabels invalid");
+		if (map.cues.prependSec !== void 0 && (!Number.isFinite(map.cues.prependSec) || map.cues.prependSec < 0)) errors.push("cues.prependSec invalid");
+	}
+	if (map.countInBeats !== void 0) {
+		if (!Number.isInteger(map.countInBeats) || map.countInBeats < 0) errors.push("countInBeats must be a non-negative integer");
+	}
+	if (map.startBeatId !== void 0) {
+		if (typeof map.startBeatId !== "string" || map.startBeatId.length === 0) errors.push("startBeatId must be a non-empty string");
+		else if (Array.isArray(beats) && !beats.some((b) => b.id === map.startBeatId)) warnings.push(`startBeatId references missing beat "${map.startBeatId}"`);
+	}
+	const validateRenderedExport = (c, label) => {
+		if (!c || typeof c !== "object") {
+			errors.push(`${label} invalid`);
+			return;
+		}
+		const r = c;
+		if (typeof r.fingerprint !== "string" || !r.fingerprint) errors.push(`${label}.fingerprint invalid`);
+		if (!Number.isFinite(r.durationSec) || r.durationSec <= 0) errors.push(`${label}.durationSec invalid`);
+		if (!Number.isFinite(r.sampleRate) || r.sampleRate <= 0) errors.push(`${label}.sampleRate invalid`);
+		if (typeof r.generatedAt !== "string" || !r.generatedAt) errors.push(`${label}.generatedAt invalid`);
+		if (!Number.isFinite(r.preludeOffsetSec) || r.preludeOffsetSec < 0) errors.push(`${label}.preludeOffsetSec invalid`);
+		if (r.relativePath !== void 0 && typeof r.relativePath !== "string") errors.push(`${label}.relativePath invalid`);
+	};
+	if (map.cueTrackExport !== void 0) validateRenderedExport(map.cueTrackExport, "cueTrackExport");
+	if (map.clickTrackExport !== void 0) validateRenderedExport(map.clickTrackExport, "clickTrackExport");
+	if (!Array.isArray(map.sections)) errors.push("sections must be array");
+	else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors));
+	if (!Array.isArray(map.harmony)) errors.push("harmony must be array");
+	else {
+		map.harmony.forEach((h, i) => validateHarmony(h, `harmony[${i}]`, errors));
+		if (Array.isArray(beats) && Array.isArray(bars)) {
+			const beatById = new Map(beats.map((b) => [b.id, b]));
+			const seenBeat = /* @__PURE__ */ new Set();
+			const SPAN_EPS = .09;
+			for (let i = 0; i < map.harmony.length; i++) {
+				const h = map.harmony[i];
+				if (h.beatId) {
+					if (seenBeat.has(h.beatId)) errors.push(`harmony[${i}]: duplicate beatId ${h.beatId}`);
+					seenBeat.add(h.beatId);
+					const beat = beatById.get(h.beatId);
+					if (!beat) errors.push(`harmony[${i}]: unknown beatId`);
+					else {
+						if (beat.barId !== h.barId) errors.push(`harmony[${i}]: barId does not match beat's bar`);
+						if (h.beatAnchor != null && h.beatAnchor.indexInBar !== beat.indexInBar) warnings.push(`harmony[${i}]: beatAnchor.indexInBar does not match beat`);
+						if (Math.abs(h.startSec - beat.timeSec) > SPAN_EPS) warnings.push(`harmony[${i}]: startSec differs from beat.timeSec`);
+					}
+				}
+			}
+		}
+	}
+	if (Array.isArray(map.sections) && Array.isArray(bars)) {
+		const maxBarIndex = bars.length ? Math.max(...bars.map((b) => b.index)) : -1;
+		map.sections.forEach((s, i) => {
+			if (s.barRange.endBarIndex > maxBarIndex) warnings.push(`sections[${i}]: barRange extends past last bar index (${maxBarIndex})`);
+		});
+	}
+	if (map.projectFolder !== void 0 && typeof map.projectFolder !== "string") errors.push("projectFolder must be a string");
+	if (map.stemRefs !== void 0) {
+		if (typeof map.stemRefs !== "object" || Array.isArray(map.stemRefs)) errors.push("stemRefs must be an object");
+		else for (const [k, v] of Object.entries(map.stemRefs)) if (typeof v !== "string") errors.push(`stemRefs.${k} must be a string`);
+	}
+	if (map.mixState !== void 0) if (!map.mixState || typeof map.mixState !== "object") errors.push("mixState invalid");
+	else if (!Array.isArray(map.mixState.tracks)) errors.push("mixState.tracks must be an array");
+	else for (let i = 0; i < map.mixState.tracks.length; i++) {
+		const t = map.mixState.tracks[i];
+		if (!t || typeof t !== "object") errors.push(`mixState.tracks[${i}] invalid`);
+		else {
+			if (typeof t.key !== "string" || !t.key) errors.push(`mixState.tracks[${i}].key invalid`);
+			if (!Number.isFinite(t.volume) || t.volume < 0) errors.push(`mixState.tracks[${i}].volume invalid`);
+		}
+	}
+	return {
+		ok: errors.length === 0,
+		errors,
+		warnings
+	};
+}
+//#endregion
 //#region src/lib/songmap/parse.ts
 var SongMapParseError = class extends Error {
 	constructor(message, path, cause) {
@@ -127,6 +343,7 @@ function parseAudio(raw, path) {
 		},
 		sha256: optString(o.sha256),
 		originalSha256: optString(o.originalSha256),
+		originalPath: optString(o.originalPath),
 		source: reqString(o.source, `${path}.source`)
 	};
 }
@@ -173,18 +390,22 @@ function parseMixState(raw, path) {
 function parseCueTrackExport(raw, path) {
 	if (raw === void 0 || raw === null) return void 0;
 	const o = expectObject(raw, path);
+	if (typeof o.preludeOffsetSec !== "number") return void 0;
 	const fingerprint = reqString(o.fingerprint, `${path}.fingerprint`);
 	const durationSec = reqNum(o.durationSec, `${path}.durationSec`);
 	const sampleRate = reqNum(o.sampleRate, `${path}.sampleRate`);
 	const generatedAt = reqString(o.generatedAt, `${path}.generatedAt`);
+	const preludeOffsetSec = reqNum(o.preludeOffsetSec, `${path}.preludeOffsetSec`);
 	const relativePath = optString(o.relativePath);
-	if (!(durationSec > 0)) throw new SongMapParseError("cueTrackExport.durationSec must be > 0", `${path}.durationSec`);
-	if (!(sampleRate > 0)) throw new SongMapParseError("cueTrackExport.sampleRate must be > 0", `${path}.sampleRate`);
+	if (!(durationSec > 0)) throw new SongMapParseError(`${path}.durationSec must be > 0`, `${path}.durationSec`);
+	if (!(sampleRate > 0)) throw new SongMapParseError(`${path}.sampleRate must be > 0`, `${path}.sampleRate`);
+	if (!(preludeOffsetSec >= 0)) throw new SongMapParseError(`${path}.preludeOffsetSec must be ≥ 0`, `${path}.preludeOffsetSec`);
 	return {
 		fingerprint,
 		durationSec,
 		sampleRate,
 		generatedAt,
+		preludeOffsetSec,
 		relativePath
 	};
 }
@@ -244,9 +465,12 @@ function extractSongMapV1(raw) {
 		sections: Array.isArray(raw.sections) ? raw.sections.map((s, i) => parseSection(s, `sections[${i}]`)) : [],
 		harmony: Array.isArray(raw.harmony) ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`)) : [],
 		cues: raw.cues !== void 0 && raw.cues !== null ? parseCues(raw.cues, "cues") : defaultCueSettings(),
+		countInBeats: optNum(raw.countInBeats),
+		startBeatId: optString(raw.startBeatId),
 		projectFolder: typeof raw.projectFolder === "string" ? raw.projectFolder : void 0,
 		stemRefs: parseStemRefs(raw.stemRefs),
 		cueTrackExport: raw.cueTrackExport !== void 0 && raw.cueTrackExport !== null ? parseCueTrackExport(raw.cueTrackExport, "cueTrackExport") : void 0,
+		clickTrackExport: raw.clickTrackExport !== void 0 && raw.clickTrackExport !== null ? parseCueTrackExport(raw.clickTrackExport, "clickTrackExport") : void 0,
 		mixState: parseMixState(raw.mixState, "mixState")
 	};
 }
@@ -277,9 +501,12 @@ var KNOWN_TOP_KEYS = new Set([
 	"sections",
 	"harmony",
 	"cues",
+	"countInBeats",
+	"startBeatId",
 	"projectFolder",
 	"stemRefs",
 	"cueTrackExport",
+	"clickTrackExport",
 	"mixState"
 ]);
 //#endregion
@@ -317,7 +544,7 @@ function readMagicMismatchError() {
 	return /* @__PURE__ */ new Error("Invalid .smap: wrong magic bytes (expected \"SMAP\" at offset 0). Is this a BarBro .smap file?");
 }
 function readUnsupportedVersionError(found) {
-	return /* @__PURE__ */ new Error(`Invalid .smap: unsupported container version ${found} (only version 1 is supported).`);
+	return /* @__PURE__ */ new Error(`Invalid .smap: unsupported container version ${found} (only version 2 is supported).`);
 }
 function readTruncatedFileError(expectedBytes, actualBytes) {
 	return /* @__PURE__ */ new Error(`Invalid .smap: file is truncated (expected at least ${expectedBytes} bytes from header, got ${actualBytes}).`);
@@ -399,36 +626,27 @@ function smapFileDataToRestorableState(data, songId) {
 	};
 }
 /**
-* Whether we should write an audio chunk: only a **non-empty** `Blob`.
-* `undefined`, missing, or `size === 0` → no audio chunk (`hasAudio = false`, `audioLength = 0`).
-*/
-function shouldWriteAudioChunk(audioBlob) {
-	return audioBlob !== void 0 && audioBlob.size > 0;
-}
-/**
-* Encode one `.smap` file: fixed header + UTF-8 JSON chunk + optional raw audio chunk.
+* Encode one `.smap` file: 16-byte header + UTF-8 JSON chunk.
+*
+* v2 is JSON-only. Audio is never embedded — it lives on disk via the
+* sidecar at `<song>/audio/<filename>` and is referenced by
+* `songMap.audio.originalPath`. The `audioBlob` field on `SmapFileData`
+* exists only so legacy v1 decode results can travel through the same
+* type; the encoder ignores it.
 */
 async function encodeSmapFile(data) {
 	if (data.project.projectFormatVersion !== 1) throw new Error(`Unsupported SongProject format version: ${data.project.projectFormatVersion}`);
 	const jsonBytes = serializeProjectToUtf8(data.project);
-	let audioBytes = null;
-	if (shouldWriteAudioChunk(data.audioBlob)) audioBytes = new Uint8Array(await data.audioBlob.arrayBuffer());
-	const hasAudio = audioBytes !== null && audioBytes.byteLength > 0;
-	const flags = hasAudio ? 1 : 0;
 	const jsonLen = BigInt(jsonBytes.byteLength);
-	const audioLen = hasAudio && audioBytes ? BigInt(audioBytes.byteLength) : 0n;
-	const header = /* @__PURE__ */ new ArrayBuffer(28);
+	const header = /* @__PURE__ */ new ArrayBuffer(16);
 	const view = new DataView(header);
 	new Uint8Array(header, 0, 4).set(MAGIC);
-	view.setUint32(4, 1, true);
-	view.setUint32(8, flags, true);
-	view.setBigUint64(12, jsonLen, true);
-	view.setBigUint64(20, audioLen, true);
-	const total = 28 + jsonBytes.byteLength + (audioBytes ? audioBytes.byteLength : 0);
+	view.setUint32(4, 2, true);
+	view.setBigUint64(8, jsonLen, true);
+	const total = 16 + jsonBytes.byteLength;
 	const out = new Uint8Array(total);
 	out.set(new Uint8Array(header), 0);
-	out.set(jsonBytes, 28);
-	if (audioBytes) out.set(audioBytes, 28 + jsonBytes.byteLength);
+	out.set(jsonBytes, 16);
 	return new Blob([out], { type: SMAP_BLOB_TYPE });
 }
 /**
@@ -438,16 +656,37 @@ async function decodeSmapFile(fileOrBlob) {
 	return decodeSmapBytes(new Uint8Array(await fileOrBlob.arrayBuffer()));
 }
 function decodeSmapBytes(buf) {
-	if (buf.byteLength < 28) throw readTruncatedFileError(28, buf.byteLength);
+	if (buf.byteLength < 8) throw readTruncatedFileError(8, buf.byteLength);
 	validateMagic(buf);
 	const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 	const version = view.getUint32(4, true);
-	if (version !== 1) throw readUnsupportedVersionError(version);
+	if (version === 2) return decodeSmapV2(buf, view);
+	if (version === 1) return decodeSmapV1(buf, view);
+	throw readUnsupportedVersionError(version);
+}
+/**
+* v2 decode: 16-byte header + JSON chunk. No audio.
+*/
+function decodeSmapV2(buf, view) {
+	if (buf.byteLength < 16) throw readTruncatedFileError(16, buf.byteLength);
+	const expectedTotal = 16 + bigintToSafeNumber(view.getBigUint64(8, true), "jsonLength");
+	if (buf.byteLength < expectedTotal) throw readFileShorterThanDeclaredError(expectedTotal, buf.byteLength);
+	if (buf.byteLength > expectedTotal) throw readTrailingGarbageError(buf.byteLength - expectedTotal);
+	return { project: parseProjectJson(buf.subarray(16, expectedTotal)) };
+}
+/**
+* v1 decode (legacy): 28-byte header + JSON chunk + optional audio chunk.
+*
+* Kept so users can still open `.smap` files saved before the v2 cutover.
+* Re-saving any decoded v1 file produces v2 and drops the audio bytes —
+* users will need to re-link the audio file via the sidecar (or the
+* audio chunk will surface in-session for one editing session).
+*/
+function decodeSmapV1(buf, view) {
+	if (buf.byteLength < 28) throw readTruncatedFileError(28, buf.byteLength);
 	const flags = view.getUint32(8, true);
-	const jsonLenBI = view.getBigUint64(12, true);
-	const audioLenBI = view.getBigUint64(20, true);
-	const jsonLen = bigintToSafeNumber(jsonLenBI, "jsonLength");
-	const audioLen = bigintToSafeNumber(audioLenBI, "audioLength");
+	const jsonLen = bigintToSafeNumber(view.getBigUint64(12, true), "jsonLength");
+	const audioLen = bigintToSafeNumber(view.getBigUint64(20, true), "audioLength");
 	const hasAudioFlag = (flags & 1) !== 0;
 	if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError();
 	if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError();
@@ -456,7 +695,20 @@ function decodeSmapBytes(buf) {
 	if (buf.byteLength > expectedTotal) throw readTrailingGarbageError(buf.byteLength - expectedTotal);
 	const jsonStart = 28;
 	const jsonEnd = jsonStart + jsonLen;
-	const jsonBytes = buf.subarray(jsonStart, jsonEnd);
+	const project = parseProjectJson(buf.subarray(jsonStart, jsonEnd));
+	if (!hasAudioFlag) return { project };
+	const audioEnd = jsonEnd + audioLen;
+	const rawAudio = buf.subarray(jsonEnd, audioEnd);
+	const mime = project.songMap.audio?.mimeType ?? "application/octet-stream";
+	return {
+		project,
+		audioBlob: new Blob([new Uint8Array(rawAudio)], { type: mime })
+	};
+}
+/**
+* Decode the UTF-8 JSON chunk into a `SongProject`. Shared by v1 + v2.
+*/
+function parseProjectJson(jsonBytes) {
 	let text;
 	try {
 		text = new TextDecoder("utf-8", { fatal: true }).decode(jsonBytes);
@@ -480,18 +732,9 @@ function decodeSmapBytes(buf) {
 		const msg = e instanceof Error ? e.message : "parse failed";
 		throw new Error(`Invalid .smap: songMap does not parse: ${msg}`);
 	}
-	const project = {
+	return {
 		projectFormatVersion: 1,
 		songMap
-	};
-	if (!hasAudioFlag) return { project };
-	const audioStart = jsonEnd;
-	const audioEnd = audioStart + audioLen;
-	const rawAudio = buf.subarray(audioStart, audioEnd);
-	const mime = project.songMap.audio?.mimeType ?? "application/octet-stream";
-	return {
-		project,
-		audioBlob: new Blob([new Uint8Array(rawAudio)], { type: mime })
 	};
 }
 /** Sanity bound for `jsonLength`: 10 MB. Real projects are <100 KB. */
@@ -507,27 +750,36 @@ var MAX_REASONABLE_JSON_LENGTH = 10 * 1024 * 1024;
 */
 async function readSmapJsonOnly(fileOrBlob) {
 	const totalSize = fileOrBlob.size;
-	if (totalSize < 28) throw readTruncatedFileError(28, totalSize);
-	const headerBuf = new Uint8Array(await fileOrBlob.slice(0, 28).arrayBuffer());
+	const probeLen = Math.min(totalSize, 28);
+	if (probeLen < 8) throw readTruncatedFileError(8, totalSize);
+	const headerBuf = new Uint8Array(await fileOrBlob.slice(0, probeLen).arrayBuffer());
 	validateMagic(headerBuf);
 	const headerView = new DataView(headerBuf.buffer, headerBuf.byteOffset, headerBuf.byteLength);
 	const version = headerView.getUint32(4, true);
-	if (version !== 1) throw readUnsupportedVersionError(version);
-	const flags = headerView.getUint32(8, true);
-	const jsonLenBI = headerView.getBigUint64(12, true);
-	const audioLenBI = headerView.getBigUint64(20, true);
-	const jsonLen = bigintToSafeNumber(jsonLenBI, "jsonLength");
-	const audioLen = bigintToSafeNumber(audioLenBI, "audioLength");
+	let headerLen;
+	let jsonLen;
+	let audioLen = 0;
+	if (version === 2) {
+		if (probeLen < 16) throw readTruncatedFileError(16, totalSize);
+		headerLen = 16;
+		jsonLen = bigintToSafeNumber(headerView.getBigUint64(8, true), "jsonLength");
+	} else if (version === 1) {
+		if (probeLen < 28) throw readTruncatedFileError(28, totalSize);
+		headerLen = 28;
+		const flags = headerView.getUint32(8, true);
+		jsonLen = bigintToSafeNumber(headerView.getBigUint64(12, true), "jsonLength");
+		audioLen = bigintToSafeNumber(headerView.getBigUint64(20, true), "audioLength");
+		const hasAudioFlag = (flags & 1) !== 0;
+		if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError();
+		if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError();
+	} else throw readUnsupportedVersionError(version);
 	if (jsonLen > MAX_REASONABLE_JSON_LENGTH) throw new Error(`Invalid .smap: jsonLength ${jsonLen} exceeds reasonable bound`);
-	const hasAudioFlag = (flags & 1) !== 0;
-	if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError();
-	if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError();
-	const expectedTotal = 28 + jsonLen + audioLen;
+	const expectedTotal = headerLen + jsonLen + audioLen;
 	if (totalSize !== expectedTotal) {
 		if (totalSize < expectedTotal) throw readFileShorterThanDeclaredError(expectedTotal, totalSize);
 		throw readTrailingGarbageError(totalSize - expectedTotal);
 	}
-	const jsonStart = 28;
+	const jsonStart = headerLen;
 	const jsonEnd = jsonStart + jsonLen;
 	const jsonBuf = new Uint8Array(await fileOrBlob.slice(jsonStart, jsonEnd).arrayBuffer());
 	let text;
@@ -591,20 +843,17 @@ function restorableStateFromJsonAndBlob(json, audioBlob, songId) {
 		}
 	};
 }
-/** SHA-256 hex digest; use for `AudioReference.sha256` and blob storage keys. */
-async function sha256HexOfBlob(blob) {
-	const buf = await blob.arrayBuffer();
-	const hash = await crypto.subtle.digest("SHA-256", buf);
-	return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 /**
 * Encode full restorable state as a single binary `.smap` file (see `smapFile.ts`).
+*
+* v2 `.smap` is JSON-only — `state.audioBlob` is intentionally **not**
+* embedded. The user's audio file lives on disk under `<song>/audio/` via
+* the sidecar and is referenced by `songMap.audio.originalPath`. Saving
+* a legacy session that still carries audio bytes simply drops them
+* here; on next load the audio comes back from `originalPath`.
 */
 async function exportRestorableStateAsSmapBlob(state) {
-	return encodeSmapFile({
-		project: songProjectFromRestorableState(state),
-		audioBlob: state.audioBlob ?? void 0
-	});
+	return encodeSmapFile({ project: songProjectFromRestorableState(state) });
 }
 /** Browser download for a `Blob` (e.g. `.smap`). */
 function downloadBlob(blob, filename) {
@@ -621,4 +870,4 @@ function safeExportBasename(title) {
 	return (title.trim() || "song").replace(/[^\w\s-]/g, "").replace(/\s+/g, "-").slice(0, 80) || "song";
 }
 //#endregion
-export { restorableStateFromJsonAndBlob as a, decodeSmapFile as c, smapFileDataToRestorableState as d, parseSongMapJsonString as i, encodeSmapFile as l, exportRestorableStateAsSmapBlob as n, safeExportBasename as o, exportSongMapJson as r, sha256HexOfBlob as s, downloadBlob as t, readSmapJsonOnly as u };
+export { restorableStateFromJsonAndBlob as a, encodeSmapFile as c, validateSongMap as d, defaultCueSettings as f, parseSongMapJsonString as i, readSmapJsonOnly as l, exportRestorableStateAsSmapBlob as n, safeExportBasename as o, emptySongMetadata as p, exportSongMapJson as r, decodeSmapFile as s, downloadBlob as t, smapFileDataToRestorableState as u };
