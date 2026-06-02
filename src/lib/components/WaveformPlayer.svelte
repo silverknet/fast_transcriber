@@ -44,7 +44,10 @@
     zoomViewportWithAnchor,
   } from '$lib/audio/viewportMath'
   import { MAX_AUDIO_DURATION_SEC, MAX_WAVE_WIDTH_PX } from '$lib/constants'
-  import TimelineBeatGrid, { type SuggestionPreview } from '$lib/components/TimelineBeatGrid.svelte'
+  import TimelineBeatGrid, {
+    type AudioBorderTick,
+    type SuggestionPreview,
+  } from '$lib/components/TimelineBeatGrid.svelte'
   import { triggerBeatPulse } from '$lib/stores/beatPulse'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { SECTION_KIND_OPTIONS } from '$lib/songmap/sectionEdit'
@@ -87,6 +90,25 @@
     onResizeBoundary = undefined as
       | ((leftSectionId: string, rightSectionId: string, newBoundaryBarIndex: number) => void)
       | undefined,
+    /** Sections mode: audio-derived candidate borders rendered as ghost ticks. */
+    audioBorderTicks = [] as AudioBorderTick[],
+    /** Sections mode toolbar status text — drives the small badge in the bar. */
+    audioBordersStatus = 'idle' as
+      | 'idle'
+      | 'installing'
+      | 'analyzing'
+      | 'ready'
+      | 'cached'
+      | 'error'
+      | 'unavailable',
+    /** Sections mode toolbar — supplementary error detail to show on hover/inline. */
+    audioBordersError = null as string | null,
+    /** Two-way: user toggle in the toolbar for whether to render the ghost ticks. */
+    showAudioBorders = $bindable(true),
+    /** Sections mode toolbar — invoked when the user clicks "Reanalyze". */
+    onReanalyzeBorders = undefined as (() => void) | undefined,
+    /** Sections mode toolbar — install progress 0..100 while `status === 'installing'`. */
+    sectionsInstallProgress = 0,
     sectionsSelectionBarIds = $bindable<string[]>([]),
     /** Chords mode: multi-selected beats (timeline order). */
     chordsSelectionBeatIds = $bindable<string[]>([]),
@@ -94,6 +116,8 @@
     selectedBeatId = $bindable<string | null>(null),
     /** Resolved + formatted chord label per beat (carry-forward included). */
     chordLabelByBeatId = {} as Record<string, string>,
+    /** Per-bar chord suggestions from cached chroma, keyed by downbeat id (chords mode only). */
+    chordSuggestionByBeatId = {} as Record<string, { label: string; confidence: number }>,
     /** Chords mode: pointer position when user picks a beat (popover anchor). */
     onChordBeatInteract = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
@@ -1627,6 +1651,7 @@
           bind:selectedBeatId
           bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
+          chordSuggestionByBeatId={chordSuggestionByBeatId}
           onSectionsSeekCommit={timelineStripMode === 'sections' ? seekToSectionsSelection : undefined}
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}
           onChordBeatInteract={onChordBeatInteract}
@@ -1635,6 +1660,7 @@
           onDismissSuggestion={onDismissSuggestion}
           onResizeSection={onResizeSection}
           onResizeBoundary={onResizeBoundary}
+          audioBorderTicks={audioBorderTicks}
         />
         {#if beatGridEditing && timelineStripMode === 'grid' && onBarGridAction}
           <div
@@ -1779,6 +1805,69 @@
             <span class="text-muted-foreground text-[11px]">
               Drag to select · Shift+drag adds · Shift+click range · ⌘/Ctrl+click toggle · Esc clears
             </span>
+          </div>
+          <div
+            class="border-foreground/10 bg-muted/10 flex flex-wrap items-center gap-2 border-b px-2 py-1.5 text-xs"
+            role="toolbar"
+            aria-label="Audio-detected section borders"
+          >
+            <label class="text-muted-foreground inline-flex items-center gap-1.5 select-none">
+              <input
+                type="checkbox"
+                bind:checked={showAudioBorders}
+                class="border-input h-3.5 w-3.5"
+              />
+              Show detected borders
+            </label>
+            {#if audioBordersStatus === 'analyzing'}
+              <span class="text-muted-foreground inline-flex items-center gap-1.5">
+                <span
+                  class="border-muted-foreground/30 border-t-foreground/80 size-3 animate-spin rounded-full border"
+                ></span>
+                Analysing borders…
+              </span>
+            {:else if audioBordersStatus === 'installing'}
+              <span class="text-muted-foreground inline-flex items-center gap-1.5">
+                <span
+                  class="border-muted-foreground/30 border-t-foreground/80 size-3 animate-spin rounded-full border"
+                ></span>
+                Installing librosa… {sectionsInstallProgress}%
+              </span>
+            {:else if audioBordersStatus === 'ready' || audioBordersStatus === 'cached'}
+              <span class="text-muted-foreground">
+                {audioBorderTicks.length}
+                {audioBorderTicks.length === 1 ? 'border' : 'borders'} detected
+                {#if audioBordersStatus === 'cached'}<span class="opacity-70">(cached)</span>{/if}
+              </span>
+            {:else if audioBordersStatus === 'error'}
+              <details class="text-destructive">
+                <summary class="cursor-pointer select-none">
+                  Analysis failed{audioBordersError
+                    ? ` — ${audioBordersError.split('\n').pop()?.slice(0, 120) ?? ''}`
+                    : ''}
+                </summary>
+                {#if audioBordersError}
+                  <pre
+                    class="text-muted-foreground bg-muted/30 mt-1 max-h-40 overflow-auto rounded-sm border border-current/10 p-2 text-[10px] leading-tight whitespace-pre-wrap"
+                  >{audioBordersError}</pre>
+                {/if}
+              </details>
+            {:else if audioBordersStatus === 'unavailable'}
+              <span class="text-muted-foreground italic">Sidecar offline — no borders</span>
+            {/if}
+            {#if onReanalyzeBorders && audioBordersStatus !== 'analyzing' && audioBordersStatus !== 'installing'}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                class="h-7 text-[11px]"
+                onclick={() => onReanalyzeBorders?.()}
+              >
+                {audioBordersStatus === 'ready' || audioBordersStatus === 'cached'
+                  ? 'Re-analyse'
+                  : 'Run analysis'}
+              </Button>
+            {/if}
           </div>
         {/if}
       {/if}

@@ -37,6 +37,8 @@ export interface ProjectSongMetadataLite {
   hasCueTrack?: boolean
   /** True iff `<song>/cue/click-track.wav` exists on disk. */
   hasClickTrack?: boolean
+  /** Count-in beats before bar 1 when `cues.mode === 'countIn'`; absent otherwise. */
+  countInBeats?: number
 }
 
 export type ProjectEditingMode = 'project-song' | 'standalone' | null

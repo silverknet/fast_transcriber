@@ -1,46 +1,60 @@
 /**
  * # BarBro `.smap` — single logical project file
  *
- * One `.smap` file is **one project**: a **JSON chunk** (canonical `SongProject`: structure,
- * metadata, `songMap`) plus an **optional binary audio chunk** (trimmed clip bytes only).
- * No zip, no base64-in-JSON for audio.
+ * One `.smap` file is **one project**: a **JSON chunk** (`SongProject` —
+ * structure, metadata, `songMap`). Audio bytes are NOT embedded; the user's
+ * audio file lives separately on disk (referenced by `audio.originalPath`)
+ * and is owned by the desktop sidecar.
  *
- * ## On-disk layout (all integers **little-endian**)
+ * ## On-disk layout — v2 (current writer, integers little-endian)
  *
  * ```
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ HEADER (fixed 28 bytes)                                                  │
+ * │ HEADER (16 bytes)                                                        │
  * │   [0..3]   magic      0x53 0x4D 0x41 0x50  ("SMAP")                    │
- * │   [4..7]   version    uint32  (container version; currently 1)           │
- * │   [8..11]  flags      uint32  (bit 0 = hasAudio; rest reserved)        │
- * │   [12..19] jsonLength uint64  byte length of UTF-8 JSON payload        │
- * │   [20..27] audioLength uint64 byte length of raw audio (0 if no audio)   │
+ * │   [4..7]   version    uint32 = 2                                         │
+ * │   [8..15]  jsonLength uint64  byte length of UTF-8 JSON payload        │
  * ├─────────────────────────────────────────────────────────────────────────┤
  * │ JSON chunk   jsonLength bytes  UTF-8 JSON `SongProject`                │
- * │ Audio chunk  audioLength bytes raw bytes (present iff hasAudio flag)   │
  * └─────────────────────────────────────────────────────────────────────────┘
  * ```
  *
- * **Encode rules (v1):**
- * - `audioBlob` is **missing** or **empty** (`size === 0`) → `hasAudio = false`, `audioLength = 0`, no audio chunk.
- * - `audioBlob` is **non-empty** → `hasAudio = true`, `audioLength = byte length`, append raw bytes after JSON.
+ * ## Legacy v1 layout (decoder still supports — read only)
  *
- * **Decode rules (v1):**
- * - `hasAudio = false` → result has **only** `{ project }` (no `audioBlob` property).
- * - `hasAudio = true` → result includes `audioBlob` with the raw bytes (typed from `songMap.audio.mimeType` when set).
+ * ```
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ HEADER (28 bytes)                                                        │
+ * │   [0..3]   magic       "SMAP"                                            │
+ * │   [4..7]   version     uint32 = 1                                        │
+ * │   [8..11]  flags       uint32 (bit 0 = hasAudio)                         │
+ * │   [12..19] jsonLength  uint64                                            │
+ * │   [20..27] audioLength uint64                                            │
+ * ├─────────────────────────────────────────────────────────────────────────┤
+ * │ JSON chunk   jsonLength bytes                                            │
+ * │ Audio chunk  audioLength bytes (only when hasAudio set)                  │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * ```
+ *
+ * The decoder reads the first 8 bytes (magic + version), branches on version.
+ * The encoder always writes v2. v1 files surface their audio chunk as
+ * `audioBlob` in the decode result so existing in-session playback still
+ * works on legacy file imports — but re-saving as v2 will drop those bytes.
  */
 
 import { parseSongMap } from './parse'
 import type { SongMap } from './types'
 import type { RestorableSongState } from './session'
 
-/** Current on-disk `.smap` container version (binary header `version` field). */
-export const SMAP_FILE_VERSION = 1
+/** Current on-disk `.smap` container version. v2 is JSON-only. */
+export const SMAP_FILE_VERSION = 2
+
+/** Earlier container version. Decoder still supports for legacy file imports. */
+export const SMAP_FILE_VERSION_V1 = 1
 
 /** JSON envelope version inside the UTF-8 payload (`SongProject.projectFormatVersion`). */
 export const SONG_PROJECT_FORMAT_VERSION = 1 as const
 
-/** Flags: bit 0 = payload includes a non-empty audio chunk after JSON. */
+/** Legacy v1 flags: bit 0 = payload included a non-empty audio chunk. */
 export const SMAP_FLAG_HAS_AUDIO = 1 << 0
 
 /** MIME type for downloaded `.smap` files. */
@@ -49,8 +63,10 @@ export const SMAP_BLOB_TYPE = 'application/vnd.barbro.smap'
 /** Magic bytes at file start (ASCII "SMAP"). */
 const MAGIC = new Uint8Array([0x53, 0x4d, 0x41, 0x50])
 
-/** Byte length of the binary header (fixed). */
-export const SMAP_HEADER_BYTE_LENGTH = 28
+/** Byte length of the v2 binary header. */
+export const SMAP_HEADER_BYTE_LENGTH = 16
+/** Byte length of the legacy v1 binary header. */
+export const SMAP_HEADER_BYTE_LENGTH_V1 = 28
 
 export type SongProject = {
   projectFormatVersion: typeof SONG_PROJECT_FORMAT_VERSION
@@ -60,7 +76,10 @@ export type SongProject = {
 
 export type SmapFileData = {
   project: SongProject
-  /** Present only when the file contained an audio chunk (`hasAudio`). */
+  /**
+   * Only populated when decoding a legacy v1 file that carried an embedded
+   * audio chunk. The v2 encoder never emits this. New saves drop it.
+   */
   audioBlob?: Blob
 }
 
@@ -187,56 +206,37 @@ export function smapFileDataToRestorableState(data: SmapFileData, songId?: strin
 }
 
 /**
- * Whether we should write an audio chunk: only a **non-empty** `Blob`.
- * `undefined`, missing, or `size === 0` → no audio chunk (`hasAudio = false`, `audioLength = 0`).
+ * Encode one `.smap` file: 16-byte header + UTF-8 JSON chunk.
+ *
+ * v2 is JSON-only. Audio is never embedded — it lives on disk via the
+ * sidecar at `<song>/audio/<filename>` and is referenced by
+ * `songMap.audio.originalPath`. The `audioBlob` field on `SmapFileData`
+ * exists only so legacy v1 decode results can travel through the same
+ * type; the encoder ignores it.
  */
-function shouldWriteAudioChunk(audioBlob: Blob | undefined): audioBlob is Blob {
-  return audioBlob !== undefined && audioBlob.size > 0
-}
-
-/**
- * Encode one `.smap` file: fixed header + UTF-8 JSON chunk + optional raw audio chunk.
- */
-export async function encodeSmapFile(data: SmapFileData): Promise<Blob> {
+export async function encodeSmapFile(data: { project: SongProject }): Promise<Blob> {
   if (data.project.projectFormatVersion !== SONG_PROJECT_FORMAT_VERSION) {
     throw new Error(`Unsupported SongProject format version: ${data.project.projectFormatVersion}`)
   }
 
   // --- JSON chunk (deterministic UTF-8 bytes) ---
   const jsonBytes = serializeProjectToUtf8(data.project)
-
-  // --- Audio chunk: only if `audioBlob` is present and non-empty ---
-  let audioBytes: Uint8Array | null = null
-  if (shouldWriteAudioChunk(data.audioBlob)) {
-    audioBytes = new Uint8Array(await data.audioBlob.arrayBuffer())
-  }
-
-  const hasAudio = audioBytes !== null && audioBytes.byteLength > 0
-  const flags = hasAudio ? SMAP_FLAG_HAS_AUDIO : 0
   const jsonLen = BigInt(jsonBytes.byteLength)
-  const audioLen = hasAudio && audioBytes ? BigInt(audioBytes.byteLength) : 0n
 
-  // --- Write 28-byte header (little-endian) ---
+  // --- Write 16-byte header (little-endian) ---
   const header = new ArrayBuffer(SMAP_HEADER_BYTE_LENGTH)
   const view = new DataView(header)
   // bytes 0–3: magic "SMAP"
   new Uint8Array(header, 0, 4).set(MAGIC)
   // bytes 4–7: container version
   view.setUint32(4, SMAP_FILE_VERSION, true)
-  // bytes 8–11: flags (bit 0 = hasAudio)
-  view.setUint32(8, flags, true)
-  // bytes 12–19: JSON chunk length
-  view.setBigUint64(12, jsonLen, true)
-  // bytes 20–27: audio chunk length (0 when no audio)
-  view.setBigUint64(20, audioLen, true)
+  // bytes 8–15: JSON chunk length
+  view.setBigUint64(8, jsonLen, true)
 
-  const total = SMAP_HEADER_BYTE_LENGTH + jsonBytes.byteLength + (audioBytes ? audioBytes.byteLength : 0)
+  const total = SMAP_HEADER_BYTE_LENGTH + jsonBytes.byteLength
   const out = new Uint8Array(total)
   out.set(new Uint8Array(header), 0)
   out.set(jsonBytes, SMAP_HEADER_BYTE_LENGTH)
-  if (audioBytes) {
-    out.set(audioBytes, SMAP_HEADER_BYTE_LENGTH + jsonBytes.byteLength)
-  }
 
   return new Blob([out], { type: SMAP_BLOB_TYPE })
 }
@@ -250,42 +250,60 @@ export async function decodeSmapFile(fileOrBlob: Blob): Promise<SmapFileData> {
 }
 
 export function decodeSmapBytes(buf: Uint8Array): SmapFileData {
-  // --- Minimum size: full header ---
+  // Need magic (4) + version (4) before we can branch.
+  if (buf.byteLength < 8) {
+    throw readTruncatedFileError(8, buf.byteLength)
+  }
+  validateMagic(buf)
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const version = view.getUint32(4, true)
+
+  if (version === SMAP_FILE_VERSION) return decodeSmapV2(buf, view)
+  if (version === SMAP_FILE_VERSION_V1) return decodeSmapV1(buf, view)
+  throw readUnsupportedVersionError(version)
+}
+
+/**
+ * v2 decode: 16-byte header + JSON chunk. No audio.
+ */
+function decodeSmapV2(buf: Uint8Array, view: DataView): SmapFileData {
   if (buf.byteLength < SMAP_HEADER_BYTE_LENGTH) {
     throw readTruncatedFileError(SMAP_HEADER_BYTE_LENGTH, buf.byteLength)
   }
-
-  // --- Magic (offset 0) ---
-  validateMagic(buf)
-
-  // Header fields use DataView on the same underlying buffer as `buf` (handles subarray offset).
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-
-  // --- Version (offset 4) ---
-  const version = view.getUint32(4, true)
-  if (version !== SMAP_FILE_VERSION) {
-    throw readUnsupportedVersionError(version)
+  const jsonLen = bigintToSafeNumber(view.getBigUint64(8, true), 'jsonLength')
+  const expectedTotal = SMAP_HEADER_BYTE_LENGTH + jsonLen
+  if (buf.byteLength < expectedTotal) {
+    throw readFileShorterThanDeclaredError(expectedTotal, buf.byteLength)
   }
+  if (buf.byteLength > expectedTotal) {
+    throw readTrailingGarbageError(buf.byteLength - expectedTotal)
+  }
+  const jsonBytes = buf.subarray(SMAP_HEADER_BYTE_LENGTH, expectedTotal)
+  const project = parseProjectJson(jsonBytes)
+  return { project }
+}
 
-  // --- Flags (offset 8); audioLength (offset 20) declared before slicing JSON ---
+/**
+ * v1 decode (legacy): 28-byte header + JSON chunk + optional audio chunk.
+ *
+ * Kept so users can still open `.smap` files saved before the v2 cutover.
+ * Re-saving any decoded v1 file produces v2 and drops the audio bytes —
+ * users will need to re-link the audio file via the sidecar (or the
+ * audio chunk will surface in-session for one editing session).
+ */
+function decodeSmapV1(buf: Uint8Array, view: DataView): SmapFileData {
+  if (buf.byteLength < SMAP_HEADER_BYTE_LENGTH_V1) {
+    throw readTruncatedFileError(SMAP_HEADER_BYTE_LENGTH_V1, buf.byteLength)
+  }
   const flags = view.getUint32(8, true)
-  const jsonLenBI = view.getBigUint64(12, true)
-  const audioLenBI = view.getBigUint64(20, true)
-
-  const jsonLen = bigintToSafeNumber(jsonLenBI, 'jsonLength')
-  const audioLen = bigintToSafeNumber(audioLenBI, 'audioLength')
+  const jsonLen = bigintToSafeNumber(view.getBigUint64(12, true), 'jsonLength')
+  const audioLen = bigintToSafeNumber(view.getBigUint64(20, true), 'audioLength')
 
   const hasAudioFlag = (flags & SMAP_FLAG_HAS_AUDIO) !== 0
+  if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError()
+  if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError()
 
-  if (hasAudioFlag && audioLen === 0) {
-    throw readHasAudioButZeroLengthError()
-  }
-  if (!hasAudioFlag && audioLen > 0) {
-    throw readFlagAudioMismatchError()
-  }
-
-  // --- Total file size must exactly match header + chunks (detect truncation or garbage) ---
-  const expectedTotal = SMAP_HEADER_BYTE_LENGTH + jsonLen + audioLen
+  const expectedTotal = SMAP_HEADER_BYTE_LENGTH_V1 + jsonLen + audioLen
   if (buf.byteLength < expectedTotal) {
     throw readFileShorterThanDeclaredError(expectedTotal, buf.byteLength)
   }
@@ -293,11 +311,23 @@ export function decodeSmapBytes(buf: Uint8Array): SmapFileData {
     throw readTrailingGarbageError(buf.byteLength - expectedTotal)
   }
 
-  // --- Slice JSON UTF-8 bytes ---
-  const jsonStart = SMAP_HEADER_BYTE_LENGTH
+  const jsonStart = SMAP_HEADER_BYTE_LENGTH_V1
   const jsonEnd = jsonStart + jsonLen
-  const jsonBytes = buf.subarray(jsonStart, jsonEnd)
+  const project = parseProjectJson(buf.subarray(jsonStart, jsonEnd))
 
+  if (!hasAudioFlag) return { project }
+
+  const audioEnd = jsonEnd + audioLen
+  const rawAudio = buf.subarray(jsonEnd, audioEnd)
+  const mime = project.songMap.audio?.mimeType ?? 'application/octet-stream'
+  const audioBlob = new Blob([new Uint8Array(rawAudio)], { type: mime })
+  return { project, audioBlob }
+}
+
+/**
+ * Decode the UTF-8 JSON chunk into a `SongProject`. Shared by v1 + v2.
+ */
+function parseProjectJson(jsonBytes: Uint8Array): SongProject {
   let text: string
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(jsonBytes)
@@ -334,22 +364,10 @@ export function decodeSmapBytes(buf: Uint8Array): SmapFileData {
     throw new Error(`Invalid .smap: songMap does not parse: ${msg}`)
   }
 
-  const project: SongProject = {
+  return {
     projectFormatVersion: SONG_PROJECT_FORMAT_VERSION,
     songMap,
   }
-
-  // --- Project-only vs project + audio ---
-  if (!hasAudioFlag) {
-    return { project }
-  }
-
-  const audioStart = jsonEnd
-  const audioEnd = audioStart + audioLen
-  const rawAudio = buf.subarray(audioStart, audioEnd)
-  const mime = project.songMap.audio?.mimeType ?? 'application/octet-stream'
-  const audioBlob = new Blob([new Uint8Array(rawAudio)], { type: mime })
-  return { project, audioBlob }
 }
 
 export function looksLikeSmapFile(bytes: Uint8Array): boolean {
@@ -370,35 +388,49 @@ const MAX_REASONABLE_JSON_LENGTH = 10 * 1024 * 1024
  */
 export async function readSmapJsonOnly(fileOrBlob: Blob): Promise<SongProject> {
   const totalSize = fileOrBlob.size
-  if (totalSize < SMAP_HEADER_BYTE_LENGTH) {
-    throw readTruncatedFileError(SMAP_HEADER_BYTE_LENGTH, totalSize)
+  // Minimum bytes to know magic + version. v2 header (16) is the smallest
+  // valid header; legacy v1 is 28 — we read the larger amount to cover both
+  // versions in a single slice.
+  const probeLen = Math.min(totalSize, SMAP_HEADER_BYTE_LENGTH_V1)
+  if (probeLen < 8) {
+    throw readTruncatedFileError(8, totalSize)
   }
 
-  // Read just the header first.
-  const headerBuf = new Uint8Array(await fileOrBlob.slice(0, SMAP_HEADER_BYTE_LENGTH).arrayBuffer())
+  const headerBuf = new Uint8Array(await fileOrBlob.slice(0, probeLen).arrayBuffer())
   validateMagic(headerBuf)
-
   const headerView = new DataView(headerBuf.buffer, headerBuf.byteOffset, headerBuf.byteLength)
   const version = headerView.getUint32(4, true)
-  if (version !== SMAP_FILE_VERSION) {
+
+  let headerLen: number
+  let jsonLen: number
+  let audioLen = 0
+
+  if (version === SMAP_FILE_VERSION) {
+    if (probeLen < SMAP_HEADER_BYTE_LENGTH) {
+      throw readTruncatedFileError(SMAP_HEADER_BYTE_LENGTH, totalSize)
+    }
+    headerLen = SMAP_HEADER_BYTE_LENGTH
+    jsonLen = bigintToSafeNumber(headerView.getBigUint64(8, true), 'jsonLength')
+  } else if (version === SMAP_FILE_VERSION_V1) {
+    if (probeLen < SMAP_HEADER_BYTE_LENGTH_V1) {
+      throw readTruncatedFileError(SMAP_HEADER_BYTE_LENGTH_V1, totalSize)
+    }
+    headerLen = SMAP_HEADER_BYTE_LENGTH_V1
+    const flags = headerView.getUint32(8, true)
+    jsonLen = bigintToSafeNumber(headerView.getBigUint64(12, true), 'jsonLength')
+    audioLen = bigintToSafeNumber(headerView.getBigUint64(20, true), 'audioLength')
+    const hasAudioFlag = (flags & SMAP_FLAG_HAS_AUDIO) !== 0
+    if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError()
+    if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError()
+  } else {
     throw readUnsupportedVersionError(version)
   }
-
-  const flags = headerView.getUint32(8, true)
-  const jsonLenBI = headerView.getBigUint64(12, true)
-  const audioLenBI = headerView.getBigUint64(20, true)
-  const jsonLen = bigintToSafeNumber(jsonLenBI, 'jsonLength')
-  const audioLen = bigintToSafeNumber(audioLenBI, 'audioLength')
 
   if (jsonLen > MAX_REASONABLE_JSON_LENGTH) {
     throw new Error(`Invalid .smap: jsonLength ${jsonLen} exceeds reasonable bound`)
   }
 
-  const hasAudioFlag = (flags & SMAP_FLAG_HAS_AUDIO) !== 0
-  if (hasAudioFlag && audioLen === 0) throw readHasAudioButZeroLengthError()
-  if (!hasAudioFlag && audioLen > 0) throw readFlagAudioMismatchError()
-
-  const expectedTotal = SMAP_HEADER_BYTE_LENGTH + jsonLen + audioLen
+  const expectedTotal = headerLen + jsonLen + audioLen
   if (totalSize !== expectedTotal) {
     if (totalSize < expectedTotal) {
       throw readFileShorterThanDeclaredError(expectedTotal, totalSize)
@@ -406,7 +438,7 @@ export async function readSmapJsonOnly(fileOrBlob: Blob): Promise<SongProject> {
     throw readTrailingGarbageError(totalSize - expectedTotal)
   }
 
-  const jsonStart = SMAP_HEADER_BYTE_LENGTH
+  const jsonStart = headerLen
   const jsonEnd = jsonStart + jsonLen
   const jsonBuf = new Uint8Array(await fileOrBlob.slice(jsonStart, jsonEnd).arrayBuffer())
 

@@ -6,10 +6,11 @@ import type { BeatClickPoint } from '$lib/audio/debugClickTrack'
 import { computeCountIn } from '$lib/audio/computeCountIn'
 import {
   countInSpeechOutputTimes,
-  firstBarDownbeatBeat,
+  songStartBeat,
   titleCuePreludeSec,
 } from '$lib/audio/cueTrackSpeechSchedule'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
+import { effectiveCountInBeats } from '$lib/songmap/countIn'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { SongMap } from '$lib/songmap/types'
 
@@ -28,9 +29,8 @@ export function mixTimelineClickPoints(
 ): BeatClickPoint[] {
   const preludeSec = titleCuePreludeSec(sm)
   const trim = { startSec: trimStart, endSec: trimEnd }
-  const fd = firstBarDownbeatBeat(sm)
-  const countInBeats =
-    sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0 ? sm.cues.countInBeats : 0
+  const fd = songStartBeat(sm)
+  const countInBeats = effectiveCountInBeats(sm)
   const countInActive = countInBeats > 0 && Boolean(fd)
 
   const out: BeatClickPoint[] = []
@@ -86,8 +86,9 @@ export async function buildSongCueMixWavBlob(
   }
 
   let prependSec = 0
-  if (sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0) {
-    const ci = computeCountIn(sm, sm.cues.countInBeats)
+  const countInBeats = effectiveCountInBeats(sm)
+  if (countInBeats > 0) {
+    const ci = computeCountIn(sm, countInBeats)
     if (ci) prependSec = ci.prependSec
   }
   const preludeSec = titleCuePreludeSec(sm)

@@ -9,7 +9,6 @@
   import { songMap, patchSongMap } from '$lib/stores/songMap'
   import { mergeAnalysisIntoSongMap } from '$lib/songmap/merge'
   import { setAnalyzingSpin } from '$lib/stores/uiAnimations'
-  import type { AnalyzeResponse } from '$lib/server/analysis/contracts'
   import type { SongMap } from '$lib/songmap'
 
   let status = $state<'running' | 'done' | 'error'>('running')
@@ -137,47 +136,23 @@
         trim.endSec,
       )
 
-      // Prefer the local desktop sidecar when the loopback companion is
-      // reachable. Fall back to `/api/analyze` on any failure so the path
-      // stays open for non-desktop users.
-      let analyzedSongMap: SongMap | null = null
-      const useDesktop = get(desktopCompanionStatus).reachable
-
-      if (useDesktop) {
-        const r = await analyzeDownbeatsViaDesktop(trimmedWav)
-        if (r.ok) {
-          try {
-            analyzedSongMap = beatsToSongMap({
-              filename: trimmedWav.name,
-              durationSec: Math.max(0, trim.endSec - trim.startSec),
-              mimeType: trimmedWav.type || 'audio/wav',
-              beats: r.beats,
-            })
-          } catch (e) {
-            console.warn('[analyze] desktop beatsToSongMap failed, falling back to server:', e)
-          }
-        } else {
-          console.warn('[analyze] desktop analyze failed, falling back to server:', r.error)
-        }
+      // Analysis runs exclusively through the desktop sidecar — the
+      // root layout redirects unreachable-sidecar sessions to /download
+      // before they can ever reach this route, so we only need a single
+      // happy path. Any sidecar error throws cleanly to the user.
+      if (!get(desktopCompanionStatus).reachable) {
+        throw new Error('BarBro Desktop sidecar isn’t running. Start it and reload.')
       }
-
-      if (!analyzedSongMap) {
-        const form = new FormData()
-        form.set('file', trimmedWav, trimmedWav.name)
-
-        const res = await fetch('/api/analyze', { method: 'POST', body: form })
-        let data: AnalyzeResponse
-        try {
-          data = (await res.json()) as AnalyzeResponse
-        } catch {
-          throw new Error('Invalid response from server')
-        }
-
-        if (!res.ok || !data.ok) {
-          throw new Error(data.ok === false ? data.error : 'Analysis failed')
-        }
-        analyzedSongMap = data.songMap
+      const r = await analyzeDownbeatsViaDesktop(trimmedWav)
+      if (!r.ok) {
+        throw new Error(`Analysis failed: ${r.error ?? 'unknown sidecar error'}`)
       }
+      const analyzedSongMap: SongMap = beatsToSongMap({
+        filename: trimmedWav.name,
+        durationSec: Math.max(0, trim.endSec - trim.startSec),
+        mimeType: trimmedWav.type || 'audio/wav',
+        beats: r.beats,
+      })
 
       const fragment = {
         bars:  analyzedSongMap.timeline.bars,

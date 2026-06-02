@@ -1,0 +1,40 @@
+name: Desktop release
+
+# Fires only when a `desktop-v*` tag is pushed (e.g. desktop-v0.1.1). The web
+# app deploys independently via Netlify on every push to main and is NOT
+# touched by this workflow — different cadence, different artifact.
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+
+jobs:
+  build-mac:
+    name: Build macOS DMG (arm64 + x64)
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm install
+
+      - name: Build + publish DMG
+        working-directory: desktop
+        env:
+          # electron-builder reads this to upload built artifacts to the
+          # GitHub Release matching the pushed tag. GITHUB_TOKEN is provided
+          # automatically by Actions; we just rename the var.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Skip code signing — no Developer ID yet. Users right-click → Open
+          # to bypass Gatekeeper on first launch.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac --arm64 --x64 --publish always

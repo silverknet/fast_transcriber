@@ -33,10 +33,13 @@ export function patchSongMap(
     if (sess.file) {
       next = mergeAudioReferenceFromSession(next, sess)
     }
-    if (next.cueTrackExport) {
+    if (next.cueTrackExport || next.clickTrackExport) {
       const fp = fingerprintCueTrackInputs(next)
-      if (fp !== next.cueTrackExport.fingerprint) {
+      if (next.cueTrackExport && fp !== next.cueTrackExport.fingerprint) {
         next = { ...next, cueTrackExport: undefined }
+      }
+      if (next.clickTrackExport && fp !== next.clickTrackExport.fingerprint) {
+        next = { ...next, clickTrackExport: undefined }
       }
     }
     const v = validateSongMap(next)

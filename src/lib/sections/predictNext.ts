@@ -69,12 +69,35 @@ function predictBarCount(sections: Section[], kind: SectionKind): number {
  * Predict the kind of the next section given the chronological history.
  * Riff / break are treated as instrumental detours — they don't drive the
  * macro form, so the prediction "looks past" them at what came before.
+ *
+ * Single-best version, retained for backward compatibility with the
+ * `predictNextSection` wrapper. The richer multi-candidate version
+ * `kindCandidates` is what drives the new UI.
  */
 function predictKind(sections: Section[]): { kind: SectionKind; reason: string } | null {
-  if (sections.length === 0) return null
+  const list = kindCandidates(sections)
+  if (list.length === 0) return null
+  return { kind: list[0].kind, reason: list[0].reason }
+}
+
+/** Internal: per-kind candidate with a 0..1 base score and a human reason. */
+type KindCandidate = { kind: SectionKind; score: number; reason: string }
+
+/**
+ * Return *all* plausible next-section kinds, ranked by base score.
+ *
+ * Driven by the last placed section (with riff/break being transparent —
+ * we look past them at the previous "real" driver). Context modifiers
+ * lift / lower scores based on how many of each kind we've already seen.
+ *
+ * Returns `[]` when no kind makes sense (cold start, after outro/custom,
+ * or a song made entirely of riffs).
+ */
+function kindCandidates(sections: Section[]): KindCandidate[] {
+  if (sections.length === 0) return []
 
   const last = sections[sections.length - 1]
-  if (last.kind === 'outro' || last.kind === 'custom') return null
+  if (last.kind === 'outro' || last.kind === 'custom') return []
 
   const counts = countByKind(sections)
   const verseCount = counts.verse ?? 0
@@ -82,7 +105,7 @@ function predictKind(sections: Section[]): { kind: SectionKind; reason: string }
   const hasBridge = (counts.bridge ?? 0) > 0
   const hasPreChorus = (counts.preChorus ?? 0) > 0
 
-  // For riff / break, defer to whatever preceded them (instrumental detour).
+  // Look past riffs/breaks at the previous "structural" section.
   let driver = last
   if (driver.kind === 'riff' || driver.kind === 'break') {
     for (let i = sections.length - 2; i >= 0; i--) {
@@ -92,62 +115,204 @@ function predictKind(sections: Section[]): { kind: SectionKind; reason: string }
         break
       }
     }
-    if (driver === last) return null // entire song is riffs/breaks — give up.
+    if (driver === last) return [] // entirely riffs/breaks
   }
 
+  const out: KindCandidate[] = []
   switch (driver.kind) {
     case 'intro':
-      return { kind: 'verse', reason: 'Intros usually lead into a verse.' }
+      out.push({ kind: 'verse', score: 0.9, reason: 'Intros usually lead into a verse.' })
+      out.push({ kind: 'chorus', score: 0.2, reason: 'Some songs go straight from intro to chorus.' })
+      break
     case 'verse':
-      if (hasPreChorus) {
-        return { kind: 'preChorus', reason: 'You used a pre-chorus earlier — likely the same pattern here.' }
-      }
-      return { kind: 'chorus', reason: 'Verse → chorus is the common move.' }
+      out.push({
+        kind: 'preChorus',
+        score: hasPreChorus ? 0.9 : 0.55,
+        reason: hasPreChorus
+          ? 'You used a pre-chorus earlier — likely the same pattern here.'
+          : 'Verse → pre-chorus is a common pop pattern.',
+      })
+      out.push({ kind: 'chorus', score: 0.7, reason: 'Verse → chorus is the most common move.' })
+      out.push({ kind: 'verse', score: 0.25, reason: 'Two verses back-to-back happens occasionally.' })
+      break
     case 'preChorus':
-      return { kind: 'chorus', reason: 'Pre-chorus → chorus.' }
-    case 'chorus':
-      if (chorusCount >= 2 && !hasBridge) {
-        return { kind: 'bridge', reason: 'Two choruses in — typically a bridge is up next.' }
+      out.push({ kind: 'chorus', score: 0.95, reason: 'Pre-chorus → chorus.' })
+      out.push({ kind: 'verse', score: 0.1, reason: 'Pre-chorus → verse is unusual but possible.' })
+      break
+    case 'chorus': {
+      // When chorusCount ≥ 2 and there's no bridge yet, the bridge is the
+      // dominant signal — make sure it can't be beaten by a verse candidate
+      // riding a strong prior-length match in the cross-product later.
+      const bridgeStrong = chorusCount >= 2 && !hasBridge
+      if (bridgeStrong) {
+        out.push({
+          kind: 'bridge',
+          score: 0.95,
+          reason: 'Two choruses in — typically a bridge is up next.',
+        })
       }
       if (verseCount <= chorusCount) {
-        return { kind: 'verse', reason: 'Back to a verse before the next chorus.' }
+        out.push({
+          kind: 'verse',
+          score: bridgeStrong ? 0.4 : 0.65,
+          reason: 'Back to a verse before the next chorus.',
+        })
       }
-      return { kind: 'chorus', reason: 'Chorus repeats — pop song form.' }
+      out.push({ kind: 'chorus', score: 0.4, reason: 'Chorus repeats — pop song form.' })
+      out.push({ kind: 'outro', score: 0.3, reason: 'Songs often end on or just after a chorus.' })
+      break
+    }
     case 'bridge':
-      return { kind: 'chorus', reason: 'Bridge → final chorus.' }
+      out.push({ kind: 'chorus', score: 0.9, reason: 'Bridge → final chorus.' })
+      out.push({ kind: 'outro', score: 0.2, reason: 'Some songs go bridge → outro.' })
+      break
     case 'solo':
-      return { kind: 'chorus', reason: 'Solo → chorus.' }
+      out.push({ kind: 'chorus', score: 0.7, reason: 'Solo → chorus.' })
+      out.push({ kind: 'verse', score: 0.4, reason: 'Solo → verse is also common.' })
+      break
     default:
-      return null
+      return []
   }
+
+  // Sort by score desc so the cross-product later naturally produces a
+  // sensibly-ordered top-N when length scores are similar.
+  return out.sort((a, b) => b.score - a.score)
 }
 
 /**
- * Public entry point. Returns `null` when:
- *   - the song has no sections (cold start),
- *   - the last section is `outro` / `custom`,
- *   - the predicted range would overrun the timeline.
+ * Audio-derived border. Indices align with `SongMap.timeline.bars`: a border
+ * at `bar: N` means "a new section likely begins at bar N." Produced by the
+ * Python sidecar (`border_suggest.py`), surfaced via `desktopBridge`.
  */
-export function predictNextSection(songMap: SongMap): SectionSuggestion | null {
-  const sections = sortedSections(songMap)
-  const pick = predictKind(sections)
-  if (!pick) return null
+export type AudioBorderHint = { bar: number; confidence: number }
 
-  const bars = predictBarCount(sections, pick.kind)
-  if (bars <= 0) return null
+/** Range (in bars) that an audio-border-derived length must fall into to be trusted. */
+const AUDIO_BARS_MIN = 2
+const AUDIO_BARS_MAX = 16
+/** Confidence floor — below this the predictor falls back to the rule-based length. */
+const AUDIO_CONFIDENCE_FLOOR = 0.35
+
+/** Hard ceiling on how many candidates the UI can sensibly cycle through. */
+const MAX_CANDIDATES = 5
+
+/** Internal: per-length candidate with score + source-of-truth reason. */
+type LengthCandidate = { bars: number; score: number; reason: string }
+
+/**
+ * Length candidates for a given kind: audio borders (if any in range),
+ * the most-frequent prior length for this kind, and the default.
+ * Deduped by `bars`, highest-scored reason wins.
+ */
+function lengthCandidates(
+  sections: Section[],
+  kind: SectionKind,
+  audioBorders: AudioBorderHint[] | undefined,
+  nextStart: number,
+): LengthCandidate[] {
+  const byBars: Map<number, LengthCandidate> = new Map()
+  const add = (cand: LengthCandidate): void => {
+    const existing = byBars.get(cand.bars)
+    if (!existing || cand.score > existing.score) byBars.set(cand.bars, cand)
+  }
+
+  // 1) Audio borders in the [AUDIO_BARS_MIN, AUDIO_BARS_MAX] band after nextStart.
+  if (audioBorders && audioBorders.length > 0) {
+    for (const b of audioBorders) {
+      if (b.confidence < AUDIO_CONFIDENCE_FLOOR) continue
+      const delta = b.bar - nextStart
+      if (delta < AUDIO_BARS_MIN || delta > AUDIO_BARS_MAX) continue
+      add({
+        bars: delta,
+        score: 0.6 + 0.4 * Math.max(0, Math.min(1, b.confidence)),
+        reason: `audio detected a change around bar ${b.bar + 1} (${Math.round(b.confidence * 100)}% confidence)`,
+      })
+    }
+  }
+
+  // 2) Most-frequent prior length for this kind.
+  const prior = predictBarCount(sections, kind)
+  if (prior > 0 && sections.some((s) => s.kind === kind)) {
+    add({
+      bars: prior,
+      score: 0.55,
+      reason: `${prior} bars to match your other ${defaultSectionLabel(kind).toLowerCase()}s`,
+    })
+  }
+
+  // 3) Default for this kind.
+  const def = DEFAULT_BARS[kind]
+  if (def > 0) {
+    add({
+      bars: def,
+      score: 0.4,
+      reason: `${def} bars is a typical ${defaultSectionLabel(kind).toLowerCase()} length`,
+    })
+  }
+
+  return [...byBars.values()].sort((a, b) => b.score - a.score)
+}
+
+/**
+ * Top-ranked next-section candidates. Cross-product of kind candidates ×
+ * length candidates, scored by `kind.score * length.score`, filtered to
+ * candidates that fit the timeline, deduped by `(kind, bars)`, sorted
+ * descending, capped at `MAX_CANDIDATES`.
+ *
+ * Returns `[]` for cold start, after outro / custom, or when no candidate
+ * fits in the remaining bars.
+ */
+export function predictNextSectionCandidates(
+  songMap: SongMap,
+  opts?: { audioBorders?: AudioBorderHint[] },
+): SectionSuggestion[] {
+  const sections = sortedSections(songMap)
+  const kinds = kindCandidates(sections)
+  if (kinds.length === 0) return []
 
   const last = sections[sections.length - 1]
   const nextStart = last.barRange.endBarIndex + 1
-  const nextEnd = nextStart + bars - 1
-  if (nextEnd >= songMap.timeline.bars.length) return null
+  const totalBars = songMap.timeline.bars.length
 
-  const lengthHint =
-    sections.some((s) => s.kind === pick.kind && sectionBarCount(s) === bars)
-      ? ` (${bars} bars to match your other ${defaultSectionLabel(pick.kind).toLowerCase()}s)`
-      : ` (${bars} bars)`
-  return {
-    kind: pick.kind,
-    bars,
-    reason: pick.reason + lengthHint,
+  type Combined = { kind: SectionKind; bars: number; score: number; reason: string }
+  const combined: Combined[] = []
+  for (const k of kinds) {
+    const lengths = lengthCandidates(sections, k.kind, opts?.audioBorders, nextStart)
+    for (const l of lengths) {
+      if (l.bars <= 0) continue
+      const nextEnd = nextStart + l.bars - 1
+      if (nextEnd >= totalBars) continue
+      combined.push({
+        kind: k.kind,
+        bars: l.bars,
+        score: k.score * l.score,
+        reason: `${k.reason} (${l.reason})`,
+      })
+    }
   }
+
+  // Dedupe by (kind, bars), keep the best-scored entry.
+  const byKey: Map<string, Combined> = new Map()
+  for (const c of combined) {
+    const key = `${c.kind}:${c.bars}`
+    const existing = byKey.get(key)
+    if (!existing || c.score > existing.score) byKey.set(key, c)
+  }
+
+  return [...byKey.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_CANDIDATES)
+    .map(({ kind, bars, reason }) => ({ kind, bars, reason }))
+}
+
+/**
+ * Single-best next-section suggestion — thin wrapper around
+ * `predictNextSectionCandidates` returning `candidates[0]` or `null`.
+ * Retained for backward compatibility with existing callers / tests.
+ */
+export function predictNextSection(
+  songMap: SongMap,
+  opts?: { audioBorders?: AudioBorderHint[] },
+): SectionSuggestion | null {
+  const out = predictNextSectionCandidates(songMap, opts)
+  return out[0] ?? null
 }

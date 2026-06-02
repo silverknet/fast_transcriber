@@ -7,10 +7,6 @@
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import { Button } from '$lib/components/ui/button'
   import { MAX_AUDIO_DURATION_SEC } from '$lib/constants'
-  import {
-    encodeReferenceAudio,
-    referenceEncodedFileOkForSession,
-  } from '$lib/audio/encodeReferenceAudio'
   import { sha256HexOfBlob } from '$lib/songmap/persist'
   import { createEmptySongMap, createSongMapFromAudioSession } from '$lib/songmap/factory'
   import { analyzingState } from '$lib/stores/analyzingState'
@@ -127,22 +123,15 @@
     initialMap.metadata.analyzed = false
     setSongMap(initialMap)
 
-    // Encode the full original file to reference MP3 in the background
+    // No re-encoding: the browser decodes the original file directly (any
+    // format Web Audio supports — MP3, WAV, FLAC, etc.). The audio is NOT
+    // embedded in the `.smap`; the desktop sidecar's `<song>/audio/` is the
+    // canonical location.
     encoding = true
     try {
-      const encoded = await encodeReferenceAudio(file)
-      const ok = await referenceEncodedFileOkForSession(encoded)
-      if (ok) {
-        referenceFile = encoded
-      } else {
-        // Fallback: use original file directly (e.g. if lamejs produces near-silent output)
-        referenceFile = new File([file], file.name, { type: file.type })
-      }
-
-      const refSha = await sha256HexOfBlob(encoded).catch(() => null)
+      referenceFile = new File([file], file.name, { type: file.type })
       const origSha = await sha256HexOfBlob(file).catch(() => null)
 
-      // Update audioSession with the full reference file
       audioSession.set({
         file: referenceFile,
         name: file.name,
@@ -150,7 +139,6 @@
         endSec: rangeEnd || 0,
       })
 
-      // Update SongMap with audio info (durationSec will update once waveform is ready)
       patchSongMap((m) => ({
         ...m,
         metadata: { ...m.metadata, title: projectName || 'Untitled' },
@@ -160,12 +148,11 @@
           durationSec: m.audio?.durationSec,
           trim: { startSec: rangeStart, endSec: rangeEnd || 0 },
           source: 'upload',
-          sha256: refSha ?? undefined,
           originalSha256: origSha ?? undefined,
         },
       }))
     } catch (e) {
-      useError = e instanceof Error ? e.message : 'Could not encode audio. Please try again.'
+      useError = e instanceof Error ? e.message : 'Could not load audio. Please try again.'
     } finally {
       encoding = false
     }

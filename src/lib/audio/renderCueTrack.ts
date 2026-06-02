@@ -4,11 +4,13 @@
  */
 import {
   buildCueSpeechEvents,
+  clickWavSongStartSec,
   countInSpeechOutputTimes,
-  firstBarDownbeatBeat,
+  songStartBeat,
   titleCuePreludeSec,
 } from '$lib/audio/cueTrackSpeechSchedule'
 import { computeCountIn } from '$lib/audio/computeCountIn'
+import { effectiveCountInBeats } from '$lib/songmap/countIn'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
 import { fetchDesktopTtsSynthesizeWav } from '$lib/client/desktopBridge'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
@@ -106,8 +108,9 @@ export function cueTrackTotalDurationSec(sm: SongMap): number | null {
   if (sm.timeline.beats.length === 0) return null
 
   let prependSec = 0
-  if (sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0) {
-    const ci = computeCountIn(sm, sm.cues.countInBeats)
+  const countInBeats = effectiveCountInBeats(sm)
+  if (countInBeats > 0) {
+    const ci = computeCountIn(sm, countInBeats)
     if (ci) prependSec = ci.prependSec
   }
   return titleCuePreludeSec(sm) + prependSec + (trim.endSec - trim.startSec)
@@ -115,6 +118,13 @@ export function cueTrackTotalDurationSec(sm: SongMap): number | null {
 
 export type RenderCueTrackResult = {
   blob: Blob
+  /**
+   * Silence + count-in clicks at the start of the WAV before the first
+   * song-aligned beat lands, in seconds. Equals `titleCuePreludeSec(sm) +
+   * computeCountIn(...)?.prependSec`. Exposed so consumers don't recompute
+   * (and risk drift) when storing the value alongside the WAV.
+   */
+  preludeOffsetSec: number
   /** Set when Piper was not used so the user knows spoken lines are missing. */
   speechSkippedReason?: string
 }
@@ -146,11 +156,10 @@ export async function renderCueTrackWavBlob(
   if (sorted.length === 0) throw new Error('Cue track needs at least one beat')
 
   let prependSec = 0
-  let countInBeats = 0
-  if (sm.cues.mode === 'countIn' && sm.cues.countInBeats > 0) {
-    const ci = computeCountIn(sm, sm.cues.countInBeats)
+  const countInBeats = effectiveCountInBeats(sm)
+  if (countInBeats > 0) {
+    const ci = computeCountIn(sm, countInBeats)
     if (ci) prependSec = ci.prependSec
-    countInBeats = sm.cues.countInBeats
   }
 
   const preludeSec = titleCuePreludeSec(sm)
@@ -165,14 +174,21 @@ export async function renderCueTrackWavBlob(
   const trimStart = trim.startSec
   const trimEnd = trim.endSec
 
-  const fd = firstBarDownbeatBeat(sm)
-  const countInActive = countInBeats > 0 && Boolean(fd)
+  // Single load-bearing anchor: where the song start beat lands on the click WAV.
+  // Both the count-in grid and the song-aligned clicks reference this point,
+  // so the relationship "N count-in clicks end exactly one beat before the
+  // song starts" is enforced by construction.
+  const fd = songStartBeat(sm)
+  const songStartSec = clickWavSongStartSec(sm, { preludeSec, prependSec })
+  const countInActive = countInBeats > 0 && Boolean(fd) && songStartSec !== null
 
   if (includeClicks && countInActive) {
+    // Contract: emit exactly `countInBeats` clicks, the last one one beat
+    // before `songStartSec`. `countInSpeechOutputTimes` returns N times by
+    // construction; we mix every one of them (no skipping / clamping).
     const grid = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)
     for (const t of grid) {
       const tClick = preludeSec + t
-      if (tClick < 0 || tClick >= totalSec - 1e-6) continue
       mixClickKernel(data, sampleRate, tClick, false)
     }
   }
@@ -181,7 +197,12 @@ export async function renderCueTrackWavBlob(
     if (b.timeSec < trimStart - 1e-9) continue
     if (b.timeSec >= trimEnd - END_EPS) continue
     if (countInActive && fd && b.timeSec < fd.timeSec) continue
-    const tClick = preludeSec + prependSec + (b.timeSec - trimStart)
+    // Song-click position = songStart + (beat offset from first downbeat).
+    // Equivalent to `preludeSec + prependSec + (b.timeSec − trimStart)` and
+    // sample-aligned with the count-in grid because both share `songStartSec`.
+    const tClick = fd && songStartSec !== null
+      ? songStartSec + (b.timeSec - fd.timeSec)
+      : preludeSec + prependSec + (b.timeSec - trimStart)
     if (tClick < 0 || tClick >= totalSec - 1e-6) continue
     mixClickKernel(data, sampleRate, tClick, b.indexInBar === 0)
   }
@@ -262,6 +283,7 @@ export async function renderCueTrackWavBlob(
     const blob = await audioBufferToWavBlob(buf)
     return {
       blob,
+      preludeOffsetSec: preludeSec + prependSec,
       speechSkippedReason: !includeSpeech || speechOk
         ? undefined
         : `No voice in this file — ${speechFail ?? 'desktop unreachable'}. Run BarBro desktop and set up Piper (TTS debug page).`,

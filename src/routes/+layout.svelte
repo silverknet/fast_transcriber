@@ -146,11 +146,39 @@
     }
   })
 
+  // The /download page is shown ONLY when the sidecar is unreachable — none
+  // of the AppMenuBar / ProjectContextBar actions can work without the
+  // sidecar, so hide them there to keep the page focused on a single CTA.
+  let onDownloadRoute = $derived($page.route?.id === '/download')
+  let showChrome = $derived(!onDownloadRoute)
+
   // Padding offset: AppMenuBar is fixed (~3rem) and ProjectContextBar adds
   // another ~2.5rem on top when active. Page content lives under both.
   let showProjectBar = $derived(
     $projectStore.data !== null && $page.route?.id !== '/project',
   )
+
+  /**
+   * Redirect to `/download` whenever the sidecar isn't reachable — the
+   * desktop sidecar is required for almost every feature (stems, project
+   * I/O, analyzers), so showing a "stuck" UI when it's offline is worse
+   * than a hard route push that surfaces install/start instructions.
+   *
+   * Gate on `lastCheckedAt` so we never redirect on the first frame
+   * (before the initial probe has completed). Skip when already on the
+   * download page to avoid a navigation loop. The 12 s poll continues to
+   * fire on `/download`; once the sidecar wakes up the user navigates
+   * back manually (or via in-page CTAs).
+   */
+  $effect(() => {
+    if (!browser) return
+    const status = $desktopCompanionStatus
+    if (status.reachable) return
+    if (status.lastCheckedAt === null) return // no probe yet
+    const here = $page.route?.id
+    if (here === '/download') return
+    void goto('/download')
+  })
 </script>
 
 <svelte:head>
@@ -159,12 +187,14 @@
 </svelte:head>
 
 <div class="relative min-h-dvh overflow-x-hidden overscroll-x-none font-sans">
-  <div class="relative z-30">
-    <AppMenuBar />
-    <ProjectContextBar />
-  </div>
-  <!-- Fixed header (~3rem) + optional project context bar (~2.5rem). -->
-  <div class={showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
+  {#if showChrome}
+    <div class="relative z-30">
+      <AppMenuBar />
+      <ProjectContextBar />
+    </div>
+  {/if}
+  <!-- AppMenuBar (3rem) + optional project context bar (2.5rem). Bare on /download. -->
+  <div class={!showChrome ? '' : showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
     {#if restoringSession}
       <div class="text-muted-foreground px-4 pt-3 text-sm">Restoring your session...</div>
     {/if}

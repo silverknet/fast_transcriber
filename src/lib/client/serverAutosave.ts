@@ -4,7 +4,6 @@ import {
   exportSongMapJson,
   parseSongMapJsonString,
   restorableStateFromJsonAndBlob,
-  sha256HexOfBlob,
 } from '$lib/songmap/persist'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import { serverAutosaveStatus } from '$lib/stores/serverAutosaveStatus'
@@ -26,7 +25,6 @@ let unsubscribers: (() => void)[] = []
 let fingerprint: string | null = null
 let sessionId: string | null = null
 let lastSavedContentKey = ''
-let lastUploadedAudioSha: string | null = null
 let dirty = false
 
 function writeMeta(m: LocalMeta) {
@@ -109,36 +107,23 @@ async function flushAutosave(manual: boolean): Promise<{ ok: boolean; error?: st
     return { ok: false, error: 'No session' }
   }
 
-  const sess = get(audioSession)
   const json = exportSongMapJson(sm, false)
-
-  const form = new FormData()
-  form.set('songMapJson', json)
-
-  const file = sess.file
-  if (file) {
-    let sha: string | null = null
-    try {
-      sha = await sha256HexOfBlob(file)
-    } catch {
-      sha = null
-    }
-    if (sha && sha !== lastUploadedAudioSha) {
-      form.set('audio', file, file.name || 'audio')
-    }
-  }
 
   serverAutosaveStatus.update((s) => ({ ...s, saving: true, lastError: null }))
 
+  // SongMap JSON only — audio is never sent to the server. The sidecar owns
+  // the user's audio files; the DB just persists the musical document.
   const res = await fetch(`/api/sessions/${sessionId}`, {
     method: 'PUT',
-    headers: { 'X-BarBro-Fingerprint': fingerprint },
-    body: form,
+    headers: {
+      'X-BarBro-Fingerprint': fingerprint,
+      'Content-Type': 'application/json',
+    },
+    body: json,
   })
 
   const payload = (await res.json().catch(() => ({}))) as {
     ok?: boolean
-    audioSha256?: string | null
     updatedAt?: string
     error?: string
   }
@@ -147,10 +132,6 @@ async function flushAutosave(manual: boolean): Promise<{ ok: boolean; error?: st
     const msg = payload.error ?? `Save failed (${res.status})`
     serverAutosaveStatus.update((s) => ({ ...s, saving: false, lastError: msg }))
     return { ok: false, error: msg }
-  }
-
-  if (file && payload.audioSha256) {
-    lastUploadedAudioSha = payload.audioSha256
   }
 
   lastSavedContentKey = contentKey()
@@ -185,7 +166,6 @@ export async function loadServerAutosave(): Promise<{ ok: boolean; error?: strin
   const data = (await res.json()) as {
     ok?: boolean
     songMap?: unknown
-    hasAudio?: boolean
     error?: string
   }
 
@@ -203,16 +183,11 @@ export async function loadServerAutosave(): Promise<{ ok: boolean; error?: strin
     return { ok: false, error: parsed.error }
   }
 
-  let blob: Blob | null = null
-  if (data.hasAudio) {
-    const ar = await fetch(`/api/sessions/${sessionId}/audio?fingerprint=${encodeURIComponent(fingerprint)}`)
-    if (!ar.ok) {
-      return { ok: false, error: 'Saved song references audio, but download failed' }
-    }
-    blob = await ar.blob()
-  }
-
-  const bundle = restorableStateFromJsonAndBlob(jsonStr, blob, sessionId ?? undefined)
+  // No audio comes from the server. Reconstruct the editor state with JSON
+  // only; the user will be prompted to relink the original audio file
+  // through the desktop sidecar (see RelinkAudioBanner work in Phase 3 of
+  // the .smap v2 plan).
+  const bundle = restorableStateFromJsonAndBlob(jsonStr, null, sessionId ?? undefined)
   if (!bundle.ok) {
     return { ok: false, error: bundle.error }
   }
@@ -220,7 +195,6 @@ export async function loadServerAutosave(): Promise<{ ok: boolean; error?: strin
   hydrateRestorableSong(bundle.state)
   lastSavedContentKey = contentKey()
   dirty = false
-  lastUploadedAudioSha = get(songMap)?.audio?.sha256 ?? null
 
   return { ok: true }
 }

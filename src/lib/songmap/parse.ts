@@ -183,6 +183,7 @@ function parseAudio(raw: unknown, path: string): AudioReference {
     },
     sha256: optString(o.sha256),
     originalSha256: optString(o.originalSha256),
+    originalPath: optString(o.originalPath),
     source: reqString(o.source, `${path}.source`) as AudioReference['source'],
   }
 }
@@ -236,18 +237,29 @@ function parseMixState(raw: unknown, path: string): import('./types').MixState |
 function parseCueTrackExport(raw: unknown, path: string): CueTrackExport | undefined {
   if (raw === undefined || raw === null) return undefined
   const o = expectObject(raw, path)
+  // Legacy .smap files written before `preludeOffsetSec` existed are dropped
+  // here — without an explicit offset we'd risk misaligning the .als clip.
+  // The next render will repopulate the field.
+  if (typeof o.preludeOffsetSec !== 'number') return undefined
   const fingerprint = reqString(o.fingerprint, `${path}.fingerprint`)
   const durationSec = reqNum(o.durationSec, `${path}.durationSec`)
   const sampleRate = reqNum(o.sampleRate, `${path}.sampleRate`)
   const generatedAt = reqString(o.generatedAt, `${path}.generatedAt`)
+  const preludeOffsetSec = reqNum(o.preludeOffsetSec, `${path}.preludeOffsetSec`)
   const relativePath = optString(o.relativePath)
   if (!(durationSec > 0)) {
-    throw new SongMapParseError('cueTrackExport.durationSec must be > 0', `${path}.durationSec`)
+    throw new SongMapParseError(`${path}.durationSec must be > 0`, `${path}.durationSec`)
   }
   if (!(sampleRate > 0)) {
-    throw new SongMapParseError('cueTrackExport.sampleRate must be > 0', `${path}.sampleRate`)
+    throw new SongMapParseError(`${path}.sampleRate must be > 0`, `${path}.sampleRate`)
   }
-  return { fingerprint, durationSec, sampleRate, generatedAt, relativePath }
+  if (!(preludeOffsetSec >= 0)) {
+    throw new SongMapParseError(
+      `${path}.preludeOffsetSec must be ≥ 0`,
+      `${path}.preludeOffsetSec`,
+    )
+  }
+  return { fingerprint, durationSec, sampleRate, generatedAt, preludeOffsetSec, relativePath }
 }
 
 function parseMetadata(raw: unknown, path: string): SongMetadata {
@@ -319,11 +331,17 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
       : [],
     cues:
       raw.cues !== undefined && raw.cues !== null ? parseCues(raw.cues, 'cues') : defaultCueSettings(),
+    countInBeats: optNum(raw.countInBeats),
+    startBeatId: optString(raw.startBeatId),
     projectFolder: typeof raw.projectFolder === 'string' ? raw.projectFolder : undefined,
     stemRefs: parseStemRefs(raw.stemRefs),
     cueTrackExport:
       raw.cueTrackExport !== undefined && raw.cueTrackExport !== null
         ? parseCueTrackExport(raw.cueTrackExport, 'cueTrackExport')
+        : undefined,
+    clickTrackExport:
+      raw.clickTrackExport !== undefined && raw.clickTrackExport !== null
+        ? parseCueTrackExport(raw.clickTrackExport, 'clickTrackExport')
         : undefined,
     mixState: parseMixState(raw.mixState, 'mixState'),
   }
@@ -361,8 +379,11 @@ const KNOWN_TOP_KEYS = new Set([
   'sections',
   'harmony',
   'cues',
+  'countInBeats',
+  'startBeatId',
   'projectFolder',
   'stemRefs',
   'cueTrackExport',
+  'clickTrackExport',
   'mixState',
 ])

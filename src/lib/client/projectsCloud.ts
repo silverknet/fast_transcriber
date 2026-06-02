@@ -5,11 +5,9 @@ import {
   exportSongMapJson,
   parseSongMapJsonString,
   restorableStateFromJsonAndBlob,
-  sha256HexOfBlob,
   SONG_PROJECT_FORMAT_VERSION,
 } from '$lib/songmap/persist'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
-import { audioSession } from '$lib/stores/audioSession'
 import { songMap } from '$lib/stores/songMap'
 import { computeBrowserFingerprintHash } from './browserFingerprint'
 
@@ -78,28 +76,20 @@ export async function saveCloudProject(
 
   const fp = await getFingerprint()
   const jsonText = exportSongMapJson(sm, false)
-  const sess = get(audioSession)
   const projectName = name ?? (sm.metadata.title?.trim() || 'Untitled Project')
 
-  const form = new FormData()
-  form.set('songMapJson', jsonText)
-  if (!projectId) form.set('name', projectName)
-
-  const file = sess.file
-  if (file) {
-    try {
-      const sha = await sha256HexOfBlob(file)
-      if (sha) form.set('audio', file, file.name || 'audio')
-    } catch {
-      // skip audio if hashing fails
-    }
+  // SongMap JSON only — audio is never uploaded. The desktop sidecar owns
+  // the user's audio files; the cloud DB only stores musical-document state.
+  const headers = {
+    'X-BarBro-Fingerprint': fp,
+    'Content-Type': 'application/json',
   }
 
   if (projectId) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: 'PUT',
-      headers: { 'X-BarBro-Fingerprint': fp },
-      body: form,
+      headers,
+      body: JSON.stringify({ songMapJson: jsonText }),
     })
     const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
     if (!res.ok || !data.ok) {
@@ -111,8 +101,8 @@ export async function saveCloudProject(
 
   const res = await fetch('/api/projects', {
     method: 'POST',
-    headers: { 'X-BarBro-Fingerprint': fp },
-    body: form,
+    headers,
+    body: JSON.stringify({ name: projectName, songMapJson: jsonText }),
   })
   const data = (await res.json().catch(() => ({}))) as { ok?: boolean; id?: string; error?: string }
   if (!res.ok || !data.ok || !data.id) {
@@ -133,7 +123,6 @@ export async function loadCloudProject(
     ok?: boolean
     name?: string
     songMap?: unknown
-    hasAudio?: boolean
     error?: string
   }
   if (!res.ok || !data.ok) {
@@ -148,16 +137,9 @@ export async function loadCloudProject(
   const parsed = parseSongMapJsonString(jsonStr)
   if (!parsed.ok) return { ok: false, error: parsed.error }
 
-  let blob: Blob | null = null
-  if (data.hasAudio) {
-    const ar = await fetch(
-      `/api/projects/${projectId}/audio?fingerprint=${encodeURIComponent(fp)}`,
-    )
-    if (!ar.ok) return { ok: false, error: 'Audio download failed' }
-    blob = await ar.blob()
-  }
-
-  const bundle = restorableStateFromJsonAndBlob(jsonStr, blob, projectId)
+  // No audio from the server; the user re-links their original file via the
+  // desktop sidecar after the SongMap loads.
+  const bundle = restorableStateFromJsonAndBlob(jsonStr, null, projectId)
   if (!bundle.ok) return { ok: false, error: bundle.error }
 
   hydrateRestorableSong(bundle.state)
@@ -187,7 +169,6 @@ export async function fetchCloudSongAsSmap(
     ok?: boolean
     name?: string
     songMap?: unknown
-    hasAudio?: boolean
     error?: string
   }
   if (!res.ok || !data.ok) {
@@ -201,20 +182,12 @@ export async function fetchCloudSongAsSmap(
   const parsed = parseSongMapJsonString(jsonStr)
   if (!parsed.ok) return { ok: false, error: parsed.error }
 
-  let audioBlob: Blob | undefined = undefined
-  if (data.hasAudio) {
-    const ar = await fetch(
-      `/api/projects/${cloudProjectId}/audio?fingerprint=${encodeURIComponent(fp)}`,
-    )
-    if (!ar.ok) return { ok: false, error: `Audio download failed (${ar.status})` }
-    audioBlob = await ar.blob()
-  }
-
+  // Audio is no longer fetched from the cloud — the .smap is encoded
+  // JSON-only and the user re-links the audio file locally via the sidecar.
   let blob: Blob
   try {
     blob = await encodeSmapFile({
       project: { projectFormatVersion: SONG_PROJECT_FORMAT_VERSION, songMap: parsed.map },
-      audioBlob,
     })
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'Encoding failed' }
