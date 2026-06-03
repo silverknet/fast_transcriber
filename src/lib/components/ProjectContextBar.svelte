@@ -41,7 +41,7 @@
   >
     <Button
       variant="secondary"
-      class="shrink-0 gap-1.5 [&_svg]:translate-y-0.5"
+      class="shrink-0 gap-1.5 shadow-none [&_svg]:translate-y-0.5"
       onclick={() => void backToProject()}
       aria-label="Back to project {projectName}"
     >

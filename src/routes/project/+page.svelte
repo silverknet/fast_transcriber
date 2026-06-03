@@ -14,9 +14,8 @@
   import ProjectSongCard from '$lib/components/ProjectSongCard.svelte'
   import RemoveSongDialog from '$lib/components/RemoveSongDialog.svelte'
   import ExportBackingTrackDialog from '$lib/components/ExportBackingTrackDialog.svelte'
-  import CopyFromCloudDialog from '$lib/components/CopyFromCloudDialog.svelte'
   import SetlistExportDialog from '$lib/components/SetlistExportDialog.svelte'
-  import { Cloud, ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
+  import { ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
   import {
     exportProjectSetAls,
     preflightProjectSetlist,
@@ -56,7 +55,6 @@
   let exportTarget = $state<{ folder: string; title: string } | null>(null)
 
   let smapImportInput = $state<HTMLInputElement | undefined>()
-  let copyFromCloudOpen = $state(false)
 
   /** Single-song expansion: the id of the song whose Set panel is open. */
   let expandedSongId = $state<string | null>(null)
@@ -318,11 +316,6 @@
     }
   }
 
-  function onAddCloud() {
-    actionError = ''
-    copyFromCloudOpen = true
-  }
-
   let songs = $derived($project.data?.songs ?? [])
 </script>
 
@@ -453,10 +446,6 @@
           <DropdownMenuItem class="cursor-pointer" onclick={onAddImportLocal}>
             Import local .smap…
           </DropdownMenuItem>
-          <DropdownMenuItem class="cursor-pointer" onclick={onAddCloud}>
-            <Cloud class="mr-2 size-4" aria-hidden="true" />
-            Copy from cloud…
-          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
@@ -509,8 +498,6 @@
   metadata={exportTarget ? $project.metadataByFolder[exportTarget.folder] : undefined}
   songMap={$songMap}
 />
-
-<CopyFromCloudDialog bind:open={copyFromCloudOpen} />
 
 <SetlistExportDialog
   bind:open={setlistExportOpen}

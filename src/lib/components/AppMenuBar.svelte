@@ -27,17 +27,10 @@
   } from '$lib/songmap/persist'
   import { restorableSongState } from '$lib/songmap/session'
   import { audioSession } from '$lib/stores/audioSession'
-  import { saveServerAutosaveNow } from '$lib/client/serverAutosave'
-  import {
-    getCurrentProject,
-    saveCloudProject,
-  } from '$lib/client/projectsCloud'
-  import LoadProjectDialog from '$lib/components/LoadProjectDialog.svelte'
   import { songMapToMusicXml } from '$lib/export/musicxml'
   import { renderLeadSheetPdf } from '$lib/export/pdfLeadSheet'
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
-  import { serverAutosaveStatus } from '$lib/stores/serverAutosaveStatus'
   import { songMap } from '$lib/stores/songMap'
   import {
     project as projectStore,
@@ -55,7 +48,6 @@
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { onMount } from 'svelte'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
-  import Cloud from '@lucide/svelte/icons/cloud'
   import Monitor from '@lucide/svelte/icons/monitor'
   import Moon from '@lucide/svelte/icons/moon'
   import Music from '@lucide/svelte/icons/music'
@@ -85,34 +77,8 @@
   }
 
   let menuError = $state('')
-  let loadProjectDialogOpen = $state(false)
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
-  let cloudConnected = $derived($serverAutosaveStatus.enabled && !$serverAutosaveStatus.lastError)
-  let lastCheckedLabel = $derived(
-    $serverAutosaveStatus.lastCheckedAt ? $serverAutosaveStatus.lastCheckedAt.slice(11, 19) : '--:--:--',
-  )
-  let lastSavedLabel = $derived(
-    $serverAutosaveStatus.lastSavedAt ? $serverAutosaveStatus.lastSavedAt.slice(11, 19) : '--:--:--',
-  )
-  let currentProjectName = $derived.by(() => {
-    if (!browser) return null
-    try {
-      const raw = localStorage.getItem('barbro_current_project')
-      if (!raw) return null
-      return (JSON.parse(raw) as { name?: string }).name ?? null
-    } catch {
-      return null
-    }
-  })
-
-  let cloudStatusTitle = $derived.by(() => {
-    const times = ` · checked ${lastCheckedLabel} · saved ${lastSavedLabel}`
-    if ($serverAutosaveStatus.saving) return `Cloud: saving…${times}`
-    if (cloudConnected) return `Cloud: connected${times}`
-    return `Cloud: disconnected${$serverAutosaveStatus.lastError ? ` (${$serverAutosaveStatus.lastError})` : ''}${times}`
-  })
-
   let desktopConnected = $derived($desktopCompanionStatus.reachable)
   let desktopCheckedLabel = $derived(
     $desktopCompanionStatus.lastCheckedAt ? $desktopCompanionStatus.lastCheckedAt.slice(11, 19) : '--:--:--',
@@ -199,18 +165,6 @@
     } catch (e) {
       menuError = e instanceof Error ? e.message : 'PDF export failed'
     }
-  }
-
-  async function onSaveToServer() {
-    menuError = ''
-    const current = getCurrentProject()
-    const r = await saveCloudProject(current?.id)
-    if (!r.ok) menuError = r.error ?? 'Cloud save failed'
-  }
-
-  function onRestoreFromServer() {
-    menuError = ''
-    loadProjectDialogOpen = true
   }
 
   async function onImportPicked(e: Event) {
@@ -422,15 +376,6 @@
             Export as PDF…
           </DropdownMenuItem>
           <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
-          <DropdownMenuItem
-            class="cursor-pointer"
-            onclick={() => {
-              void onSaveToServer()
-            }}
-          >
-            {currentProjectName ? `Save to cloud — "${currentProjectName}"` : 'Save current song to cloud'}
-          </DropdownMenuItem>
-          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
           <DropdownMenuItem class="cursor-pointer" onclick={() => void onCloseProject()}>
             Close Project
           </DropdownMenuItem>
@@ -490,51 +435,10 @@
               </DropdownMenuItem>
             {/each}
           {/if}
-          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
-          <DropdownMenuItem
-            class="cursor-pointer"
-            onclick={() => {
-              void onSaveToServer()
-            }}
-          >
-            {currentProjectName ? `Save to cloud — "${currentProjectName}"` : 'Save to cloud'}
-          </DropdownMenuItem>
-          <DropdownMenuItem class="cursor-pointer" onclick={onRestoreFromServer}>
-            Load from cloud…
-          </DropdownMenuItem>
         {/if}
         <DropdownMenuItem class="cursor-pointer" onclick={() => goto('/download')}>
           Download desktop app…
         </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-
-    <DropdownMenu>
-      <DropdownMenuTrigger>
-        {#snippet child({ props })}
-          <Button variant="outline" size="sm" class="h-8 gap-1 px-2.5" {...props}>
-            Edit
-            <ChevronDown class="size-3.5 opacity-60" aria-hidden="true" />
-          </Button>
-        {/snippet}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" class="min-w-[10rem]">
-        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Undo (coming soon)</DropdownMenuItem>
-        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Redo (coming soon)</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-
-    <DropdownMenu>
-      <DropdownMenuTrigger>
-        {#snippet child({ props })}
-          <Button variant="outline" size="sm" class="h-8 gap-1 px-2.5" {...props}>
-            View
-            <ChevronDown class="size-3.5 opacity-60" aria-hidden="true" />
-          </Button>
-        {/snippet}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" class="min-w-[10rem]">
-        <DropdownMenuItem class="cursor-not-allowed opacity-50" disabled>Zoom controls (coming soon)</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>
@@ -550,17 +454,6 @@
     >
       <Monitor class="size-4" aria-hidden="true" />
     </a>
-    <span
-      class="inline-flex size-8 items-center justify-center border-2 {cloudConnected
-        ? 'border-emerald-600 bg-emerald-100 text-emerald-800 dark:border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200'
-        : 'border-rose-600 bg-rose-100 text-rose-800 dark:border-rose-300 dark:bg-rose-950 dark:text-rose-200'} {$serverAutosaveStatus.saving
-        ? 'animate-pulse'
-        : ''}"
-      title={cloudStatusTitle}
-      aria-label={cloudStatusTitle}
-    >
-      <Cloud class="size-4" aria-hidden="true" />
-    </span>
     <Button
       type="button"
       variant="outline"
@@ -575,17 +468,6 @@
         <Moon class="size-4" />
       {/if}
     </Button>
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      class="h-8"
-      onclick={() => {
-        debugOpen = true
-      }}
-    >
-      Inspect JSON
-    </Button>
     {#if !isInProjectMode}
       <Button
         type="button"
@@ -599,6 +481,17 @@
       </Button>
     {/if}
     {#if import.meta.env.DEV}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        class="h-8 opacity-50"
+        onclick={() => {
+          debugOpen = true
+        }}
+      >
+        JSON
+      </Button>
       <Button
         type="button"
         variant="outline"
@@ -627,8 +520,6 @@
     onchange={onImportPicked}
   />
 </header>
-
-<LoadProjectDialog bind:open={loadProjectDialogOpen} />
 
 <Dialog bind:open={debugOpen}>
   <DialogContent

@@ -925,8 +925,8 @@ async function handleProjectSongAudioRelink(req, res, cors) {
     const songFolder = validateRelSongFolder(body.songFolder)
     const defaultName = typeof body.defaultName === 'string' ? body.defaultName : null
 
-    const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? undefined
-    const dlg = await dialog.showOpenDialog(parent, {
+    focusSidecarApp()
+    const dlg = await dialog.showOpenDialog({
       title: 'Locate audio file',
       properties: ['openFile'],
       filters: [
@@ -1330,23 +1330,47 @@ async function handleProjectSongRemove(req, res, cors) {
  * Request body (optional JSON): `{ title?: string; defaultPath?: string }`
  * Response: `{ ok: true, path } | { ok: false, cancelled: true } | { ok: false, error }`
  */
+/**
+ * Bring the headless sidecar app to focus so the next OS dialog appears
+ * on top instead of behind the user's browser.
+ */
+function focusSidecarApp() {
+  try {
+    if (process.platform === 'darwin' && app.dock && !app.dock.isVisible()) {
+      app.dock.show().catch(() => {})
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    app.focus({ steal: true })
+  } catch {
+    /* older Electron — no steal option */
+  }
+}
+
 async function handlePickFolder(req, res, cors) {
+  logInfo('pick-folder: request received')
   const body = await readRequestJson(req)
   const title = typeof body?.title === 'string' ? body.title : 'Select folder'
   const defaultPath = typeof body?.defaultPath === 'string' ? body.defaultPath : undefined
   try {
-    const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? undefined
-    const r = await dialog.showOpenDialog(parent, {
+    focusSidecarApp()
+    logInfo('pick-folder: showing dialog')
+    const r = await dialog.showOpenDialog({
       title,
       defaultPath,
       properties: ['openDirectory', 'createDirectory'],
     })
+    logInfo(`pick-folder: dialog returned canceled=${r.canceled} paths=${r.filePaths.length}`)
     if (r.canceled || !r.filePaths[0]) {
       sendJson(res, 200, { ok: false, cancelled: true }, cors)
       return
     }
     sendJson(res, 200, { ok: true, path: r.filePaths[0] }, cors)
   } catch (e) {
+    const msg = e instanceof Error ? `${e.message}\n${e.stack}` : String(e)
+    logError(`pick-folder: dialog threw: ${msg}`)
     sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
   }
 }

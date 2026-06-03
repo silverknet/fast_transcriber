@@ -9,7 +9,6 @@
   import { page } from '$app/stores'
   import { project as projectStore } from '$lib/stores/project'
   import { probeDesktopCompanion } from '$lib/client/desktopBeacon'
-  import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
   import {
     ACTIVE_SONG_ID_KEY,
@@ -20,9 +19,6 @@
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
 
-  let { data } = $props<{ data: { savedSessionId: string | null } }>()
-
-  let restoringSession = $state(false)
   let companionPollId: ReturnType<typeof setInterval> | null = null
   let activeSongUnsub: (() => void) | null = null
 
@@ -46,18 +42,31 @@
    * project is identified by `localStorage[barbro::lastProjectPath]` and
    * re-hydrated via the desktop sidecar. Silent on failure — sidecar may
    * be offline, project folder may be gone, etc.
+   *
+   * Landing route after a successful restore:
+   *  - had an active song that loaded into the editor → `/edit`
+   *  - otherwise, if we were sitting on the import page (`/`) → `/project`
+   *  - any other route stays put (user explicitly nav'd there).
    */
   async function restoreLastProjectIfAny(pendingActiveSongId: string | null) {
     if (get(projectStore).data) return
     try {
       const restored = await tryRestoreLastProject()
       if (!restored) return
+      let openedSong = false
       if (
         pendingActiveSongId &&
         restored.songs.some((s) => s.id === pendingActiveSongId) &&
         !get(songMap)
       ) {
         await loadProjectSongIntoEditor(pendingActiveSongId)
+        openedSong = true
+      }
+      const here = get(page).route?.id
+      if (openedSong && here !== '/edit') {
+        await goto('/edit', { replaceState: true })
+      } else if (!openedSong && here === '/') {
+        await goto('/project', { replaceState: true })
       }
     } catch {
       /* silent — user can re-open from the File menu */
@@ -68,7 +77,6 @@
     if (!browser) return
     void pollDesktopCompanion()
     companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
-    startServerAutosave()
     startProjectAutosave()
 
     // Read pending active-song id BEFORE attaching the subscriber so its
@@ -98,26 +106,6 @@
         /* localStorage may be disabled */
       }
     })
-
-    // Server-side song autosave restoration. Wrapped in try/finally so the
-    // indicator always clears even on errors.
-    if (isAnalyzed(get(songMap))) return
-    if (!data.savedSessionId) return
-    restoringSession = true
-    void (async () => {
-      try {
-        const r = await loadServerAutosave()
-        if (!r.ok) return
-        const sm = get(songMap)
-        if (sm && isAnalyzed(sm)) {
-          await goto('/edit', { replaceState: true })
-        }
-      } catch {
-        /* swallow */
-      } finally {
-        restoringSession = false
-      }
-    })()
   })
 
   onDestroy(() => {
@@ -128,7 +116,6 @@
       }
       activeSongUnsub?.()
       activeSongUnsub = null
-      stopServerAutosave()
       stopProjectAutosave()
     }
   })
@@ -195,9 +182,6 @@
   {/if}
   <!-- AppMenuBar (3rem) + optional project context bar (2.5rem). Bare on /download. -->
   <div class={!showChrome ? '' : showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
-    {#if restoringSession}
-      <div class="text-muted-foreground px-4 pt-3 text-sm">Restoring your session...</div>
-    {/if}
     <slot />
   </div>
 </div>
