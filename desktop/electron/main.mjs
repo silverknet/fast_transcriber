@@ -87,7 +87,7 @@ const MAX_REQUEST_BYTES = 200 * 1024 * 1024
  * Terminal jobs (`done`/`cancelled`/`error`) keep their temp dir until the
  * web client fetches the stems and calls `DELETE`, or the 30-min TTL fires.
  *
- * @typedef {'queued' | 'running' | 'done' | 'cancelled' | 'error'} JobState
+ * @typedef {'queued' | 'running' | 'paused' | 'done' | 'cancelled' | 'error'} JobState
  *
  * @typedef {Object} StemsJob
  * @property {string} jobId
@@ -925,8 +925,8 @@ async function handleProjectSongAudioRelink(req, res, cors) {
     const songFolder = validateRelSongFolder(body.songFolder)
     const defaultName = typeof body.defaultName === 'string' ? body.defaultName : null
 
-    const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? undefined
-    const dlg = await dialog.showOpenDialog(parent, {
+    focusSidecarApp()
+    const dlg = await dialog.showOpenDialog({
       title: 'Locate audio file',
       properties: ['openFile'],
       filters: [
@@ -1330,23 +1330,47 @@ async function handleProjectSongRemove(req, res, cors) {
  * Request body (optional JSON): `{ title?: string; defaultPath?: string }`
  * Response: `{ ok: true, path } | { ok: false, cancelled: true } | { ok: false, error }`
  */
+/**
+ * Bring the headless sidecar app to focus so the next OS dialog appears
+ * on top instead of behind the user's browser.
+ */
+function focusSidecarApp() {
+  try {
+    if (process.platform === 'darwin' && app.dock && !app.dock.isVisible()) {
+      app.dock.show().catch(() => {})
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    app.focus({ steal: true })
+  } catch {
+    /* older Electron — no steal option */
+  }
+}
+
 async function handlePickFolder(req, res, cors) {
+  logInfo('pick-folder: request received')
   const body = await readRequestJson(req)
   const title = typeof body?.title === 'string' ? body.title : 'Select folder'
   const defaultPath = typeof body?.defaultPath === 'string' ? body.defaultPath : undefined
   try {
-    const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? undefined
-    const r = await dialog.showOpenDialog(parent, {
+    focusSidecarApp()
+    logInfo('pick-folder: showing dialog')
+    const r = await dialog.showOpenDialog({
       title,
       defaultPath,
       properties: ['openDirectory', 'createDirectory'],
     })
+    logInfo(`pick-folder: dialog returned canceled=${r.canceled} paths=${r.filePaths.length}`)
     if (r.canceled || !r.filePaths[0]) {
       sendJson(res, 200, { ok: false, cancelled: true }, cors)
       return
     }
     sendJson(res, 200, { ok: true, path: r.filePaths[0] }, cors)
   } catch (e) {
+    const msg = e instanceof Error ? `${e.message}\n${e.stack}` : String(e)
+    logError(`pick-folder: dialog threw: ${msg}`)
     sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
   }
 }
@@ -1998,16 +2022,20 @@ async function handleCancelJob(res, cors, jobId) {
     return
   }
 
-  if (job.state === 'running') {
+  if (job.state === 'running' || job.state === 'paused') {
+    const wasPaused = job.state === 'paused'
     job.state = 'cancelled'
     job.lastErrorMsg = 'Cancelled mid-run'
     emitJobEvent(job, { type: 'state', state: 'cancelled' })
     try {
+      // A SIGSTOPped process won't act on SIGTERM until it's resumed —
+      // SIGCONT first, then SIGTERM, otherwise cancel-from-paused hangs.
+      if (wasPaused) job.child?.kill('SIGCONT')
       job.child?.kill('SIGTERM')
     } catch {
       /* ignore */
     }
-    logInfo(`stems: job ${jobId.slice(0, 8)} cancellation signal sent (running)`)
+    logInfo(`stems: job ${jobId.slice(0, 8)} cancellation signal sent (${wasPaused ? 'was paused' : 'running'})`)
     sendJson(res, 200, { ok: true, state: 'cancelled' }, cors)
     return
   }
@@ -2015,6 +2043,76 @@ async function handleCancelJob(res, cors, jobId) {
   // Terminal: act as cleanup.
   await destroyStemsJob(jobId)
   sendJson(res, 200, { ok: true, state: 'destroyed' }, cors)
+}
+
+/**
+ * `POST /native/jobs/:jobId/pause` — suspend a running Demucs subprocess
+ * via SIGSTOP. CPU/GPU drop to zero immediately; the kernel pipe holds
+ * any pending stdout until SIGCONT.
+ *
+ * Limitations:
+ *  - macOS/Linux only (Windows ignores POSIX signals on `child.kill`).
+ *  - Does NOT survive sidecar/app quit — the subprocess dies with us.
+ *  - The queue worker still treats the slot as occupied while paused, so
+ *    other queued jobs wait their turn. Cancel the paused job first if
+ *    you'd rather let the next one through.
+ */
+async function handlePauseJob(res, cors, jobId) {
+  const job = stemsJobs.get(jobId)
+  if (!job) {
+    sendJson(res, 404, { ok: false, error: 'Unknown jobId' }, cors)
+    return
+  }
+  if (job.state !== 'running') {
+    sendJson(res, 409, { ok: false, error: `Cannot pause from state '${job.state}'` }, cors)
+    return
+  }
+  if (!job.child) {
+    sendJson(res, 409, { ok: false, error: 'No active child process' }, cors)
+    return
+  }
+  try {
+    job.child.kill('SIGSTOP')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+    return
+  }
+  job.state = 'paused'
+  emitJobEvent(job, { type: 'state', state: 'paused' })
+  logInfo(`stems: job ${jobId.slice(0, 8)} paused`)
+  sendJson(res, 200, { ok: true, state: 'paused' }, cors)
+}
+
+/**
+ * `POST /native/jobs/:jobId/resume` — thaw a paused Demucs subprocess via
+ * SIGCONT. Buffered stdout drains naturally as Demucs writes new lines.
+ */
+async function handleResumeJob(res, cors, jobId) {
+  const job = stemsJobs.get(jobId)
+  if (!job) {
+    sendJson(res, 404, { ok: false, error: 'Unknown jobId' }, cors)
+    return
+  }
+  if (job.state !== 'paused') {
+    sendJson(res, 409, { ok: false, error: `Cannot resume from state '${job.state}'` }, cors)
+    return
+  }
+  if (!job.child) {
+    sendJson(res, 409, { ok: false, error: 'No active child process' }, cors)
+    return
+  }
+  try {
+    job.child.kill('SIGCONT')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+    return
+  }
+  job.state = 'running'
+  emitJobEvent(job, { type: 'state', state: 'running' })
+  logInfo(`stems: job ${jobId.slice(0, 8)} resumed`)
+  sendJson(res, 200, { ok: true, state: 'running' }, cors)
 }
 
 /**
@@ -2853,6 +2951,8 @@ function startBeaconServer() {
 
     // /native/jobs                           (GET)   — list
     // /native/jobs/:jobId/events             (GET)   — NDJSON stream subscription
+    // /native/jobs/:jobId/pause              (POST)  — SIGSTOP the child
+    // /native/jobs/:jobId/resume             (POST)  — SIGCONT the child
     // /native/jobs/:jobId                    (DELETE) — cancel
     if (req.method === 'GET' && (req.url === '/native/jobs' || req.url?.startsWith('/native/jobs?'))) {
       handleListJobs(res, cors)
@@ -2864,6 +2964,14 @@ function startBeaconServer() {
       const sub = jobsMatch[2]
       if (req.method === 'GET' && sub === 'events') {
         handleJobEvents(req, res, cors, jobId)
+        return
+      }
+      if (req.method === 'POST' && sub === 'pause') {
+        void handlePauseJob(res, cors, jobId)
+        return
+      }
+      if (req.method === 'POST' && sub === 'resume') {
+        void handleResumeJob(res, cors, jobId)
         return
       }
       if (req.method === 'DELETE' && !sub) {
@@ -2931,7 +3039,9 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/separate-stems        (returns jobId immediately; queue runs serially)`)
   logInfo(`  GET    /native/jobs`)
   logInfo(`  GET    /native/jobs/:jobId/events    (NDJSON stream + replay)`)
-  logInfo(`  DELETE /native/jobs/:jobId           (cancel queued or running)`)
+  logInfo(`  POST   /native/jobs/:jobId/pause     (SIGSTOP the Demucs child)`)
+  logInfo(`  POST   /native/jobs/:jobId/resume    (SIGCONT to thaw)`)
+  logInfo(`  DELETE /native/jobs/:jobId           (cancel queued / running / paused)`)
   logInfo(`  GET    /native/stems/:jobId/:filename`)
   logInfo(`  DELETE /native/stems/:jobId          (cleanup after fetch)`)
   logInfo(`  GET    /native/setup/stems/status    (check Demucs venv readiness)`)

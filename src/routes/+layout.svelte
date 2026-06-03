@@ -9,7 +9,6 @@
   import { page } from '$app/stores'
   import { project as projectStore } from '$lib/stores/project'
   import { probeDesktopCompanion } from '$lib/client/desktopBeacon'
-  import { loadServerAutosave, startServerAutosave, stopServerAutosave } from '$lib/client/serverAutosave'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
   import {
     ACTIVE_SONG_ID_KEY,
@@ -19,12 +18,29 @@
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
+  import { userStore } from '$lib/stores/user'
+  import { getSupabaseBrowserClient } from '$lib/client/supabase/browserClient'
+  import { invalidateAll } from '$app/navigation'
 
-  let { data } = $props<{ data: { savedSessionId: string | null } }>()
+  // Server-resolved layout data (includes `user` from +layout.server.ts).
+  // Using `<slot />` below for parent-content rendering — Svelte 5 still
+  // accepts it for now; the slot→snippet migration is a separate task.
+  let { data } = $props<{
+    data: {
+      user: { id: string; email: string | null; name: string | null; avatarUrl: string | null } | null
+    }
+  }>()
 
-  let restoringSession = $state(false)
+  // Mirror the server-resolved user into the global store on every nav.
+  // SvelteKit re-runs `+layout.server.ts` on every navigation, so this
+  // stays current as the cookie state changes.
+  $effect(() => {
+    userStore.set(data.user)
+  })
+
   let companionPollId: ReturnType<typeof setInterval> | null = null
   let activeSongUnsub: (() => void) | null = null
+  let authUnsub: (() => void) | null = null
 
   async function pollDesktopCompanion() {
     const r = await probeDesktopCompanion()
@@ -46,18 +62,36 @@
    * project is identified by `localStorage[barbro::lastProjectPath]` and
    * re-hydrated via the desktop sidecar. Silent on failure — sidecar may
    * be offline, project folder may be gone, etc.
+   *
+   * Landing route after a successful restore:
+   *  - had an active song that loaded into the editor → `/edit`
+   *  - otherwise, if we were sitting on the import page (`/`) → `/project`
+   *  - any other route stays put (user explicitly nav'd there).
    */
   async function restoreLastProjectIfAny(pendingActiveSongId: string | null) {
     if (get(projectStore).data) return
     try {
       const restored = await tryRestoreLastProject()
       if (!restored) return
+      let openedSong = false
       if (
         pendingActiveSongId &&
         restored.songs.some((s) => s.id === pendingActiveSongId) &&
         !get(songMap)
       ) {
         await loadProjectSongIntoEditor(pendingActiveSongId)
+        openedSong = true
+      }
+      const here = get(page).route?.id
+      // Never yank the user away from the auth flow — they came here for
+      // a reason and an auto-restore should not steal focus from sign-in
+      // or the OAuth callback round-trip.
+      const onAuthRoute = here === '/login' || here?.startsWith('/auth')
+      if (onAuthRoute) return
+      if (openedSong && here !== '/edit') {
+        await goto('/edit', { replaceState: true })
+      } else if (!openedSong && here === '/') {
+        await goto('/project', { replaceState: true })
       }
     } catch {
       /* silent — user can re-open from the File menu */
@@ -68,8 +102,21 @@
     if (!browser) return
     void pollDesktopCompanion()
     companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
-    startServerAutosave()
     startProjectAutosave()
+
+    // Subscribe to client-side Supabase auth events (sign-in via OAuth
+    // callback, sign-out, token refresh) and re-run the server load so
+    // `data.user` reflects the new state without a full page reload.
+    // The `$effect` above will then mirror the new user into `userStore`.
+    try {
+      const sb = getSupabaseBrowserClient()
+      const { data: { subscription } } = sb.auth.onAuthStateChange(() => {
+        void invalidateAll()
+      })
+      authUnsub = () => subscription.unsubscribe()
+    } catch {
+      // Supabase env not configured — fine, app keeps working signed-out.
+    }
 
     // Read pending active-song id BEFORE attaching the subscriber so its
     // synchronous initial emit doesn't overwrite localStorage.
@@ -98,26 +145,6 @@
         /* localStorage may be disabled */
       }
     })
-
-    // Server-side song autosave restoration. Wrapped in try/finally so the
-    // indicator always clears even on errors.
-    if (isAnalyzed(get(songMap))) return
-    if (!data.savedSessionId) return
-    restoringSession = true
-    void (async () => {
-      try {
-        const r = await loadServerAutosave()
-        if (!r.ok) return
-        const sm = get(songMap)
-        if (sm && isAnalyzed(sm)) {
-          await goto('/edit', { replaceState: true })
-        }
-      } catch {
-        /* swallow */
-      } finally {
-        restoringSession = false
-      }
-    })()
   })
 
   onDestroy(() => {
@@ -128,7 +155,8 @@
       }
       activeSongUnsub?.()
       activeSongUnsub = null
-      stopServerAutosave()
+      authUnsub?.()
+      authUnsub = null
       stopProjectAutosave()
     }
   })
@@ -195,9 +223,6 @@
   {/if}
   <!-- AppMenuBar (3rem) + optional project context bar (2.5rem). Bare on /download. -->
   <div class={!showChrome ? '' : showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
-    {#if restoringSession}
-      <div class="text-muted-foreground px-4 pt-3 text-sm">Restoring your session...</div>
-    {/if}
     <slot />
   </div>
 </div>

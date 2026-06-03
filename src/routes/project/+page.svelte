@@ -2,8 +2,6 @@
   import { onMount } from 'svelte'
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
-  import { page } from '$app/stores'
-  import { get } from 'svelte/store'
   import { Button } from '$lib/components/ui/button'
   import {
     DropdownMenu,
@@ -14,9 +12,9 @@
   import ProjectSongCard from '$lib/components/ProjectSongCard.svelte'
   import RemoveSongDialog from '$lib/components/RemoveSongDialog.svelte'
   import ExportBackingTrackDialog from '$lib/components/ExportBackingTrackDialog.svelte'
-  import CopyFromCloudDialog from '$lib/components/CopyFromCloudDialog.svelte'
   import SetlistExportDialog from '$lib/components/SetlistExportDialog.svelte'
-  import { Cloud, ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
+  import StemsDialog from '$lib/components/StemsDialog.svelte'
+  import { ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
   import {
     exportProjectSetAls,
     preflightProjectSetlist,
@@ -55,11 +53,10 @@
   let exportDialogOpen = $state(false)
   let exportTarget = $state<{ folder: string; title: string } | null>(null)
 
-  let smapImportInput = $state<HTMLInputElement | undefined>()
-  let copyFromCloudOpen = $state(false)
+  let stemsDialogOpen = $state(false)
+  let stemsTarget = $state<ProjectSongEntry | null>(null)
 
-  /** Single-song expansion: the id of the song whose Set panel is open. */
-  let expandedSongId = $state<string | null>(null)
+  let smapImportInput = $state<HTMLInputElement | undefined>()
 
   /** Refresh button state. */
   let refreshing = $state(false)
@@ -156,14 +153,6 @@
           // we were elsewhere appear right away.
           await refreshProjectInfo()
         }
-        // Songs are collapsed by default — the overview is the point of
-        // this view. Only auto-expand when the URL says so.
-        const url = get(page).url
-        const wantExpand = url.searchParams.get('expand')
-        const songs = $project.data?.songs ?? []
-        if (wantExpand && songs.some((s) => s.id === wantExpand)) {
-          expandedSongId = wantExpand
-        }
         // Hydrate the in-flight sidecar jobs into the store so the active
         // job pill renders. We no longer need to "finalize" anything — the
         // sidecar wrote stems straight into the project folder, and
@@ -201,15 +190,16 @@
     }
   }
 
-  async function onToggleExpand(songId: string) {
+  async function onOpenStems(entry: ProjectSongEntry) {
     actionError = ''
-    if (expandedSongId === songId) {
-      expandedSongId = null
-      return
-    }
     try {
-      await loadProjectSongIntoEditor(songId)
-      expandedSongId = songId
+      // Load the song so $songMap (and therefore audio.originalPath) reflects
+      // this entry by the time StemsDialog renders the splitter.
+      if ($project.activeSongId !== entry.id) {
+        await loadProjectSongIntoEditor(entry.id)
+      }
+      stemsTarget = entry
+      stemsDialogOpen = true
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'Could not load song'
     }
@@ -318,11 +308,6 @@
     }
   }
 
-  function onAddCloud() {
-    actionError = ''
-    copyFromCloudOpen = true
-  }
-
   let songs = $derived($project.data?.songs ?? [])
 </script>
 
@@ -423,9 +408,8 @@
               {entry}
               position={index + 1}
               metadata={$project.metadataByFolder[entry.folder]}
-              isExpanded={expandedSongId === entry.id}
-              onToggleExpand={() => void onToggleExpand(entry.id)}
               onEdit={() => void onEditSong(entry.id)}
+              onOpenStems={() => void onOpenStems(entry)}
               onToggleHidden={() => void onToggleHidden(entry)}
               onRemove={() => askRemove(entry)}
               onExport={() => void askExport(entry)}
@@ -452,10 +436,6 @@
           </DropdownMenuItem>
           <DropdownMenuItem class="cursor-pointer" onclick={onAddImportLocal}>
             Import local .smap…
-          </DropdownMenuItem>
-          <DropdownMenuItem class="cursor-pointer" onclick={onAddCloud}>
-            <Cloud class="mr-2 size-4" aria-hidden="true" />
-            Copy from cloud…
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -510,7 +490,7 @@
   songMap={$songMap}
 />
 
-<CopyFromCloudDialog bind:open={copyFromCloudOpen} />
+<StemsDialog bind:open={stemsDialogOpen} entry={stemsTarget} />
 
 <SetlistExportDialog
   bind:open={setlistExportOpen}

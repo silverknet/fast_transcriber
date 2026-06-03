@@ -1,34 +1,27 @@
-import { isDatabaseConfigured } from '$lib/server/db/pool'
-import { isValidSessionId } from '$lib/server/db/sessionRepo'
+/**
+ * Root layout load — exposes the signed-in user (if any) to every page.
+ *
+ * `hooks.server.ts` already resolved `event.locals.user` from Supabase; we
+ * just project the few fields the UI cares about so we don't ship the
+ * entire User JWT shape to the client.
+ *
+ * No project/song restoration happens here: the desktop sidecar owns
+ * project state, and `+layout.svelte` calls `tryRestoreLastProject` on
+ * mount for that. This file's only job is auth + opting out of any
+ * inherited parent loads.
+ */
+import type { LayoutServerLoad } from './$types'
 
-type LayoutData = {
-  savedSessionId: string | null
-}
-
-export async function load({ cookies }): Promise<LayoutData> {
-  const sid = cookies.get('barbro_session') ?? ''
-  if (!sid || !isValidSessionId(sid) || !isDatabaseConfigured()) {
-    return { savedSessionId: null }
-  }
-
-  const { getPgPool } = await import('$lib/server/db/pool')
-  const pool = getPgPool()
-  if (!pool) return { savedSessionId: null }
-
-  // DB is best-effort — if Postgres is unreachable (local container down,
-  // network issue, etc.) we still want the app to render. Treat any
-  // failure as "no saved session" and let the user keep working.
-  try {
-    const r = await pool.query<{ has_song: boolean }>(
-      `SELECT (song_map_json IS NOT NULL) AS has_song
-       FROM editor_sessions
-       WHERE id = $1::uuid`,
-      [sid],
-    )
-    const hasSong = r.rows[0]?.has_song === true
-    return { savedSessionId: hasSong ? sid : null }
-  } catch (e) {
-    console.warn('[layout.server] Postgres unavailable — skipping session restore:', e instanceof Error ? e.message : e)
-    return { savedSessionId: null }
+export const load: LayoutServerLoad = async ({ locals }) => {
+  const u = locals.user
+  return {
+    user: u
+      ? {
+          id: u.id,
+          email: u.email ?? null,
+          name: (u.user_metadata?.full_name as string | undefined) ?? null,
+          avatarUrl: (u.user_metadata?.avatar_url as string | undefined) ?? null,
+        }
+      : null,
   }
 }
