@@ -52,7 +52,9 @@
   import Monitor from '@lucide/svelte/icons/monitor'
   import Moon from '@lucide/svelte/icons/moon'
   import Music from '@lucide/svelte/icons/music'
+  import Shield from '@lucide/svelte/icons/shield'
   import Sun from '@lucide/svelte/icons/sun'
+  import { page } from '$app/stores'
   import { userStore } from '$lib/stores/user'
 
   let dark = $state(browser && document.documentElement.classList.contains('dark'))
@@ -470,6 +472,21 @@
         <Moon class="size-4" />
       {/if}
     </Button>
+    <!--
+      Admin shortcut — only renders when the layout server flagged the
+      current user as admin. Hidden for everyone else (link doesn't even
+      exist in the DOM, so curious users can't crawl their way in).
+    -->
+    {#if $page.data?.isAdmin}
+      <a
+        href="/admin/access"
+        class="border-foreground/40 text-muted-foreground hover:border-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 border-2 px-2 text-xs font-semibold uppercase tracking-wider no-underline"
+        title="Admin: access requests"
+      >
+        <Shield class="size-3.5" aria-hidden="true" />
+        Admin
+      </a>
+    {/if}
     <!--
       Auth chip: signed-in users get an avatar/initial linking to /account;
       signed-out users get a small "Sign in" link. Compact on purpose — the
