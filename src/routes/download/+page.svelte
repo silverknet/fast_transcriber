@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { goto } from '$app/navigation'
   import { detectDesktopArtifactKey } from '$lib/client/detectDesktopArtifactKey'
   import {
     DESKTOP_ARTIFACT_KEYS,
@@ -8,7 +9,13 @@
   } from '$lib/desktop/downloadsManifest'
   import { probeDesktopCompanion } from '$lib/client/desktopBeacon'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
-  import { RefreshCw } from '@lucide/svelte'
+  import { ArrowRight, Check, RefreshCw } from '@lucide/svelte'
+
+  // Live status — once the sidecar is reachable, the page flips its
+  // hero/CTA so the user sees "you're good, continue" instead of an
+  // outdated "isn't running" message that no longer matches reality.
+  const reachable = $derived($desktopCompanionStatus.reachable)
+  const version = $derived($desktopCompanionStatus.version)
 
   let { data } = $props<{
     data: {
@@ -70,24 +77,42 @@
 </svelte:head>
 
 <main class="mx-auto max-w-2xl px-4 py-16 sm:px-6">
-  <h1 class="mb-3 text-3xl font-black tracking-tight sm:text-4xl">
-    BarBro Desktop isn't running.
-  </h1>
-  <p class="text-muted-foreground mb-10 text-base">
-    Launch it from your Applications folder, then come back here.
-  </p>
+  {#if reachable}
+    <h1 class="mb-3 flex items-center gap-3 text-3xl font-black tracking-tight sm:text-4xl">
+      <Check class="text-emerald-600 dark:text-emerald-400 size-8 shrink-0" aria-hidden="true" />
+      BarBro Desktop is running.
+    </h1>
+    <p class="text-muted-foreground mb-10 text-base">
+      Connected{version ? ` (v${version})` : ''}. You're good to go.
+    </p>
+    <button
+      type="button"
+      onclick={() => void goto('/')}
+      class="border-foreground brutalist-shadow bg-foreground text-background inline-flex items-center justify-center gap-2 border-2 px-6 py-3 text-base font-bold no-underline hover:opacity-90"
+    >
+      Continue to BarBro
+      <ArrowRight class="size-4" aria-hidden="true" />
+    </button>
+  {:else}
+    <h1 class="mb-3 text-3xl font-black tracking-tight sm:text-4xl">
+      BarBro Desktop isn't running.
+    </h1>
+    <p class="text-muted-foreground mb-10 text-base">
+      Launch it from your Applications folder, then come back here.
+    </p>
 
-  <!-- Primary action: re-check. Most people landing here already have the app
-       installed and just need to start it; checking is the path they want. -->
-  <button
-    type="button"
-    onclick={() => void checkAgain()}
-    disabled={checking}
-    class="border-foreground brutalist-shadow bg-foreground text-background inline-flex items-center justify-center gap-2 border-2 px-6 py-3 text-base font-bold no-underline hover:opacity-90 disabled:opacity-50"
-  >
-    <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" aria-hidden="true" />
-    {checking ? 'Checking…' : "I've started it — check again"}
-  </button>
+    <!-- Primary action: re-check. Most people landing here already have the app
+         installed and just need to start it; checking is the path they want. -->
+    <button
+      type="button"
+      onclick={() => void checkAgain()}
+      disabled={checking}
+      class="border-foreground brutalist-shadow bg-foreground text-background inline-flex items-center justify-center gap-2 border-2 px-6 py-3 text-base font-bold no-underline hover:opacity-90 disabled:opacity-50"
+    >
+      <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" aria-hidden="true" />
+      {checking ? 'Checking…' : "I've started it — check again"}
+    </button>
+  {/if}
 
   <!-- Secondary: install it if they don't have it yet. -->
   <div class="border-foreground/30 mt-12 border-t pt-8">
