@@ -63,12 +63,35 @@
     })
   }
 
-  /** Stamp `audio.originalPath`/`fileName` into the SongMap so reload finds the file. */
-  function stampPath(relPath: string, fileName: string): void {
+  /**
+   * Stamp `audio.originalPath` / `fileName` plus the identity bundle
+   * (sampleRate, channels, fileSize, durationSec) that the sidecar
+   * returned at relink time. Phase 3 added those identity fields so
+   * cloud collab can match audio by content rather than path — every
+   * relink is also a chance to backfill them on legacy songs.
+   */
+  function stampPath(
+    relPath: string,
+    fileName: string,
+    identity: {
+      fileSize?: number
+      durationSec?: number
+      sampleRate?: number
+      channels?: number
+    } = {},
+  ): void {
     patchSongMap((m: SongMap): SongMap => ({
       ...m,
       audio: m.audio
-        ? { ...m.audio, originalPath: relPath, fileName }
+        ? {
+            ...m.audio,
+            originalPath: relPath,
+            fileName,
+            ...(identity.fileSize !== undefined ? { fileSize: identity.fileSize } : {}),
+            ...(identity.durationSec !== undefined ? { durationSec: identity.durationSec } : {}),
+            ...(identity.sampleRate !== undefined ? { sampleRate: identity.sampleRate } : {}),
+            ...(identity.channels !== undefined ? { channels: identity.channels } : {}),
+          }
         : m.audio,
     }))
   }
@@ -117,7 +140,12 @@
 
     status = 'loading'
     try {
-      stampPath(r.relPath, r.fileName)
+      stampPath(r.relPath, r.fileName, {
+        fileSize: r.fileSize,
+        durationSec: r.durationSec,
+        sampleRate: r.sampleRate,
+        channels: r.channels,
+      })
       await loadRelinkedFile(r.relPath, r.fileName)
       status = 'idle'
     } catch (e) {
@@ -133,6 +161,10 @@
     mismatch = null
     status = 'loading'
     try {
+      // No identity bundle here — the user knowingly accepted a
+      // mismatched file, so we don't backfill sr/channels/fileSize from
+      // it (those would suggest the cloud's expected_audio matches when
+      // it doesn't). Path + fileName only.
       stampPath(m.relPath, m.fileName)
       await loadRelinkedFile(m.relPath, m.fileName)
       status = 'idle'

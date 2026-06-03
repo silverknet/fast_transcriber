@@ -212,6 +212,8 @@ export type ProjectWavInfo =
       sampleRate: number
       channels: number
       fileSize: number
+      /** Present iff the caller passed `withSha: true`. */
+      sha256?: string
     }
   | {
       songFolder: string
@@ -227,14 +229,20 @@ export type ProjectWavInfoBatchResult =
  * Read WAV header info (duration / sample rate / channels) for a batch of
  * files under the project tree. Per-file errors don't abort the batch
  * — each item either has the info fields or an `error` field.
+ *
+ * `withSha` opts into per-file SHA-256. Costs ~50ms per WAV at typical
+ * sizes — fine for one-shot work like the Phase 3 identity backfill
+ * sweep, but skip it for hot paths like `refreshProjectInfo`.
  */
 export async function getProjectWavInfoBatch(
   projectPath: string,
   files: Array<{ songFolder: string; subpath: string }>,
+  options: { withSha?: boolean } = {},
 ): Promise<ProjectWavInfoBatchResult> {
   return await postJson<ProjectWavInfoBatchResult>(`${BASE_URL}/native/project/wav-info/batch`, {
     projectPath,
     files,
+    ...(options.withSha ? { withSha: true } : {}),
   })
 }
 
@@ -274,6 +282,16 @@ export type RelinkAudioResult =
       /** SHA-256 hex of the bytes that were just copied to disk. */
       sha256: string
       size: number
+      /**
+       * Identity bundle — Phase 3 made these mandatory on the sidecar
+       * (we always read the WAV/MP3 header at relink time), but they're
+       * declared optional here in case the user is talking to an older
+       * sidecar that doesn't return them yet.
+       */
+      fileSize?: number
+      durationSec?: number
+      sampleRate?: number
+      channels?: number
     }
   | { ok: false; cancelled: true }
   | { ok: false; error: string }

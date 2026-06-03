@@ -14,7 +14,11 @@
   import ExportBackingTrackDialog from '$lib/components/ExportBackingTrackDialog.svelte'
   import SetlistExportDialog from '$lib/components/SetlistExportDialog.svelte'
   import StemsDialog from '$lib/components/StemsDialog.svelte'
-  import { ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
+  import CloudCollabSection from '$lib/components/CloudCollabSection.svelte'
+  import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
+  import JoinCloudProjectDialog from '$lib/components/JoinCloudProjectDialog.svelte'
+  import { Cloud, FolderOpen, FolderPlus, ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
+  import { listCloudProjects, type CloudProjectMeta } from '$lib/client/cloudSync'
   import {
     exportProjectSetAls,
     preflightProjectSetlist,
@@ -23,9 +27,12 @@
   import { safeExportBasename } from '$lib/songmap/persist'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import {
+    dropRecentProjectPath,
     importSmapToProject,
     loadProjectSongIntoEditor,
     metadataLiteFromSongMap,
+    openProjectByPath,
+    readRecentProjectPaths,
     refreshProjectInfo,
     removeSongFromProject,
     renameProject,
@@ -33,6 +40,7 @@
     setSongOrder,
     tryRestoreLastProject,
   } from '$lib/project/commit'
+  import { pickFolderViaDesktop } from '$lib/client/desktopBridge'
   import { dndzone } from 'svelte-dnd-action'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
   import { listJobsViaDesktop } from '$lib/client/desktopBridge'
@@ -46,6 +54,76 @@
   let restoreError = $state('')
   let actionError = $state('')
   let renameInput = $state('')
+
+  // ── Empty-state project home (no project open) ────────────────────────────
+  let newProjectDialogOpen = $state(false)
+  let recentEntries = $state<Array<{ path: string; label: string }>>([])
+  let openingPath = $state<string | null>(null)
+  let openError = $state('')
+  let cloudProjects = $state<CloudProjectMeta[]>([])
+  let cloudProjectsLoading = $state(false)
+  let joinDialogOpen = $state(false)
+  let joinTarget = $state<CloudProjectMeta | null>(null)
+
+  async function loadCloudProjects() {
+    cloudProjectsLoading = true
+    try {
+      cloudProjects = await listCloudProjects()
+    } finally {
+      cloudProjectsLoading = false
+    }
+  }
+
+  function startJoin(p: CloudProjectMeta) {
+    joinTarget = p
+    joinDialogOpen = true
+  }
+
+  function pathLabel(p: string): string {
+    const ix = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    return ix === -1 ? p : p.slice(ix + 1)
+  }
+
+  function refreshRecents() {
+    if (!browser) return
+    recentEntries = readRecentProjectPaths().map((p) => ({ path: p, label: pathLabel(p) }))
+  }
+
+  async function openRecent(entry: { path: string; label: string }) {
+    if (openingPath) return
+    openError = ''
+    openingPath = entry.path
+    try {
+      await openProjectByPath(entry.path)
+      refreshRecents()
+    } catch (e) {
+      dropRecentProjectPath(entry.path)
+      refreshRecents()
+      openError = e instanceof Error ? e.message : `Could not open "${entry.label}"`
+    } finally {
+      openingPath = null
+    }
+  }
+
+  async function browseAndOpen() {
+    openError = ''
+    if (!$desktopCompanionStatus.reachable) {
+      openError = 'Desktop client unreachable.'
+      return
+    }
+    const pick = await pickFolderViaDesktop({ title: 'Open a BarBro project folder' })
+    if (!pick.ok) {
+      if ('cancelled' in pick) return
+      openError = pick.error ?? 'Could not open picker'
+      return
+    }
+    try {
+      await openProjectByPath(pick.path)
+      refreshRecents()
+    } catch (e) {
+      openError = e instanceof Error ? e.message : 'Could not open project'
+    }
+  }
 
   let removeDialogOpen = $state(false)
   let removeTarget = $state<{ id: string; title: string } | null>(null)
@@ -140,12 +218,14 @@
 
   onMount(() => {
     if (!browser) return
+    refreshRecents()
+    void loadCloudProjects()
     void (async () => {
       try {
         if (!$project.data || !$project.osPath) {
           const data = await tryRestoreLastProject()
           if (!data) {
-            restoreError = 'No active project. Use File → Open Project to pick one.'
+            restoreError = ''
             return
           }
         } else {
@@ -315,13 +395,103 @@
   {#if restoring}
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}
-    <div class="brutalist-shadow border-foreground bg-background border-2 p-6 text-center">
-      <h1 class="mb-2 text-xl font-black">No project open</h1>
-      <p class="text-muted-foreground mb-4 text-sm">{restoreError}</p>
-      <div class="flex justify-center gap-3">
-        <Button class="" onclick={() => goto('/')}>Single song mode</Button>
-      </div>
+    <header class="border-foreground border-b-2 pb-4">
+      <h1 class="text-3xl font-black tracking-tight">Projects</h1>
+    </header>
+
+    <div class="grid gap-3 sm:grid-cols-2">
+      <button
+        type="button"
+        class="brutalist-shadow border-foreground bg-foreground text-background flex flex-col items-start gap-1.5 border-2 p-4 text-left"
+        onclick={() => (newProjectDialogOpen = true)}
+      >
+        <FolderPlus class="size-5" aria-hidden="true" />
+        <span class="text-base font-bold">New project</span>
+        <span class="text-background/70 text-xs">Create a fresh project folder on disk.</span>
+      </button>
+      <button
+        type="button"
+        class="brutalist-shadow-sm border-foreground bg-background flex flex-col items-start gap-1.5 border-2 p-4 text-left hover:bg-foreground/5"
+        onclick={() => void browseAndOpen()}
+      >
+        <FolderOpen class="size-5" aria-hidden="true" />
+        <span class="text-base font-bold">Open project…</span>
+        <span class="text-muted-foreground text-xs">Browse for an existing BarBro project folder.</span>
+      </button>
     </div>
+
+    {#if openError}
+      <p class="text-destructive text-sm" role="status">{openError}</p>
+    {/if}
+
+    {#if recentEntries.length > 0}
+      <section class="space-y-2">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Recent</h2>
+        <ul class="border-foreground/20 border-2 divide-foreground/10 divide-y">
+          {#each recentEntries as r (r.path)}
+            <li>
+              <button
+                type="button"
+                class="hover:bg-foreground/5 flex w-full items-center gap-3 px-3 py-2 text-left disabled:opacity-50"
+                onclick={() => void openRecent(r)}
+                disabled={openingPath !== null}
+              >
+                <FolderOpen class="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-sm font-semibold">{r.label}</p>
+                  <p class="text-muted-foreground truncate font-mono text-[11px]">{r.path}</p>
+                </div>
+                {#if openingPath === r.path}
+                  <span class="text-muted-foreground text-xs">Opening…</span>
+                {/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    <!--
+      Shared with me: cloud projects the signed-in user is a member of.
+      Click "Join here" → opens JoinCloudProjectDialog which materializes a
+      fresh local copy + pulls metadata. Audio doesn't sync (Phase 6's job)
+      so each song lands with an "audio missing" badge until relinked.
+    -->
+    <section class="space-y-2">
+      <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
+        <Cloud class="size-3.5" aria-hidden="true" />
+        Shared with me
+        {#if cloudProjectsLoading}
+          <span class="text-muted-foreground/60 normal-case">loading…</span>
+        {/if}
+      </h2>
+      {#if cloudProjects.length === 0 && !cloudProjectsLoading}
+        <p class="border-foreground/20 border-2 border-dashed p-3 text-xs text-muted-foreground">
+          No shared projects yet. When someone invites you, it'll show up here.
+        </p>
+      {:else if cloudProjects.length > 0}
+        <ul class="border-foreground/20 border-2 divide-foreground/10 divide-y">
+          {#each cloudProjects as c (c.id)}
+            <li class="flex items-center gap-3 px-3 py-2">
+              <Cloud class="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-semibold">{c.name}</p>
+                <p class="text-muted-foreground truncate font-mono text-[11px]">
+                  rev {c.revision} · updated {new Date(c.updated_at).toLocaleDateString()}
+                </p>
+              </div>
+              <Button class="" variant="outline" size="sm" onclick={() => startJoin(c)}>
+                Join here
+              </Button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+
+    {#if restoreError}
+      <p class="text-destructive text-xs" role="status">{restoreError}</p>
+    {/if}
   {:else}
     <header class="border-foreground border-b-2 pb-4">
       <input
@@ -356,6 +526,8 @@
         </p>
       {/if}
     </header>
+
+    <CloudCollabSection />
 
     {#if actionError}
       <p class="text-destructive text-sm" role="status">{actionError}</p>
@@ -491,6 +663,14 @@
 />
 
 <StemsDialog bind:open={stemsDialogOpen} entry={stemsTarget} />
+
+<NewProjectDialog bind:open={newProjectDialogOpen} onCreated={refreshRecents} />
+
+<JoinCloudProjectDialog
+  bind:open={joinDialogOpen}
+  cloudProject={joinTarget}
+  onJoined={refreshRecents}
+/>
 
 <SetlistExportDialog
   bind:open={setlistExportOpen}

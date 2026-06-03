@@ -27,6 +27,15 @@ export interface ProjectSongMetadataLite {
    */
   stemRefs?: StemRefs
   /**
+   * Audio content-identity hints, projected from the song's
+   * `audio.{sha256,durationSec}`. Lets the project list show "audio
+   * matched / missing / mismatch" badges per row (Phase 5 reconciler
+   * writes the verdict; this carries the raw signal needed to compare
+   * without loading the full .smap on every render).
+   */
+  audioSha256?: string
+  audioDurationSec?: number
+  /**
    * Stem renderings on disk grouped by quality preset. See
    * `ProjectSongMetadataInfo.stemsByPreset` for the schema. Empty/absent
    * when no stems exist yet.

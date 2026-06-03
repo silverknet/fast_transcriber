@@ -38,6 +38,26 @@ export interface ProjectFile {
   updatedAt: string
   /** Order of this array IS the setlist order. */
   songs: ProjectSongEntry[]
+  /**
+   * Cloud-collab linkage. Absent on standalone (local-only) projects.
+   * Populated by `createCloudProject` / `joinCloudProject` in Phase 4.
+   * Local-only fields here MUST NOT round-trip to the cloud — they
+   * describe this device's view of sync state.
+   */
+  cloud?: ProjectCloudLink
+}
+
+export interface ProjectCloudLink {
+  /** Matches `cloud_projects.id`. Equal to `ProjectFile.id` at create-collab time. */
+  projectId: string
+  /** Last `cloud_projects.revision` this device successfully pulled and applied. */
+  lastSyncedRevision: number
+  /** Count of un-pushed song edits since the last successful push. */
+  pendingChanges?: number
+  /** ISO timestamp of the most recent successful push. */
+  lastPushedAt?: string
+  /** ISO timestamp of the most recent successful pull. */
+  lastPulledAt?: string
 }
 
 export interface ProjectSongEntry {
@@ -52,6 +72,15 @@ export interface ProjectSongEntry {
   folder: string
   /** Excluded from any bulk/set export. Still visible in the list. */
   hidden?: boolean
+  /**
+   * Matches `cloud_songs.id` for cloud-linked songs. Equal to
+   * `ProjectSongEntry.id` at create-collab time so we don't need an id
+   * remapping table. Absent for songs created locally after a project
+   * was linked (they get one once the next push succeeds).
+   */
+  cloudSongId?: string
+  /** Last `cloud_songs.revision` this device pulled for this song. */
+  lastSyncedRevision?: number
 }
 
 /**
