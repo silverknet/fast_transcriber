@@ -23,6 +23,13 @@
         createdAt: string
         provider: string
       }
+      cloudProjects: Array<{
+        id: string
+        name: string
+        revision: number
+        updatedAt: string
+        isOwner: boolean
+      }>
     }
   }>()
 
@@ -89,15 +96,42 @@
     cloud-projects list, Phase 4 adds "Create cloud project" / "Join",
     and a later phase adds member management.
   -->
-  <section class="border-foreground/40 border-2 border-dashed p-4 space-y-2">
+  <section class="border-foreground border-2 p-4 space-y-3">
     <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
       <FolderGit2 class="size-4" aria-hidden="true" />
-      Shared projects
+      Shared projects ({data.cloudProjects.length})
     </h2>
-    <p class="text-muted-foreground text-sm">
-      No shared projects yet. Collaboration ships in Phase 4 — you'll be able to enable cloud
-      sync on a local project and invite editors here.
-    </p>
+    {#if data.cloudProjects.length === 0}
+      <p class="text-muted-foreground text-sm">
+        You haven't enabled collaboration on any project yet. Open a project and click
+        <span class="font-semibold">Enable Collaboration</span> to start syncing.
+      </p>
+    {:else}
+      <ul class="border-foreground/20 border divide-foreground/10 divide-y">
+        {#each data.cloudProjects as p (p.id)}
+          <li class="flex items-center justify-between gap-3 px-3 py-2">
+            <div class="min-w-0 flex-1">
+              <p class="truncate font-semibold text-sm">{p.name}</p>
+              <p class="text-muted-foreground text-[11px] font-mono">
+                rev {p.revision} · updated {new Date(p.updatedAt).toLocaleString()}
+              </p>
+            </div>
+            <span
+              class="text-[10px] font-bold uppercase tracking-wider {p.isOwner
+                ? 'text-emerald-700 dark:text-emerald-400'
+                : 'text-muted-foreground'}"
+            >
+              {p.isOwner ? 'owner' : 'editor'}
+            </span>
+          </li>
+        {/each}
+      </ul>
+      <p class="text-muted-foreground text-[11px]">
+        To open a shared project, use File → Open Project from a machine with its folder
+        on disk. (Phase 6 will add an "Open from cloud" flow that creates a fresh local
+        folder and pulls metadata down.)
+      </p>
+    {/if}
   </section>
 
   <section class="border-foreground/40 border-2 border-dashed p-4 space-y-2">

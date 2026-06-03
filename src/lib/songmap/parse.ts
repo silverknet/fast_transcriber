@@ -177,6 +177,9 @@ function parseAudio(raw: unknown, path: string): AudioReference {
     fileName: reqString(o.fileName, `${path}.fileName`),
     mimeType: optString(o.mimeType),
     durationSec: optNum(o.durationSec),
+    sampleRate: optNum(o.sampleRate),
+    channels: optNum(o.channels),
+    fileSize: optNum(o.fileSize),
     trim: {
       startSec: reqNum(trim.startSec, `${path}.trim.startSec`),
       endSec: reqNum(trim.endSec, `${path}.trim.endSec`),
@@ -185,6 +188,21 @@ function parseAudio(raw: unknown, path: string): AudioReference {
     originalSha256: optString(o.originalSha256),
     originalPath: optString(o.originalPath),
     source: reqString(o.source, `${path}.source`) as AudioReference['source'],
+  }
+}
+
+function parseExpectedAudio(raw: unknown, path: string): import('./types').ExpectedAudio | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  return {
+    fileName: reqString(o.fileName, `${path}.fileName`),
+    mimeType: optString(o.mimeType),
+    durationSec: optNum(o.durationSec),
+    sampleRate: optNum(o.sampleRate),
+    channels: optNum(o.channels),
+    fileSize: optNum(o.fileSize),
+    sha256: optString(o.sha256),
+    originalSha256: optString(o.originalSha256),
   }
 }
 
@@ -344,6 +362,7 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
         ? parseCueTrackExport(raw.clickTrackExport, 'clickTrackExport')
         : undefined,
     mixState: parseMixState(raw.mixState, 'mixState'),
+    expectedAudio: parseExpectedAudio(raw.expectedAudio, 'expectedAudio'),
   }
 }
 

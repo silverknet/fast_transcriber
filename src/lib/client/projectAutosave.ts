@@ -23,22 +23,33 @@
 import { get, type Unsubscriber } from 'svelte/store'
 import { browser } from '$app/environment'
 import { page } from '$app/stores'
+import { pushCloudSong } from '$lib/client/cloudSync'
 import { writeProjectSong } from '$lib/client/desktopProjectFs'
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
 import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
-import { patchMetadataForFolder, project } from '$lib/stores/project'
+import { patchMetadataForFolder, project, setProjectData } from '$lib/stores/project'
 import { songMap } from '$lib/stores/songMap'
+import type { ProjectFile } from '$lib/project/types'
 
 const DEBOUNCE_MS = 1500
+/**
+ * Cloud push runs on its own longer debounce so we don't fire on every
+ * keystroke. Disk write fires first (faster, local) and is independent;
+ * a failed cloud push must never block the local save.
+ */
+const CLOUD_DEBOUNCE_MS = 7000
 
 let started = false
 let unsubs: Unsubscriber[] = []
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
+let cloudDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let writing = false
 let pendingWhileWriting = false
+let cloudPushing = false
+let cloudPendingWhilePushing = false
 
 async function tryWriteOnce(): Promise<void> {
   const snap = get(project)
@@ -102,6 +113,95 @@ function schedule(): void {
 }
 
 /**
+ * Push the current active song to the cloud if the project is linked.
+ * Independent of disk write — runs on its own debounce, fails silently
+ * (the local .smap on disk stays the source of truth).
+ *
+ * Conflict handling here is minimal for Phase 4 (caller sees the
+ * 409, increments pendingChanges, and a later pull will resolve).
+ * Phase 8 wires the actual merge UI.
+ */
+async function tryCloudPushOnce(): Promise<void> {
+  const snap = get(project)
+  const sm = get(songMap)
+  if (!sm || !snap.data || !snap.data.cloud) return
+  if (!snap.activeSongId) return
+  if (snap.editingMode !== 'project-song') return
+  // Only push when actively editing in /edit, mirroring the disk-write guard.
+  if (get(page)?.route?.id !== '/edit') return
+
+  const cloud = snap.data.cloud
+  const entry = snap.data.songs.find((e) => e.id === snap.activeSongId)
+  if (!entry) return
+  const cloudSongId = entry.cloudSongId ?? entry.id
+  const baseRev = entry.lastSyncedRevision ?? cloud.lastSyncedRevision
+  const sortOrder = snap.data.songs.indexOf(entry)
+  if (sortOrder < 0) return
+
+  const r = await pushCloudSong(
+    cloud.projectId,
+    cloudSongId,
+    sm,
+    sortOrder,
+    !!entry.hidden,
+    baseRev,
+  )
+
+  if (r.ok) {
+    // Mark this song + the project as synced through the returned revision.
+    const next: ProjectFile = {
+      ...snap.data,
+      cloud: {
+        ...cloud,
+        lastSyncedRevision: r.revision,
+        lastPushedAt: new Date().toISOString(),
+        pendingChanges: 0,
+      },
+      songs: snap.data.songs.map((s) =>
+        s.id === entry.id
+          ? { ...s, cloudSongId, lastSyncedRevision: r.revision }
+          : s,
+      ),
+    }
+    setProjectData(next)
+    return
+  }
+
+  // Conflict or transient error — bump pendingChanges so the UI surfaces
+  // it. Phase 8 turns conflict into a merge prompt; Phase 7 surfaces the
+  // pending count.
+  const next: ProjectFile = {
+    ...snap.data,
+    cloud: {
+      ...cloud,
+      pendingChanges: (cloud.pendingChanges ?? 0) + 1,
+    },
+  }
+  setProjectData(next)
+}
+
+function scheduleCloudPush(): void {
+  if (cloudDebounceTimer) clearTimeout(cloudDebounceTimer)
+  cloudDebounceTimer = setTimeout(() => {
+    cloudDebounceTimer = null
+    if (cloudPushing) {
+      cloudPendingWhilePushing = true
+      return
+    }
+    cloudPushing = true
+    tryCloudPushOnce()
+      .catch(() => {})
+      .finally(() => {
+        cloudPushing = false
+        if (cloudPendingWhilePushing) {
+          cloudPendingWhilePushing = false
+          scheduleCloudPush()
+        }
+      })
+  }, CLOUD_DEBOUNCE_MS)
+}
+
+/**
  * Start the global autosave subscription. Idempotent — safe to call
  * multiple times. Should be invoked once from the root layout in browser.
  */
@@ -111,6 +211,10 @@ export function startProjectAutosave(): void {
   unsubs.push(
     songMap.subscribe(() => {
       schedule()
+      // Independent timer — cloud push runs in parallel with disk write,
+      // not chained after it. Disk failure must not block cloud, and
+      // vice versa.
+      scheduleCloudPush()
     }),
   )
 }
@@ -121,6 +225,10 @@ export function stopProjectAutosave(): void {
   if (debounceTimer) {
     clearTimeout(debounceTimer)
     debounceTimer = null
+  }
+  if (cloudDebounceTimer) {
+    clearTimeout(cloudDebounceTimer)
+    cloudDebounceTimer = null
   }
   started = false
 }

@@ -956,12 +956,28 @@ async function handleProjectSongAudioRelink(req, res, cors) {
     await atomicWriteFile(destAbs, bytes)
     const sha256 = createHash('sha256').update(bytes).digest('hex')
 
+    // Stamp the full identity bundle right at relink time so Phase 5
+    // reconciliation doesn't have to re-parse the same WAV/MP3 header on
+    // a later pass. readAudioInfo returns null for unsupported formats —
+    // we just leave sampleRate/channels/durationSec undefined in that case
+    // and the client falls back to sha256-only identity matching.
+    let info = null
+    try {
+      info = readAudioInfo(destAbs)
+    } catch {
+      info = null
+    }
+
     sendJson(res, 200, {
       ok: true,
       relPath,
       fileName: desired,
       sha256,
       size: bytes.byteLength,
+      fileSize: bytes.byteLength,
+      durationSec: info?.durationSec,
+      sampleRate: info?.sampleRate,
+      channels: info?.channels,
     }, cors)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -1173,10 +1189,19 @@ function readAudioInfo(filePath) {
 }
 
 /**
- * `POST /native/project/wav-info/batch` — body `{ projectPath, files: [{ songFolder, subpath }, ...] }`.
- * Returns `{ ok: true, items: [{ songFolder, subpath, durationSec, sampleRate, channels } | { songFolder, subpath, error }] }`.
- * Despite the legacy "/wav-info/" path, handles MP3 as well — dispatch by
- * file extension. Per-file errors don't abort the batch.
+ * `POST /native/project/wav-info/batch` — body
+ *   `{ projectPath, files: [{ songFolder, subpath }, ...], withSha?: boolean }`.
+ *
+ * Returns
+ *   `{ ok: true, items: [{ songFolder, subpath, durationSec, sampleRate, channels, fileSize, sha256? } | { songFolder, subpath, error }] }`.
+ *
+ * `withSha` opts into per-file SHA-256 computation. We don't do it by
+ * default — hashing 50× WAVs at every project open is too slow. The
+ * Phase 3 migration sweep and the Phase 5 reconciler request it
+ * explicitly; the general `refreshProjectInfo` call does not.
+ *
+ * Despite the legacy "/wav-info/" path, handles MP3 as well — dispatch
+ * by file extension. Per-file errors don't abort the batch.
  */
 async function handleProjectWavInfoBatch(req, res, cors) {
   try {
@@ -1190,6 +1215,7 @@ async function handleProjectWavInfoBatch(req, res, cors) {
     if (!Array.isArray(body.files)) {
       return sendJson(res, 400, { ok: false, error: 'files must be an array' }, cors)
     }
+    const withSha = body.withSha === true
     const items = []
     for (const f of body.files) {
       const songFolder = f?.songFolder
@@ -1204,7 +1230,20 @@ async function handleProjectWavInfoBatch(req, res, cors) {
         }
         const info = readAudioInfo(abs)
         const fileSize = statSync(abs).size
-        items.push({ songFolder, subpath, ...info, fileSize })
+        const item = { songFolder, subpath, ...info, fileSize }
+        if (withSha) {
+          // Streamed hashing so we don't OOM on big WAVs (50 MB+ is
+          // typical for a 5-minute uncompressed file).
+          const hash = createHash('sha256')
+          await new Promise((resolve, reject) => {
+            const s = createReadStream(abs)
+            s.on('data', (chunk) => hash.update(chunk))
+            s.on('end', resolve)
+            s.on('error', reject)
+          })
+          item.sha256 = hash.digest('hex')
+        }
+        items.push(item)
       } catch (e) {
         items.push({ songFolder, subpath, error: e instanceof Error ? e.message : String(e) })
       }

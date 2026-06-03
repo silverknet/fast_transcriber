@@ -33,6 +33,7 @@ import {
   createProject,
   createProjectSong,
   getProjectInfo,
+  getProjectWavInfoBatch,
   readProjectSong,
   readProjectSongAsset,
   removeProjectSong,
@@ -147,6 +148,8 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   if (map.stemRefs && Object.keys(map.stemRefs).length > 0) {
     out.stemRefs = { ...map.stemRefs }
   }
+  if (map.audio?.sha256) out.audioSha256 = map.audio.sha256
+  if (map.audio?.durationSec !== undefined) out.audioDurationSec = map.audio.durationSec
   return out
 }
 
@@ -257,6 +260,23 @@ export async function openProjectByPath(projectPath: string): Promise<ProjectFil
       `[project] migrated ${migrated.migrated} song(s) to v2 (skipped ${migrated.skipped}, failed ${migrated.failed})`,
     )
   }
+
+  // Phase 3 identity backfill — best-effort. Async-fired so opening a
+  // project doesn't block on the sidecar reading every audio file (the
+  // first sweep on a big library can take a few seconds). The next
+  // project open will see the stamped fields and skip the work.
+  void backfillAudioIdentity(projectPath, r.manifest)
+    .then((res) => {
+      if (res.stamped > 0) {
+        console.info(
+          `[project] identity backfill: stamped ${res.stamped} song(s) (skipped ${res.skipped}, failed ${res.failed})`,
+        )
+      }
+    })
+    .catch((e) => {
+      console.warn('[project] identity backfill failed:', e)
+    })
+
   return r.manifest
 }
 
@@ -333,6 +353,139 @@ export async function migrateProjectSongsToV2(
     }
   }
   return { migrated, skipped, failed }
+}
+
+/**
+ * Phase 3 identity backfill: for every song that already has a resolvable
+ * `audio.originalPath` but is missing any of the new identity fields
+ * (`sampleRate`, `channels`, `fileSize`, or `sha256`), batch a single
+ * sidecar `wav-info` call (with `withSha`) and stamp the results into the
+ * .smap. One call covers the whole project, so this is cheap on next
+ * open after the initial sweep.
+ *
+ * Idempotent — songs that already have a full identity bundle are
+ * skipped before we even ask the sidecar.
+ */
+export async function backfillAudioIdentity(
+  projectPath: string,
+  manifest: ProjectFile,
+): Promise<{ stamped: number; skipped: number; failed: number }> {
+  let stamped = 0
+  let skipped = 0
+  let failed = 0
+
+  // Phase 1: read every .smap, decide which need a backfill, gather the
+  // wav-info batch input. SongMaps are kept in a temporary map so we
+  // don't re-read them in phase 2.
+  type PendingSong = {
+    entry: ProjectSongEntry
+    songMap: SongMap
+    originalPath: string
+  }
+  const pending: PendingSong[] = []
+
+  for (const entry of manifest.songs) {
+    try {
+      const r = await readProjectSong(projectPath, entry.folder)
+      if (!r.ok) {
+        failed++
+        continue
+      }
+      const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+      const data = await decodeSmapFile(blob)
+      const audio = data.project.songMap.audio
+      if (!audio?.originalPath) {
+        // No file to probe — nothing to backfill.
+        skipped++
+        continue
+      }
+      const needsIdentity =
+        audio.sampleRate === undefined ||
+        audio.channels === undefined ||
+        audio.fileSize === undefined ||
+        audio.sha256 === undefined
+      if (!needsIdentity) {
+        skipped++
+        continue
+      }
+      pending.push({
+        entry,
+        songMap: data.project.songMap,
+        originalPath: audio.originalPath,
+      })
+    } catch (e) {
+      failed++
+      console.warn(`[project] identity backfill: read failed for ${entry.folder}:`, e)
+    }
+  }
+
+  if (pending.length === 0) {
+    return { stamped, skipped, failed }
+  }
+
+  // Phase 2: one batch wav-info call for every song that needs it.
+  // `withSha: true` makes this O(N) reads of the audio bytes — slow on
+  // big libraries, but only the first time. Subsequent opens skip
+  // everything in Phase 1.
+  const info = await getProjectWavInfoBatch(
+    projectPath,
+    pending.map((p) => ({ songFolder: p.entry.folder, subpath: p.originalPath })),
+    { withSha: true },
+  )
+  if (!info.ok) {
+    return { stamped, skipped, failed: failed + pending.length }
+  }
+
+  const infoByFolder = new Map<string, (typeof info.items)[number]>()
+  for (const item of info.items) infoByFolder.set(item.songFolder, item)
+
+  // Phase 3: stamp + re-write each .smap. Failures are per-song.
+  for (const p of pending) {
+    try {
+      const item = infoByFolder.get(p.entry.folder)
+      if (!item || 'error' in item) {
+        failed++
+        continue
+      }
+      const audio = p.songMap.audio
+      if (!audio) {
+        failed++
+        continue
+      }
+      const patched: SongMap = {
+        ...p.songMap,
+        audio: {
+          ...audio,
+          // Don't overwrite existing values — `withSha` returns sha256
+          // for every file, but the SongMap's sha256 might already be
+          // the upload-time hash. Keep the existing one.
+          sampleRate: audio.sampleRate ?? item.sampleRate,
+          channels: audio.channels ?? item.channels,
+          fileSize: audio.fileSize ?? item.fileSize,
+          durationSec: audio.durationSec ?? item.durationSec,
+          sha256: audio.sha256 ?? item.sha256,
+        },
+      }
+      const out = await encodeSmapFile({
+        project: {
+          projectFormatVersion: SONG_PROJECT_FORMAT_VERSION,
+          songMap: patched,
+        },
+      })
+      const outBytes = new Uint8Array(await out.arrayBuffer())
+      const ws = await writeProjectSong(projectPath, p.entry.folder, outBytes)
+      if (!ws.ok) {
+        failed++
+        continue
+      }
+      stamped++
+    } catch (e) {
+      failed++
+      console.warn(`[project] identity backfill: rewrite failed for ${p.entry.folder}:`, e)
+    }
+  }
+
+  return { stamped, skipped, failed }
 }
 
 /**

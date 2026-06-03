@@ -19,6 +19,7 @@
     DropdownMenuItem,
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu'
+  import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
   import {
     downloadBlob,
     exportRestorableStateAsSmapBlob,
@@ -83,6 +84,15 @@
   let menuError = $state('')
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
+  let newProjectDialogOpen = $state(false)
+
+  function openNewProjectDialog() {
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — install/start BarBro desktop to manage projects.'
+      return
+    }
+    newProjectDialogOpen = true
+  }
   let desktopConnected = $derived($desktopCompanionStatus.reachable)
   let desktopCheckedLabel = $derived(
     $desktopCompanionStatus.lastCheckedAt ? $desktopCompanionStatus.lastCheckedAt.slice(11, 19) : '--:--:--',
@@ -195,33 +205,6 @@
    * absolute OS path, and that path is the project's canonical identity —
    * the web app never touches the filesystem directly for project I/O.
    */
-  async function onNewProject() {
-    menuError = ''
-    if (!$desktopCompanionStatus.reachable) {
-      menuError = 'Desktop client unreachable — install/start BarBro desktop to manage projects.'
-      return
-    }
-    const pick = await pickFolderViaDesktop({
-      title: 'Pick the folder that will contain the new project',
-    })
-    if (!pick.ok) {
-      if ('cancelled' in pick) return
-      menuError = pick.error ?? 'Could not open picker'
-      return
-    }
-    const name = window.prompt(
-      `Project name (a new folder will be created inside the chosen location):`,
-      'Untitled Project',
-    )
-    if (name === null) return
-    try {
-      await createProjectOnDisk(pick.path, name)
-      refreshRecents()
-      await goto('/project')
-    } catch (e) {
-      menuError = e instanceof Error ? e.message : 'Could not create project'
-    }
-  }
 
   async function onOpenProject() {
     menuError = ''
@@ -352,7 +335,7 @@
           <!-- In project mode: project actions are the focus; standalone-only
                flows (Open Song, Load from cloud) would conflict with the
                project's setlist and are hidden until the user Close Projects. -->
-          <DropdownMenuItem class="cursor-pointer" onclick={onBackToProject}>
+          <DropdownMenuItem class="cursor-pointer" onclick={() => void onBackToProject()}>
             Back to Project
           </DropdownMenuItem>
           <DropdownMenuItem
@@ -384,43 +367,16 @@
             Close Project
           </DropdownMenuItem>
         {:else}
-          <DropdownMenuItem
-            class="cursor-pointer"
-            onclick={() => {
-              void onExportFull()
-            }}
-          >
-            Save Song (.smap)…
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            class="cursor-pointer"
-            onclick={() => {
-              importInput?.click()
-            }}
-          >
-            Open Song (.smap)…
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            class="cursor-pointer"
-            onclick={() => {
-              void onExportMusicXml()
-            }}
-          >
-            Export as lead sheet (.musicxml)…
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            class="cursor-pointer"
-            onclick={() => {
-              void onExportPdf()
-            }}
-          >
-            Export as PDF…
-          </DropdownMenuItem>
-          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
-          <DropdownMenuItem class="cursor-pointer" onclick={onNewProject}>
+          <!--
+            Project-only mode. The .smap-as-document workflow (Save Song,
+            Open Song, standalone musicxml/pdf exports) is retired — every
+            song lives inside a project now. The remaining no-project-open
+            entries are just the create/open project actions.
+          -->
+          <DropdownMenuItem class="cursor-pointer" onclick={openNewProjectDialog}>
             New Project…
           </DropdownMenuItem>
-          <DropdownMenuItem class="cursor-pointer" onclick={onOpenProject}>
+          <DropdownMenuItem class="cursor-pointer" onclick={() => void onOpenProject()}>
             Open Project…
           </DropdownMenuItem>
           {#if recentProjects.length > 0}
@@ -574,7 +530,7 @@
     class="flex max-h-[85vh] w-full max-w-[min(56rem,calc(100%-2rem))] flex-col gap-3 p-4 sm:max-w-[min(56rem,calc(100%-2rem))]"
     showCloseButton={true}
   >
-    <DialogHeader>
+    <DialogHeader class="">
       <DialogTitle>Project JSON</DialogTitle>
       <DialogDescription>
         Live song map and audio session metadata. Audio bytes are not shown here.
@@ -585,3 +541,5 @@
     >{debugJsonText}</pre>
   </DialogContent>
 </Dialog>
+
+<NewProjectDialog bind:open={newProjectDialogOpen} onCreated={() => refreshRecents()} />

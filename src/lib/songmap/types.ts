@@ -117,6 +117,16 @@ export type AudioReference = {
   mimeType?: string
   /** Duration of the full (untrimmed) reference audio file in seconds. */
   durationSec?: number
+  /**
+   * Sample rate of the stored audio in Hz (e.g. 44100, 48000). Persisted at
+   * relink / import time alongside `sha256` so collaborators on a different
+   * machine can match audio by content identity rather than path.
+   */
+  sampleRate?: number
+  /** Channel count (1 = mono, 2 = stereo). Identity field; see `sampleRate`. */
+  channels?: number
+  /** File size in bytes on disk. Identity field; see `sampleRate`. */
+  fileSize?: number
   /** Selected playback region within the full reference audio. */
   trim: { startSec: number; endSec: number }
   /** SHA-256 of the stored reference (compressed) audio file. */
@@ -128,9 +138,27 @@ export type AudioReference = {
    * Typical value: `"audio/<fileName>"`. Resolves to `<projectPath>/<songFolder>/audio/<fileName>`
    * in project mode and to a sibling `audio/` folder when a single-song bundle is shared.
    * Absent on legacy/web-only `.smap` files; the app shows a relink banner in that case.
+   * **Local-only** — stripped from the collaborative SongMap on cloud push.
    */
   originalPath?: string
   source: AudioSource
+}
+
+/**
+ * Cloud's claim about which audio file belongs to a song. Written by the
+ * server on `joinCloudProject` / pull; read by the local reconciler when
+ * the project opens. Phase 5 matches the local `<song>/audio/` contents
+ * against this bundle (strict by sha256, loose by duration+sr+ch+size).
+ */
+export type ExpectedAudio = {
+  fileName: string
+  mimeType?: string
+  durationSec?: number
+  sampleRate?: number
+  channels?: number
+  fileSize?: number
+  sha256?: string
+  originalSha256?: string
 }
 
 export type Meter = { numerator: number; denominator: number }
@@ -310,6 +338,13 @@ export type SongMapV1 = {
   clickTrackExport?: ClickTrackExport
   /** Optional saved mixer state for the in-browser DAW view. */
   mixState?: MixState
+  /**
+   * For cloud-linked songs: the server's claim about which audio file
+   * belongs here, by content identity. Absent on standalone / local-only
+   * songs. Phase 5 reconciliation uses this to match a local audio file
+   * even if it was renamed or copied from a different folder.
+   */
+  expectedAudio?: ExpectedAudio
   /** Cached audio-derived section-border hints (display-only). */
   sectionBorderHints?: SectionBorderHints
   /** Cached per-beat chroma + detected key (display-only / hint source). */

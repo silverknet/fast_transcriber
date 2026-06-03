@@ -72,7 +72,33 @@ export function parseProjectJson(text: string): ProjectFile {
     }
     const entry: ProjectSongEntry = { id: e.id, folder }
     if (typeof e.hidden === 'boolean' && e.hidden) entry.hidden = true
+    if (typeof e.cloudSongId === 'string' && e.cloudSongId.length > 0) {
+      entry.cloudSongId = e.cloudSongId
+    }
+    if (typeof e.lastSyncedRevision === 'number' && Number.isFinite(e.lastSyncedRevision)) {
+      entry.lastSyncedRevision = e.lastSyncedRevision
+    }
     songs.push(entry)
+  }
+
+  // Cloud-link block is optional; only present on collab-enabled
+  // projects. Unknown shapes are silently dropped so a future schema
+  // bump doesn't refuse to open older clients' manifests.
+  let cloud: ProjectFile['cloud']
+  if (o.cloud && typeof o.cloud === 'object') {
+    const c = o.cloud as Record<string, unknown>
+    if (typeof c.projectId === 'string' && c.projectId.length > 0
+        && typeof c.lastSyncedRevision === 'number' && Number.isFinite(c.lastSyncedRevision)) {
+      cloud = {
+        projectId: c.projectId,
+        lastSyncedRevision: c.lastSyncedRevision,
+      }
+      if (typeof c.pendingChanges === 'number' && Number.isFinite(c.pendingChanges)) {
+        cloud.pendingChanges = c.pendingChanges
+      }
+      if (typeof c.lastPushedAt === 'string') cloud.lastPushedAt = c.lastPushedAt
+      if (typeof c.lastPulledAt === 'string') cloud.lastPulledAt = c.lastPulledAt
+    }
   }
 
   return {
@@ -82,5 +108,6 @@ export function parseProjectJson(text: string): ProjectFile {
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
     songs,
+    ...(cloud ? { cloud } : {}),
   }
 }
