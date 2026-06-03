@@ -17,9 +17,12 @@
 import { get, writable } from 'svelte/store'
 import {
   cancelJob as cancelJobOnSidecar,
+  pauseJob as pauseJobOnSidecar,
+  resumeJob as resumeJobOnSidecar,
   releaseStemsJob,
   subscribeToJobEvents,
   type DesktopJobView,
+  type JobControlResult,
   type StemJobState,
   type StemSeparationEvent,
 } from '$lib/client/desktopBridge'
@@ -103,14 +106,21 @@ function handleEvent(jobId: string, ev: StemSeparationEvent) {
       patchEntry(jobId, { error: ev.msg })
       appendLog(jobId, `⛔  ${ev.msg}`)
       break
-    case 'state':
+    case 'state': {
+      // Track previous state so we can log "Resumed" only when coming back
+      // from a pause (not on the initial queued → running transition).
+      const prevState = get(stemJobs).get(jobId)?.state ?? null
       patchEntry(jobId, {
         state: ev.state,
+        // Only stamp finishedAt for terminal states. `paused` keeps the
+        // job mid-flight — we don't want it auto-filed under "done".
         finishedAt:
           ev.state === 'done' || ev.state === 'error' || ev.state === 'cancelled'
             ? new Date().toISOString()
             : null,
       })
+      if (ev.state === 'paused') appendLog(jobId, '⏸  Paused.')
+      else if (ev.state === 'running' && prevState === 'paused') appendLog(jobId, '▶  Resumed.')
       if (ev.state === 'done') {
         const entry = get(stemJobs).get(jobId)
         const finalize = finalizers.get(jobId)
@@ -120,6 +130,7 @@ function handleEvent(jobId: string, ev: StemSeparationEvent) {
         }
       }
       break
+    }
     case 'cleanup':
       removeJob(jobId)
       break
@@ -231,6 +242,20 @@ export async function cancelStemJob(jobId: string): Promise<void> {
   // entry briefly so the user sees what happened.
 }
 
+/**
+ * Pause a running stems job (SIGSTOP on the desktop sidecar). The store
+ * updates via the streamed `state: 'paused'` event, not here. Returns the
+ * sidecar's reply so the caller can surface invalid-transition errors.
+ */
+export async function pauseStemJob(jobId: string): Promise<JobControlResult> {
+  return pauseJobOnSidecar(jobId)
+}
+
+/** Resume a paused stems job (SIGCONT). State update flows in via NDJSON. */
+export async function resumeStemJob(jobId: string): Promise<JobControlResult> {
+  return resumeJobOnSidecar(jobId)
+}
+
 /** Release the sidecar's temp dir (called after stems are fetched). */
 export async function releaseStemJob(jobId: string): Promise<void> {
   await releaseStemsJob(jobId)
@@ -242,9 +267,15 @@ export function jobsForSong(songId: string): StemJobEntry[] {
   return [...get(stemJobs).values()].filter((j) => j.songId === songId)
 }
 
+/**
+ * In-flight = queued, running, or paused. A paused job still occupies the
+ * song's slot (the sidecar's queue worker treats it as the current job), so
+ * for UI purposes "is this song busy with stems?" is true while paused too.
+ */
 export function activeJobForSong(songId: string): StemJobEntry | null {
   for (const j of get(stemJobs).values()) {
-    if (j.songId === songId && (j.state === 'queued' || j.state === 'running')) {
+    if (j.songId !== songId) continue
+    if (j.state === 'queued' || j.state === 'running' || j.state === 'paused') {
       return j
     }
   }

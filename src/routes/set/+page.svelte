@@ -38,9 +38,9 @@
   }
 
   /**
-   * Project-mode songs use the in-card SongSetPanel — this /set route stays
-   * standalone-only. Always returns null so the per-title folder picker path
-   * runs.
+   * Project-mode songs flow through the StemsDialog on the project page —
+   * this /set route stays standalone-only. Always returns null so the
+   * per-title folder picker path runs.
    */
   async function projectSongDirHandle(): Promise<FileSystemDirectoryHandle | null> {
     return null
@@ -276,7 +276,7 @@
       lastXml = xml
       statusMsg = 'Compressing (gzip)…'
       const blob = await gzipString(xml)
-      // Standalone mode only — project songs use the in-card SongSetPanel
+      // Standalone mode only — project songs export via the project page
       // (.als export there moves to a sidecar endpoint in a follow-up).
       const alsName = `${safeExportBasename(sm.metadata.title)}.als`
 

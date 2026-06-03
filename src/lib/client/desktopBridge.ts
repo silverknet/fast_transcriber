@@ -308,7 +308,7 @@ export const STEM_PRESET_PRIORITY: readonly string[] = ['best', 'balanced', 'pre
 
 export type StemName = 'vocals' | 'drums' | 'bass' | 'other'
 
-export type StemJobState = 'queued' | 'running' | 'done' | 'cancelled' | 'error'
+export type StemJobState = 'queued' | 'running' | 'paused' | 'done' | 'cancelled' | 'error'
 
 /** Lifecycle + content events from the per-job NDJSON subscription. */
 export type StemSeparationEvent =
@@ -518,7 +518,8 @@ export async function listJobsViaDesktop(): Promise<DesktopJobView[]> {
 
 /**
  * Cancel a queued or running job (or destroy a terminal one). The sidecar
- * sends SIGTERM if the job is running.
+ * sends SIGTERM if the job is running. For a paused job the sidecar thaws
+ * it first (SIGCONT) so SIGTERM actually delivers.
  */
 export async function cancelJob(jobId: string): Promise<void> {
   try {
@@ -529,6 +530,55 @@ export async function cancelJob(jobId: string): Promise<void> {
   } catch {
     /* best-effort */
   }
+}
+
+/**
+ * Result shape from POST /native/jobs/:jobId/pause and /resume.
+ * `ok: false` is returned for invalid transitions (e.g. pausing a queued job).
+ */
+export type JobControlResult =
+  | { ok: true; state: StemJobState }
+  | { ok: false; error: string }
+
+async function postJobControl(jobId: string, action: 'pause' | 'resume'): Promise<JobControlResult> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/native/jobs/${encodeURIComponent(jobId)}/${action}`, {
+      method: 'POST',
+      cache: 'no-store',
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+  let data: { ok?: boolean; state?: StemJobState; error?: string }
+  try {
+    data = await res.json()
+  } catch {
+    return { ok: false, error: `Non-JSON response (HTTP ${res.status})` }
+  }
+  if (!res.ok || data.ok !== true || !data.state) {
+    return { ok: false, error: data.error ?? `${action} failed (HTTP ${res.status})` }
+  }
+  return { ok: true, state: data.state }
+}
+
+/**
+ * Suspend a running Demucs job via SIGSTOP — CPU/GPU usage drops to zero,
+ * progress freezes. The job keeps its queue slot, so other queued jobs
+ * still wait their turn. Cancel + re-enqueue if you'd rather free the slot.
+ *
+ * Limitations:
+ *  - macOS/Linux only.
+ *  - Does not survive sidecar restart.
+ */
+export async function pauseJob(jobId: string): Promise<JobControlResult> {
+  return postJobControl(jobId, 'pause')
+}
+
+/** Resume a paused Demucs job via SIGCONT. Picks up exactly where it left off. */
+export async function resumeJob(jobId: string): Promise<JobControlResult> {
+  return postJobControl(jobId, 'resume')
 }
 
 // ── Stems dependency setup ─────────────────────────────────────────────────

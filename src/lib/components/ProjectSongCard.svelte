@@ -6,6 +6,10 @@
    * single edit button + a ⋮ overflow menu — drag handle on the left, no more
    * up/down arrows (reordering is drag-and-drop in the parent).
    *
+   * Stems open in the project-level `StemsDialog`, not an inline expand panel —
+   * keeps the row consistent and lets drag-and-drop work without the expanded
+   * section fighting the dnd zone.
+   *
    * Layout grid (matches the header):
    *   handle | title/artist | key/bpm | drums | bass | guitar | vocals | fx | cue | edit | ⋮
    */
@@ -18,19 +22,17 @@
     DropdownMenuSeparator,
   } from '$lib/components/ui/dropdown-menu'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
-  import SongSetPanel from '$lib/components/SongSetPanel.svelte'
   import type { ProjectSongEntry } from '$lib/project/types'
   import type { ProjectSongMetadataLite } from '$lib/stores/project'
   import { stemJobs, type StemJobEntry } from '$lib/stores/stemJobs'
   import {
-    ChevronDown,
-    ChevronUp,
     Download,
     Eye,
     EyeOff,
     GripVertical,
     MoreVertical,
     Pencil,
+    Sliders,
     Trash2,
   } from '@lucide/svelte'
 
@@ -38,9 +40,8 @@
     entry,
     metadata,
     position,
-    isExpanded,
-    onToggleExpand,
     onEdit,
+    onOpenStems,
     onToggleHidden,
     onRemove,
     onExport,
@@ -49,9 +50,9 @@
     metadata?: ProjectSongMetadataLite
     /** 1-based position in the (drag-aware) setlist. Updates live during reorder. */
     position: number
-    isExpanded: boolean
-    onToggleExpand: () => void
     onEdit: () => void
+    /** Open the project-level Stems dialog for this song. */
+    onOpenStems: () => void
     onToggleHidden: () => void
     onRemove: () => void
     onExport: () => void
@@ -80,10 +81,15 @@
   )
   let hasCueTrack = $derived(!!metadata?.hasCueTrack)
 
-  /** Active stem job for this song (queued / running) — drives the row's status pill. */
+  /** Active stem job for this song (queued / running / paused) — drives the row pill. */
   let activeJob = $derived.by<StemJobEntry | null>(() => {
     for (const j of $stemJobs.values()) {
-      if (j.songId === entry.id && (j.state === 'queued' || j.state === 'running')) return j
+      if (
+        j.songId === entry.id &&
+        (j.state === 'queued' || j.state === 'running' || j.state === 'paused')
+      ) {
+        return j
+      }
     }
     return null
   })
@@ -196,7 +202,7 @@
       <Pencil class="size-3.5" aria-hidden="true" />
     </Button>
 
-    <!-- Overflow menu (⋮): export / hide-show / remove / expand. -->
+    <!-- Overflow menu (⋮): stems / export / hide-show / remove. -->
     <DropdownMenu>
       <DropdownMenuTrigger>
         {#snippet child({ props })}
@@ -213,14 +219,9 @@
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" class="min-w-44">
-        <DropdownMenuItem class="" onclick={onToggleExpand}>
-          {#if isExpanded}
-            <ChevronUp class="size-3.5" aria-hidden="true" />
-            Collapse panel
-          {:else}
-            <ChevronDown class="size-3.5" aria-hidden="true" />
-            Expand panel
-          {/if}
+        <DropdownMenuItem class="" onclick={onOpenStems}>
+          <Sliders class="size-3.5" aria-hidden="true" />
+          Stems…
         </DropdownMenuItem>
         <DropdownMenuItem class="" onclick={onExport}>
           <Download class="size-3.5" aria-hidden="true" />
@@ -244,24 +245,52 @@
     </DropdownMenu>
   </div>
 
-  <!-- Active / recent stem-job status pill (below the row when present). -->
+  <!--
+    Active / recent stem-job status (below the row when present). Includes a
+    visible progress bar so the user can scan the song list and tell at a
+    glance which song the queue is currently chewing on.
+  -->
   {#if activeJob}
     <div
-      class="border-foreground/40 mx-2 mb-2 flex flex-wrap items-center gap-2 border px-2 py-1 text-xs"
+      class="border-foreground/40 mx-2 mb-2 flex items-center gap-3 border px-2 py-1 text-xs"
       role="status"
+      aria-label="Stem splitting progress"
     >
       <span
         class="size-1.5 shrink-0 rounded-full {activeJob.state === 'running'
           ? 'animate-pulse bg-amber-500'
-          : 'bg-foreground/40'}"
+          : activeJob.state === 'paused'
+            ? 'bg-sky-500'
+            : 'bg-foreground/40'}"
         aria-hidden="true"
       ></span>
-      <span class="font-mono">
-        {activeJob.state === 'queued' ? 'Queued' : activeJob.label || 'Running'}
+      <span class="shrink-0 font-mono">
+        {#if activeJob.state === 'queued'}Queued
+        {:else if activeJob.state === 'paused'}Paused
+        {:else}Stems{/if}
       </span>
-      {#if activeJob.state === 'running'}
-        <span class="text-muted-foreground font-mono tabular-nums">
-          {activeJob.overallPct}% overall · {activeJob.currentPct}% pass
+      <span class="text-muted-foreground min-w-0 flex-1 truncate font-mono text-[11px]">
+        {activeJob.label || (activeJob.state === 'queued' ? 'Waiting for slot…' : 'Starting…')}
+      </span>
+      <!--
+        Progress bar shown for both running AND paused: the paused bar freezes
+        at its last %, signalling "we're partway through, just suspended".
+      -->
+      {#if activeJob.state === 'running' || activeJob.state === 'paused'}
+        <div
+          class="border-foreground/30 bg-background relative h-2 w-32 shrink-0 border"
+          aria-hidden="true"
+        >
+          <div
+            class="absolute inset-y-0 left-0 transition-[width] duration-200 {activeJob.state ===
+            'paused'
+              ? 'bg-foreground/40'
+              : 'bg-foreground'}"
+            style="width: {activeJob.overallPct}%"
+          ></div>
+        </div>
+        <span class="text-muted-foreground w-9 shrink-0 text-right font-mono tabular-nums">
+          {activeJob.overallPct}%
         </span>
       {/if}
     </div>
@@ -274,10 +303,5 @@
         {recentTerminalJob.state === 'cancelled' ? 'Cancelled' : `Error: ${recentTerminalJob.error ?? 'unknown'}`}
       </span>
     </div>
-  {/if}
-
-  <!-- ── Expanded panel (only when toggled from the ⋮ menu) ───────────── -->
-  {#if isExpanded}
-    <SongSetPanel {entry} />
   {/if}
 </li>

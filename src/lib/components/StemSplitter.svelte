@@ -7,7 +7,7 @@
    * cross HTTP**. The web app's only job is to trigger, observe, and
    * (lightly) finalize the .smap stemRefs.
    *
-   * The parent (`SongSetPanel`) hands us a `finalizeJob` callback that runs
+   * The parent (`StemsDialog`) hands us a `finalizeJob` callback that runs
    * when the job's state becomes `done`. The stems are already on disk by
    * then — the callback just refreshes the folder listing and updates the
    * song's `.smap` `stemRefs`.
@@ -23,13 +23,15 @@
   } from '$lib/client/desktopBridge'
   import {
     activeJobForSong,
+    cancelStemJob,
+    pauseStemJob,
     registerStemJob,
+    resumeStemJob,
     stemJobs,
     type StemJobEntry,
   } from '$lib/stores/stemJobs'
   import CircleHelp from '@lucide/svelte/icons/circle-help'
-  import { Download, Play, X } from '@lucide/svelte'
-  import { cancelStemJob } from '$lib/stores/stemJobs'
+  import { Download, Pause, Play, X } from '@lucide/svelte'
 
   const ALL_STEMS: StemName[] = ['vocals', 'drums', 'bass', 'other']
 
@@ -43,6 +45,8 @@
     inputLabel,
     desktopReachable,
     finalizeJob,
+    chromeless = false,
+    currentQualityByStem = {},
   } = $props<{
     /** Stable identity used to associate jobs with this card. */
     songId: string
@@ -60,18 +64,60 @@
     desktopReachable: boolean
     /** Runs once when the job's state becomes `done`. Stems are already on disk. */
     finalizeJob: (entry: StemJobEntry) => void | Promise<void>
+    /**
+     * Drop the outer card border + "Stem Splitter" h2. Used by `StemsDialog`
+     * since the surrounding dialog already supplies a border and a title.
+     */
+    chromeless?: boolean
+    /**
+     * Highest preset slug each stem currently exists at on disk. Drives the
+     * per-stem quality badge and the "smart default" checkbox state (queue
+     * stems that are missing OR lower than the chosen target). Empty / unset
+     * means "no info" — falls back to selecting everything by default.
+     */
+    currentQualityByStem?: Partial<Record<StemName, 'best' | 'balanced' | 'preview' | 'legacy' | null>>
   }>()
+
+  // Lower number = higher quality. Matches `STEM_PRESET_PRIORITY` in
+  // desktopBridge.ts. `legacy` is the flat pre-preset layout — lowest tier.
+  const PRESET_RANK: Record<string, number> = { best: 0, balanced: 1, preview: 2, legacy: 3 }
+  const MISSING_RANK = 99
 
   // ── Form state ─────────────────────────────────────────────────────────────
 
-  const selected = $state<Record<StemName, boolean>>({ vocals: true, drums: true, bass: true, other: true })
   let presetIndex = $state(1) // default: "Balanced"
-
-  const allSelected = $derived(ALL_STEMS.every((s) => selected[s]))
-  const anySelected = $derived(ALL_STEMS.some((s) => selected[s]))
   const preset: StemQualityPreset = $derived(
     STEM_QUALITY_PRESETS[presetIndex] ?? STEM_QUALITY_PRESETS[1]!,
   )
+  const targetRank = $derived(PRESET_RANK[preset.slug] ?? MISSING_RANK)
+
+  function stemRank(s: StemName): number {
+    const cur = currentQualityByStem[s] ?? null
+    return cur ? PRESET_RANK[cur] ?? MISSING_RANK : MISSING_RANK
+  }
+
+  /**
+   * Initial selection mirrors the smart default: tick stems that are missing
+   * OR exist at lower quality than the current target. The $effect below
+   * keeps this honest whenever the target preset changes.
+   */
+  const selected = $state<Record<StemName, boolean>>(
+    Object.fromEntries(
+      ALL_STEMS.map((s) => [s, stemRank(s) > (PRESET_RANK['balanced'] ?? MISSING_RANK)]),
+    ) as Record<StemName, boolean>,
+  )
+
+  // Whenever the user picks a different quality, re-suggest the right set —
+  // typical case: bump target to "best" and the still-at-balanced stems
+  // auto-tick for upgrade. User can manually adjust after; selections survive
+  // until the next preset change.
+  $effect(() => {
+    const rank = targetRank
+    for (const s of ALL_STEMS) selected[s] = stemRank(s) > rank
+  })
+
+  const allSelected = $derived(ALL_STEMS.every((s) => selected[s]))
+  const anySelected = $derived(ALL_STEMS.some((s) => selected[s]))
 
   function toggleAll() {
     const next = !allSelected
@@ -151,6 +197,20 @@
     const id = jobEntry?.jobId
     if (!id) return
     await cancelStemJob(id)
+  }
+
+  /** Surface invalid-transition / sidecar errors via the existing error slot. */
+  let pauseError = $state('')
+
+  async function togglePause() {
+    const id = jobEntry?.jobId
+    if (!id || !jobEntry) return
+    pauseError = ''
+    const r =
+      jobEntry.state === 'paused'
+        ? await resumeStemJob(id)
+        : await pauseStemJob(id)
+    if (!r.ok) pauseError = r.error
   }
 
   // ── Python deps setup (one-time pip install of Demucs) ─────────────────────
@@ -249,10 +309,13 @@
     canRun().ok ? 'Run Demucs stem separation in the desktop app' : hint || 'Cannot split yet',
   )
 
-  const phase = $derived<'idle' | 'queued' | 'running' | 'done' | 'error' | 'cancelled'>(
+  const phase = $derived<'idle' | 'queued' | 'running' | 'paused' | 'done' | 'error' | 'cancelled'>(
     jobEntry?.state ?? 'idle',
   )
-  const stepLabel = $derived(jobEntry?.label ?? 'Idle')
+  const stepLabel = $derived(
+    phase === 'paused' ? `Paused — ${jobEntry?.label ?? '…'}` : (jobEntry?.label ?? 'Idle'),
+  )
+  const isPaused = $derived(phase === 'paused')
   const currentPct = $derived(jobEntry?.currentPct ?? 0)
   const overallPct = $derived(jobEntry?.overallPct ?? 0)
   const logLines = $derived(jobEntry?.log ?? [])
@@ -267,11 +330,21 @@
   })
 </script>
 
-<section class="border-foreground border-2 p-4 space-y-4">
-  <h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Stem Splitter</h2>
+<section class:border-foreground={!chromeless} class:border-2={!chromeless} class:p-4={!chromeless} class="space-y-4">
+  {#if !chromeless}
+    <h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Stem Splitter</h2>
+  {/if}
 
+  <!--
+    `min-w-0` on every fieldset overrides the user-agent's intrinsic
+    `min-width: min-content` (browsers historically size <fieldset> to fit
+    its content, ignoring `width` constraints). Without it, a long
+    `inputPath` / `outputDir` makes the fieldset refuse to shrink — and the
+    `truncate` `<p>` inside has nothing to truncate against, producing
+    horizontal overflow inside the dialog.
+  -->
   <!-- Audio source on disk -->
-  <fieldset class="border-foreground/30 border space-y-1 px-3 py-2">
+  <fieldset class="border-foreground/30 border min-w-0 space-y-1 px-3 py-2">
     <legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Audio source</legend>
     {#if inputPath}
       <p class="font-mono text-sm truncate" title={inputPath}>
@@ -288,19 +361,48 @@
     {/if}
   </fieldset>
 
-  <!-- Stems to Export -->
-  <fieldset class="border-foreground/30 border space-y-2 px-3 py-2">
-    <legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Stems to Export</legend>
-    <div class="flex flex-wrap gap-x-4 gap-y-2">
+  <!--
+    Stems to Export. Each row carries a quality badge:
+      emerald = already at target
+      muted (no arrow) when unchecked + at-or-above target = skip
+      amber + "→ target" = will be upgraded
+      muted "none" + "→ target" = will be created
+    The grid uses `display: contents` on the row labels so checkbox / name /
+    badge columns stay aligned across rows.
+  -->
+  <fieldset class="border-foreground/30 border min-w-0 space-y-2 px-3 py-2">
+    <legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Stems</legend>
+    <div class="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1.5">
       {#each ALL_STEMS as s (s)}
-        <label class="flex cursor-pointer items-center gap-1.5 text-sm">
+        {@const cur = currentQualityByStem[s] ?? null}
+        {@const curRank = stemRank(s)}
+        {@const atTarget = curRank === targetRank}
+        {@const willUpgrade = curRank > targetRank}
+        {@const willRun = selected[s]}
+        <label class="contents cursor-pointer">
           <input
             type="checkbox"
             class="size-4"
             bind:checked={selected[s]}
             disabled={songIsBusy}
           />
-          <span class="capitalize">{s}</span>
+          <span class="capitalize text-sm">{s}</span>
+          <span class="font-mono text-[10px] uppercase tracking-wider whitespace-nowrap tabular-nums">
+            {#if cur === null}
+              <span class="text-muted-foreground">none</span>
+            {:else}
+              <span
+                class={atTarget
+                  ? 'text-emerald-700 dark:text-emerald-400'
+                  : willUpgrade
+                    ? 'text-amber-700 dark:text-amber-400'
+                    : 'text-muted-foreground'}
+              >{cur}</span>
+            {/if}
+            {#if willRun && !atTarget}
+              <span class="text-foreground"> → {preset.slug}</span>
+            {/if}
+          </span>
         </label>
       {/each}
     </div>
@@ -312,12 +414,12 @@
         onchange={toggleAll}
         disabled={songIsBusy}
       />
-      <span>Select all</span>
+      <span>Run all</span>
     </label>
   </fieldset>
 
   <!-- Quality -->
-  <fieldset class="border-foreground/30 border space-y-1 px-3 py-2">
+  <fieldset class="border-foreground/30 border min-w-0 space-y-1 px-3 py-2">
     <legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Quality</legend>
     <select
       class="border-foreground/30 bg-background text-foreground w-full border px-2 py-1 font-mono text-xs"
@@ -330,7 +432,11 @@
     </select>
   </fieldset>
 
-  <!-- Run / Cancel -->
+  <!--
+    Run / Pause / Resume / Cancel. Pause is only meaningful for a `running`
+    job — queued jobs haven't started yet, so we just show Cancel. A paused
+    job exposes Resume + Cancel.
+  -->
   <div class="flex flex-wrap items-center gap-3">
     <Button
       class="gap-2"
@@ -341,7 +447,31 @@
       <Play class="size-4" aria-hidden="true" />
       Split Stems
     </Button>
-    {#if jobEntry && (phase === 'queued' || phase === 'running')}
+    {#if jobEntry && phase === 'running'}
+      <Button
+        variant="outline"
+        size="sm"
+        class="gap-1"
+        onclick={() => void togglePause()}
+        aria-label="Pause this stem job"
+        title="Suspend Demucs (SIGSTOP). Resume later to continue from where it left off."
+      >
+        <Pause class="size-3.5" aria-hidden="true" />
+        Pause
+      </Button>
+    {/if}
+    {#if jobEntry && phase === 'paused'}
+      <Button
+        size="sm"
+        class="gap-1"
+        onclick={() => void togglePause()}
+        aria-label="Resume this stem job"
+      >
+        <Play class="size-3.5" aria-hidden="true" />
+        Resume
+      </Button>
+    {/if}
+    {#if jobEntry && (phase === 'queued' || phase === 'running' || phase === 'paused')}
       <Button
         variant="outline"
         size="sm"
@@ -356,12 +486,15 @@
     {#if enqueueError}
       <p class="text-destructive text-xs" role="status">{enqueueError}</p>
     {/if}
+    {#if pauseError}
+      <p class="text-destructive text-xs" role="status">{pauseError}</p>
+    {/if}
   </div>
 
   <!-- Setup affordance: shown when the sidecar has no Demucs venv, or after a
        run fails with the "Demucs not installed" error. -->
   {#if desktopReachable && (showSetupButton || setupRunning || setupError)}
-    <fieldset class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border space-y-2 px-3 py-2">
+    <fieldset class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border min-w-0 space-y-2 px-3 py-2">
       <legend class="text-[10px] font-semibold uppercase tracking-wider px-1 text-amber-700 dark:text-amber-200">
         Python deps
       </legend>
@@ -413,7 +546,7 @@
           </summary>
           <div
             bind:this={setupLogBox}
-            class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-32 min-h-12 overflow-y-auto border p-2 font-mono text-[10px] leading-tight whitespace-pre-wrap"
+            class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-32 min-h-12 overflow-y-auto border p-2 font-mono text-[10px] leading-tight break-all whitespace-pre-wrap"
           >
             {#each setupLog as line, i (i)}
               <div>{line}</div>
@@ -462,7 +595,7 @@
     </summary>
     <div
       bind:this={logBox}
-      class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-40 min-h-16 overflow-y-auto border p-2 font-mono text-[11px] leading-tight whitespace-pre-wrap"
+      class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-40 min-h-16 overflow-y-auto border p-2 font-mono text-[11px] leading-tight break-all whitespace-pre-wrap"
     >
       {#each logLines as line, i (i)}
         <div>{line}</div>
