@@ -1,18 +1,35 @@
 /**
- * Root layout load — exposes the signed-in user (if any) to every page.
+ * Root layout load.
  *
- * `hooks.server.ts` already resolved `event.locals.user` from Supabase; we
- * just project the few fields the UI cares about so we don't ship the
- * entire User JWT shape to the client.
+ *  1. Resolve the route-level access gate (invite-only). Signed-out
+ *     visitors get bounced to /welcome on any protected route; signed-in
+ *     but-not-yet-granted users get bounced to /pending. The decision
+ *     table lives in `src/lib/server/access.ts:decideRouteAccess`.
  *
- * No project/song restoration happens here: the desktop sidecar owns
- * project state, and `+layout.svelte` calls `tryRestoreLastProject` on
- * mount for that. This file's only job is auth + opting out of any
- * inherited parent loads.
+ *  2. Expose the projected user shape to every page (also `accessStatus`
+ *     and `isAdmin` so the UI can render chips / hide admin entries).
+ *
+ * Auth and access are read from `event.locals.{user,accessStatus,isAdmin}`,
+ * which `hooks.server.ts` populated. No DB round-trip in here.
  */
+import { redirect } from '@sveltejs/kit'
+import { decideRouteAccess } from '$lib/server/access'
 import type { LayoutServerLoad } from './$types'
 
-export const load: LayoutServerLoad = async ({ locals }) => {
+export const load: LayoutServerLoad = async ({ locals, route, url }) => {
+  // Route gate. Skip for `/admin/*` if not admin — handled separately so
+  // we send a friendly 404-ish "not admin" instead of looping.
+  const gate = decideRouteAccess(route.id, !!locals.user, locals.accessStatus)
+  if (!gate.allow && url.pathname !== gate.redirectTo) {
+    throw redirect(303, gate.redirectTo)
+  }
+
+  // Admin routes: only admins. Non-admins get a redirect away from the
+  // admin tree so the route literally doesn't render.
+  if (route.id?.startsWith('/admin') && !locals.isAdmin) {
+    throw redirect(303, locals.user ? '/pending' : '/welcome')
+  }
+
   const u = locals.user
   return {
     user: u
@@ -23,5 +40,7 @@ export const load: LayoutServerLoad = async ({ locals }) => {
           avatarUrl: (u.user_metadata?.avatar_url as string | undefined) ?? null,
         }
       : null,
+    accessStatus: locals.accessStatus,
+    isAdmin: locals.isAdmin,
   }
 }

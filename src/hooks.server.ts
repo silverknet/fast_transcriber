@@ -16,6 +16,7 @@
  * header probing can break SvelteKit's response serialization.
  */
 import { createSupabaseServerClient } from '$lib/server/supabase/serverClient'
+import { loadAccessForUser } from '$lib/server/access'
 import { env as publicEnv } from '$env/dynamic/public'
 import type { Handle } from '@sveltejs/kit'
 
@@ -33,6 +34,8 @@ export const handle: Handle = async ({ event, resolve }) => {
     event.locals.supabase = null
     event.locals.session = null
     event.locals.user = null
+    event.locals.accessStatus = 'none'
+    event.locals.isAdmin = false
     return resolve(event, {
       filterSerializedResponseHeaders: (name) => name === 'content-range',
     })
@@ -49,12 +52,28 @@ export const handle: Handle = async ({ event, resolve }) => {
   if (error || !user) {
     event.locals.user = null
     event.locals.session = null
+    event.locals.accessStatus = 'none'
+    event.locals.isAdmin = false
   } else {
     event.locals.user = user
     // `getSession()` is cheap (no round-trip) and we already trust the
     // user above — pair them up for handlers that want both.
     const { data: { session } } = await event.locals.supabase.auth.getSession()
     event.locals.session = session
+    // Resolve the invite-only access gate. Admin users always pass; other
+    // users get their access_grants row (created lazily on first hit).
+    try {
+      const access = await loadAccessForUser(user)
+      event.locals.accessStatus = access.status
+      event.locals.isAdmin = access.isAdmin
+    } catch (e) {
+      // DB unavailable or service-role env missing — fall back to
+      // "no access" so route gate redirects to /pending or /welcome
+      // rather than letting an unknown-state user into the app.
+      console.warn('[access] loadAccessForUser failed:', e)
+      event.locals.accessStatus = 'none'
+      event.locals.isAdmin = false
+    }
   }
 
   return resolve(event, {

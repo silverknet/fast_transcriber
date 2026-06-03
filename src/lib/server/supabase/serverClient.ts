@@ -15,8 +15,11 @@
  * `/auth/callback` round-trip.
  */
 import { createServerClient } from '@supabase/ssr'
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import { env } from '$env/dynamic/private'
 import { env as publicEnv } from '$env/dynamic/public'
 import type { Cookies } from '@sveltejs/kit'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 export function createSupabaseServerClient(cookies: Cookies) {
   const url = publicEnv.PUBLIC_SUPABASE_URL
@@ -37,4 +40,33 @@ export function createSupabaseServerClient(cookies: Cookies) {
       },
     },
   })
+}
+
+/**
+ * Service-role client — bypasses RLS. Reserved for trusted server-side
+ * operations that can't be expressed through user-scoped policies:
+ *
+ *  - Admin endpoints that mutate `access_grants` (grant/deny/invite).
+ *  - The auto-create-pending-row path during the access gate, since the
+ *    user can't INSERT their own access_grants row (RLS denies it).
+ *
+ * NEVER import from client-side code. NEVER expose
+ * `SUPABASE_SERVICE_ROLE_KEY` via `PUBLIC_*` env. The client is built
+ * lazily so missing env doesn't break server boot for callers that
+ * don't need it.
+ */
+let serviceClient: SupabaseClient | null = null
+export function getSupabaseServiceClient(): SupabaseClient {
+  if (serviceClient) return serviceClient
+  const url = publicEnv.PUBLIC_SUPABASE_URL
+  const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) {
+    throw new Error(
+      'Missing PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY (server-only).',
+    )
+  }
+  serviceClient = createSupabaseClient(url, serviceKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+  return serviceClient
 }

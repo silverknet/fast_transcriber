@@ -174,11 +174,13 @@
     }
   })
 
-  // The /download page is shown ONLY when the sidecar is unreachable — none
-  // of the AppMenuBar / ProjectContextBar actions can work without the
-  // sidecar, so hide them there to keep the page focused on a single CTA.
-  let onDownloadRoute = $derived($page.route?.id === '/download')
-  let showChrome = $derived(!onDownloadRoute)
+  // Hide AppMenuBar + ProjectContextBar on full-page routes that have
+  // their own self-contained chrome: /download (sidecar install CTA),
+  // /welcome (landing), /login, /pending. These pages should fill the
+  // viewport without the app's regular menus floating on top.
+  let bareRouteIds = ['/download', '/welcome', '/login', '/pending']
+  let onBareRoute = $derived(bareRouteIds.includes($page.route?.id ?? ''))
+  let showChrome = $derived(!onBareRoute)
 
   // Padding offset: AppMenuBar is fixed (~3rem) and ProjectContextBar adds
   // another ~2.5rem on top when active. Page content lives under both.
@@ -204,7 +206,12 @@
     if (status.reachable) return
     if (status.lastCheckedAt === null) return // no probe yet
     const here = $page.route?.id
+    // Don't yank the user away from the public / auth / pending pages —
+    // they don't need the sidecar yet, and a redirect to /download would
+    // skip the landing entirely on first visit.
     if (here === '/download') return
+    if (here === '/welcome' || here === '/login' || here === '/pending') return
+    if (here?.startsWith('/auth')) return
     void goto('/download')
   })
 </script>
