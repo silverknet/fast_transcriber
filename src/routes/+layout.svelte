@@ -18,9 +18,29 @@
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
+  import { userStore } from '$lib/stores/user'
+  import { getSupabaseBrowserClient } from '$lib/client/supabase/browserClient'
+  import { invalidateAll } from '$app/navigation'
+
+  // Server-resolved layout data (includes `user` from +layout.server.ts).
+  // Using `<slot />` below for parent-content rendering — Svelte 5 still
+  // accepts it for now; the slot→snippet migration is a separate task.
+  let { data } = $props<{
+    data: {
+      user: { id: string; email: string | null; name: string | null; avatarUrl: string | null } | null
+    }
+  }>()
+
+  // Mirror the server-resolved user into the global store on every nav.
+  // SvelteKit re-runs `+layout.server.ts` on every navigation, so this
+  // stays current as the cookie state changes.
+  $effect(() => {
+    userStore.set(data.user)
+  })
 
   let companionPollId: ReturnType<typeof setInterval> | null = null
   let activeSongUnsub: (() => void) | null = null
+  let authUnsub: (() => void) | null = null
 
   async function pollDesktopCompanion() {
     const r = await probeDesktopCompanion()
@@ -63,6 +83,11 @@
         openedSong = true
       }
       const here = get(page).route?.id
+      // Never yank the user away from the auth flow — they came here for
+      // a reason and an auto-restore should not steal focus from sign-in
+      // or the OAuth callback round-trip.
+      const onAuthRoute = here === '/login' || here?.startsWith('/auth')
+      if (onAuthRoute) return
       if (openedSong && here !== '/edit') {
         await goto('/edit', { replaceState: true })
       } else if (!openedSong && here === '/') {
@@ -78,6 +103,20 @@
     void pollDesktopCompanion()
     companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
     startProjectAutosave()
+
+    // Subscribe to client-side Supabase auth events (sign-in via OAuth
+    // callback, sign-out, token refresh) and re-run the server load so
+    // `data.user` reflects the new state without a full page reload.
+    // The `$effect` above will then mirror the new user into `userStore`.
+    try {
+      const sb = getSupabaseBrowserClient()
+      const { data: { subscription } } = sb.auth.onAuthStateChange(() => {
+        void invalidateAll()
+      })
+      authUnsub = () => subscription.unsubscribe()
+    } catch {
+      // Supabase env not configured — fine, app keeps working signed-out.
+    }
 
     // Read pending active-song id BEFORE attaching the subscriber so its
     // synchronous initial emit doesn't overwrite localStorage.
@@ -116,6 +155,8 @@
       }
       activeSongUnsub?.()
       activeSongUnsub = null
+      authUnsub?.()
+      authUnsub = null
       stopProjectAutosave()
     }
   })

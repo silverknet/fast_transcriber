@@ -31,7 +31,13 @@ import pg from 'pg'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const envPath = path.join(__dirname, '..', '.env')
 
-function databaseUrlFromDotEnv() {
+/**
+ * Tiny .env reader — pulls the requested key, strips surrounding quotes.
+ * Used to fall back to .env when no env var is set in the shell, so a
+ * developer with `MIGRATE_DATABASE_URL=…` already in their .env can just
+ * `npm run db:migrate` without prefixing every time.
+ */
+function envFromDotEnv(key) {
   if (!fs.existsSync(envPath)) return null
   const text = fs.readFileSync(envPath, 'utf8')
   for (const line of text.split(/\r?\n/)) {
@@ -40,7 +46,7 @@ function databaseUrlFromDotEnv() {
     const eq = s.indexOf('=')
     if (eq <= 0) continue
     const k = s.slice(0, eq).trim()
-    if (k !== 'DATABASE_URL') continue
+    if (k !== key) continue
     const v = s.slice(eq + 1).trim()
     if (!v) return null
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
@@ -51,8 +57,15 @@ function databaseUrlFromDotEnv() {
   return null
 }
 
+// Precedence: shell env wins; then .env. Within each layer, MIGRATE_*
+// wins over DATABASE_URL so a dev with both set in .env can keep
+// `DATABASE_URL` pointing at local Docker for the SvelteKit dev server
+// while `MIGRATE_DATABASE_URL` aims at the prod Supabase direct URL.
 const url =
-  process.env.MIGRATE_DATABASE_URL ?? process.env.DATABASE_URL ?? databaseUrlFromDotEnv()
+  process.env.MIGRATE_DATABASE_URL ??
+  envFromDotEnv('MIGRATE_DATABASE_URL') ??
+  process.env.DATABASE_URL ??
+  envFromDotEnv('DATABASE_URL')
 if (!url) {
   console.error('Set MIGRATE_DATABASE_URL or DATABASE_URL (env or .env)')
   process.exit(1)

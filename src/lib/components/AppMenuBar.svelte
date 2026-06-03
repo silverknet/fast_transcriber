@@ -48,10 +48,12 @@
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { onMount } from 'svelte'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
+  import LogIn from '@lucide/svelte/icons/log-in'
   import Monitor from '@lucide/svelte/icons/monitor'
   import Moon from '@lucide/svelte/icons/moon'
   import Music from '@lucide/svelte/icons/music'
   import Sun from '@lucide/svelte/icons/sun'
+  import { userStore } from '$lib/stores/user'
 
   let dark = $state(browser && document.documentElement.classList.contains('dark'))
 
@@ -468,6 +470,35 @@
         <Moon class="size-4" />
       {/if}
     </Button>
+    <!--
+      Auth chip: signed-in users get an avatar/initial linking to /account;
+      signed-out users get a small "Sign in" link. Compact on purpose — the
+      header is busy. Full account UI lives at /account.
+    -->
+    {#if $userStore}
+      {@const initial = ($userStore.name?.[0] ?? $userStore.email?.[0] ?? '?').toUpperCase()}
+      <a
+        href="/account"
+        class="border-foreground inline-flex size-8 shrink-0 items-center justify-center border-2 no-underline"
+        title={$userStore.name ?? $userStore.email ?? 'Account'}
+        aria-label="Account"
+      >
+        {#if $userStore.avatarUrl}
+          <img src={$userStore.avatarUrl} alt="" class="size-full object-cover" referrerpolicy="no-referrer" />
+        {:else}
+          <span class="text-xs font-black">{initial}</span>
+        {/if}
+      </a>
+    {:else}
+      <a
+        href="/login"
+        class="border-foreground/40 text-muted-foreground hover:border-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 border-2 px-2 text-xs font-semibold uppercase tracking-wider no-underline"
+        title="Sign in"
+      >
+        <LogIn class="size-3.5" aria-hidden="true" />
+        Sign in
+      </a>
+    {/if}
     {#if !isInProjectMode}
       <Button
         type="button"
