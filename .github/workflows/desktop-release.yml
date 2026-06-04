@@ -50,11 +50,15 @@ jobs:
           # Skip code signing — no Developer ID yet. Users right-click → Open
           # to bypass Gatekeeper on first launch.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        # Build only — don't let electron-builder publish. It hardcodes
-        # the release tag to `v${version}` (no way to override), which
-        # drifts from our `desktop-v*` git tag scheme. We upload to the
-        # actual pushed tag below.
-        run: npx electron-builder --mac --arm64 --x64
+        # `--publish never` is load-bearing: when electron-builder
+        # detects a git tag on the workspace it triggers an *implicit*
+        # publish step (even without --publish always), which then
+        # crashes the workflow because GH_TOKEN isn't set. We don't
+        # want it to publish at all — we hand the artifacts to
+        # softprops/action-gh-release below so they land on the actual
+        # `desktop-vX.Y.Z` tag instead of electron-builder's hardcoded
+        # `v${version}` tag.
+        run: npx electron-builder --mac --arm64 --x64 --publish never
 
       - name: Upload to the pushed tag's GitHub Release
         uses: softprops/action-gh-release@v2
