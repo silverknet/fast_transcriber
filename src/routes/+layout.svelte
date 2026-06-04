@@ -8,7 +8,11 @@
   import ProjectContextBar from '$lib/components/ProjectContextBar.svelte'
   import { page } from '$app/stores'
   import { project as projectStore } from '$lib/stores/project'
-  import { probeDesktopCompanion } from '$lib/client/desktopBeacon'
+  import {
+    probeDesktopCompanion,
+    probeDesktopPythonHealth,
+    probeDesktopSetupStatus,
+  } from '$lib/client/desktopBeacon'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
   import {
     ACTIVE_SONG_ID_KEY,
@@ -44,11 +48,49 @@
 
   async function pollDesktopCompanion() {
     const r = await probeDesktopCompanion()
+    // Python deps health is only worth checking when the sidecar
+    // itself is reachable — there's no point asking python questions
+    // of a dead beacon. Sidecar caches the health internally so the
+    // 12s poll cadence only triggers fresh Python spawns once per minute.
+    let pythonHealth: 'unknown' | 'installing' | 'ok' | 'broken' = 'unknown'
+    let brokenChecks: { name: string; ok: boolean; error?: string }[] = []
+    let setup: {
+      running: boolean
+      overall: number
+      stages: import('$lib/client/desktopBeacon').DesktopSetupStage[]
+      lastError: string | null
+    } | null = null
+    if (r.ok) {
+      const health = await probeDesktopPythonHealth()
+      if (health) {
+        if (health.installing) {
+          pythonHealth = 'installing'
+        } else {
+          pythonHealth = health.ok ? 'ok' : 'broken'
+          brokenChecks = health.checks.filter((c) => !c.ok)
+        }
+      }
+      // Always pull setup state — even when health says 'ok' the page
+      // wants to know if anything was just installed (recent stages
+      // can show a "Done" toast). Cheap call, no Python spawned.
+      const s = await probeDesktopSetupStatus()
+      if (s) {
+        setup = {
+          running: s.running,
+          overall: s.overall,
+          stages: s.stages,
+          lastError: s.lastError,
+        }
+      }
+    }
     desktopCompanionStatus.set({
       reachable: r.ok,
       version: r.version,
       lastCheckedAt: new Date().toISOString(),
       lastError: r.error,
+      pythonHealth,
+      brokenChecks,
+      setup,
     })
   }
 
@@ -203,7 +245,6 @@
   $effect(() => {
     if (!browser) return
     const status = $desktopCompanionStatus
-    if (status.reachable) return
     if (status.lastCheckedAt === null) return // no probe yet
     const here = $page.route?.id
     // Don't yank the user away from the public / auth / pending pages —
@@ -212,7 +253,19 @@
     if (here === '/download') return
     if (here === '/welcome' || here === '/login' || here === '/pending') return
     if (here?.startsWith('/auth')) return
-    void goto('/download')
+    // Three reasons to lock the user to /download:
+    //   1. Sidecar unreachable (no companion running)
+    //   2. Sidecar reachable but its Python deps are missing (broken)
+    //   3. Auto-setup is currently installing deps — show the progress
+    //      UI on /download instead of letting the user wander into the
+    //      app where analyze endpoints will fail.
+    if (
+      !status.reachable ||
+      status.pythonHealth === 'broken' ||
+      status.pythonHealth === 'installing'
+    ) {
+      void goto('/download')
+    }
   })
 </script>
 

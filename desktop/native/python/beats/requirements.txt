@@ -1,7 +1,30 @@
-# Prefer: bash desktop/native/python/beats/install-deps.sh
-# (madmom needs --no-build-isolation; setuptools<76 keeps pkg_resources for madmom 0.16.)
+# Beats venv — first-pass install via `/native/setup/beats` (managed by
+# the sidecar's auto-setup at boot). The setup handler runs THIS file
+# first, then `pip install --no-build-isolation madmom==0.16.1` in a
+# second pass — madmom's setup.py imports `numpy.get_include()` at
+# build time, so numpy must already be in the venv before madmom is
+# pip-installed.
+#
+# madmom 0.16.1 is the 2018 PyPI release. Bare `import madmom` is
+# broken on Python 3.10+ (collections.MutableSequence moved to
+# collections.abc; np.float/np.int aliases removed), but we apply the
+# missing shims at runtime in `analyze_downbeats.py`. We deliberately
+# do NOT install from git+main — main's array code is incompatible
+# with numpy >= 1.22 (numpy.AxisError on np.delete), and we hit that in
+# the field.
+#
+# Pins (these are the versions confirmed working end-to-end against
+# madmom 0.16.1 on Python 3.10 — see docs/python-auto-setup.md):
+#  - setuptools < 76 keeps `pkg_resources` available (madmom's
+#    setup.py imports it).
+#  - numpy < 1.24 because madmom 0.16.1's Cython extensions were built
+#    against the pre-1.24 ABI; uv resolves to 1.23.5, which works.
+#  - scipy < 1.10 lines up with numpy 1.23.
+#  - cython >= 0.29.36 — earliest version that builds madmom cleanly
+#    on Python 3.11. (We pin Python 3.10 in the sidecar, but the
+#    floor is harmless.)
 setuptools>=69,<76
 wheel
 cython>=0.29.36
-numpy>=1.19.0,<2
-scipy>=1.5.0
+numpy>=1.21,<1.24
+scipy>=1.7,<1.10

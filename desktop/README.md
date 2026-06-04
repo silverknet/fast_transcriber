@@ -19,13 +19,27 @@ The process exits to the OS dock/taskbar only (no window). Watch the terminal fo
 
 `electron` downloads its binary during `npm install`; run that on your machine (normal terminal, not a restricted sandbox) so it can write its cache under your user directory.
 
-### Python env vars (optional)
+### Python deps — auto-setup at boot
+
+The sidecar auto-installs its Python venvs at first launch — no user
+button click required. See [`docs/python-auto-setup.md`](../docs/python-auto-setup.md)
+for the full architecture: health endpoint, auto-setup orchestrator,
+per-venv install pipelines, debug recipe, and the Path A (bundled
+installer) roadmap.
+
+### Python env vars (optional dev overrides)
+
+The managed venvs above take precedence over these in production. Use
+the env vars when you want to point at a custom interpreter (e.g.
+debugging with a different madmom version).
 
 | Env | Purpose |
 |-----|---------|
-| `BARBRO_PYTHON` | Interpreter for **madmom** beat script (`desktop/.venv-beats/bin/python3` after install-deps) |
-| `BARBRO_PYTHON_STEMS` | Interpreter for **demucs** (defaults to `BARBRO_PYTHON` then `python3`) |
-| `BARBRO_PYTHON_PIPER_TTS` | Interpreter for **Piper** (defaults to sidecar `piper-tts-venv` then `BARBRO_PYTHON` / `python3`) |
+| `BARBRO_PYTHON` | Default interpreter when no managed venv resolves |
+| `BARBRO_PYTHON_BEATS` | Beats interpreter override (beats venv at userData → this → `BARBRO_PYTHON` → `python3`) |
+| `BARBRO_PYTHON_SECTIONS` | Sections interpreter override (sections venv → this → `BARBRO_PYTHON` → `python3`) |
+| `BARBRO_PYTHON_STEMS` | Stems interpreter override (stems venv → this → `BARBRO_PYTHON` → `python3`) |
+| `BARBRO_PYTHON_PIPER_TTS` | Piper interpreter override (piper venv → this → `BARBRO_PYTHON` → `python3`) |
 
 ### Packaged build (Apple Silicon, unsigned dev)
 
