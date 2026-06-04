@@ -42,6 +42,7 @@ import {
   getSectionsVenvDir,
   getSectionsVenvPythonExe,
   sectionsLibrosaReady,
+  sectionsVenvIsReady,
   invalidateSectionsLibrosaCache,
   writeSectionsVenvMarker,
   uvBinaryIsReady,
@@ -50,6 +51,12 @@ import {
   UV_PINNED_VERSION,
   stemsScriptPath,
   stemsVenvIsReady,
+  getBeatsVenvDir,
+  getBeatsVenvPythonExe,
+  beatsVenvIsReady,
+  beatsMadmomReady,
+  invalidateBeatsMadmomCache,
+  writeBeatsVenvMarker,
 } from './nativePython.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -1868,6 +1875,150 @@ function tryRunNext() {
   }
 }
 
+// ── Python deps health check ──────────────────────────────────────────────
+//
+// Each analysis endpoint (analyze-downbeats, suggest-section-borders,
+// chord-chroma, stems separation) uses a specific Python interpreter
+// (system or a per-task venv). When the matching venv is missing or
+// has missing modules (the canonical case being "numpy not found"
+// because pip-install was interrupted), the analyze endpoint fails
+// with an unhelpful exit code. The web app should detect this proactively
+// and redirect to /download so the user knows something's broken before
+// they hit "Analyze" and get nothing.
+//
+// `getHealthStatus()` probes each interpreter by spawning
+// `python -c "import <modules>"` once per kind. The result is cached
+// for HEALTH_CACHE_TTL_MS so the web app polling every 12s only spawns
+// a fresh check once per minute. Per-check timeout = 5s; a hung
+// interpreter doesn't block the whole check.
+
+const HEALTH_CACHE_TTL_MS = 60_000
+
+/** @type {{ result: { ok: boolean, checks: Array<{ name: string, ok: boolean, error?: string }> } | null, expiresAt: number }} */
+let healthCache = { result: null, expiresAt: 0 }
+
+// madmom 0.16.1 needs runtime patches to import on Python 3.10+
+// (collections ABC move, np.float/int aliases removed). The patches
+// live in analyze_downbeats.py; reproduce the import-side bits here so
+// health checks don't false-negative on a working venv.
+const BEATS_HEALTH_PROBE = [
+  'import collections, collections.abc',
+  'collections.MutableSequence = collections.abc.MutableSequence',
+  'import numpy as np',
+  'np.float = np.float64',
+  'np.int = np.int64',
+  'np.bool = np.bool_',
+  'import scipy',
+  'from madmom.features.downbeats import DBNDownBeatTrackingProcessor, RNNDownBeatProcessor',
+].join('; ')
+
+/**
+ * Run `python -c "<script>"` against the given interpreter.
+ * Returns a CheckResult — never rejects. If `script` is provided it's
+ * used verbatim; otherwise we synthesise `import a; import b; …` from
+ * `modules`.
+ *
+ * @param {string} name
+ * @param {string | null | undefined} exe
+ * @param {string[]} modules
+ * @param {string} [script]
+ * @returns {Promise<{ name: string, ok: boolean, error?: string }>}
+ */
+function checkPythonImports(name, exe, modules, script) {
+  return new Promise((resolve) => {
+    if (!exe) {
+      resolve({ name, ok: false, error: 'no interpreter resolved' })
+      return
+    }
+    const code = script ?? modules.map((m) => `import ${m}`).join('; ')
+    let proc
+    try {
+      proc = spawn(exe, ['-c', code], { stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      resolve({ name, ok: false, error: e instanceof Error ? e.message : String(e) })
+      return
+    }
+    let stderr = ''
+    let done = false
+    const finish = (result) => {
+      if (done) return
+      done = true
+      try { proc?.kill() } catch { /* ignore */ }
+      resolve(result)
+    }
+    const timer = setTimeout(() => finish({ name, ok: false, error: 'timeout (5s)' }), 5_000)
+    proc.stderr?.on('data', (b) => {
+      stderr += b.toString('utf-8')
+    })
+    proc.on('error', (e) => {
+      clearTimeout(timer)
+      finish({ name, ok: false, error: e.message })
+    })
+    proc.on('close', (rc) => {
+      clearTimeout(timer)
+      if (rc === 0) finish({ name, ok: true })
+      else finish({ name, ok: false, error: stderr.trim() || `exit ${rc}` })
+    })
+  })
+}
+
+async function getHealthStatus() {
+  const now = Date.now()
+  if (healthCache.result && now < healthCache.expiresAt) {
+    return healthCache.result
+  }
+  // While auto-setup is running, health is "installing" rather than
+  // "broken" — return early so the client UI shows progress instead of
+  // the generic deps-broken error.
+  if (autoSetupState.running) {
+    return {
+      ok: false,
+      installing: true,
+      checks: [],
+    }
+  }
+  const checks = await Promise.all([
+    // Beats: only probe when the venv exists. Otherwise the system
+    // python3 fallback would happily report numpy ok (without madmom)
+    // and we'd incorrectly classify beats as "ok" while analyze fails.
+    checkPythonImports(
+      'beats',
+      beatsVenvIsReady() ? pythonBeatsExe() : null,
+      ['numpy', 'madmom'],
+      BEATS_HEALTH_PROBE,
+    ),
+    checkPythonImports('sections', pythonSectionsExe(), ['numpy', 'librosa']),
+    // Stems is intentionally not in the auto-setup loop (too heavy),
+    // so we don't report it as broken at the health level — the Stems
+    // dialog handles its own missing-deps UX.
+    checkPythonImports(
+      'piper-tts',
+      piperTtsVenvIsReady() ? pythonPiperTtsExe() : null,
+      ['piper'],
+    ),
+  ])
+  // piper is optional — having it broken doesn't block analyze. Only
+  // beats / sections being broken triggers the "deps broken" lock.
+  const ok = checks.filter((c) => c.name !== 'piper-tts').every((c) => c.ok)
+  const result = { ok, installing: false, checks }
+  healthCache = { result, expiresAt: now + HEALTH_CACHE_TTL_MS }
+  return result
+}
+
+function invalidateHealthCache() {
+  healthCache = { result: null, expiresAt: 0 }
+}
+
+async function handleHealth(res, cors) {
+  const status = await getHealthStatus()
+  sendJson(
+    res,
+    200,
+    { ok: status.ok, installing: status.installing ?? false, checks: status.checks },
+    cors,
+  )
+}
+
 /**
  * `POST /native/separate-stems` — body is JSON:
  *   `{ inputPath, outputDir, model?, shifts?, overlap?, stems?, songId? }`
@@ -2657,6 +2808,372 @@ async function handleSetupPiperTts(req, res, cors) {
   }
 }
 
+// ── Beats venv setup (madmom + numpy + scipy) ─────────────────────────────
+//
+// Madmom is finicky: it builds against the installed numpy ABI at install
+// time (its setup.py uses `numpy.get_include()`), so it needs
+// `--no-build-isolation` AND numpy already in the venv. The two-pass
+// install below handles that. Also pins numpy < 1.24 because madmom 0.16's
+// Cython code uses APIs removed in newer numpy.
+
+function handleBeatsSetupStatus(res, cors) {
+  const ready = beatsVenvIsReady()
+  sendJson(
+    res,
+    200,
+    {
+      ok: true,
+      ready,
+      venvDir: getBeatsVenvDir(),
+      venvPython: ready ? getBeatsVenvPythonExe() : null,
+    },
+    cors,
+  )
+}
+
+async function handleSetupBeats(req, res, cors) {
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  })
+  const emit = (ev) => {
+    try {
+      res.write(JSON.stringify(ev) + '\n')
+    } catch {
+      /* socket closed */
+    }
+  }
+
+  const venvDir = getBeatsVenvDir()
+  const venvPython = getBeatsVenvPythonExe()
+  const reqPath = path.join(getNativePythonRoot(), 'beats', 'requirements.txt')
+
+  emit({ type: 'log', msg: `Beats venv target: ${venvDir}` })
+
+  try {
+    // Phase 1 — uv (same sealed-Python download as sections setup).
+    if (!uvBinaryIsReady()) {
+      emit({
+        type: 'progress',
+        label: `Downloading uv ${UV_PINNED_VERSION} (~14 MB)…`,
+        current: 0,
+        overall: 5,
+      })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+    const uvBin = getUvBinaryPath()
+    emit({ type: 'progress', label: 'uv ready', current: 100, overall: 15 })
+
+    // Phase 2 — nuke broken venv if smoke test fails.
+    if (existsSync(venvDir)) {
+      const ok = await beatsMadmomReady()
+      if (!ok) {
+        emit({ type: 'log', msg: 'Existing beats venv is incomplete — removing it.' })
+        await rm(venvDir, { recursive: true, force: true })
+        invalidateBeatsMadmomCache()
+      }
+    }
+
+    // Phase 3 — create venv.
+    if (!existsSync(venvPython)) {
+      emit({
+        type: 'progress',
+        label: 'Creating venv…',
+        current: 0,
+        overall: 25,
+      })
+      // Pin to Python 3.10:
+      //  - numpy 1.21.x ships macOS arm64 wheels for 3.8-3.10 only; no
+      //    3.11 backport. madmom's array code is incompatible with
+      //    numpy >= 1.22's strict np.delete axis checks, so we're stuck
+      //    on numpy 1.21 → forced down to Python 3.10.
+      //  - madmom main also doesn't build cleanly on Python 3.12+.
+      // 3.10 is the only version where every pin lines up cleanly.
+      const v = await runPipelineNdjson(uvBin, ['venv', '--python', '3.10', venvDir], emit)
+      if (v.code !== 0 || !existsSync(venvPython)) {
+        emit({ type: 'error', msg: `uv venv failed (exit ${v.code})` })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+      emit({ type: 'progress', label: 'Venv ready', current: 100, overall: 40 })
+    }
+
+    // Phase 4 — install build deps + numpy + scipy from requirements.txt.
+    if (!existsSync(reqPath)) {
+      emit({ type: 'error', msg: `Missing requirements.txt at ${reqPath}` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({
+      type: 'progress',
+      label: 'Installing build deps + numpy + scipy…',
+      current: 0,
+      overall: 45,
+    })
+    const baseInstall = await runPipelineNdjson(
+      uvBin,
+      ['pip', 'install', '--python', venvPython, '-r', reqPath],
+      emit,
+    )
+    if (baseInstall.code !== 0) {
+      emit({ type: 'error', msg: `Base install failed (exit ${baseInstall.code})` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Base deps installed', current: 100, overall: 75 })
+
+    // Phase 5 — install madmom 0.16.1 from PyPI.
+    //
+    // We pin to the 2018 release rather than the git `main` branch on
+    // purpose. The two known-broken things in 0.16.1 (`from collections
+    // import MutableSequence`, `np.float`/`np.int` aliases, the
+    // numpy 1.20+ DBN process incompat) are all patched at runtime in
+    // `analyze_downbeats.py`. main has churned past that snapshot in
+    // ways that make its array code incompatible with numpy 1.22+'s
+    // stricter np.delete axis checks (`numpy.AxisError: axis 1 is out
+    // of bounds`), which we hit in the field.
+    //
+    // --no-build-isolation because madmom's setup.py imports
+    // `numpy.get_include()` at build time — numpy must already exist
+    // in the venv (it does, from Phase 4).
+    emit({
+      type: 'progress',
+      label: 'Compiling madmom 0.16.1 (~30–60 s)…',
+      current: 0,
+      overall: 80,
+    })
+    const madmomInstall = await runPipelineNdjson(
+      uvBin,
+      [
+        'pip',
+        'install',
+        '--python',
+        venvPython,
+        '--no-build-isolation',
+        'madmom==0.16.1',
+      ],
+      emit,
+    )
+    if (madmomInstall.code !== 0) {
+      emit({ type: 'error', msg: `madmom install failed (exit ${madmomInstall.code})` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'madmom installed', current: 100, overall: 95 })
+
+    // Phase 6 — smoke test. Bare `import madmom` would fail on 0.16.1
+    // (collections.MutableSequence, np.float/int aliases). Apply the
+    // same runtime patches we use in analyze_downbeats.py before
+    // importing, and exercise DBNDownBeatTrackingProcessor /
+    // RNNDownBeatProcessor — those are the symbols the analyzer
+    // actually uses, and they trip a separate numpy ABI mismatch if
+    // numpy/scipy got pulled to wheels with a wrong-ABI build of
+    // madmom's Cython extensions.
+    const smokeScript = [
+      'import collections, collections.abc',
+      'collections.MutableSequence = collections.abc.MutableSequence',
+      'import numpy as np',
+      'np.float = np.float64',
+      'np.int = np.int64',
+      'np.bool = np.bool_',
+      'import scipy',
+      'from madmom.features.downbeats import DBNDownBeatTrackingProcessor, RNNDownBeatProcessor',
+      'import madmom',
+      'print("ok", madmom.__version__)',
+    ].join('; ')
+    const smoke = await runPipelineNdjson(
+      venvPython,
+      ['-c', smokeScript],
+      emit,
+    )
+    if (smoke.code !== 0) {
+      emit({ type: 'error', msg: `Beats smoke test failed (exit ${smoke.code})` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    await writeBeatsVenvMarker()
+    invalidateBeatsMadmomCache()
+    emit({ type: 'progress', label: 'Done', current: 100, overall: 100 })
+    emit({ type: 'done', venvPython })
+    emit({ type: 'state', state: 'done' })
+    logInfo(`setup/beats: venv ready at ${venvPython}`)
+    res.end()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`setup/beats: ${msg}`)
+    emit({ type: 'error', msg })
+    emit({ type: 'state', state: 'error' })
+    res.end()
+  }
+}
+
+// ── Auto-setup orchestrator ─────────────────────────────────────────────────
+//
+// Fires at sidecar boot. Probes which managed venvs are missing/broken,
+// then sequentially POSTs each one's /native/setup/<name> endpoint via
+// loopback fetch and pipes its NDJSON event stream into `autoSetupState`.
+// The web app polls `/native/setup/status` to render a "setting up audio
+// engine…" UI on the download page instead of the generic "broken" lock.
+//
+// Reuses the existing setup handlers verbatim (no duplicated install
+// logic). Loopback is up by the time `runAutoSetup` fires (caller awaits
+// `startBeaconServer` first).
+
+/** @typedef {{ name: string; status: 'pending'|'running'|'done'|'error'|'skipped'; label?: string; progress?: number; error?: string }} AutoSetupStage */
+
+const autoSetupState = /** @type {{ running: boolean; startedAt: number | null; completedAt: number | null; overall: number; stages: AutoSetupStage[]; lastError: string | null }} */ ({
+  running: false,
+  startedAt: null,
+  completedAt: null,
+  overall: 0,
+  stages: [],
+  lastError: null,
+})
+
+function publicAutoSetupState() {
+  return { ...autoSetupState, stages: autoSetupState.stages.map((s) => ({ ...s })) }
+}
+
+function handleAutoSetupStatus(res, cors) {
+  sendJson(res, 200, { ok: true, ...publicAutoSetupState() }, cors)
+}
+
+async function runAutoSetupOne(stage, urlPath) {
+  stage.status = 'running'
+  stage.progress = 0
+  const url = `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}${urlPath}`
+  let res
+  try {
+    res = await fetch(url, { method: 'POST', cache: 'no-store' })
+  } catch (e) {
+    stage.status = 'error'
+    stage.error = e instanceof Error ? e.message : String(e)
+    return
+  }
+  if (!res.ok || !res.body) {
+    stage.status = 'error'
+    stage.error = `HTTP ${res.status}`
+    return
+  }
+  // Parse NDJSON stream from the setup handler's `emit()` events.
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let idx = buffer.indexOf('\n')
+    while (idx !== -1) {
+      const line = buffer.slice(0, idx).trim()
+      buffer = buffer.slice(idx + 1)
+      idx = buffer.indexOf('\n')
+      if (!line) continue
+      try {
+        const ev = JSON.parse(line)
+        if (ev.type === 'progress') {
+          stage.label = ev.label
+          stage.progress = ev.overall ?? stage.progress
+        } else if (ev.type === 'error') {
+          stage.error = ev.msg
+        } else if (ev.type === 'state' && (ev.state === 'done' || ev.state === 'error')) {
+          stage.status = ev.state
+        }
+      } catch {
+        /* ignore non-json line */
+      }
+    }
+  }
+  // Fallback: if `state` event never arrived (caller-side bail) decide
+  // from whether an error was recorded.
+  if (stage.status === 'running') {
+    stage.status = stage.error ? 'error' : 'done'
+  }
+}
+
+/**
+ * Idempotent — safe to call repeatedly. Re-running while a previous
+ * autoSetup is in flight is a no-op.
+ */
+export async function runAutoSetup() {
+  if (autoSetupState.running) return
+  // Probe what needs setup.
+  const stages = []
+  if (!beatsVenvIsReady() || !(await beatsMadmomReady())) {
+    stages.push({ name: 'beats', path: '/native/setup/beats' })
+  }
+  if (!sectionsVenvIsReady() || !(await sectionsLibrosaReady())) {
+    stages.push({ name: 'sections', path: '/native/setup/sections' })
+  }
+  if (!stemsVenvIsReady()) {
+    // Stems is heavy (~1 GB torch). Defer to user click rather than
+    // auto-installing — most projects don't need stems and pre-pulling
+    // adds minutes to first-launch. The Stems dialog still surfaces
+    // "Set up dependencies" for users who want it.
+    stages.push({ name: 'stems', path: null })
+  }
+  if (stages.length === 0) {
+    autoSetupState.running = false
+    autoSetupState.stages = []
+    autoSetupState.completedAt = Date.now()
+    autoSetupState.overall = 100
+    return
+  }
+
+  autoSetupState.running = true
+  autoSetupState.startedAt = Date.now()
+  autoSetupState.completedAt = null
+  autoSetupState.lastError = null
+  autoSetupState.stages = stages.map((s) => ({
+    name: s.name,
+    status: s.path ? 'pending' : 'skipped',
+    progress: 0,
+  }))
+  autoSetupState.overall = 0
+  logInfo(`auto-setup: ${stages.length} stage(s) needed`)
+
+  let i = 0
+  for (const s of stages) {
+    if (!s.path) {
+      i++
+      continue
+    }
+    const stage = autoSetupState.stages[i]
+    await runAutoSetupOne(stage, s.path)
+    if (stage.status === 'error') {
+      autoSetupState.lastError = `${s.name}: ${stage.error ?? 'unknown'}`
+      logWarn(`auto-setup: ${s.name} failed — ${stage.error ?? 'unknown'}`)
+    } else {
+      logInfo(`auto-setup: ${s.name} ready`)
+    }
+    // Recompute overall as average of stage progress (count skipped as 100).
+    const done = autoSetupState.stages
+      .map((st) => (st.status === 'done' || st.status === 'skipped' ? 100 : st.progress ?? 0))
+      .reduce((a, b) => a + b, 0)
+    autoSetupState.overall = Math.round(done / autoSetupState.stages.length)
+    i++
+  }
+  autoSetupState.running = false
+  autoSetupState.completedAt = Date.now()
+  // Invalidate health cache so /native/health re-probes fresh.
+  invalidateHealthCache()
+}
+
 /**
  * `GET /native/tts/hello-world` — WAV bytes, fixed phrase for web debug (`/texttospeech`).
  */
@@ -2866,6 +3383,11 @@ function startBeaconServer() {
       return
     }
 
+    if (req.method === 'GET' && req.url === '/native/health') {
+      void handleHealth(res, cors)
+      return
+    }
+
     if (req.method === 'POST' && req.url === '/native/analyze-downbeats') {
       void handleAnalyzeDownbeats(req, res, cors)
       return
@@ -2903,6 +3425,22 @@ function startBeaconServer() {
 
     if (req.method === 'POST' && req.url === '/native/setup/stems') {
       void handleSetupStems(req, res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/native/setup/beats/status') {
+      handleBeatsSetupStatus(res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/setup/beats') {
+      void handleSetupBeats(req, res, cors)
+      return
+    }
+    // Aggregated auto-setup state. The web app polls this to render
+    // the "setting up audio engine…" UI while runAutoSetup() walks the
+    // missing venvs at sidecar boot.
+    if (req.method === 'GET' && req.url === '/native/setup/status') {
+      handleAutoSetupStatus(res, cors)
       return
     }
 
@@ -3044,6 +3582,12 @@ function startBeaconServer() {
 
   beaconServer.listen(BARBRO_DESKTOP_BEACON_PORT, '127.0.0.1', () => {
     logInfo(`Beacon listening on 127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
+    // Kick off auto-setup right after the loopback is reachable. It
+    // hits its own setup endpoints via fetch, so the listener must be
+    // up first. Runs in the background — doesn't block boot.
+    void runAutoSetup().catch((e) => {
+      logError(`auto-setup: ${e instanceof Error ? e.message : String(e)}`)
+    })
   })
 }
 

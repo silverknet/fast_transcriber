@@ -84,8 +84,40 @@ export function pythonPiperTtsExe() {
   return process.env.BARBRO_PYTHON?.trim() || 'python3'
 }
 
-/** Interpreter with madmom — default `BARBRO_PYTHON` or system python3 */
+/**
+ * Standardized beats venv path under userData. Same shape as the
+ * sections / stems venvs — auto-created via `/native/setup/beats`, hosts
+ * madmom + numpy + scipy. Until this venv lands, beats analysis falls
+ * back to whatever `BARBRO_PYTHON` points at, which is what dev users
+ * had configured but production users do not.
+ */
+export function getBeatsVenvDir() {
+  return path.join(app.getPath('userData'), 'python', 'beats-venv')
+}
+
+export function getBeatsVenvPythonExe() {
+  const venv = getBeatsVenvDir()
+  if (process.platform === 'win32') {
+    return path.join(venv, 'Scripts', 'python.exe')
+  }
+  return path.join(venv, 'bin', 'python3')
+}
+
+export function beatsVenvIsReady() {
+  return existsSync(getBeatsVenvPythonExe())
+}
+
+/**
+ * Resolution order for the beats interpreter:
+ *   1. `BARBRO_PYTHON_BEATS` env override (power users / CI)
+ *   2. The standardized userData venv (auto-installed)
+ *   3. `BARBRO_PYTHON` (dev fallback — historic install path)
+ *   4. `python3` on PATH (last-resort; will likely fail import)
+ */
 export function pythonBeatsExe() {
+  const override = process.env.BARBRO_PYTHON_BEATS?.trim()
+  if (override) return override
+  if (beatsVenvIsReady()) return getBeatsVenvPythonExe()
   return process.env.BARBRO_PYTHON?.trim() || 'python3'
 }
 
@@ -403,6 +435,113 @@ export async function sectionsLibrosaReady() {
     })
   })
   _librosaReadyCache = { ready, checkedAt: Date.now(), exe }
+  return ready
+}
+
+// ── Beats venv readiness (parallel to sections) ─────────────────────────────
+//
+// Beats analysis uses madmom — an oldish research-grade beat tracker that
+// needs numpy <1.24, scipy, cython, and `--no-build-isolation` during pip
+// install (madmom 0.16 builds against the existing numpy ABI rather than
+// PEP-518 isolation). The setup endpoint in main.mjs handles that flag.
+
+export function beatsRequirementsHash() {
+  try {
+    const reqPath = path.join(getNativePythonRoot(), 'beats', 'requirements.txt')
+    const buf = readFileSync(reqPath)
+    return createHash('sha256').update(buf).digest('hex').slice(0, 16)
+  } catch {
+    return 'no-requirements'
+  }
+}
+
+function getBeatsVenvMarkerFile() {
+  return path.join(getBeatsVenvDir(), '.barbro-reqs-hash')
+}
+
+export function beatsVenvMarkerIsCurrent() {
+  try {
+    const stored = readFileSync(getBeatsVenvMarkerFile(), 'utf8').trim()
+    return stored === beatsRequirementsHash()
+  } catch {
+    return false
+  }
+}
+
+export async function writeBeatsVenvMarker() {
+  try {
+    await writeFile(getBeatsVenvMarkerFile(), beatsRequirementsHash() + '\n')
+  } catch {
+    /* best-effort */
+  }
+}
+
+const MADMOM_PROBE_TTL_MS = 30_000
+let _madmomReadyCache = null
+
+export function invalidateBeatsMadmomCache() {
+  _madmomReadyCache = null
+}
+
+export async function beatsMadmomReady() {
+  const exe = pythonBeatsExe()
+  const now = Date.now()
+  if (
+    _madmomReadyCache &&
+    _madmomReadyCache.exe === exe &&
+    now - _madmomReadyCache.checkedAt < MADMOM_PROBE_TTL_MS
+  ) {
+    return _madmomReadyCache.ready
+  }
+  if (!existsSync(exe)) {
+    _madmomReadyCache = { ready: false, checkedAt: now, exe }
+    return false
+  }
+  if (!beatsVenvMarkerIsCurrent()) {
+    _madmomReadyCache = { ready: false, checkedAt: now, exe }
+    return false
+  }
+  // madmom 0.16.1 can't be imported bare on Python 3.10+ (collections
+  // ABC move, np.float/int aliases removed). Apply the same runtime
+  // patches that analyze_downbeats.py uses before importing — otherwise
+  // a working venv would look broken here and the setup orchestrator
+  // would reinstall it on every boot.
+  const probeScript = [
+    'import collections, collections.abc',
+    'collections.MutableSequence = collections.abc.MutableSequence',
+    'import numpy as np',
+    'np.float = np.float64',
+    'np.int = np.int64',
+    'np.bool = np.bool_',
+    'import scipy',
+    'from madmom.features.downbeats import DBNDownBeatTrackingProcessor, RNNDownBeatProcessor',
+  ].join('; ')
+  const ready = await new Promise((resolve) => {
+    let settled = false
+    const child = spawn(exe, ['-c', probeScript], {
+      stdio: 'ignore',
+      env: process.env,
+    })
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill('SIGKILL')
+      resolve(false)
+    }, 8_000)
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(code === 0)
+    })
+    child.on('error', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(false)
+    })
+  })
+  _madmomReadyCache = { ready, checkedAt: Date.now(), exe }
   return ready
 }
 
