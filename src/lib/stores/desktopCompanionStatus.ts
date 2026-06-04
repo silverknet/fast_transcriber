@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store'
 import type { DesktopHealthCheck, DesktopSetupStage } from '$lib/client/desktopBeacon'
+import type { SidecarVersionStatus } from '$lib/desktop/minSidecarVersion'
 
 /**
  * `pythonHealth` is the per-venv status reported by the sidecar's
@@ -11,6 +12,9 @@ import type { DesktopHealthCheck, DesktopSetupStage } from '$lib/client/desktopB
  *  - `'broken'`     → at least one critical venv failed and we're NOT
  *                     currently installing; UI redirects to /download
  *
+ * `versionStatus` compares the sidecar's reported `/ping` version
+ * against `MIN_SIDECAR_VERSION`. See `$lib/desktop/minSidecarVersion`.
+ *
  * `setup` mirrors `/native/setup/status` when populated. It's null when
  * the sidecar hasn't reported a setup state yet.
  */
@@ -19,6 +23,7 @@ export type PythonHealth = 'unknown' | 'installing' | 'ok' | 'broken'
 export type DesktopCompanionStatus = {
   reachable: boolean
   version: string | null
+  versionStatus: SidecarVersionStatus
   lastCheckedAt: string | null
   lastError: string | null
   pythonHealth: PythonHealth
@@ -34,6 +39,7 @@ export type DesktopCompanionStatus = {
 export const desktopCompanionStatus = writable<DesktopCompanionStatus>({
   reachable: false,
   version: null,
+  versionStatus: 'unknown',
   lastCheckedAt: null,
   lastError: null,
   pythonHealth: 'unknown',

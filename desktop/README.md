@@ -60,6 +60,39 @@ Artifacts land in **`desktop/release/`** (gitignored):
 
 **Serve the DMG from the BarBro web app (same server):** from repo root run **`npm run desktop:dist-mac-sync`** — copies into `static/releases/` and refreshes `static/desktop-downloads.json`. Deploy after that so `/releases/barbro-desktop-<version>-arm64.dmg` exists on the host.
 
+### Releasing a new version (production)
+
+The release pipeline is driven by a single git tag. Steps:
+
+1. **Push the tag.** From `main`, tag and push:
+   ```bash
+   git tag desktop-v0.1.3       # bump the patch / minor / major
+   git push origin desktop-v0.1.3
+   ```
+   The [`desktop-release`](../.github/workflows/desktop-release.yml) workflow fires on `desktop-v*` tags. It:
+   - syncs `desktop/package.json#version` to the tag (`0.1.3`),
+   - builds arm64 + x64 DMGs and ZIPs with `electron-builder`,
+   - uploads them, plus `latest-mac.yml`, to the GitHub Release named after the tag.
+
+2. **Verify the assets landed.** Open [the Releases page](https://github.com/silverknet/fast_transcriber/releases) and confirm the new release has the DMGs, ZIPs, and `latest-mac.yml`. If a previous tag accidentally created an empty release (e.g. `desktop-v0.1.1`, `desktop-v0.1.2`), delete it from the UI to keep the list clean — they're harmless but confusing.
+
+3. **Tell the web app about it.** Bump [`src/lib/desktop/minSidecarVersion.ts#MIN_SIDECAR_VERSION`](../src/lib/desktop/minSidecarVersion.ts) to `'0.1.3'` and merge to `main`. Netlify deploys the change; every user running an older sidecar gets redirected to `/download` with update instructions.
+
+   **Order matters:** never bump `MIN_SIDECAR_VERSION` before the release with that version has assets attached. If you do, every existing user is force-redirected to `/download` and the download URL 404s.
+
+The static manifest at [`static/desktop-downloads.json`](../static/desktop-downloads.json) uses `releases/latest/download/<file>.dmg` URLs — those resolve to whichever GitHub release is marked "latest", which is automatically the chronologically newest published release. So you never edit the manifest as part of a release.
+
+### What users see when they need to update
+
+The web app polls the sidecar's `/ping` every 12 s. When the reported version is below `MIN_SIDECAR_VERSION`, the layout redirects to `/download`, which shows a numbered update flow:
+
+1. Quit BarBro Desktop (right-click Dock icon → Quit).
+2. Download the new version.
+3. Drag it into Applications, click **Replace** when prompted.
+4. Open the new BarBro Desktop, click **I've updated — check again**.
+
+macOS replaces the old `.app` in-place during step 3 — no manual uninstall needed. Step 1 matters because the running sidecar binds loopback port 47842; the new launch would fail otherwise.
+
 ## Layout
 
 | Path | Role |

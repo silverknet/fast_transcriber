@@ -13,15 +13,18 @@
     probeDesktopSetupStatus,
   } from '$lib/client/desktopBeacon'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
-  import { ArrowRight, Check, RefreshCw, AlertTriangle, Loader2 } from '@lucide/svelte'
+  import { classifySidecarVersion } from '$lib/desktop/minSidecarVersion'
+  import { ArrowRight, Check, RefreshCw, AlertTriangle, Loader2, Download } from '@lucide/svelte'
 
-  // Live status — drives four hero states:
+  // Live status — drives five hero states:
   //  - sidecar unreachable             → "isn't running"
   //  - reachable + installing          → "setting up audio engine…"
+  //  - reachable + outdated            → "needs an update" + steps
   //  - reachable + python broken       → "is broken (deps missing)"
   //  - reachable + python ok           → "is running" + continue CTA
   const reachable = $derived($desktopCompanionStatus.reachable)
   const version = $derived($desktopCompanionStatus.version)
+  const versionStatus = $derived($desktopCompanionStatus.versionStatus)
   const pythonHealth = $derived($desktopCompanionStatus.pythonHealth)
   const brokenChecks = $derived($desktopCompanionStatus.brokenChecks)
   const setup = $derived($desktopCompanionStatus.setup)
@@ -95,6 +98,7 @@
       desktopCompanionStatus.set({
         reachable: r.ok,
         version: r.version,
+        versionStatus: classifySidecarVersion(r.version),
         lastCheckedAt: new Date().toISOString(),
         lastError: r.error,
         pythonHealth,
@@ -169,6 +173,51 @@
       <RefreshCw class="size-3.5 {checking ? 'animate-spin' : ''}" aria-hidden="true" />
       Refresh status
     </button>
+  {:else if reachable && versionStatus === 'outdated'}
+    <!--
+      Sidecar is up but reports a version below MIN_SIDECAR_VERSION.
+      User must replace their installed copy with the latest build.
+      Same DMG flow as a fresh install — macOS asks to "Replace" when
+      they drag the new .app over the old one.
+    -->
+    <h1 class="mb-3 flex items-center gap-3 text-3xl font-black tracking-tight sm:text-4xl">
+      <Download class="size-8 shrink-0" aria-hidden="true" />
+      BarBro Desktop needs an update.
+    </h1>
+    <p class="text-muted-foreground mb-6 text-base">
+      Update to keep using BarBro.
+    </p>
+
+    <!-- Three-step list. Numbered, no developer-speak. The order is
+         deliberate: quit first (so the new app can bind the port),
+         download, then drag-replace. -->
+    <ol class="border-foreground/30 mb-8 list-decimal border-2 pl-8 pr-4 py-4 text-sm marker:font-bold">
+      <li class="py-1">Quit BarBro Desktop. Right-click its icon in the Dock, then choose <span class="font-semibold">Quit</span>.</li>
+      <li class="py-1">Download the new version below and open the file.</li>
+      <li class="py-1">Drag BarBro Desktop into <span class="font-semibold">Applications</span>. When asked, click <span class="font-semibold">Replace</span>.</li>
+      <li class="py-1">Open the new BarBro Desktop from Applications, then come back here.</li>
+    </ol>
+
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+      {#if data.manifest && recommended && recommended.url}
+        <a
+          href={recommended.url}
+          class="border-foreground brutalist-shadow bg-foreground text-background inline-flex items-center justify-center gap-2 border-2 px-6 py-3 text-base font-bold no-underline hover:opacity-90"
+        >
+          <Download class="size-4" aria-hidden="true" />
+          Download for {recommended.label}
+        </a>
+      {/if}
+      <button
+        type="button"
+        onclick={() => void checkAgain()}
+        disabled={checking}
+        class="border-foreground bg-background text-foreground inline-flex items-center justify-center gap-2 border-2 px-4 py-3 text-sm font-bold no-underline hover:bg-foreground/5 disabled:opacity-50"
+      >
+        <RefreshCw class="size-3.5 {checking ? 'animate-spin' : ''}" aria-hidden="true" />
+        {checking ? 'Checking…' : "I've updated — check again"}
+      </button>
+    </div>
   {:else if reachable && pythonHealth === 'broken'}
     <!--
       Sidecar is up but its Python deps are missing/broken (typical
@@ -246,7 +295,11 @@
     </button>
   {/if}
 
-  <!-- Secondary: install it if they don't have it yet. -->
+  <!-- Secondary: install it if they don't have it yet. Hidden in the
+       outdated state because the outdated hero already shows the same
+       download CTA — duplicating it under "Don't have it yet?" would
+       suggest they're missing the app when they just need to update it. -->
+  {#if !(reachable && versionStatus === 'outdated')}
   <div class="border-foreground/30 mt-12 border-t pt-8">
     <h2 class="mb-2 text-sm font-bold tracking-wide uppercase">Don't have it yet?</h2>
     {#if data.manifest && recommended && recommended.url}
@@ -303,4 +356,5 @@
       </details>
     {/if}
   </div>
+  {/if}
 </main>

@@ -23,18 +23,52 @@ jobs:
         with:
           node-version: '20'
 
+      # Sync the package.json version to the pushed git tag (e.g.
+      # `desktop-v0.1.3` → `0.1.3`). Three things depend on this being
+      # right at build time:
+      #   1. The sidecar's `/ping` endpoint reads version from
+      #      package.json — the web app's min-version gate compares
+      #      against that.
+      #   2. The DMG title (`dmg.title: "${productName} ${version}"`)
+      #      shows the version when the user mounts the disk image.
+      #   3. electron-builder's `latest-mac.yml` records the version
+      #      for any future auto-updater wiring.
+      - name: Sync package.json version to tag
+        working-directory: desktop
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          npm pkg set version="$VERSION"
+          echo "Synced desktop/package.json version → $VERSION"
+
       - name: Install desktop deps
         working-directory: desktop
         run: npm install
 
-      - name: Build + publish DMG
+      - name: Build DMG
         working-directory: desktop
         env:
-          # electron-builder reads this to upload built artifacts to the
-          # GitHub Release matching the pushed tag. GITHUB_TOKEN is provided
-          # automatically by Actions; we just rename the var.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Skip code signing — no Developer ID yet. Users right-click → Open
           # to bypass Gatekeeper on first launch.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --mac --arm64 --x64 --publish always
+        # Build only — don't let electron-builder publish. It hardcodes
+        # the release tag to `v${version}` (no way to override), which
+        # drifts from our `desktop-v*` git tag scheme. We upload to the
+        # actual pushed tag below.
+        run: npx electron-builder --mac --arm64 --x64
+
+      - name: Upload to the pushed tag's GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # `github.ref_name` is the literal git tag (e.g.
+          # `desktop-v0.1.3`). Uploading to that tag means the release
+          # with the assets is the same release the static manifest's
+          # `releases/latest/download/...` URLs resolve to (since the
+          # most-recent release becomes "latest" automatically).
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            desktop/release/*.dmg
+            desktop/release/*.dmg.blockmap
+            desktop/release/*.zip
+            desktop/release/*.zip.blockmap
+            desktop/release/latest-mac.yml

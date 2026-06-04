@@ -20,6 +20,7 @@
     tryRestoreLastProject,
   } from '$lib/project/commit'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { classifySidecarVersion } from '$lib/desktop/minSidecarVersion'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
   import { userStore } from '$lib/stores/user'
@@ -86,6 +87,7 @@
     desktopCompanionStatus.set({
       reachable: r.ok,
       version: r.version,
+      versionStatus: classifySidecarVersion(r.version),
       lastCheckedAt: new Date().toISOString(),
       lastError: r.error,
       pythonHealth,
@@ -253,14 +255,17 @@
     if (here === '/download') return
     if (here === '/welcome' || here === '/login' || here === '/pending') return
     if (here?.startsWith('/auth')) return
-    // Three reasons to lock the user to /download:
+    // Four reasons to lock the user to /download:
     //   1. Sidecar unreachable (no companion running)
-    //   2. Sidecar reachable but its Python deps are missing (broken)
-    //   3. Auto-setup is currently installing deps — show the progress
+    //   2. Sidecar reachable but its version is below the web app's
+    //      minimum — user needs to install a newer build
+    //   3. Sidecar reachable but its Python deps are missing (broken)
+    //   4. Auto-setup is currently installing deps — show the progress
     //      UI on /download instead of letting the user wander into the
     //      app where analyze endpoints will fail.
     if (
       !status.reachable ||
+      status.versionStatus === 'outdated' ||
       status.pythonHealth === 'broken' ||
       status.pythonHealth === 'installing'
     ) {
