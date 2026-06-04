@@ -25,14 +25,14 @@ export async function detectDesktopArtifactKey(): Promise<DesktopArtifactKey | n
       }
       if (platform.includes('mac')) {
         if (arch.includes('arm') || arch.includes('aarch64')) return 'darwin-arm64'
-        if (
-          arch.includes('x86') ||
-          arch.includes('amd64') ||
-          arch.includes('386') ||
-          arch === 'unknown'
-        ) {
+        if (arch.includes('x86') || arch.includes('amd64') || arch.includes('386')) {
           return 'darwin-x64'
         }
+        // No explicit arch signal (empty string, "unknown", etc. —
+        // common on Chrome over HTTP and on browsers that partially
+        // implement userAgentData). Default to arm64; see the legacy
+        // branch below for the rationale.
+        return 'darwin-arm64'
       }
     } catch {
       // fall through
@@ -47,8 +47,14 @@ export async function detectDesktopArtifactKey(): Promise<DesktopArtifactKey | n
   }
 
   if (/Mac|iPhone|iPod|iPad/i.test(plat)) {
-    if (/arm64|aarch64/i.test(ua)) return 'darwin-arm64'
-    if (/Intel Mac|x86_64/i.test(ua) || plat === 'MacIntel') return 'darwin-x64'
+    // Default to arm64 on Mac. `navigator.platform === 'MacIntel'` and
+    // a UA string containing "Intel Mac" are both unreliable: Safari
+    // and Chrome hardcode them on Apple Silicon for fingerprint
+    // reduction, so trusting either ends up flagging every Apple
+    // Silicon user as Intel. Apple stopped selling Intel Macs in 2022;
+    // the install base is overwhelmingly arm64. The handful of
+    // remaining Intel users can pick their build from the "Other
+    // platforms" list on the download page.
     return 'darwin-arm64'
   }
 

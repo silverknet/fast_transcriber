@@ -326,6 +326,25 @@
       </p>
     {/if}
 
+    <!-- BarBro Desktop isn't signed with an Apple Developer ID yet, so
+         Gatekeeper blocks it on first launch with either "can't be
+         opened" or "is damaged" copy depending on the macOS version.
+         The recovery flow (Privacy & Security → Open Anyway) is the
+         same for both. Only show this for macOS downloaders. -->
+    {#if recommended?.key?.startsWith('darwin')}
+      <div class="border-foreground/30 mt-6 border-2 p-4 text-sm">
+        <p class="mb-3 text-xs font-bold uppercase tracking-wider">
+          First time opening on macOS?
+        </p>
+        <ol class="list-decimal space-y-1.5 pl-5">
+          <li>Open BarBro Desktop. macOS will block it — close the warning.</li>
+          <li>Open <span class="font-semibold">System Settings → Privacy &amp; Security</span>.</li>
+          <li>Scroll down. Click <span class="font-semibold">Open Anyway</span> next to BarBro Desktop.</li>
+          <li>Confirm by clicking <span class="font-semibold">Open Anyway</span> again.</li>
+        </ol>
+      </div>
+    {/if}
+
     {#if data.manifest}
       <details class="mt-4">
         <summary class="text-muted-foreground hover:text-foreground cursor-pointer text-xs uppercase tracking-wider select-none">
