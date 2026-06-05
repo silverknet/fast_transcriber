@@ -24,6 +24,8 @@ function bar(id: string, index: number): Bar {
     startSec: index,
     endSec: index + 1,
     meter: { numerator: 4, denominator: 4 },
+    beatCount: 4,
+    beatIds: [],
   }
 }
 

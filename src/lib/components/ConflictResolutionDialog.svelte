@@ -26,6 +26,7 @@
   import { songMap as songMapStore } from '$lib/stores/songMap'
   import {
     applyConflictDecisions,
+    mergeForConflict,
     type ConflictDecisions,
   } from '$lib/songmap/collabMerge'
   import { pushCloudSong } from '$lib/client/cloudSync'
@@ -101,6 +102,17 @@
   /**
    * Apply per-row decisions + push. Defaults still "cloud wins" for
    * rows the user didn't touch.
+   *
+   * Re-snapshots `songMapStore` at apply time so any edits the user
+   * made while the dialog was open survive the resolution. Without
+   * this, `applyConflictDecisions(c.report, …)` would push a stale
+   * SongMap (the one snapshotted when the 409 fired) and silently
+   * lose every in-flight edit on `songMapStore.set(resolved)`.
+   *
+   * Strategy: merge the user's current local against the remote, then
+   * carry their per-row decisions forward by path. New conflicts that
+   * appeared post-409 default to cloud (same as initial behaviour) —
+   * the dialog won't re-open to surface them, which is fine for v1.
    */
   async function applyAndPush() {
     const c = $cloudConflict
@@ -108,7 +120,9 @@
     pushing = true
     pushError = ''
     try {
-      const resolved = applyConflictDecisions(c.report, decisions)
+      const currentLocal = get(songMapStore) ?? c.local
+      const freshReport = mergeForConflict(currentLocal, c.remote)
+      const resolved = applyConflictDecisions(freshReport, decisions)
       const proj = get(projectStore)
       const entry = proj.data?.songs.find((s) => s.id === c.localSongId)
       const sortOrder = proj.data?.songs.findIndex((s) => s.id === c.localSongId) ?? -1

@@ -91,8 +91,6 @@ function mergeByIdList<T extends { id: string }>(
 ): { merged: T[]; conflicts: Conflict[] } {
   const mineMap = new Map<string, T>()
   for (const item of mine ?? []) mineMap.set(item.id, item)
-  const theirsMap = new Map<string, T>()
-  for (const item of theirs ?? []) theirsMap.set(item.id, item)
 
   const conflicts: Conflict[] = []
   /** Preserve cloud order, then append local-only items. */
