@@ -54,25 +54,35 @@ export function identityFromAudioRef(audio: AudioReference | ExpectedAudio | nul
 const DURATION_TOLERANCE_SEC = 0.1
 
 /**
- * Strict identity: matching sha256 of either the stored or original file.
- * Conclusive — two files with the same sha256 are byte-identical.
+ * Strict identity: ANY sha256 on either side equal to ANY sha256 on
+ * the other. Conclusive — two files with the same sha256 are
+ * byte-identical, full stop. Cross-kind matches (a local sha256 from
+ * a scanned file equalling the cloud's `originalSha256`) are valid:
+ * the reconciler doesn't know whether the local file is a compressed
+ * derivative or the original master, only that its bytes hash to a
+ * value the SongMap claims somewhere.
  *
  * Returns `null` (= undecided) when neither side has any sha256 to
- * compare against. Returns `false` when both sides have a sha256 of the
- * same kind but they disagree.
+ * compare against. Returns `false` when both sides have at least one
+ * sha256 each but none of them coincide.
  */
 export function identityMatchesStrict(
   local: AudioIdentity,
   expected: AudioIdentity,
 ): boolean | null {
-  if (local.sha256 && expected.sha256) return local.sha256 === expected.sha256
-  if (local.originalSha256 && expected.originalSha256) {
-    return local.originalSha256 === expected.originalSha256
+  const localShas = [local.sha256, local.originalSha256].filter(
+    (s): s is string => typeof s === 'string' && s.length > 0,
+  )
+  const expectedShas = [expected.sha256, expected.originalSha256].filter(
+    (s): s is string => typeof s === 'string' && s.length > 0,
+  )
+  if (localShas.length === 0 || expectedShas.length === 0) return null
+  for (const a of localShas) {
+    for (const b of expectedShas) {
+      if (a === b) return true
+    }
   }
-  // Cross-kind matches: a stored sha256 won't match an originalSha256
-  // for the same logical file (different encoding) — only check within
-  // the same kind. Decide undecided.
-  return null
+  return false
 }
 
 /**

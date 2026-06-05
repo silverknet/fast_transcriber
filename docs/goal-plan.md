@@ -193,14 +193,14 @@ Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit
 
 Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
 
-**Epic rollup:** **M** — `.smap` + parsing strongest (**R**); cloud/DB **S**.
+**Epic rollup:** **M** — `.smap` + parsing strongest (**R**); cloud / sync now **M** (auth + schema + sync engine + audio reconcile + hydration packs shipped; offline-status pill and conflict modal are the remaining gaps to **R**).
 
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
 | PF | `.smap` encode/decode, deterministic saves | R | Tests: [`smapFile.test.ts`](../src/lib/songmap/smapFile.test.ts), [`persist.test.ts`](../src/lib/songmap/persist.test.ts); deterministic key order documented; `readSmapJsonOnly` for fast metadata-only reads (project list view). |
 | PF | Web audio pipeline (upload → analyze → reference MP3) | M | `/analyzing`, server analysis merge, [`encodeReferenceAudio.test.ts`](../src/lib/audio/encodeReferenceAudio.test.ts); failure modes vary by browser codec. |
 | PF | Local folder handles / autosave / Ableton marker | M | [`folderHandle.ts`](../src/lib/client/folderHandle.ts), project autosave guards; permission revoke = silent skip. |
-| PF | Cloud / sync | S | `/api/projects` + fingerprint; list/save/load (`loadCloudProject` hydrates editor) + per-song `fetchCloudSongAsSmap` (returns bytes only, no editor side-effects) used by project copy — **not** full sync or conflict resolution. |
+| PF | Cloud / sync (auth + project collab) | M | Supabase auth ([`hooks.server.ts`](../src/hooks.server.ts), Google OAuth + magic link) ✓; cloud schema ([`004_drop_legacy`](../db/migrations/004_drop_legacy.sql)–[`010_cloud_rpcs`](../db/migrations/010_cloud_rpcs.sql)) ✓; sync engine + `/api/cloud/projects/[id]/(songs\|members\|manifest)` + [`cloudSync.ts`](../src/lib/client/cloudSync.ts) ✓; **Phase 5+6 audio reconcile** ([`audioReconcile.ts`](../src/lib/project/audioReconcile.ts) + sidecar `/native/project/song/audio/scan` + Locate / Import-pack / Ignore in [`RelinkAudioBanner.svelte`](../src/lib/components/RelinkAudioBanner.svelte)) ✓; **hydration packs** ([`AppMenuBar`](../src/lib/components/AppMenuBar.svelte) → File → Export/Import; `/native/project/hydration/{export,import}`) ✓. Remaining: offline pending-changes badge (counter exists, status pill doesn't), client-side conflict modal (server 409 fires, no UI). |
 | PF | Postgres autosave (Docker) | S | Migrations [`001_editor_sessions.sql`](../db/migrations/001_editor_sessions.sql), [`002_projects.sql`](../db/migrations/002_projects.sql); parallel **browser API** path — adoption/ops unclear. |
 
 #### Detail — `PF`
@@ -217,9 +217,19 @@ Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
   **Evidence:** Debounced 1.5 s `song.smap` writes via `projectAutosave.ts`; seven guard clauses — project open + active song + `editingMode === 'project-song'` + route is `/edit` + fresh `queryPermission('readwrite')` + manifest entry exists with matching `{folder,id}`. Two parallel autosave subscriptions coexist: `serverAutosave.ts` (cloud) and `projectAutosave.ts` (on-disk in project mode). [`folderHandle.ts`](../src/lib/client/folderHandle.ts) provides the `getDirectoryHandleByPath` / `removeEntryRecursive` primitives both autosave + commit ladder share.  
   **Gap:** User may not know when autosave skipped (permission); standalone `/edit` vs project-mode differs. **→ R** with status indicator + failure toasts.
 
-- **Cloud (`S`)**  
-  **Evidence:** [`projectsCloud.ts`](../src/lib/client/projectsCloud.ts) CRUD-shaped calls; fingerprint identity only. Two import paths now coexist: `loadCloudProject` hydrates the editor (single-song flow), `fetchCloudSongAsSmap` returns bytes only and is composed with `importSmapToProject` for project copies — no shared cloud state between them.  
-  **Gap:** No offline queue, no merge, no multi-device story, no project-scoped cloud matching folder projects (the cloud still stores songs, not BarBro projects). **→ M** when “save to cloud” matches mental model for BarBro projects.
+- **Cloud / sync (`M`)**  
+  **Evidence:** End-to-end multi-device project collab via Supabase:
+  - **Auth** — Google OAuth + magic link via `@supabase/ssr`. Server client at [`serverClient.ts`](../src/lib/server/supabase/serverClient.ts), browser client at [`browserClient.ts`](../src/lib/client/supabase/browserClient.ts), per-request session resolution in [`hooks.server.ts`](../src/hooks.server.ts).
+  - **Schema** — `cloud_projects`, `cloud_project_members`, `cloud_songs`, `cloud_project_revisions`, `access_grants` + RLS + RPC helpers, migrations `004`–`010`.
+  - **Sync engine** — server routes under `/api/cloud/projects/[id]/{songs,members,manifest}`; client orchestration in [`cloudSync.ts`](../src/lib/client/cloudSync.ts); `pendingChanges` counter persisted on `ProjectFile.cloud`.
+  - **Audio identity & reconcile (Phase 5)** — sidecar `/native/project/song/audio/scan` walks `<song>/audio/` and returns sha256 + duration + sample rate + channels + file size per file (cached by `(absPath, mtime, size)` in memory). [`audioReconcile.ts`](../src/lib/project/audioReconcile.ts) does sha-first match, loose-field fallback; called from [`loadProjectSongIntoEditor`](../src/lib/project/commit.ts) so a renamed-or-dropped audio file is auto-found and `audio.originalPath` is restamped before the editor loads. [`identityMatchesStrict`](../src/lib/songmap/audioIdentity.ts) now does cross-kind sha comparison (a scanned file's hash will match either the SongMap's `audio.sha256` OR `audio.originalSha256`).
+  - **Missing-audio UI (Phase 6)** — [`RelinkAudioBanner.svelte`](../src/lib/components/RelinkAudioBanner.svelte) shows expected fileName, duration, and sha prefix; offers **Locate** (relink with strict sha check + "Use anyway" override modal), **Import hydration pack** (drop a `.zip` and the reconciler picks up the freshly-extracted file), and **Ignore for this session** (lets the user keep editing chord chart / sections without audio).
+  - **Hydration packs (Phase 9)** — File menu **Export / Import hydration package…**; sidecar endpoints `/native/project/hydration/{export,import}`; per-song match by id then by audio sha; existing files on the receiver are never overwritten so the existing quality picker chooses across the union.
+  
+  **Gap to R:**
+    - **Phase 7 (offline pending UI):** `cloud.pendingChanges` exists but the editor doesn't render a Synced / Syncing / Offline pill or auto-retry on the `online` event.
+    - **Phase 8 (conflict modal):** server returns 409 with `clientBaseRevision` rejection, but the client surfaces it as a console warning instead of a "Remote changes — Keep yours / Take theirs / Open diff" dialog. No field-classification (`collabMerge.ts`) yet.
+    - **No automated coverage** of the sync engine, reconcile, or hydration roundtrip — only the standalone manual tests done at commit time.
 
 - **Postgres (`S`)**  
   **Evidence:** Schema exists for sessions + named projects.  

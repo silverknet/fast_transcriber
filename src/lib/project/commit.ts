@@ -43,6 +43,7 @@ import {
   type ProjectSongMetadataInfo,
 } from '$lib/client/desktopProjectFs'
 import { STEM_PRESET_PRIORITY } from '$lib/client/desktopBridge'
+import { reconcileSongAudio, applyReconcileMatch } from '$lib/project/audioReconcile'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import { audioSession } from '$lib/stores/audioSession'
 import {
@@ -722,6 +723,45 @@ export async function loadProjectSongIntoEditor(songId: string): Promise<void> {
     }
   }
 
+  // Path A.5 — Phase 5 reconcile. The named originalPath didn't resolve
+  // (file renamed, hydration-pack drop, fresh-machine cloud join). Scan
+  // <song>/audio/ and try to find the right file by content identity
+  // — sha256 first, then duration/sr/channels/fileSize. On a strict
+  // match we stamp the new path into the SongMap and persist the
+  // .smap so the next open hits Path A cleanly.
+  if (!state.audioBlob && state.songMap.audio) {
+    try {
+      const outcome = await reconcileSongAudio(state.songMap, snap.osPath, entry.folder)
+      if (outcome.kind === 'strict-match') {
+        const repaired = applyReconcileMatch(state.songMap.audio, {
+          fileName: outcome.fileName,
+          identity: outcome.identity,
+        })
+        const repairedMap: SongMap = { ...state.songMap, audio: repaired }
+        // Pull the freshly-identified bytes from disk.
+        const got = await readProjectSongAsset(snap.osPath, entry.folder, repaired.originalPath ?? `audio/${outcome.fileName}`)
+        if (got.ok) {
+          const file = new File([got.blob], repaired.fileName, { type: repaired.mimeType ?? 'audio/*' })
+          state = { ...state, audioBlob: file, songMap: repairedMap }
+          // Persist the stamped path so reconcile doesn't re-run next time.
+          try {
+            const repairedSmap = await exportRestorableStateAsSmapBlob(state)
+            const repairedBytes = new Uint8Array(await repairedSmap.arrayBuffer())
+            const ws = await writeProjectSong(snap.osPath, entry.folder, repairedBytes)
+            if (!ws.ok) console.warn(`[project] reconcile .smap rewrite failed: ${ws.error}`)
+          } catch (e) {
+            console.warn('[project] reconcile .smap rewrite threw:', e)
+          }
+        }
+      }
+      // Loose-match and no-match cases fall through to the missing-audio
+      // banner; the banner UI lets the user accept a loose match
+      // explicitly rather than guessing here.
+    } catch (e) {
+      console.warn('[project] audio reconcile failed:', e)
+    }
+  }
+
   // Path B — legacy v1 file decoded with an embedded audio chunk AND no
   //          `originalPath` recorded yet. Migrate forward: write the bytes
   //          to <song>/audio/<fileName>, stamp `originalPath` into the
@@ -760,9 +800,11 @@ export async function loadProjectSongIntoEditor(songId: string): Promise<void> {
   }
 
   hydrateRestorableSong(state)
-  // If audio was referenced but not loaded (file gone on disk, no v1
-  // chunk available), flag the session so the editor can show the relink
-  // banner instead of falling silently into a degraded state.
+  // Reset the per-session "ignore missing audio" flag — the user opted
+  // out of the banner for the previous song; the new song gets a fresh
+  // chance to show it. Then, if audio was referenced but not loaded,
+  // flag the session so the relink banner renders.
+  audioSession.update((s) => ({ ...s, missingAudioIgnored: false }))
   if (!state.audioBlob && state.songMap.audio?.originalPath) {
     audioSession.update((s) => ({ ...s, missingReason: 'file-not-found' }))
   }

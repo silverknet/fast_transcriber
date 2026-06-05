@@ -9,14 +9,19 @@
     DialogHeader,
     DialogTitle,
   } from '$lib/components/ui/dialog'
-  import { AlertTriangle, FolderSearch, Loader2 } from '@lucide/svelte'
+  import { AlertTriangle, FolderSearch, Loader2, Package, EyeOff } from '@lucide/svelte'
   import { audioSession } from '$lib/stores/audioSession'
   import {
     readProjectSongAsset,
     relinkProjectSongAudio,
   } from '$lib/client/desktopProjectFs'
+  import {
+    pickOpenFileViaDesktop,
+    importHydrationPackViaDesktop,
+  } from '$lib/client/desktopBridge'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
   import { project } from '$lib/stores/project'
+  import { loadProjectSongIntoEditor } from '$lib/project/commit'
   import type { SongMap } from '$lib/songmap'
 
   /** Truncate a hex hash for display. */
@@ -154,6 +159,59 @@
     }
   }
 
+  /**
+   * Import a hydration pack and try to fill the missing audio from
+   * it. After import we re-run the song-load flow so reconcile picks
+   * up the freshly-extracted audio file.
+   */
+  async function importPack(): Promise<void> {
+    const snap = get(project)
+    if (!snap.osPath || !snap.activeSongId) {
+      errorMsg = 'No active project song'
+      status = 'error'
+      return
+    }
+    status = 'picking'
+    errorMsg = ''
+    const pick = await pickOpenFileViaDesktop({
+      title: 'Import hydration package',
+      filters: [{ name: 'BarBro hydration package', extensions: ['zip'] }],
+    })
+    if (!pick.ok) {
+      if (!('cancelled' in pick)) {
+        errorMsg = pick.error ?? 'Could not open file picker'
+        status = 'error'
+        return
+      }
+      status = 'idle'
+      return
+    }
+    status = 'loading'
+    try {
+      const result = await importHydrationPackViaDesktop({
+        projectPath: snap.osPath,
+        packPath: pick.path,
+      })
+      if (!result.ok) throw new Error(result.error)
+      // Re-load this song. Reconcile in loadProjectSongIntoEditor will
+      // catch the freshly-extracted audio by sha and stamp the path.
+      await loadProjectSongIntoEditor(snap.activeSongId)
+      status = 'idle'
+    } catch (e) {
+      status = 'error'
+      errorMsg = e instanceof Error ? e.message : 'Hydration import failed'
+    }
+  }
+
+  /**
+   * User chose to keep working without audio (chord chart, sections,
+   * metadata edits still function). Banner stops rendering this
+   * session — cleared on next song load.
+   */
+  function ignoreForSession(): void {
+    audioSession.update((s) => ({ ...s, missingAudioIgnored: true }))
+  }
+
   /** Mismatch modal — proceed with the new file but do NOT overwrite originalSha256. */
   async function useAnyway(): Promise<void> {
     const m = mismatch
@@ -176,24 +234,40 @@
 </script>
 
 <div
-  class="border-foreground bg-destructive/10 mx-auto flex w-full max-w-6xl flex-col gap-3 border-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+  class="border-foreground bg-destructive/10 mx-auto flex w-full max-w-6xl flex-col gap-3 border-2 px-4 py-3"
   role="alert"
   aria-live="polite"
 >
   <div class="flex items-start gap-3">
     <AlertTriangle class="text-destructive size-5 shrink-0 mt-0.5" aria-hidden="true" />
-    <div class="min-w-0">
+    <div class="min-w-0 flex-1">
       <div class="text-sm font-bold">Audio file missing</div>
       <div class="text-muted-foreground mt-0.5 text-xs">
-        BarBro can't find <span class="font-mono">{$songMap?.audio?.originalPath ?? '—'}</span>
-        for this song. Locate the original audio to enable playback, the mixer, and analyzers.
+        BarBro can't find the audio for this song.
       </div>
+      {#if $songMap?.audio}
+        {@const a = $songMap.audio}
+        <dl class="mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+          {#if a.fileName}
+            <dt class="text-muted-foreground font-semibold uppercase tracking-wider">File</dt>
+            <dd class="font-mono break-all">{a.fileName}</dd>
+          {/if}
+          {#if a.durationSec}
+            <dt class="text-muted-foreground font-semibold uppercase tracking-wider">Duration</dt>
+            <dd class="font-mono tabular-nums">{a.durationSec.toFixed(1)} s</dd>
+          {/if}
+          {#if a.originalSha256 ?? a.sha256}
+            <dt class="text-muted-foreground font-semibold uppercase tracking-wider">SHA</dt>
+            <dd class="font-mono">{shortSha(a.originalSha256 ?? a.sha256)}…</dd>
+          {/if}
+        </dl>
+      {/if}
       {#if errorMsg}
         <div class="text-destructive mt-1 text-xs">{errorMsg}</div>
       {/if}
     </div>
   </div>
-  <div class="flex shrink-0 items-center gap-2">
+  <div class="flex flex-wrap items-center justify-end gap-2">
     <Button
       type="button"
       size="sm"
@@ -207,6 +281,28 @@
         <FolderSearch class="size-3.5" aria-hidden="true" />
       {/if}
       {status === 'picking' ? 'Choose…' : status === 'loading' ? 'Loading…' : 'Locate audio file'}
+    </Button>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      class="h-8 gap-2 text-xs font-bold"
+      onclick={importPack}
+      disabled={status === 'picking' || status === 'loading'}
+    >
+      <Package class="size-3.5" aria-hidden="true" />
+      Import hydration pack
+    </Button>
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      class="h-8 gap-2 text-xs"
+      onclick={ignoreForSession}
+      disabled={status === 'picking' || status === 'loading'}
+    >
+      <EyeOff class="size-3.5" aria-hidden="true" />
+      Ignore for this session
     </Button>
   </div>
 </div>

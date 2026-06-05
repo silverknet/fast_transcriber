@@ -246,6 +246,41 @@ export async function getProjectWavInfoBatch(
   })
 }
 
+/** One entry in a `scanProjectSongAudio` response. */
+export type ProjectAudioScanItem = {
+  fileName: string
+  sha256?: string
+  durationSec?: number
+  sampleRate?: number
+  channels?: number
+  fileSize?: number
+  error?: string
+}
+
+export type ProjectAudioScanResult =
+  | { ok: true; items: ProjectAudioScanItem[] }
+  | { ok: false; error: string }
+
+/**
+ * Walk `<projectPath>/<songFolder>/audio/` and return an identity bundle
+ * (sha256 + duration + sample rate + channels + file size) for each
+ * audio file. Used by the Phase 5 reconciler to find files matching
+ * `expectedAudio` even when the path recorded in the SongMap has
+ * drifted (file renamed, dropped from a hydration pack, etc.).
+ *
+ * The sidecar caches hashes by `(path, mtime, size)` in memory, so
+ * repeated calls on the same files are cheap.
+ */
+export async function scanProjectSongAudio(
+  projectPath: string,
+  songFolder: string,
+): Promise<ProjectAudioScanResult> {
+  return await postJson<ProjectAudioScanResult>(`${BASE_URL}/native/project/song/audio/scan`, {
+    projectPath,
+    songFolder,
+  })
+}
+
 export type TranscodeToWavResult =
   | { ok: true; cached: boolean }
   | { ok: false; error: string }
