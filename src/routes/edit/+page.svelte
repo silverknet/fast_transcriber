@@ -1273,22 +1273,31 @@
       }
 
       cancelPendingAudioStart()
+      console.info('[click] count-in scheduled, audioDelaySec=', audioDelaySec, 'songStartSec=', songStartSec, 'pre-filter clickPoints=', clickPoints.length)
       pendingAudioStartTimer = setTimeout(() => {
         pendingAudioStartTimer = null
-        if (!playWithClick || !audioEl) return
+        if (!playWithClick || !audioEl) {
+          console.info('[click] setTimeout fired but playWithClick or audioEl gone, aborting')
+          return
+        }
         resumingAfterCountIn = true
-        audioEl.play().catch(() => {
-          /* ignore */
+        console.info('[click] count-in done; calling audioEl.play() to resume')
+        audioEl.play().then(() => {
+          console.info('[click] audioEl.play() resolved — audio is playing')
+        }).catch((e) => {
+          console.error('[click] audioEl.play() REJECTED — autoplay block or other error:', e)
         })
       }, audioDelaySec * 1000)
       return
     }
 
-    // No count-in pre-roll — just start the click loop on the existing audio.
+    // No count-in pre-roll (or post-count-in resume) — start click loop.
+    console.info('[click] no-count-in / resume branch entered. resumingAfterCountIn was=', resumingAfterCountIn)
     resumingAfterCountIn = false
     ensureClickGraph()
     void clickCtx?.resume()
     clickPoints = beatsToClickPoints(sm.timeline.beats)
+    console.info('[click] starting loop · clickPoints=', clickPoints.length, 'currentTime=', audioEl.currentTime, 'paused=', audioEl.paused)
     startClickLoopFromCurrentTime()
   }
 
@@ -2095,63 +2104,10 @@
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
           bind:audioElement={audioEl}
+          bind:playWithClick
+          bind:clickVolume
+          bind:songVolume
         />
-        {#if editMode === 'grid' && sm.timeline.beats.length > 0}
-          <!--
-            Compact playback strip — sits directly under the
-            WaveformPlayer so the click toggle is right next to the
-            Play button. Vertical sliders use the absolute-rotate
-            trick: an 80px-wide range rotated -90deg inside a fixed
-            80×24 container (predictable layout, no writing-mode
-            quirks that don't ship in every browser).
-            Single source of truth: clickVolume → clickMaster gain
-            node, songVolume → audioEl.volume — same elements the
-            click loop reads.
-          -->
-          <div class="border-foreground/30 mt-3 flex items-center gap-4 border-2 px-4 py-2 text-xs">
-            <label class="flex shrink-0 cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                bind:checked={playWithClick}
-                class="accent-foreground size-4"
-              />
-              <span class="font-bold uppercase tracking-wider">Click</span>
-            </label>
-            <div class="bg-foreground/20 h-10 w-px shrink-0" aria-hidden="true"></div>
-            <div class="flex items-end gap-5">
-              <div class="flex shrink-0 flex-col items-center gap-0.5">
-                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
-                <div class="relative h-20 w-6" title="Click volume">
-                  <input
-                    type="range"
-                    min="0"
-                    max="2"
-                    step="0.05"
-                    bind:value={clickVolume}
-                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-20 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
-                    aria-label="Click volume"
-                  />
-                </div>
-                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{clickVolume.toFixed(1)}×</span>
-              </div>
-              <div class="flex shrink-0 flex-col items-center gap-0.5">
-                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
-                <div class="relative h-20 w-6" title="Song volume">
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    bind:value={songVolume}
-                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-20 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
-                    aria-label="Song volume"
-                  />
-                </div>
-                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(songVolume * 100)}%</span>
-              </div>
-            </div>
-          </div>
-        {/if}
         {#if beatEditError}
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>
         {/if}

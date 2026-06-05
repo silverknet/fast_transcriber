@@ -131,6 +131,22 @@
      * Single source of truth — no duplicate audio.
      */
     audioElement = $bindable<HTMLAudioElement | null>(null),
+    /**
+     * Editor-mode "Play with click" toolbar controls. All three are
+     * two-way bound so the parent owns the state and the click loop
+     * lives in /edit, but the *UI* (checkbox + volume popover) lives
+     * here in the toolbar where the play button is. DRY: the same
+     * playWithClick state drives both the toggle visual AND the
+     * parent's onAudioPlay decision; same clickVolume drives both
+     * the slider AND the click-loop gain node; same songVolume drives
+     * both the slider AND audioEl.volume.
+     *
+     * Only renders when variant === 'editor' AND there are beats to
+     * click against.
+     */
+    playWithClick = $bindable(false),
+    clickVolume = $bindable(1.5),
+    songVolume = $bindable(1),
   } = $props()
 
   let isEditorVariant = $derived(variant === 'editor')
@@ -1539,6 +1555,65 @@
         <Square class="size-4" aria-hidden="true" />
         Stop
       </Button>
+      {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0}
+        <!-- Toolbar-level click toggle + volume popover. State is
+             $bindable, parent owns the click-loop logic. -->
+        <label
+          class="border-foreground/40 hover:bg-foreground/5 ml-1 flex shrink-0 cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs"
+          title="Play clicks alongside the audio (and count-in if configured)"
+        >
+          <input
+            type="checkbox"
+            bind:checked={playWithClick}
+            class="accent-foreground size-3.5"
+          />
+          <span class="font-bold uppercase tracking-wider">Click</span>
+        </label>
+        <details class="relative">
+          <summary
+            class="border-foreground/40 hover:bg-foreground/5 inline-flex h-7 cursor-pointer list-none items-center gap-1 border-2 px-2 text-xs font-bold uppercase tracking-wider marker:content-none [&::-webkit-details-marker]:hidden"
+            title="Volume"
+          >
+            Vol
+          </summary>
+          <div
+            class="border-foreground bg-background absolute right-0 top-9 z-20 flex items-end gap-4 border-2 px-4 py-3 shadow-lg"
+            role="dialog"
+            aria-label="Volume sliders"
+          >
+            <div class="flex flex-col items-center gap-1">
+              <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
+              <div class="relative h-24 w-6">
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  bind:value={clickVolume}
+                  class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                  aria-label="Click volume"
+                />
+              </div>
+              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{clickVolume.toFixed(1)}×</span>
+            </div>
+            <div class="flex flex-col items-center gap-1">
+              <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
+              <div class="relative h-24 w-6">
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  bind:value={songVolume}
+                  class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                  aria-label="Song volume"
+                />
+              </div>
+              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(songVolume * 100)}%</span>
+            </div>
+          </div>
+        </details>
+      {/if}
       <span class="text-muted-foreground font-mono text-xs tabular-nums">
         {formatTime(currentTime)} / {formatTime(timelineSec)}
       </span>
