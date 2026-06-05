@@ -202,6 +202,18 @@ function scheduleCloudPush(): void {
 }
 
 /**
+ * Phase 7 — let external code (the "online" event listener in
+ * `startProjectAutosave`, or a manual "retry" button somewhere) ask
+ * for a cloud push attempt to be queued through the same debounce
+ * that the songMap subscription uses. No-op when the autosave isn't
+ * started or there's nothing pending.
+ */
+export function requestCloudPush(): void {
+  if (!browser || !started) return
+  scheduleCloudPush()
+}
+
+/**
  * Start the global autosave subscription. Idempotent — safe to call
  * multiple times. Should be invoked once from the root layout in browser.
  */
@@ -217,6 +229,13 @@ export function startProjectAutosave(): void {
       scheduleCloudPush()
     }),
   )
+  // Phase 7 — when the browser regains connectivity, flush any queued
+  // cloud pushes. The debounced scheduleCloudPush picks up the current
+  // active song; offline-accumulated edits from previously-active songs
+  // will be flushed individually as the user navigates back to them.
+  const onOnline = () => scheduleCloudPush()
+  window.addEventListener('online', onOnline)
+  unsubs.push(() => window.removeEventListener('online', onOnline))
 }
 
 export function stopProjectAutosave(): void {

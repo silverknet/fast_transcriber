@@ -20,6 +20,7 @@
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
+  import CloudSyncPill from '$lib/components/CloudSyncPill.svelte'
   import {
     downloadBlob,
     exportRestorableStateAsSmapBlob,
@@ -521,6 +522,7 @@
   </div>
 
   <div class="ml-auto flex shrink-0 items-center gap-2">
+    <CloudSyncPill />
     <a
       href="/download"
       class="inline-flex size-8 items-center justify-center border-2 no-underline {desktopConnected
