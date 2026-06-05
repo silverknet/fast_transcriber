@@ -1654,8 +1654,11 @@
 >
   {#if !browser}
     <div class="min-h-[50vh]" aria-hidden="true"></div>
-  {:else if $songMap && !$audioSession.file && $audioSession.missingReason === 'file-not-found'}
-    <!-- SongMap loaded but audio missing on disk — relink flow. -->
+  {:else if $songMap && !$audioSession.file && $audioSession.missingReason === 'file-not-found' && !$audioSession.missingAudioIgnored}
+    <!-- SongMap loaded but audio missing on disk — relink flow.
+         "Ignore for this session" sets `missingAudioIgnored`, after
+         which we fall through to the audio-free editor below so the
+         user can keep editing chord chart / sections / metadata. -->
     <RelinkAudioBanner />
     <div
       class="brutalist-shadow border-foreground bg-background mx-auto w-full max-w-md border-2 p-8 text-center"

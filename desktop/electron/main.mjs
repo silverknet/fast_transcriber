@@ -916,10 +916,20 @@ async function handleProjectSongAssetWrite(req, res, cors) {
  * and return the relative path + hash. Used by the relink banner when the
  * SongMap's `audio.originalPath` doesn't resolve on disk anymore.
  *
- * Request body: `{ projectPath, songFolder, defaultName? }`.
+ * Request body: `{ projectPath, songFolder, defaultName?, expected?, strict? }`.
+ *
+ * When `expected.sha256` is present and `strict === true`, the picked
+ * file's sha256 must match before we write anything. On mismatch we
+ * return `{ ok: false, mismatch: { expected, got } }` and leave disk
+ * untouched — this is the Phase 6 "I have a different master" guard.
+ * When `strict === false` (default) we always write, regardless of
+ * `expected`, and just include the comparison fields in the response so
+ * the UI can surface a soft warning.
+ *
  * Response: one of:
- *   `{ ok: true, relPath, fileName, sha256, size }`
+ *   `{ ok: true, relPath, fileName, sha256, size, identityMatched? }`
  *   `{ ok: false, cancelled: true }`
+ *   `{ ok: false, mismatch: { expected, got } }`
  *   `{ ok: false, error }`
  */
 async function handleProjectSongAudioRelink(req, res, cors) {
@@ -933,6 +943,8 @@ async function handleProjectSongAudioRelink(req, res, cors) {
     }
     const songFolder = validateRelSongFolder(body.songFolder)
     const defaultName = typeof body.defaultName === 'string' ? body.defaultName : null
+    const expected = body.expected && typeof body.expected === 'object' ? body.expected : null
+    const strict = body.strict === true
 
     focusSidecarApp()
     const dlg = await dialog.showOpenDialog({
@@ -961,22 +973,31 @@ async function handleProjectSongAudioRelink(req, res, cors) {
     const relPath = `audio/${desired}`
     const destAbs = path.join(projectPath, songFolder, relPath)
 
+    // Hash + identity BEFORE writing so we can refuse strict mismatches
+    // without leaving a stray file behind.
     const bytes = await readFile(src)
-    await atomicWriteFile(destAbs, bytes)
     const sha256 = createHash('sha256').update(bytes).digest('hex')
-
-    // Stamp the full identity bundle right at relink time so Phase 5
-    // reconciliation doesn't have to re-parse the same WAV/MP3 header on
-    // a later pass. readAudioInfo returns null for unsupported formats —
-    // we just leave sampleRate/channels/durationSec undefined in that case
-    // and the client falls back to sha256-only identity matching.
     let info = null
-    try {
-      info = readAudioInfo(destAbs)
-    } catch {
-      info = null
+    try { info = readAudioInfo(src) } catch { info = null }
+
+    const expectedSha = typeof expected?.sha256 === 'string' && expected.sha256.length > 0
+      ? expected.sha256
+      : typeof expected?.originalSha256 === 'string' && expected.originalSha256.length > 0
+        ? expected.originalSha256
+        : null
+    const shaMatches = expectedSha ? expectedSha === sha256 : null
+
+    if (strict && expectedSha && !shaMatches) {
+      return sendJson(res, 200, {
+        ok: false,
+        mismatch: {
+          expected: { sha256: expectedSha },
+          got: { sha256, fileSize: bytes.byteLength, durationSec: info?.durationSec },
+        },
+      }, cors)
     }
 
+    await atomicWriteFile(destAbs, bytes)
     sendJson(res, 200, {
       ok: true,
       relPath,
@@ -987,6 +1008,10 @@ async function handleProjectSongAudioRelink(req, res, cors) {
       durationSec: info?.durationSec,
       sampleRate: info?.sampleRate,
       channels: info?.channels,
+      // Tri-state: true if the sha matched expected, false if it didn't
+      // (but strict was off so we wrote anyway), undefined if no expected
+      // sha was provided. Lets the UI show a soft mismatch warning.
+      identityMatched: shaMatches,
     }, cors)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -1255,6 +1280,106 @@ async function handleProjectWavInfoBatch(req, res, cors) {
         items.push(item)
       } catch (e) {
         items.push({ songFolder, subpath, error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    sendJson(res, 200, { ok: true, items }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+// ── Audio identity scan (Phase 5 reconcile) ──────────────────────────────
+//
+// Cached identity probe over `<song>/audio/`. Returns one entry per
+// audio file with its full identity bundle (duration, sample rate,
+// channels, file size, sha256). The reconciler uses this to find a
+// matching local file even when the path recorded in the SongMap
+// doesn't resolve (file renamed, copied via a hydration pack, etc.).
+//
+// Hashing big WAVs at every project open would be painful, so cache
+// by (absPath, mtime, size) in memory. We don't persist to disk —
+// the cache rebuilds in O(seconds) on next launch which is fine.
+
+/** @type {Map<string, { sha256: string; mtimeMs: number; size: number; durationSec: number; sampleRate: number; channels: number }>} */
+const audioIdentityCache = new Map()
+
+async function audioIdentityForFile(absPath) {
+  const st = statSync(absPath)
+  const cached = audioIdentityCache.get(absPath)
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+    return {
+      sha256: cached.sha256,
+      durationSec: cached.durationSec,
+      sampleRate: cached.sampleRate,
+      channels: cached.channels,
+      fileSize: cached.size,
+    }
+  }
+  const info = readAudioInfo(absPath)
+  const hash = createHash('sha256')
+  await new Promise((resolve, reject) => {
+    const s = createReadStream(absPath)
+    s.on('data', (c) => hash.update(c))
+    s.on('end', resolve)
+    s.on('error', reject)
+  })
+  const sha256 = hash.digest('hex')
+  audioIdentityCache.set(absPath, {
+    sha256,
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    durationSec: info.durationSec,
+    sampleRate: info.sampleRate,
+    channels: info.channels,
+  })
+  return {
+    sha256,
+    durationSec: info.durationSec,
+    sampleRate: info.sampleRate,
+    channels: info.channels,
+    fileSize: st.size,
+  }
+}
+
+const SCAN_AUDIO_EXTENSIONS = ['.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aif', '.aiff']
+
+/**
+ * `POST /native/project/song/audio/scan` — body
+ *   `{ projectPath, songFolder }`.
+ *
+ * Lists `<projectPath>/<songFolder>/audio/` and returns identity for
+ * each audio file. Errors per file don't fail the batch. Used by the
+ * Phase 5 reconciler to find files renamed-but-content-matching the
+ * SongMap's `expectedAudio` / `audio` identity.
+ */
+async function handleProjectSongAudioScan(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const audioDir = path.join(projectPath, songFolder, 'audio')
+    if (!existsSync(audioDir)) {
+      return sendJson(res, 200, { ok: true, items: [] }, cors)
+    }
+    const entries = await readdir(audioDir, { withFileTypes: true })
+    /** @type {Array<{ fileName: string; sha256?: string; durationSec?: number; sampleRate?: number; channels?: number; fileSize?: number; error?: string }>} */
+    const items = []
+    for (const ent of entries) {
+      if (!ent.isFile()) continue
+      const lower = ent.name.toLowerCase()
+      if (!SCAN_AUDIO_EXTENSIONS.some((ext) => lower.endsWith(ext))) continue
+      const abs = path.join(audioDir, ent.name)
+      try {
+        const id = await audioIdentityForFile(abs)
+        items.push({ fileName: ent.name, ...id })
+      } catch (e) {
+        items.push({ fileName: ent.name, error: e instanceof Error ? e.message : String(e) })
       }
     }
     sendJson(res, 200, { ok: true, items }, cors)
@@ -4024,6 +4149,10 @@ function startBeaconServer() {
     }
     if (req.method === 'POST' && req.url === '/native/project/asset/write') {
       void handleProjectAssetWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/audio/scan') {
+      void handleProjectSongAudioScan(req, res, cors)
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/wav-info/batch') {

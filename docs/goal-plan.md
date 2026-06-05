@@ -193,14 +193,14 @@ Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit
 
 Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
 
-**Epic rollup:** **M** — `.smap` + parsing strongest (**R**); cloud/DB **S**.
+**Epic rollup:** **M** — `.smap` + parsing strongest (**R**); cloud / sync now **M** (auth + schema + sync engine + audio reconcile + hydration packs + status pill + conflict modal all shipped; automated tests around merge + cloud roundtrip are the remaining gap to **R**).
 
 | Epic | Work item | Lvl | Notes |
 |:----:|-----------|:---:|:------|
 | PF | `.smap` encode/decode, deterministic saves | R | Tests: [`smapFile.test.ts`](../src/lib/songmap/smapFile.test.ts), [`persist.test.ts`](../src/lib/songmap/persist.test.ts); deterministic key order documented; `readSmapJsonOnly` for fast metadata-only reads (project list view). |
 | PF | Web audio pipeline (upload → analyze → reference MP3) | M | `/analyzing`, server analysis merge, [`encodeReferenceAudio.test.ts`](../src/lib/audio/encodeReferenceAudio.test.ts); failure modes vary by browser codec. |
 | PF | Local folder handles / autosave / Ableton marker | M | [`folderHandle.ts`](../src/lib/client/folderHandle.ts), project autosave guards; permission revoke = silent skip. |
-| PF | Cloud / sync | S | `/api/projects` + fingerprint; list/save/load (`loadCloudProject` hydrates editor) + per-song `fetchCloudSongAsSmap` (returns bytes only, no editor side-effects) used by project copy — **not** full sync or conflict resolution. |
+| PF | Cloud / sync (auth + project collab) | M | Supabase auth ([`hooks.server.ts`](../src/hooks.server.ts), Google OAuth + magic link) ✓; cloud schema ([`004_drop_legacy`](../db/migrations/004_drop_legacy.sql)–[`010_cloud_rpcs`](../db/migrations/010_cloud_rpcs.sql)) ✓; sync engine + `/api/cloud/projects/[id]/(songs\|members\|manifest)` + [`cloudSync.ts`](../src/lib/client/cloudSync.ts) ✓; **Phase 5+6 audio reconcile** ([`audioReconcile.ts`](../src/lib/project/audioReconcile.ts) + sidecar `/native/project/song/audio/scan` + Locate / Import-pack / Ignore in [`RelinkAudioBanner.svelte`](../src/lib/components/RelinkAudioBanner.svelte)) ✓; **hydration packs** ([`AppMenuBar`](../src/lib/components/AppMenuBar.svelte) → File → Export/Import; `/native/project/hydration/{export,import}`) ✓; **Phase 7 status pill** ([`CloudSyncPill.svelte`](../src/lib/components/CloudSyncPill.svelte) — Synced / N pending / Offline; manual retry; auto-flush on `online` event) ✓; **Phase 8 conflict modal** ([`collabMerge.ts`](../src/lib/songmap/collabMerge.ts) field classification + [`ConflictResolutionDialog.svelte`](../src/lib/components/ConflictResolutionDialog.svelte) with per-row Keep mine / Take theirs and a "Take theirs (all)" shortcut) ✓. Remaining: automated tests around merge primitives + cloud roundtrip. |
 | PF | Postgres autosave (Docker) | S | Migrations [`001_editor_sessions.sql`](../db/migrations/001_editor_sessions.sql), [`002_projects.sql`](../db/migrations/002_projects.sql); parallel **browser API** path — adoption/ops unclear. |
 
 #### Detail — `PF`
@@ -217,9 +217,29 @@ Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
   **Evidence:** Debounced 1.5 s `song.smap` writes via `projectAutosave.ts`; seven guard clauses — project open + active song + `editingMode === 'project-song'` + route is `/edit` + fresh `queryPermission('readwrite')` + manifest entry exists with matching `{folder,id}`. Two parallel autosave subscriptions coexist: `serverAutosave.ts` (cloud) and `projectAutosave.ts` (on-disk in project mode). [`folderHandle.ts`](../src/lib/client/folderHandle.ts) provides the `getDirectoryHandleByPath` / `removeEntryRecursive` primitives both autosave + commit ladder share.  
   **Gap:** User may not know when autosave skipped (permission); standalone `/edit` vs project-mode differs. **→ R** with status indicator + failure toasts.
 
-- **Cloud (`S`)**  
-  **Evidence:** [`projectsCloud.ts`](../src/lib/client/projectsCloud.ts) CRUD-shaped calls; fingerprint identity only. Two import paths now coexist: `loadCloudProject` hydrates the editor (single-song flow), `fetchCloudSongAsSmap` returns bytes only and is composed with `importSmapToProject` for project copies — no shared cloud state between them.  
-  **Gap:** No offline queue, no merge, no multi-device story, no project-scoped cloud matching folder projects (the cloud still stores songs, not BarBro projects). **→ M** when “save to cloud” matches mental model for BarBro projects.
+- **Cloud / sync (`M`)**  
+  **Evidence:** End-to-end multi-device project collab via Supabase:
+  - **Auth** — Google OAuth + magic link via `@supabase/ssr`. Server client at [`serverClient.ts`](../src/lib/server/supabase/serverClient.ts), browser client at [`browserClient.ts`](../src/lib/client/supabase/browserClient.ts), per-request session resolution in [`hooks.server.ts`](../src/hooks.server.ts).
+  - **Schema** — `cloud_projects`, `cloud_project_members`, `cloud_songs`, `cloud_project_revisions`, `access_grants` + RLS + RPC helpers, migrations `004`–`010`.
+  - **Sync engine** — server routes under `/api/cloud/projects/[id]/{songs,members,manifest}`; client orchestration in [`cloudSync.ts`](../src/lib/client/cloudSync.ts); `pendingChanges` counter persisted on `ProjectFile.cloud`.
+  - **Audio identity & reconcile (Phase 5)** — sidecar `/native/project/song/audio/scan` walks `<song>/audio/` and returns sha256 + duration + sample rate + channels + file size per file (cached by `(absPath, mtime, size)` in memory). [`audioReconcile.ts`](../src/lib/project/audioReconcile.ts) does sha-first match, loose-field fallback; called from [`loadProjectSongIntoEditor`](../src/lib/project/commit.ts) so a renamed-or-dropped audio file is auto-found and `audio.originalPath` is restamped before the editor loads. [`identityMatchesStrict`](../src/lib/songmap/audioIdentity.ts) now does cross-kind sha comparison (a scanned file's hash will match either the SongMap's `audio.sha256` OR `audio.originalSha256`).
+  - **Missing-audio UI (Phase 6)** — [`RelinkAudioBanner.svelte`](../src/lib/components/RelinkAudioBanner.svelte) shows expected fileName, duration, and sha prefix; offers **Locate** (relink with strict sha check + "Use anyway" override modal), **Import hydration pack** (drop a `.zip` and the reconciler picks up the freshly-extracted file), and **Ignore for this session** (lets the user keep editing chord chart / sections without audio).
+  - **Hydration packs (Phase 9)** — File menu **Export / Import hydration package…**; sidecar endpoints `/native/project/hydration/{export,import}`; per-song match by id then by audio sha; existing files on the receiver are never overwritten so the existing quality picker chooses across the union.
+  
+  **Phase 7 (status pill)**: [`CloudSyncPill.svelte`](../src/lib/components/CloudSyncPill.svelte) reads `project.data.cloud.pendingChanges` + `navigator.onLine` and renders Synced / N pending / Offline. Clicking N pending calls `requestCloudPush()` to retry; the autosave also auto-subscribes to the window `online` event so reconnecting flushes the queue without user action.
+
+  **Phase 8 (conflict modal)**: [`collabMerge.ts`](../src/lib/songmap/collabMerge.ts) classifies every field on a 409 — id-keyed list items (`harmony`, `sections`, `timeline.bars/beats`) merge per id; scalar metadata + cues + countInBeats + startBeatId surface as safe conflicts; whole-timeline regeneration / `metadata.analyzed` flip / `expectedAudio` swap surface as `dangerous`. Defaults cloud-wins; the dialog ([`ConflictResolutionDialog.svelte`](../src/lib/components/ConflictResolutionDialog.svelte)) lets the user flip individual rows back to "Keep mine" or hit "Take theirs (all)" to wholesale-accept. On Apply we push the resolved SongMap with the cloud's revision as the new `clientBaseRevision`.
+
+  **Automated coverage** (added June 2026):
+    - [`collabMerge.test.ts`](../src/lib/songmap/collabMerge.test.ts) — 18 tests: non-overlapping list merges, same-id collisions, scalar metadata, dangerous flags (timeline regen / `metadata.analyzed` / `expectedAudio` swap), `applyConflictDecisions` flipping per-row, the no-silent-data-loss invariant (every conflicting field appears in the report; "Keep mine" reproduces the local fields).
+    - [`audioIdentity.test.ts`](../src/lib/songmap/audioIdentity.test.ts) — 19 tests: strict cross-kind matching (the Phase 5 fix), loose-field tolerance, combined `identityMatches` priority, `identityFromAudioRef` projection.
+    - [`audioReconcile.test.ts`](../src/lib/project/audioReconcile.test.ts) — 11 tests covering strict-match, cross-kind match (rename scenario), loose-match fallback, no-match, no-expected, scan-failure, and `applyReconcileMatch` field preservation. Uses `vi.mock` on the sidecar fetch wrapper to run pure.
+    - Full suite passes 229 tests across 24 files.
+
+  **Gap to R:**
+    - **No live HTTP smoke** against the new sidecar endpoints. The endpoint handlers are syntax-checked + logic-validated against a real project via standalone JS mirrors (the hydration export roundtrip and the audio scan-and-match flow), but no test actually fires an HTTP request at a running sidecar. Shipping unblocks this: once `desktop-v0.1.6` is out, the deployed web app exercises every endpoint on first use.
+    - Conflict modal "Open diff" view isn't implemented — for the dangerous severity rows, surfacing the structural diff inline (vs just the JSON snippet) would help users decide more confidently.
+    - No end-to-end multi-device test (two browsers, two accounts, concurrent edit, real 409). Would need a test harness that spins up two Supabase sessions; deferred until adoption justifies it.
 
 - **Postgres (`S`)**  
   **Evidence:** Schema exists for sessions + named projects.  

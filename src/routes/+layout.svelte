@@ -6,6 +6,7 @@
   import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
   import ProjectContextBar from '$lib/components/ProjectContextBar.svelte'
+  import ConflictResolutionDialog from '$lib/components/ConflictResolutionDialog.svelte'
   import { page } from '$app/stores'
   import { project as projectStore } from '$lib/stores/project'
   import {
@@ -290,4 +291,5 @@
   <div class={!showChrome ? '' : showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
     <slot />
   </div>
+  <ConflictResolutionDialog />
 </div>

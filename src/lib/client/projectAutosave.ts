@@ -28,6 +28,8 @@ import { writeProjectSong } from '$lib/client/desktopProjectFs'
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
+import { mergeForConflict } from '$lib/songmap/collabMerge'
+import { cloudConflict } from '$lib/stores/cloudConflict'
 import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
 import { patchMetadataForFolder, project, setProjectData } from '$lib/stores/project'
@@ -167,9 +169,26 @@ async function tryCloudPushOnce(): Promise<void> {
     return
   }
 
-  // Conflict or transient error — bump pendingChanges so the UI surfaces
-  // it. Phase 8 turns conflict into a merge prompt; Phase 7 surfaces the
-  // pending count.
+  // Conflict path (Phase 8): surface the disagreement to the user via
+  // the cloudConflict store. The dialog renders the merge report; the
+  // user picks per-row before applying. We bump pendingChanges so the
+  // status pill reflects the unsynced state until they resolve.
+  if ('conflict' in r && r.conflict && r.remote?.song_map) {
+    // Don't replace an already-pending conflict — the user is mid-resolve.
+    if (get(cloudConflict) === null) {
+      const report = mergeForConflict(sm, r.remote.song_map)
+      cloudConflict.set({
+        cloudProjectId: cloud.projectId,
+        cloudSongId,
+        localSongId: entry.id,
+        local: sm,
+        remote: r.remote.song_map,
+        remoteRevision: r.remote.revision,
+        report,
+      })
+    }
+  }
+
   const next: ProjectFile = {
     ...snap.data,
     cloud: {
@@ -202,6 +221,18 @@ function scheduleCloudPush(): void {
 }
 
 /**
+ * Phase 7 — let external code (the "online" event listener in
+ * `startProjectAutosave`, or a manual "retry" button somewhere) ask
+ * for a cloud push attempt to be queued through the same debounce
+ * that the songMap subscription uses. No-op when the autosave isn't
+ * started or there's nothing pending.
+ */
+export function requestCloudPush(): void {
+  if (!browser || !started) return
+  scheduleCloudPush()
+}
+
+/**
  * Start the global autosave subscription. Idempotent — safe to call
  * multiple times. Should be invoked once from the root layout in browser.
  */
@@ -217,6 +248,13 @@ export function startProjectAutosave(): void {
       scheduleCloudPush()
     }),
   )
+  // Phase 7 — when the browser regains connectivity, flush any queued
+  // cloud pushes. The debounced scheduleCloudPush picks up the current
+  // active song; offline-accumulated edits from previously-active songs
+  // will be flushed individually as the user navigates back to them.
+  const onOnline = () => scheduleCloudPush()
+  window.addEventListener('online', onOnline)
+  unsubs.push(() => window.removeEventListener('online', onOnline))
 }
 
 export function stopProjectAutosave(): void {

@@ -17,6 +17,13 @@ export type AudioSession = {
   endSec: number
   /** Set when `file === null` because audio is missing on disk (not just unloaded). */
   missingReason?: AudioMissingReason
+  /**
+   * User clicked "Ignore for this session" on the missing-audio banner.
+   * The banner stops rendering; the editor still won't have audio, but
+   * we trust the user wants to work on chord chart / sections without
+   * playback. Cleared on the next song load.
+   */
+  missingAudioIgnored?: boolean
 }
 
 export const audioSession = writable<AudioSession>({
