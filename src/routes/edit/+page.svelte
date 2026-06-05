@@ -1208,6 +1208,27 @@
    *  not a fresh user-initiated play (so we don't re-trigger the count-in pre-roll). */
   let resumingAfterCountIn = false
 
+  /**
+   * Bridge the WaveformPlayer's play/pause/ended events onto the
+   * existing audioEl-based handlers. The edit page used to host its
+   * own (debug-tools) <audio> with these handlers wired directly,
+   * but the user actually plays via the WaveformPlayer's controls —
+   * so the click-loop never started. These shims point `audioEl` at
+   * the WaveformPlayer's element and re-use the existing logic.
+   */
+  function onWaveformPlay(el: HTMLAudioElement) {
+    audioEl = el
+    onAudioPlay()
+  }
+  function onWaveformPause(el: HTMLAudioElement) {
+    audioEl = el
+    onAudioPause()
+  }
+  function onWaveformEnded(el: HTMLAudioElement) {
+    audioEl = el
+    onAudioEnded()
+  }
+
   function onAudioPlay() {
     if (!playWithClick || !audioEl) return
 
@@ -2071,6 +2092,10 @@
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
+          audioVolume={songVolume}
+          onAudioElementPlay={onWaveformPlay}
+          onAudioElementPause={onWaveformPause}
+          onAudioElementEnded={onWaveformEnded}
         />
         {#if beatEditError}
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>

@@ -122,6 +122,22 @@
     onChordBeatInteract = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
+    /**
+     * Audio element volume (0..1). Parent passes this through when it
+     * owns a volume slider that should control THIS audio (the only
+     * one actually playing). Default 1 = unity. Updating from the
+     * parent has no UI effect on the WaveformPlayer's own controls.
+     */
+    audioVolume = 1,
+    /**
+     * Fired when the WaveformPlayer's internal audio starts playing.
+     * Passes the underlying <audio> element so the parent can read
+     * `currentTime` for scheduling clicks etc. without poking at
+     * private internals.
+     */
+    onAudioElementPlay = undefined as ((el: HTMLAudioElement) => void) | undefined,
+    onAudioElementPause = undefined as ((el: HTMLAudioElement) => void) | undefined,
+    onAudioElementEnded = undefined as ((el: HTMLAudioElement) => void) | undefined,
   } = $props()
 
   let isEditorVariant = $derived(variant === 'editor')
@@ -244,6 +260,14 @@
   const displayH = 144
   const minimapH = 52
   const transport = createAudioTransport()
+
+  // Forward audioVolume from the parent into the underlying <audio>
+  // whenever it changes. The parent is the source of truth for any
+  // user-visible volume slider — the WaveformPlayer itself has no
+  // volume control of its own.
+  $effect(() => {
+    if (audioEl) audioEl.volume = Math.max(0, Math.min(1, audioVolume))
+  })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */
   let detailMode = $state('idle')
@@ -1429,10 +1453,17 @@
 
   function onAudioPlay() {
     transport.onPlay(tbind())
+    if (audioEl) onAudioElementPlay?.(audioEl)
   }
 
   function onAudioPause() {
     transport.onPause(tbind())
+    if (audioEl) onAudioElementPause?.(audioEl)
+  }
+
+  function onAudioEnded() {
+    transport.onPause(tbind())
+    if (audioEl) onAudioElementEnded?.(audioEl)
   }
 
   /** Sparse `timeupdate` — only when paused (rAF owns the clock during playback). */
@@ -1490,7 +1521,7 @@
     ontimeupdate={onTimeUpdateSparse}
     onplay={onAudioPlay}
     onpause={onAudioPause}
-    onended={onAudioPause}
+    onended={onAudioEnded}
   ></audio>
 
   <div class="flex w-full min-w-0 flex-col gap-3">
