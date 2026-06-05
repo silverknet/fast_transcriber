@@ -39,11 +39,25 @@
 
   let detectedKey = $state<DesktopArtifactKey | null>(null)
   let checking = $state(false)
+  let isSafari = $state(false)
 
   onMount(() => {
     void detectDesktopArtifactKey().then((k) => {
       detectedKey = k
     })
+    // Safari blocks cross-origin fetch from HTTPS to http://127.0.0.1
+    // as mixed content. Chrome and Firefox special-case loopback as
+    // "potentially trustworthy" so they allow it; Safari doesn't.
+    // No server-side header (PNA included) fixes this — the only
+    // real solution is serving the sidecar over HTTPS. Until that
+    // ships, Safari users see "isn't running" forever; the banner
+    // below redirects them to Chrome/Firefox. See desktop/README.md
+    // "Browser support" for the long-term plan.
+    const ua = navigator.userAgent
+    isSafari =
+      !/Chrome|Chromium|Edg|OPR/i.test(ua) &&
+      /Safari/i.test(ua) &&
+      navigator.vendor === 'Apple Computer, Inc.'
   })
 
   let recommended = $derived.by(() => {
@@ -116,7 +130,29 @@
 </svelte:head>
 
 <main class="mx-auto max-w-2xl px-4 py-16 sm:px-6">
-  {#if reachable && pythonHealth === 'installing'}
+  {#if isSafari}
+    <!--
+      Safari blocks every fetch to the loopback sidecar as mixed
+      content, so the rest of /download (every other hero state +
+      the install/download CTAs themselves still work, but probing
+      "is it running?" never succeeds). Highest-priority hero — if
+      we render this we don't want to confuse the user with the
+      misleading "isn't running" message underneath.
+    -->
+    <h1 class="mb-3 flex items-center gap-3 text-3xl font-black tracking-tight sm:text-4xl">
+      <AlertTriangle class="text-amber-600 dark:text-amber-400 size-8 shrink-0" aria-hidden="true" />
+      Safari isn't supported yet.
+    </h1>
+    <p class="text-muted-foreground mb-6 text-base">
+      Open BarBro in <span class="font-semibold">Chrome</span> or
+      <span class="font-semibold">Firefox</span> instead. We're working on Safari support.
+    </p>
+    <ol class="border-foreground/30 mb-8 list-decimal border-2 pl-8 pr-4 py-4 text-sm marker:font-bold">
+      <li class="py-1">Open Chrome or Firefox.</li>
+      <li class="py-1">Go to the BarBro web app there.</li>
+      <li class="py-1">If you haven't installed BarBro Desktop yet, the download is below — works the same in any browser.</li>
+    </ol>
+  {:else if reachable && pythonHealth === 'installing'}
     <!--
       Auto-setup is in flight. Shown on first launch (or after a sidecar
       update that bumped the requirements hash). We surface the per-stage

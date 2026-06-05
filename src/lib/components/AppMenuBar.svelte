@@ -45,7 +45,15 @@
     openProjectByPath,
     readRecentProjectPaths,
   } from '$lib/project/commit'
-  import { pickFolderViaDesktop } from '$lib/client/desktopBridge'
+  import {
+    pickFolderViaDesktop,
+    pickSaveFileViaDesktop,
+    pickOpenFileViaDesktop,
+    exportHydrationPackViaDesktop,
+    importHydrationPackViaDesktop,
+    type HydrationImportResult,
+  } from '$lib/client/desktopBridge'
+  import { refreshProjectInfo } from '$lib/project/commit'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { onMount } from 'svelte'
   import ChevronDown from '@lucide/svelte/icons/chevron-down'
@@ -82,9 +90,16 @@
   }
 
   let menuError = $state('')
+  // Neutral / success counterpart to `menuError`. Rendered in a muted
+  // color next to the error so a successful action can give brief
+  // feedback ("Exported 12 songs (340 MB)") without looking like an
+  // error. Cleared by the next menu action.
+  let menuStatus = $state('')
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
   let newProjectDialogOpen = $state(false)
+  let hydrationImportOpen = $state(false)
+  let hydrationImport = $state<Extract<HydrationImportResult, { ok: true }> | null>(null)
 
   function openNewProjectDialog() {
     if (!$desktopCompanionStatus.reachable) {
@@ -126,6 +141,91 @@
     }
     return JSON.stringify(payload, null, 2)
   })
+
+  function clearMenuMessages() {
+    menuError = ''
+    menuStatus = ''
+  }
+
+  function projectFileBaseName(): string {
+    const name = get(projectStore).data?.name ?? 'project'
+    return name.replace(/[^a-zA-Z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'project'
+  }
+
+  async function onExportHydration() {
+    clearMenuMessages()
+    if (!browser) return
+    const state = get(projectStore)
+    if (!state.osPath || !state.data) {
+      menuError = 'Open a project first.'
+      return
+    }
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
+    const defaultFile = `${projectFileBaseName()}-hydration.zip`
+    const pick = await pickSaveFileViaDesktop({
+      title: 'Export hydration package',
+      defaultPath: defaultFile,
+      filters: [{ name: 'BarBro hydration package', extensions: ['zip'] }],
+    })
+    if (!pick.ok) {
+      if (!('cancelled' in pick)) menuError = pick.error ?? 'Could not open save dialog'
+      return
+    }
+    const result = await exportHydrationPackViaDesktop({
+      projectPath: state.osPath,
+      outPath: pick.path,
+    })
+    if (!result.ok) {
+      menuError = result.error || 'Hydration export failed.'
+      return
+    }
+    const mb = (result.packSize / 1_048_576).toFixed(1)
+    const songWord = result.songCount === 1 ? 'song' : 'songs'
+    menuStatus = `Exported ${result.songCount} ${songWord} (${mb} MB) — ${pick.path}`
+  }
+
+  async function onImportHydration() {
+    clearMenuMessages()
+    if (!browser) return
+    const state = get(projectStore)
+    if (!state.osPath || !state.data) {
+      menuError = 'Open a project first.'
+      return
+    }
+    if (!$desktopCompanionStatus.reachable) {
+      menuError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
+    const pick = await pickOpenFileViaDesktop({
+      title: 'Import hydration package',
+      filters: [{ name: 'BarBro hydration package', extensions: ['zip'] }],
+    })
+    if (!pick.ok) {
+      if (!('cancelled' in pick)) menuError = pick.error ?? 'Could not open file picker'
+      return
+    }
+    const result = await importHydrationPackViaDesktop({
+      projectPath: state.osPath,
+      packPath: pick.path,
+    })
+    if (!result.ok) {
+      menuError = result.error || 'Hydration import failed.'
+      return
+    }
+    // Refresh project info so the project list view picks up the
+    // freshly-imported audio + stems. Best-effort — log on error so the
+    // import summary still shows.
+    try {
+      await refreshProjectInfo()
+    } catch (e) {
+      console.warn('refreshProjectInfo after hydration import failed:', e)
+    }
+    hydrationImport = result
+    hydrationImportOpen = true
+  }
 
   async function onExportFull() {
     menuError = ''
@@ -363,6 +463,23 @@
             Export as PDF…
           </DropdownMenuItem>
           <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onExportHydration()
+            }}
+          >
+            Export hydration package…
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class="cursor-pointer"
+            onclick={() => {
+              void onImportHydration()
+            }}
+          >
+            Import hydration package…
+          </DropdownMenuItem>
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
           <DropdownMenuItem class="cursor-pointer" onclick={() => void onCloseProject()}>
             Close Project
           </DropdownMenuItem>
@@ -514,6 +631,9 @@
   {#if menuError}
     <p class="text-destructive w-full max-w-md truncate text-xs sm:w-auto" role="status">{menuError}</p>
   {/if}
+  {#if menuStatus && !menuError}
+    <p class="text-muted-foreground w-full max-w-md truncate text-xs sm:w-auto" role="status">{menuStatus}</p>
+  {/if}
 
   <input
     bind:this={importInput}
@@ -543,3 +663,54 @@
 </Dialog>
 
 <NewProjectDialog bind:open={newProjectDialogOpen} onCreated={() => refreshRecents()} />
+
+<Dialog bind:open={hydrationImportOpen}>
+  <DialogContent
+    class="flex max-h-[85vh] w-full max-w-[min(40rem,calc(100%-2rem))] flex-col gap-3 p-4 sm:max-w-[min(40rem,calc(100%-2rem))]"
+    showCloseButton={true}
+  >
+    <DialogHeader>
+      <DialogTitle>Hydration package imported</DialogTitle>
+      <DialogDescription>
+        {#if hydrationImport}
+          {@const s = hydrationImport.summary}
+          Matched {s.matchedCount} of {s.packSongCount} songs.
+          Wrote {s.audioImported} audio file{s.audioImported === 1 ? '' : 's'}
+          and {s.stemsImported} stem file{s.stemsImported === 1 ? '' : 's'}.
+          Existing files were left untouched.
+        {/if}
+      </DialogDescription>
+    </DialogHeader>
+    {#if hydrationImport && hydrationImport.results.length > 0}
+      <ul class="border-foreground/20 divide-foreground/10 max-h-[min(60vh,32rem)] overflow-auto divide-y border-2 text-sm">
+        {#each hydrationImport.results as r (r.songId)}
+          <li class="px-3 py-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="truncate font-medium">{r.title || r.songId}</span>
+              <span
+                class="shrink-0 text-xs font-semibold uppercase tracking-wider {r.matched
+                  ? 'text-emerald-700 dark:text-emerald-400'
+                  : 'text-muted-foreground'}"
+              >
+                {r.matched ? 'matched' : 'skipped'}
+              </span>
+            </div>
+            <div class="text-muted-foreground mt-0.5 text-[11px]">
+              {#if r.matched}
+                {#if r.audioImported}+ audio{:else if r.audioSkipped}audio: kept yours{/if}
+                {#if r.audioImported && r.stemsImported > 0} · {/if}
+                {#if r.stemsImported > 0}+ {r.stemsImported} stem{r.stemsImported === 1 ? '' : 's'}{/if}
+                {#if r.stemsSkipped > 0} · {r.stemsSkipped} stem{r.stemsSkipped === 1 ? '' : 's'} kept{/if}
+                {#if !r.audioImported && r.stemsImported === 0 && !r.audioSkipped && r.stemsSkipped === 0}
+                  no new files
+                {/if}
+              {:else}
+                {r.notes ?? 'no matching song in this project'}
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </DialogContent>
+</Dialog>

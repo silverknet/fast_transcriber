@@ -11,6 +11,10 @@
     "dist:mac-arm64": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64",
     "dist:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --x64"
   },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "yauzl": "^3.2.0"
+  },
   "devDependencies": {
     "electron": "^42.0.1",
     "electron-builder": "^26.0.12",
