@@ -3360,6 +3360,13 @@ function startBeaconServer() {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Bars-Json, X-Beats-Json',
+      // Private Network Access (PNA): when an HTTPS public origin
+      // (the deployed web app) reaches a private/loopback address
+      // (this sidecar on 127.0.0.1), Safari and Chrome both require
+      // the server to explicitly opt in. Without this header Safari
+      // blocks every request with "Not allowed to request resource"
+      // and the web app permanently shows "isn't running".
+      'Access-Control-Allow-Private-Network': 'true',
     }
 
     if (req.method === 'OPTIONS') {
