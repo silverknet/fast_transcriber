@@ -1208,26 +1208,23 @@
    *  not a fresh user-initiated play (so we don't re-trigger the count-in pre-roll). */
   let resumingAfterCountIn = false
 
-  /**
-   * Bridge the WaveformPlayer's play/pause/ended events onto the
-   * existing audioEl-based handlers. The edit page used to host its
-   * own (debug-tools) <audio> with these handlers wired directly,
-   * but the user actually plays via the WaveformPlayer's controls —
-   * so the click-loop never started. These shims point `audioEl` at
-   * the WaveformPlayer's element and re-use the existing logic.
-   */
-  function onWaveformPlay(el: HTMLAudioElement) {
-    audioEl = el
-    onAudioPlay()
-  }
-  function onWaveformPause(el: HTMLAudioElement) {
-    audioEl = el
-    onAudioPause()
-  }
-  function onWaveformEnded(el: HTMLAudioElement) {
-    audioEl = el
-    onAudioEnded()
-  }
+  // Attach play/pause/ended listeners directly to the WaveformPlayer's
+  // <audio> element (bound via `bind:audioElement={audioEl}` above).
+  // This replaces the bug-prone callback-prop bridge: one element,
+  // one set of listeners, native event flow. Cleans up on element
+  // change / unmount.
+  $effect(() => {
+    const el = audioEl
+    if (!el) return
+    el.addEventListener('play', onAudioPlay)
+    el.addEventListener('pause', onAudioPause)
+    el.addEventListener('ended', onAudioEnded)
+    return () => {
+      el.removeEventListener('play', onAudioPlay)
+      el.removeEventListener('pause', onAudioPause)
+      el.removeEventListener('ended', onAudioEnded)
+    }
+  })
 
   function onAudioPlay() {
     if (!playWithClick || !audioEl) return
@@ -2092,11 +2089,64 @@
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
-          audioVolume={songVolume}
-          onAudioElementPlay={onWaveformPlay}
-          onAudioElementPause={onWaveformPause}
-          onAudioElementEnded={onWaveformEnded}
+          bind:audioElement={audioEl}
         />
+        {#if editMode === 'grid' && sm.timeline.beats.length > 0}
+          <!--
+            Compact "play-with-click" strip — sits directly under the
+            WaveformPlayer so the toggle is right next to the play
+            button users were already looking at. Volume sliders are
+            vertical and ~16px wide so they don't eat space.
+            One source of truth: both sliders write into the same
+            `audioEl` (the WaveformPlayer's <audio>) and the same
+            `clickMaster` gain node that the click loop reads.
+          -->
+          <div class="border-foreground/30 mt-3 flex items-stretch gap-3 border-2 px-3 py-2 text-xs">
+            <label class="flex shrink-0 cursor-pointer items-center gap-2 font-bold">
+              <input
+                type="checkbox"
+                bind:checked={playWithClick}
+                class="accent-foreground"
+              />
+              <span class="uppercase tracking-wider">Play with click</span>
+            </label>
+            <div class="bg-foreground/15 w-px shrink-0" aria-hidden="true"></div>
+            <div class="flex items-end gap-3">
+              <label
+                class="flex shrink-0 flex-col items-center gap-1"
+                title="Click volume"
+              >
+                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  bind:value={clickVolume}
+                  class="accent-foreground h-20 w-4 [writing-mode:vertical-lr] rotate-180"
+                  aria-label="Click volume"
+                />
+                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{clickVolume.toFixed(1)}×</span>
+              </label>
+              <label
+                class="flex shrink-0 flex-col items-center gap-1"
+                title="Song volume"
+              >
+                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  bind:value={songVolume}
+                  class="accent-foreground h-20 w-4 [writing-mode:vertical-lr] rotate-180"
+                  aria-label="Song volume"
+                />
+                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(songVolume * 100)}%</span>
+              </label>
+            </div>
+          </div>
+        {/if}
         {#if beatEditError}
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>
         {/if}
@@ -2191,53 +2241,10 @@
           </p>
         </fieldset>
 
-        <label class="flex cursor-pointer items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            bind:checked={playWithClick}
-            class="accent-foreground shrink-0"
-          />
-          <span>Play with click</span>
-          <span class="text-muted-foreground text-xs leading-relaxed">
-            — when on, the waveform's play button fires the metronome (count-in pre-roll, then a click on every beat).
-          </span>
-        </label>
-
-        <fieldset class="border-foreground border-2 px-3 py-3">
-          <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Volume</legend>
-          <div class="grid gap-3 pt-1 sm:grid-cols-2">
-            <label class="flex flex-col gap-1 text-xs">
-              <span class="flex justify-between">
-                <span>Click</span>
-                <span class="text-muted-foreground font-mono tabular-nums">{clickVolume.toFixed(2)}×</span>
-              </span>
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.05"
-                bind:value={clickVolume}
-                class="accent-foreground"
-                aria-label="Click volume"
-              />
-            </label>
-            <label class="flex flex-col gap-1 text-xs">
-              <span class="flex justify-between">
-                <span>Song</span>
-                <span class="text-muted-foreground font-mono tabular-nums">{Math.round(songVolume * 100)}%</span>
-              </span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                bind:value={songVolume}
-                class="accent-foreground"
-                aria-label="Song volume"
-              />
-            </label>
-          </div>
-        </fieldset>
+        <!-- "Play with click" toggle + Click / Song volume sliders
+             moved to a compact strip directly under the WaveformPlayer
+             where the play button lives. See the grid-mode toolbar
+             block above. -->
       </section>
     {/if}
 
@@ -2316,17 +2323,11 @@
           </span>
         </p>
 
-        {#if objectUrl}
-          <audio
-            bind:this={audioEl}
-            src={objectUrl}
-            class="sr-only"
-            preload="auto"
-            onplay={onAudioPlay}
-            onpause={onAudioPause}
-            onended={onAudioEnded}
-          ></audio>
-        {/if}
+        <!-- The previously-rendered orphan <audio> here was the bug:
+             two audio elements, two event sources, two volume targets.
+             Removed. `audioEl` now binds to the WaveformPlayer's real
+             <audio> via bind:audioElement above. -->
+
       </div>
     </details>
 

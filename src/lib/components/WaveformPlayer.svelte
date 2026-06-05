@@ -123,21 +123,14 @@
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
     /**
-     * Audio element volume (0..1). Parent passes this through when it
-     * owns a volume slider that should control THIS audio (the only
-     * one actually playing). Default 1 = unity. Updating from the
-     * parent has no UI effect on the WaveformPlayer's own controls.
+     * Two-way bind: lets the parent reach the underlying <audio>
+     * element so volume slider / click-overlay scheduling can target
+     * the one element that actually plays. Parent just does
+     * `bind:audioElement={localAudioEl}` and uses it like a normal ref
+     * (attach event listeners via $effect, set .volume, read .currentTime).
+     * Single source of truth — no duplicate audio.
      */
-    audioVolume = 1,
-    /**
-     * Fired when the WaveformPlayer's internal audio starts playing.
-     * Passes the underlying <audio> element so the parent can read
-     * `currentTime` for scheduling clicks etc. without poking at
-     * private internals.
-     */
-    onAudioElementPlay = undefined as ((el: HTMLAudioElement) => void) | undefined,
-    onAudioElementPause = undefined as ((el: HTMLAudioElement) => void) | undefined,
-    onAudioElementEnded = undefined as ((el: HTMLAudioElement) => void) | undefined,
+    audioElement = $bindable<HTMLAudioElement | null>(null),
   } = $props()
 
   let isEditorVariant = $derived(variant === 'editor')
@@ -261,12 +254,11 @@
   const minimapH = 52
   const transport = createAudioTransport()
 
-  // Forward audioVolume from the parent into the underlying <audio>
-  // whenever it changes. The parent is the source of truth for any
-  // user-visible volume slider — the WaveformPlayer itself has no
-  // volume control of its own.
+  // Mirror our internal <audio> ref out to the parent via $bindable.
+  // Parent does its own bind:this gymnastics through audioElement
+  // and we stay free of "click bridge" / "volume bridge" props.
   $effect(() => {
-    if (audioEl) audioEl.volume = Math.max(0, Math.min(1, audioVolume))
+    audioElement = audioEl ?? null
   })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */
@@ -1453,17 +1445,10 @@
 
   function onAudioPlay() {
     transport.onPlay(tbind())
-    if (audioEl) onAudioElementPlay?.(audioEl)
   }
 
   function onAudioPause() {
     transport.onPause(tbind())
-    if (audioEl) onAudioElementPause?.(audioEl)
-  }
-
-  function onAudioEnded() {
-    transport.onPause(tbind())
-    if (audioEl) onAudioElementEnded?.(audioEl)
   }
 
   /** Sparse `timeupdate` — only when paused (rAF owns the clock during playback). */
@@ -1521,7 +1506,7 @@
     ontimeupdate={onTimeUpdateSparse}
     onplay={onAudioPlay}
     onpause={onAudioPause}
-    onended={onAudioEnded}
+    onended={onAudioPause}
   ></audio>
 
   <div class="flex w-full min-w-0 flex-col gap-3">
