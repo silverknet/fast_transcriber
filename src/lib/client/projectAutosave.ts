@@ -28,6 +28,8 @@ import { writeProjectSong } from '$lib/client/desktopProjectFs'
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
+import { mergeForConflict } from '$lib/songmap/collabMerge'
+import { cloudConflict } from '$lib/stores/cloudConflict'
 import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
 import { patchMetadataForFolder, project, setProjectData } from '$lib/stores/project'
@@ -167,9 +169,26 @@ async function tryCloudPushOnce(): Promise<void> {
     return
   }
 
-  // Conflict or transient error — bump pendingChanges so the UI surfaces
-  // it. Phase 8 turns conflict into a merge prompt; Phase 7 surfaces the
-  // pending count.
+  // Conflict path (Phase 8): surface the disagreement to the user via
+  // the cloudConflict store. The dialog renders the merge report; the
+  // user picks per-row before applying. We bump pendingChanges so the
+  // status pill reflects the unsynced state until they resolve.
+  if ('conflict' in r && r.conflict && r.remote?.song_map) {
+    // Don't replace an already-pending conflict — the user is mid-resolve.
+    if (get(cloudConflict) === null) {
+      const report = mergeForConflict(sm, r.remote.song_map)
+      cloudConflict.set({
+        cloudProjectId: cloud.projectId,
+        cloudSongId,
+        localSongId: entry.id,
+        local: sm,
+        remote: r.remote.song_map,
+        remoteRevision: r.remote.revision,
+        report,
+      })
+    }
+  }
+
   const next: ProjectFile = {
     ...snap.data,
     cloud: {
