@@ -93,6 +93,33 @@ The web app polls the sidecar's `/ping` every 12 s. When the reported version is
 
 macOS replaces the old `.app` in-place during step 3 — no manual uninstall needed. Step 1 matters because the running sidecar binds loopback port 47842; the new launch would fail otherwise.
 
+## Browser support
+
+**Works:** Chrome, Edge, Firefox. **Doesn't work:** Safari.
+
+The web app is served over HTTPS (from Netlify) and needs to fetch from the sidecar at `http://127.0.0.1:47842`. Chrome and Firefox special-case loopback / `localhost` as "potentially trustworthy" and let the HTTPS → HTTP request through. Safari doesn't grant that exemption — it treats every such request as mixed content and blocks it with `"Not allowed to request resource"` / `"due to access control checks"` in the console.
+
+We confirmed empirically (June 2026, sidecar v0.1.5) that:
+- `Access-Control-Allow-Private-Network: true` is set on every sidecar response (handles Chrome's strict PNA mode).
+- Safari still blocks even with that header — the block happens before any CORS/PNA check.
+- No server-side header fix exists.
+
+Until we ship the real fix, `/download` detects Safari (`navigator.vendor === 'Apple Computer, Inc.'` + UA filter) and shows a hero telling the user to use Chrome or Firefox instead. See `src/routes/download/+page.svelte` (`isSafari` derived) and `src/lib/client/desktopBeacon.ts` (where the probe fails silently).
+
+### The real fix (deferred): HTTPS on the loopback sidecar
+
+To unblock Safari we need both endpoints on HTTPS. The conventional pattern (used by Plex, qBittorrent, etc.):
+
+1. Sidecar generates a self-signed TLS cert on first launch, stored under `~/Library/Application Support/barbro-desktop/`.
+2. Installer adds the cert to the macOS Keychain as trusted (one-time `security add-trusted-cert` invocation; needs admin password OR a user-installed cert).
+3. Map a hostname like `localhost.barbro.app` → `127.0.0.1` (either via `/etc/hosts` or DNS for the public-domain trick that some Plex-style apps use).
+4. Sidecar listens on `https://localhost.barbro.app:47842` with the trusted cert.
+5. Web app probes that URL instead of `http://127.0.0.1`.
+
+Estimated effort: roughly a day. Drawbacks: the keychain install step needs a one-time admin prompt (or the cert lives only in the user keychain, which Safari distrusts by default), and the hostname mapping is fiddly. The `.dev.local` mDNS path is another option but Safari's mDNS support is uneven.
+
+For now: ship the Safari warning and revisit this when the Mac user base big enough on Safari to justify the day of work.
+
 ## Layout
 
 | Path | Role |
