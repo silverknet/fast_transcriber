@@ -230,9 +230,16 @@ Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
 
   **Phase 8 (conflict modal)**: [`collabMerge.ts`](../src/lib/songmap/collabMerge.ts) classifies every field on a 409 — id-keyed list items (`harmony`, `sections`, `timeline.bars/beats`) merge per id; scalar metadata + cues + countInBeats + startBeatId surface as safe conflicts; whole-timeline regeneration / `metadata.analyzed` flip / `expectedAudio` swap surface as `dangerous`. Defaults cloud-wins; the dialog ([`ConflictResolutionDialog.svelte`](../src/lib/components/ConflictResolutionDialog.svelte)) lets the user flip individual rows back to "Keep mine" or hit "Take theirs (all)" to wholesale-accept. On Apply we push the resolved SongMap with the cloud's revision as the new `clientBaseRevision`.
 
+  **Automated coverage** (added June 2026):
+    - [`collabMerge.test.ts`](../src/lib/songmap/collabMerge.test.ts) — 18 tests: non-overlapping list merges, same-id collisions, scalar metadata, dangerous flags (timeline regen / `metadata.analyzed` / `expectedAudio` swap), `applyConflictDecisions` flipping per-row, the no-silent-data-loss invariant (every conflicting field appears in the report; "Keep mine" reproduces the local fields).
+    - [`audioIdentity.test.ts`](../src/lib/songmap/audioIdentity.test.ts) — 19 tests: strict cross-kind matching (the Phase 5 fix), loose-field tolerance, combined `identityMatches` priority, `identityFromAudioRef` projection.
+    - [`audioReconcile.test.ts`](../src/lib/project/audioReconcile.test.ts) — 11 tests covering strict-match, cross-kind match (rename scenario), loose-match fallback, no-match, no-expected, scan-failure, and `applyReconcileMatch` field preservation. Uses `vi.mock` on the sidecar fetch wrapper to run pure.
+    - Full suite passes 229 tests across 24 files.
+
   **Gap to R:**
-    - **No automated coverage** of the sync engine, reconcile, merge primitives, or hydration roundtrip — only the standalone manual tests done at commit time.
+    - **No live HTTP smoke** against the new sidecar endpoints. The endpoint handlers are syntax-checked + logic-validated against a real project via standalone JS mirrors (the hydration export roundtrip and the audio scan-and-match flow), but no test actually fires an HTTP request at a running sidecar. Shipping unblocks this: once `desktop-v0.1.6` is out, the deployed web app exercises every endpoint on first use.
     - Conflict modal "Open diff" view isn't implemented — for the dangerous severity rows, surfacing the structural diff inline (vs just the JSON snippet) would help users decide more confidently.
+    - No end-to-end multi-device test (two browsers, two accounts, concurrent edit, real 409). Would need a test harness that spins up two Supabase sessions; deferred until adoption justifies it.
 
 - **Postgres (`S`)**  
   **Evidence:** Schema exists for sessions + named projects.  
