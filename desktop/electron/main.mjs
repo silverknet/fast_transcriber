@@ -12,8 +12,10 @@
  */
 
 import { app, BrowserWindow, dialog } from 'electron'
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
+import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import archiver from 'archiver'
+import yauzl from 'yauzl'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -1418,6 +1420,510 @@ async function handlePickFolder(req, res, cors) {
     const msg = e instanceof Error ? `${e.message}\n${e.stack}` : String(e)
     logError(`pick-folder: dialog threw: ${msg}`)
     sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+// ── Save / Open file dialogs ──────────────────────────────────────────────
+//
+// Hydration export needs a "save as…" dialog; import needs a file-open
+// dialog. Both wrap Electron's `dialog.show*` calls in the same shape as
+// `pick-folder` so the web app calls them the same way.
+
+/**
+ * `POST /native/pick-save-file` — body `{ title?, defaultPath?, filters? }`.
+ * Returns `{ ok: true, path } | { ok: false, cancelled: true } | { ok: false, error }`.
+ */
+async function handlePickSaveFile(req, res, cors) {
+  const body = await readRequestJson(req)
+  const title = typeof body?.title === 'string' ? body.title : 'Save file'
+  const defaultPath = typeof body?.defaultPath === 'string' ? body.defaultPath : undefined
+  const filters = Array.isArray(body?.filters) ? body.filters : undefined
+  try {
+    focusSidecarApp()
+    const r = await dialog.showSaveDialog({ title, defaultPath, filters })
+    if (r.canceled || !r.filePath) {
+      sendJson(res, 200, { ok: false, cancelled: true }, cors)
+      return
+    }
+    sendJson(res, 200, { ok: true, path: r.filePath }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/pick-open-file` — body `{ title?, defaultPath?, filters? }`.
+ * Returns `{ ok: true, path } | { ok: false, cancelled: true } | { ok: false, error }`.
+ */
+async function handlePickOpenFile(req, res, cors) {
+  const body = await readRequestJson(req)
+  const title = typeof body?.title === 'string' ? body.title : 'Open file'
+  const defaultPath = typeof body?.defaultPath === 'string' ? body.defaultPath : undefined
+  const filters = Array.isArray(body?.filters) ? body.filters : undefined
+  try {
+    focusSidecarApp()
+    const r = await dialog.showOpenDialog({
+      title,
+      defaultPath,
+      filters,
+      properties: ['openFile'],
+    })
+    if (r.canceled || !r.filePaths[0]) {
+      sendJson(res, 200, { ok: false, cancelled: true }, cors)
+      return
+    }
+    sendJson(res, 200, { ok: true, path: r.filePaths[0] }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+// ── Hydration packs ─────────────────────────────────────────────────────
+//
+// A hydration pack is a zip file containing per-song audio assets
+// (originals + stems) so a project owner can hand-deliver heavy assets
+// to a collaborator whose project structure already exists (typically
+// via cloud sync, but not required — matching falls back to audio
+// identity hashes when ids don't line up).
+//
+// Layout:
+//   hydration-manifest.json
+//   songs/<songId>/audio/<fileName>
+//   songs/<songId>/stems/<preset>/<stemFileName>
+//
+// On import: only files that don't already exist on disk get written.
+// The receiver's stem-quality picker (`listStemSets` → web-side
+// preset-priority) then chooses the best variant from the union of
+// their own and the pack's contributions. Never destructive.
+
+const HYDRATION_FORMAT_VERSION = 1
+const HYDRATION_MANIFEST_FILENAME = 'hydration-manifest.json'
+
+/**
+ * Read one song's smap to gather everything we need for a hydration
+ * pack entry. Returns null if the smap is unreadable or the audio file
+ * referenced by it doesn't exist on disk — we silently skip those
+ * songs (the project list view already surfaces them as "audio
+ * missing"; no point putting unresolvable entries into a pack).
+ */
+async function buildHydrationEntryForSong(projectPath, songEntry) {
+  const songFolderAbs = path.join(projectPath, songEntry.folder)
+  const smapPath = path.join(songFolderAbs, SONG_SMAP_FILENAME)
+  const songProject = existsSync(smapPath) ? await readSmapHeaderJson(smapPath) : null
+  const songMap = songProject?.songMap
+  if (!songMap || typeof songMap !== 'object') return null
+  const audio = songMap.audio
+  if (!audio || typeof audio !== 'object') return null
+
+  const audioFileName = typeof audio.fileName === 'string' ? audio.fileName : null
+  if (!audioFileName) return null
+
+  // Audio file lives at `<song>/audio/<fileName>`. Some legacy songs
+  // also have `audio.originalPath` pointing elsewhere on disk — for a
+  // hydration pack we only ship the canonical `<song>/audio/` copy.
+  const audioAbs = path.join(songFolderAbs, 'audio', audioFileName)
+  if (!existsSync(audioAbs)) return null
+
+  const stemSets = await listStemSets(songFolderAbs)
+  /** @type {{ preset: string; fileName: string; absPath: string }[]} */
+  const stemEntries = []
+  for (const [preset, files] of Object.entries(stemSets)) {
+    for (const fileName of files) {
+      const absPath = preset === 'legacy'
+        ? path.join(songFolderAbs, 'stems', fileName)
+        : path.join(songFolderAbs, 'stems', preset, fileName)
+      if (existsSync(absPath)) stemEntries.push({ preset, fileName, absPath })
+    }
+  }
+
+  return {
+    songId: songEntry.id,
+    songFolderAbs,
+    title: typeof songMap.metadata?.title === 'string' ? songMap.metadata.title : '',
+    audio: {
+      fileName: audioFileName,
+      absPath: audioAbs,
+      // The smap stores sha256 / originalSha256 already; copy them
+      // through so the receiver can identity-match without rehashing.
+      // If the smap is missing them (older songs), we leave the field
+      // out — receiver will fall back to id-only matching.
+      sha256: typeof audio.sha256 === 'string' ? audio.sha256 : null,
+      originalSha256: typeof audio.originalSha256 === 'string' ? audio.originalSha256 : null,
+      durationSec: typeof audio.durationSec === 'number' ? audio.durationSec : null,
+      sampleRate: typeof audio.sampleRate === 'number' ? audio.sampleRate : null,
+      channels: typeof audio.channels === 'number' ? audio.channels : null,
+      fileSize: typeof audio.fileSize === 'number' ? audio.fileSize : null,
+      mimeType: typeof audio.mimeType === 'string' ? audio.mimeType : null,
+    },
+    stems: stemEntries,
+  }
+}
+
+/**
+ * `POST /native/project/hydration/export` — body
+ * `{ projectPath, outPath, songIds? }`. Writes a zip to `outPath`
+ * containing audio + stems for the requested songs (or all songs if
+ * `songIds` is absent). Returns a summary.
+ */
+async function handleHydrationExport(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath : ''
+    const outPath = typeof body.outPath === 'string' ? body.outPath : ''
+    const songIdFilter = Array.isArray(body.songIds) ? new Set(body.songIds) : null
+    if (!projectPath || !outPath) {
+      return sendJson(res, 400, { ok: false, error: 'projectPath and outPath are required' }, cors)
+    }
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+
+    const projectManifest = await readProjectManifest(projectPath)
+    const songsToExport = songIdFilter
+      ? projectManifest.songs.filter((s) => songIdFilter.has(s.id))
+      : projectManifest.songs
+
+    // Build pack entries (skips songs whose audio file isn't on disk).
+    const entries = []
+    for (const songEntry of songsToExport) {
+      const entry = await buildHydrationEntryForSong(projectPath, songEntry)
+      if (entry) entries.push(entry)
+    }
+
+    if (entries.length === 0) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: 'No songs in this project have audio on disk to export.',
+      }, cors)
+    }
+
+    const manifest = {
+      formatVersion: HYDRATION_FORMAT_VERSION,
+      kind: 'barbro-hydration-pack',
+      createdAt: new Date().toISOString(),
+      sourceProjectId: projectManifest.id,
+      sourceProjectName: projectManifest.name,
+      songs: entries.map((e) => ({
+        songId: e.songId,
+        title: e.title,
+        audio: {
+          fileName: e.audio.fileName,
+          sha256: e.audio.sha256,
+          originalSha256: e.audio.originalSha256,
+          durationSec: e.audio.durationSec,
+          sampleRate: e.audio.sampleRate,
+          channels: e.audio.channels,
+          fileSize: e.audio.fileSize,
+          mimeType: e.audio.mimeType,
+        },
+        stems: e.stems.map((s) => ({
+          preset: s.preset,
+          fileName: s.fileName,
+        })),
+      })),
+    }
+
+    // Stream to disk. Audio is already compressed — use store-only
+    // (level 0) so we don't burn CPU re-deflating MP3/WAV.
+    const output = createWriteStream(outPath)
+    const archive = archiver('zip', { zlib: { level: 0 } })
+    /** @type {Promise<void>} */
+    const done = new Promise((resolve, reject) => {
+      output.on('close', () => resolve())
+      output.on('error', reject)
+      archive.on('error', reject)
+      archive.on('warning', (e) => {
+        if (e.code !== 'ENOENT') reject(e)
+      })
+    })
+    archive.pipe(output)
+
+    archive.append(JSON.stringify(manifest, null, 2), { name: HYDRATION_MANIFEST_FILENAME })
+    for (const e of entries) {
+      archive.file(e.audio.absPath, { name: `songs/${e.songId}/audio/${e.audio.fileName}` })
+      for (const s of e.stems) {
+        archive.file(s.absPath, { name: `songs/${e.songId}/stems/${s.preset}/${s.fileName}` })
+      }
+    }
+    await archive.finalize()
+    await done
+
+    const packSize = (await stat(outPath)).size
+    const totalStems = entries.reduce((sum, e) => sum + e.stems.length, 0)
+    logInfo(`hydration export: ${entries.length} song(s), ${totalStems} stem file(s) → ${outPath} (${(packSize / 1_048_576).toFixed(1)} MB)`)
+    sendJson(res, 200, {
+      ok: true,
+      outPath,
+      packSize,
+      songCount: entries.length,
+      audioCount: entries.length,
+      stemCount: totalStems,
+    }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`hydration export: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * Resolve the receiver-side song that matches a pack entry. Priority:
+ *  1. Same `ProjectSongEntry.id` (cloud-collab case).
+ *  2. Same audio `sha256` or `originalSha256` (content match).
+ * The audio-identity fallback handles the case where two projects
+ * were built independently but happen to reference the same masters.
+ *
+ * @returns {string | null} — the matched receiver song's `folder`, or null.
+ */
+function findReceiverMatch(packSong, receiverIndex) {
+  // Try id first.
+  if (receiverIndex.byId.has(packSong.songId)) {
+    return receiverIndex.byId.get(packSong.songId)
+  }
+  const packShas = new Set(
+    [packSong.audio?.sha256, packSong.audio?.originalSha256].filter(
+      (s) => typeof s === 'string' && s.length > 0,
+    ),
+  )
+  if (packShas.size === 0) return null
+  for (const [sha, folder] of receiverIndex.byAudioSha) {
+    if (packShas.has(sha)) return folder
+  }
+  return null
+}
+
+/**
+ * Build a lookup index of the receiver project's songs so we don't
+ * re-read smaps once per pack entry. `byAudioSha` includes both
+ * `sha256` and `originalSha256` for each song that has them set.
+ */
+async function buildReceiverIndex(projectPath, projectManifest) {
+  /** @type {Map<string, string>} id → folder */
+  const byId = new Map()
+  /** @type {Map<string, string>} sha → folder */
+  const byAudioSha = new Map()
+  for (const s of projectManifest.songs) {
+    byId.set(s.id, s.folder)
+    const smapPath = path.join(projectPath, s.folder, SONG_SMAP_FILENAME)
+    if (!existsSync(smapPath)) continue
+    const songProject = await readSmapHeaderJson(smapPath)
+    const audio = songProject?.songMap?.audio
+    if (!audio) continue
+    if (typeof audio.sha256 === 'string' && audio.sha256) byAudioSha.set(audio.sha256, s.folder)
+    if (typeof audio.originalSha256 === 'string' && audio.originalSha256) byAudioSha.set(audio.originalSha256, s.folder)
+  }
+  return { byId, byAudioSha }
+}
+
+/**
+ * Read just `hydration-manifest.json` from a zip without decompressing
+ * the heavy entries. Returns the parsed manifest plus the open yauzl
+ * `zipFile` so callers can keep streaming entries from it.
+ */
+function openHydrationPack(packPath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(packPath, { lazyEntries: true }, (err, zipFile) => {
+      if (err || !zipFile) {
+        reject(err ?? new Error('Could not open hydration pack'))
+        return
+      }
+      /** @type {Array<{ entry: yauzl.Entry }>} */
+      const entries = []
+      let manifestEntry = null
+      zipFile.on('entry', (entry) => {
+        if (/\/$/.test(entry.fileName)) {
+          zipFile.readEntry()
+          return
+        }
+        if (entry.fileName === HYDRATION_MANIFEST_FILENAME) {
+          manifestEntry = entry
+        }
+        entries.push({ entry })
+        zipFile.readEntry()
+      })
+      zipFile.on('end', async () => {
+        if (!manifestEntry) {
+          zipFile.close()
+          reject(new Error(`Pack is missing ${HYDRATION_MANIFEST_FILENAME}`))
+          return
+        }
+        // Read manifest now.
+        try {
+          const manifest = await readZipEntryAsJson(zipFile, manifestEntry)
+          resolve({ zipFile, manifest, entries: entries.map((e) => e.entry) })
+        } catch (e) {
+          zipFile.close()
+          reject(e)
+        }
+      })
+      zipFile.on('error', reject)
+      zipFile.readEntry()
+    })
+  })
+}
+
+function readZipEntryAsJson(zipFile, entry) {
+  return new Promise((resolve, reject) => {
+    zipFile.openReadStream(entry, (err, stream) => {
+      if (err || !stream) {
+        reject(err ?? new Error('No read stream'))
+        return
+      }
+      /** @type {Buffer[]} */
+      const chunks = []
+      stream.on('data', (c) => chunks.push(c))
+      stream.on('error', reject)
+      stream.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')))
+        } catch (e) {
+          reject(e)
+        }
+      })
+    })
+  })
+}
+
+function extractZipEntryToFile(zipFile, entry, targetAbs) {
+  return new Promise((resolve, reject) => {
+    zipFile.openReadStream(entry, async (err, stream) => {
+      if (err || !stream) {
+        reject(err ?? new Error('No read stream'))
+        return
+      }
+      try {
+        await mkdir(path.dirname(targetAbs), { recursive: true })
+        const out = createWriteStream(targetAbs)
+        stream.pipe(out)
+        out.on('finish', () => resolve())
+        out.on('error', reject)
+        stream.on('error', reject)
+      } catch (e) {
+        reject(e)
+      }
+    })
+  })
+}
+
+/**
+ * `POST /native/project/hydration/import` — body
+ * `{ projectPath, packPath }`. Extracts the pack into the project,
+ * skipping any file that already exists. Returns a per-song summary.
+ */
+async function handleHydrationImport(req, res, cors) {
+  /** @type {{ zipFile?: import('yauzl').ZipFile }} */
+  const scope = {}
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath : ''
+    const packPath = typeof body.packPath === 'string' ? body.packPath : ''
+    if (!projectPath || !packPath) {
+      return sendJson(res, 400, { ok: false, error: 'projectPath and packPath are required' }, cors)
+    }
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    if (!existsSync(packPath)) {
+      return sendJson(res, 404, { ok: false, error: `packPath not found: ${packPath}` }, cors)
+    }
+
+    const projectManifest = await readProjectManifest(projectPath)
+    const receiverIndex = await buildReceiverIndex(projectPath, projectManifest)
+
+    const { zipFile, manifest, entries } = await openHydrationPack(packPath)
+    scope.zipFile = zipFile
+    if (manifest?.kind !== 'barbro-hydration-pack') {
+      throw new Error('Not a BarBro hydration pack')
+    }
+    if (manifest.formatVersion !== HYDRATION_FORMAT_VERSION) {
+      throw new Error(
+        `Unsupported hydration pack version: ${manifest.formatVersion} (expected ${HYDRATION_FORMAT_VERSION})`,
+      )
+    }
+
+    /** @type {Array<{ songId: string; title: string; matched: boolean; receiverFolder: string | null; audioImported: boolean; audioSkipped: boolean; stemsImported: number; stemsSkipped: number; notes?: string }>} */
+    const results = []
+
+    // Group zip entries by songId for fast lookup.
+    /** @type {Map<string, yauzl.Entry[]>} */
+    const entriesBySongId = new Map()
+    for (const entry of entries) {
+      const m = entry.fileName.match(/^songs\/([^/]+)\//)
+      if (!m) continue
+      const list = entriesBySongId.get(m[1]) ?? []
+      list.push(entry)
+      entriesBySongId.set(m[1], list)
+    }
+
+    for (const packSong of manifest.songs ?? []) {
+      const songId = typeof packSong.songId === 'string' ? packSong.songId : null
+      if (!songId) continue
+      const receiverFolder = findReceiverMatch(packSong, receiverIndex)
+      const result = {
+        songId,
+        title: typeof packSong.title === 'string' ? packSong.title : '',
+        matched: receiverFolder !== null,
+        receiverFolder,
+        audioImported: false,
+        audioSkipped: false,
+        stemsImported: 0,
+        stemsSkipped: 0,
+      }
+      if (!receiverFolder) {
+        result.notes = 'no matching song in this project'
+        results.push(result)
+        continue
+      }
+
+      const receiverFolderAbs = path.join(projectPath, receiverFolder)
+      const songEntries = entriesBySongId.get(songId) ?? []
+      for (const entry of songEntries) {
+        // Strip `songs/<songId>/` prefix to get the path inside the song folder.
+        const rel = entry.fileName.replace(/^songs\/[^/]+\//, '')
+        if (!rel || rel === HYDRATION_MANIFEST_FILENAME) continue
+        const targetAbs = path.join(receiverFolderAbs, rel)
+
+        // Defence in depth: reject path-escape attempts.
+        if (!targetAbs.startsWith(receiverFolderAbs + path.sep)) continue
+
+        if (existsSync(targetAbs)) {
+          if (rel.startsWith('audio/')) result.audioSkipped = true
+          else if (rel.startsWith('stems/')) result.stemsSkipped++
+          continue
+        }
+
+        await extractZipEntryToFile(zipFile, entry, targetAbs)
+        if (rel.startsWith('audio/')) result.audioImported = true
+        else if (rel.startsWith('stems/')) result.stemsImported++
+      }
+      results.push(result)
+    }
+
+    zipFile.close()
+    scope.zipFile = undefined
+
+    const matchedCount = results.filter((r) => r.matched).length
+    const audioWritten = results.filter((r) => r.audioImported).length
+    const stemsWritten = results.reduce((s, r) => s + r.stemsImported, 0)
+    logInfo(`hydration import: matched ${matchedCount}/${results.length} song(s), wrote ${audioWritten} audio file(s) + ${stemsWritten} stem(s)`)
+    sendJson(res, 200, {
+      ok: true,
+      results,
+      summary: {
+        packSongCount: results.length,
+        matchedCount,
+        unmatchedCount: results.length - matchedCount,
+        audioImported: audioWritten,
+        stemsImported: stemsWritten,
+      },
+    }, cors)
+  } catch (e) {
+    try { scope.zipFile?.close() } catch { /* ignore */ }
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`hydration import: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
   }
 }
 
@@ -3453,6 +3959,22 @@ function startBeaconServer() {
 
     if (req.method === 'POST' && req.url === '/native/pick-folder') {
       void handlePickFolder(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/pick-save-file') {
+      void handlePickSaveFile(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/pick-open-file') {
+      void handlePickOpenFile(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/hydration/export') {
+      void handleHydrationExport(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/hydration/import') {
+      void handleHydrationImport(req, res, cors)
       return
     }
 

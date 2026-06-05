@@ -499,6 +499,127 @@ export async function pickFolderViaDesktop(opts?: {
   }
 }
 
+// ── Save / Open file dialogs ───────────────────────────────────────────────
+
+export type FileDialogFilter = { name: string; extensions: string[] }
+
+export type PickFileResult =
+  | { ok: true; path: string }
+  | { ok: false; cancelled: true }
+  | { ok: false; error: string }
+
+async function pickFileViaDesktop(
+  endpoint: '/native/pick-save-file' | '/native/pick-open-file',
+  opts?: { title?: string; defaultPath?: string; filters?: FileDialogFilter[] },
+): Promise<PickFileResult> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts ?? {}),
+      cache: 'no-store',
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  try {
+    return (await res.json()) as PickFileResult
+  } catch {
+    return { ok: false, error: `Picker returned non-JSON (HTTP ${res.status})` }
+  }
+}
+
+export const pickSaveFileViaDesktop = (opts?: Parameters<typeof pickFileViaDesktop>[1]) =>
+  pickFileViaDesktop('/native/pick-save-file', opts)
+
+export const pickOpenFileViaDesktop = (opts?: Parameters<typeof pickFileViaDesktop>[1]) =>
+  pickFileViaDesktop('/native/pick-open-file', opts)
+
+// ── Hydration pack export / import ─────────────────────────────────────────
+
+export type HydrationExportResult =
+  | {
+      ok: true
+      outPath: string
+      packSize: number
+      songCount: number
+      audioCount: number
+      stemCount: number
+    }
+  | { ok: false; error: string }
+
+export type HydrationImportSongResult = {
+  songId: string
+  title: string
+  matched: boolean
+  receiverFolder: string | null
+  audioImported: boolean
+  audioSkipped: boolean
+  stemsImported: number
+  stemsSkipped: number
+  notes?: string
+}
+
+export type HydrationImportResult =
+  | {
+      ok: true
+      results: HydrationImportSongResult[]
+      summary: {
+        packSongCount: number
+        matchedCount: number
+        unmatchedCount: number
+        audioImported: number
+        stemsImported: number
+      }
+    }
+  | { ok: false; error: string }
+
+export async function exportHydrationPackViaDesktop(args: {
+  projectPath: string
+  outPath: string
+  songIds?: string[]
+}): Promise<HydrationExportResult> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/native/project/hydration/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+      cache: 'no-store',
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  try {
+    return (await res.json()) as HydrationExportResult
+  } catch {
+    return { ok: false, error: `Sidecar returned non-JSON (HTTP ${res.status})` }
+  }
+}
+
+export async function importHydrationPackViaDesktop(args: {
+  projectPath: string
+  packPath: string
+}): Promise<HydrationImportResult> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/native/project/hydration/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+      cache: 'no-store',
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  try {
+    return (await res.json()) as HydrationImportResult
+  } catch {
+    return { ok: false, error: `Sidecar returned non-JSON (HTTP ${res.status})` }
+  }
+}
+
 /** Snapshot of all known jobs on the sidecar. Useful on reload. */
 export async function listJobsViaDesktop(): Promise<DesktopJobView[]> {
   let res: Response
