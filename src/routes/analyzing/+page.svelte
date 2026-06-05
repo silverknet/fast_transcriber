@@ -130,11 +130,26 @@
     setAnalyzingSpin(true)
 
     try {
+      // Diagnostic — every "no beats detected" report we've gotten has
+      // boiled down to one of: zero-length trim, missing hqFile, or a
+      // sidecar problem. Log all three so we can read the cause off
+      // the browser console without guessing.
+      console.info('[analyze] trim:', trim, 'hqFile:', {
+        name: state.hqFile?.name,
+        size: state.hqFile?.size,
+        type: state.hqFile?.type,
+      })
       const { file: trimmedWav } = await trimAudioFileToWav(
         state.hqFile,
         trim.startSec,
         trim.endSec,
       )
+      console.info('[analyze] trimmed WAV bytes:', trimmedWav.size, 'duration:', trim.endSec - trim.startSec, 's')
+      if (trimmedWav.size < 50_000) {
+        throw new Error(
+          `The trimmed audio is only ${trimmedWav.size} bytes — the trim range may be empty (start ${trim.startSec.toFixed(1)}s → end ${trim.endSec.toFixed(1)}s). Go back, drag the trim handles to cover at least 10 seconds of audible audio, and try again.`,
+        )
+      }
 
       // Analysis runs exclusively through the desktop sidecar — the
       // root layout redirects unreachable-sidecar sessions to /download
