@@ -69,7 +69,16 @@ export function beatsToSongMap(input: BeatsToSongMapInput): SongMap {
   const trimmed = firstDown >= 0 ? rows.slice(firstDown) : rows
 
   if (trimmed.length === 0) {
-    throw new Error('No beats detected')
+    // Distinguish empty-from-analyzer vs all-invalid so the user gets a
+    // diagnostic message instead of the generic "No beats detected".
+    if (input.beats.length === 0) {
+      throw new Error(
+        'The analyzer found no beats. The selected audio region may be too short, too quiet, or have no clear rhythm — try a longer region with audible drums.',
+      )
+    }
+    throw new Error(
+      `The analyzer returned ${input.beats.length} beats but none were valid (missing time or beatInBar). This is a sidecar bug — please report it.`,
+    )
   }
 
   const segments: RawBeatRow[][] = []
