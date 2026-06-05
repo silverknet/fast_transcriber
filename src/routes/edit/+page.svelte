@@ -1215,7 +1215,11 @@
   // change / unmount.
   $effect(() => {
     const el = audioEl
-    if (!el) return
+    if (!el) {
+      console.info('[click] audioEl is null — waiting for bind:audioElement from WaveformPlayer')
+      return
+    }
+    console.info('[click] attaching play/pause/ended listeners to', el)
     el.addEventListener('play', onAudioPlay)
     el.addEventListener('pause', onAudioPause)
     el.addEventListener('ended', onAudioEnded)
@@ -1227,6 +1231,7 @@
   })
 
   function onAudioPlay() {
+    console.info('[click] onAudioPlay fired. playWithClick=', playWithClick, 'audioEl=', !!audioEl, 'currentTime=', audioEl?.currentTime)
     if (!playWithClick || !audioEl) return
 
     const sm = get(songMap)
@@ -2093,57 +2098,57 @@
         />
         {#if editMode === 'grid' && sm.timeline.beats.length > 0}
           <!--
-            Compact "play-with-click" strip — sits directly under the
-            WaveformPlayer so the toggle is right next to the play
-            button users were already looking at. Volume sliders are
-            vertical and ~16px wide so they don't eat space.
-            One source of truth: both sliders write into the same
-            `audioEl` (the WaveformPlayer's <audio>) and the same
-            `clickMaster` gain node that the click loop reads.
+            Compact playback strip — sits directly under the
+            WaveformPlayer so the click toggle is right next to the
+            Play button. Vertical sliders use the absolute-rotate
+            trick: an 80px-wide range rotated -90deg inside a fixed
+            80×24 container (predictable layout, no writing-mode
+            quirks that don't ship in every browser).
+            Single source of truth: clickVolume → clickMaster gain
+            node, songVolume → audioEl.volume — same elements the
+            click loop reads.
           -->
-          <div class="border-foreground/30 mt-3 flex items-stretch gap-3 border-2 px-3 py-2 text-xs">
-            <label class="flex shrink-0 cursor-pointer items-center gap-2 font-bold">
+          <div class="border-foreground/30 mt-3 flex items-center gap-4 border-2 px-4 py-2 text-xs">
+            <label class="flex shrink-0 cursor-pointer items-center gap-2">
               <input
                 type="checkbox"
                 bind:checked={playWithClick}
-                class="accent-foreground"
+                class="accent-foreground size-4"
               />
-              <span class="uppercase tracking-wider">Play with click</span>
+              <span class="font-bold uppercase tracking-wider">Click</span>
             </label>
-            <div class="bg-foreground/15 w-px shrink-0" aria-hidden="true"></div>
-            <div class="flex items-end gap-3">
-              <label
-                class="flex shrink-0 flex-col items-center gap-1"
-                title="Click volume"
-              >
+            <div class="bg-foreground/20 h-10 w-px shrink-0" aria-hidden="true"></div>
+            <div class="flex items-end gap-5">
+              <div class="flex shrink-0 flex-col items-center gap-0.5">
                 <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="2"
-                  step="0.05"
-                  bind:value={clickVolume}
-                  class="accent-foreground h-20 w-4 [writing-mode:vertical-lr] rotate-180"
-                  aria-label="Click volume"
-                />
+                <div class="relative h-20 w-6" title="Click volume">
+                  <input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.05"
+                    bind:value={clickVolume}
+                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-20 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                    aria-label="Click volume"
+                  />
+                </div>
                 <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{clickVolume.toFixed(1)}×</span>
-              </label>
-              <label
-                class="flex shrink-0 flex-col items-center gap-1"
-                title="Song volume"
-              >
+              </div>
+              <div class="flex shrink-0 flex-col items-center gap-0.5">
                 <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  bind:value={songVolume}
-                  class="accent-foreground h-20 w-4 [writing-mode:vertical-lr] rotate-180"
-                  aria-label="Song volume"
-                />
+                <div class="relative h-20 w-6" title="Song volume">
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    bind:value={songVolume}
+                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-20 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                    aria-label="Song volume"
+                  />
+                </div>
                 <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(songVolume * 100)}%</span>
-              </label>
+              </div>
             </div>
           </div>
         {/if}
