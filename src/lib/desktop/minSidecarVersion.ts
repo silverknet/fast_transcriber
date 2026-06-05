@@ -21,7 +21,7 @@
  * Format must match `desktop/package.json#version` (semver
  * `<major>.<minor>.<patch>`).
  */
-export const MIN_SIDECAR_VERSION = '0.1.3'
+export const MIN_SIDECAR_VERSION = '0.1.4'
 
 export type SidecarVersionStatus = 'ok' | 'outdated' | 'unknown'
 
