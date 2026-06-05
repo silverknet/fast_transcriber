@@ -15,7 +15,7 @@
    * already retries on `online`; we don't have to do anything else.
    */
   import { browser } from '$app/environment'
-  import { onDestroy, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { project } from '$lib/stores/project'
   import { requestCloudPush } from '$lib/client/projectAutosave'
   import { CloudCheck, CloudOff, RefreshCw } from '@lucide/svelte'
@@ -30,16 +30,19 @@
     online = navigator.onLine
   }
 
+  // Returning a cleanup fn from onMount is the Svelte idiom — calling
+  // onDestroy inside onMount silently leaks because the destroy hook
+  // must be registered during component init, not after first render.
   onMount(() => {
     syncOnline()
     const on = () => { online = true }
     const off = () => { online = false }
     window.addEventListener('online', on)
     window.addEventListener('offline', off)
-    onDestroy(() => {
+    return () => {
       window.removeEventListener('online', on)
       window.removeEventListener('offline', off)
-    })
+    }
   })
 
   function manualRetry() {

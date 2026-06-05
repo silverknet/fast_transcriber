@@ -131,6 +131,11 @@ async function tryCloudPushOnce(): Promise<void> {
   if (snap.editingMode !== 'project-song') return
   // Only push when actively editing in /edit, mirroring the disk-write guard.
   if (get(page)?.route?.id !== '/edit') return
+  // Don't keep firing pushes that will 409 while a conflict is awaiting
+  // resolution. The dialog's Apply re-merges with the current songMap
+  // and pushes once with the fresh base revision; until then, edits
+  // stack up locally and only the next post-resolve push hits the wire.
+  if (get(cloudConflict) !== null) return
 
   const cloud = snap.data.cloud
   const entry = snap.data.songs.find((e) => e.id === snap.activeSongId)
