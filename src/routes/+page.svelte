@@ -196,6 +196,25 @@
       markEditingStandalone()
     }
 
+    // Force-write the trim AT click time. The reactive $effect above
+    // should keep `sm.audio.trim` in sync with `rangeStart/rangeEnd`,
+    // but if it hasn't run yet (or the WaveformPlayer ↔ $state bind
+    // hasn't propagated by the time the user clicks Analyze) we'd
+    // ship {0, 0} to the sidecar and madmom returns no beats. The
+    // canAnalyze gate already proved rangeEnd > rangeStart — just
+    // commit those values directly so the analyzer can't miss them.
+    patchSongMap((m) => ({
+      ...m,
+      audio: m.audio
+        ? {
+            ...m.audio,
+            durationSec: rangeEnd,
+            trim: { startSec: rangeStart, endSec: rangeEnd },
+          }
+        : m.audio,
+    }))
+    audioSession.update((s) => ({ ...s, startSec: rangeStart, endSec: rangeEnd }))
+
     analyzingState.set({ hqFile: originalFile })
     await goto(inProjectMode ? '/analyzing?project=1' : '/analyzing')
   }
