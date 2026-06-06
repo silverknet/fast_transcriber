@@ -1499,9 +1499,21 @@
   }
 
   function syncNextClickIndex(t: number) {
-    nextClickIdx = cachedClickPoints.findIndex((b) => b.timeSec >= t - 0.018)
+    nextClickIdx = cachedClickPoints.findIndex((b) => b.timeSec >= t - CLICK_PAST_GRACE_SEC)
     if (nextClickIdx < 0) nextClickIdx = cachedClickPoints.length
   }
+
+  // Sync constants — match `playbackController.svelte.ts`. When that
+  // controller is wired into this component (Step 4 of the playback
+  // refactor in `AGENT_NOTES.md`), this whole loop goes away. Until
+  // then the SAME scheduling math runs here so live grid clicks land
+  // on the beat: schedule each click at `ctxNow + (clickPoint − audio)`,
+  // not at `ctxNow + LEAD` (which fires every in-window click up to
+  // 23 ms early), and drop clicks that are too far in the past (so a
+  // seek/jump doesn't dump every missed click into "now").
+  const CLICK_LOOKAHEAD_SEC = 0.025
+  const CLICK_SCHEDULE_LEAD_SEC = 0.002
+  const CLICK_PAST_GRACE_SEC = 0.018
 
   function runClickLoop() {
     const el = audioEl
@@ -1511,10 +1523,28 @@
       stopClickLoop()
       return
     }
+    // `cachedClickPoints[].timeSec` and `el.currentTime` are both in
+    // original-time (audio src = full uploaded file), so they compare
+    // directly. No trim offset needed here.
     const t = el.currentTime
-    while (nextClickIdx < cachedClickPoints.length && cachedClickPoints[nextClickIdx]!.timeSec <= t + 0.025) {
+    const ctxNow = ctx.currentTime
+
+    // Drop clicks too far in the past (audio seek, app stutter).
+    while (
+      nextClickIdx < cachedClickPoints.length &&
+      cachedClickPoints[nextClickIdx]!.timeSec < t - CLICK_PAST_GRACE_SEC
+    ) {
+      nextClickIdx++
+    }
+
+    while (
+      nextClickIdx < cachedClickPoints.length &&
+      cachedClickPoints[nextClickIdx]!.timeSec <= t + CLICK_LOOKAHEAD_SEC
+    ) {
       const pt = cachedClickPoints[nextClickIdx]!
-      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
+      const delta = pt.timeSec - t
+      const scheduleAt = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, delta)
+      playMetronomeClick(ctx, dest, scheduleAt, pt.downbeat)
       nextClickIdx++
     }
     if (nextClickIdx >= cachedClickPoints.length) {
