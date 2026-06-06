@@ -1,26 +1,7 @@
 /**
- * Short metronome-style clicks for debug playback (downbeat vs other beats).
- * Call from an rAF loop synced to HTMLMediaElement.currentTime.
- */
-
-export type BeatClickPoint = {
-  timeSec: number
-  downbeat: boolean
-}
-
-export function beatsToClickPoints(
-  beats: { timeSec: number; indexInBar: number }[],
-): BeatClickPoint[] {
-  return [...beats]
-    .map((b) => ({
-      timeSec: b.timeSec,
-      downbeat: b.indexInBar === 0,
-    }))
-    .sort((a, b) => a.timeSec - b.timeSec)
-}
-
-/**
- * One shot: accent = downbeat (bar 1), softer = other beats.
+ * One-shot metronome click for the PlaybackController and any future
+ * Web-Audio-scheduled cue paths. Accent = downbeat (bar 1), softer =
+ * other beats.
  */
 export function playMetronomeClick(
   ctx: AudioContext,

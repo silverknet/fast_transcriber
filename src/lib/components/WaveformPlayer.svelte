@@ -13,8 +13,6 @@
     ZoomIn,
     ZoomOut,
   } from '@lucide/svelte'
-  import { createAudioTransport, type TransportBindings } from '$lib/audio/audioTransport'
-  import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
   import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
@@ -272,9 +270,9 @@
   // —— Canonical transport state (single source of truth for UI + head) ——
   /** Authoritative editor duration consumed by selection / viewport / transport / geometry. */
   let timelineSec = $state(0)
-  /** Seconds; ONLY updated from `HTMLAudioElement.currentTime` (rAF while playing, sync when paused). */
-  let currentTime = $state(0)
-  let isPlaying = $state(false)
+  /** Mirrored from the controller's rAF-driven `currentTime` (or 0 before mount). */
+  let currentTime = $derived(controller.currentTime)
+  let isPlaying = $derived(controller.isPlaying)
   let mediaReady = $state(false)
 
   // —— Waveform assets ——
@@ -310,7 +308,6 @@
 
   const displayH = 144
   const minimapH = 52
-  const transport = createAudioTransport()
 
   // Mirror our internal <audio> ref out to the parent via $bindable.
   // Parent does its own bind:this gymnastics through audioElement
@@ -392,25 +389,6 @@
   let minimapHoverTarget = $state('outside')
   let pendingMainPeaksRecompute = false
 
-  /**
-   * Transport bindings. `currentTime` is only written here (via setCurrentTime), in
-   * commitMediaTiming when paused, load/reset — not from timeupdate while playing (see onTimeUpdateSparse).
-   */
-  function tbind(): TransportBindings {
-    return {
-      getAudio: () => audioEl,
-      getDuration: () => timelineSec,
-      getRange: () => ({ start: rangeStart, end: rangeEnd }),
-      setCurrentTime: (t) => {
-        currentTime = t
-      },
-      getIsPlaying: () => isPlaying,
-      setIsPlaying: (v) => {
-        isPlaying = v
-      },
-    }
-  }
-
   /** Grid mode: seek to selected bar start when selection changes (same as before). */
   $effect(() => {
     if (timelineStripMode !== 'grid' || !beatGridEditing || !selectedBarId || !beatGrid) return
@@ -419,7 +397,7 @@
     const d = timelineSec
     if (!(d > 0) || !mediaReady) return
     const t = Math.min(Math.max(0, bar.startSec), d)
-    transport.seek(tbind(), t)
+    controller.seek(t)
   })
 
   /** Sections mode: seek after pointer-up (selection commit), not on every drag frame. */
@@ -427,7 +405,7 @@
     if (!beatGridEditing || !mediaReady) return
     const d = timelineSec
     if (!(d > 0)) return
-    transport.seek(tbind(), Math.min(Math.max(0, timeSec), d))
+    controller.seek(Math.min(Math.max(0, timeSec), d))
   }
 
   // —— Pure layout: time ↔ x uses the visible window [layoutViewStart, layoutViewEnd] ——
@@ -924,11 +902,15 @@
     const v = clampViewportToTimeline(d, viewStart, viewEnd, MIN_VIEW_SPAN_SEC)
     viewStart = v.start
     viewEnd = v.end
-    // While playing, only rAF reads the element clock — avoid a stray metadata callback resetting UI time.
+    // While playing, only rAF reads the element clock — avoid a stray
+    // metadata callback resetting UI time. When paused, sync the
+    // controller's mirrored `currentTime` to the actual element
+    // currentTime via `seek()` so the playhead doesn't drift after a
+    // load / resize / range commit.
     if (!isPlaying && audioEl) {
       let t = audioEl.currentTime
       if (Number.isFinite(d) && d > 0) t = Math.min(Math.max(0, t), d)
-      currentTime = t
+      controller.seek(t)
     }
   }
 
@@ -963,7 +945,6 @@
     decodedAudioBuffer = null
     timelineSec = 0
     decodedDuration = 0
-    transport.stopRaf()
 
     if (objectUrl) {
       URL.revokeObjectURL(objectUrl)
@@ -971,8 +952,7 @@
     }
     if (audioEl) {
       audioEl.pause()
-      isPlaying = false
-      currentTime = 0
+      controller.seek(0)
     }
 
     const ac = new AudioContext()
@@ -1048,7 +1028,6 @@
       viewEnd = 0
       timelineSec = 0
       decodedDuration = 0
-      transport.stopRaf()
       loadGeneration += 1
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl)
@@ -1238,13 +1217,11 @@
 
   $effect(() => {
     return () => {
-      transport.destroy()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   })
 
   onDestroy(() => {
-    transport.destroy()
     if (mainPeaksRafId) cancelAnimationFrame(mainPeaksRafId)
   })
 
@@ -1332,7 +1309,7 @@
     detailMode = 'maybe-seek'
     scrubPreviewTime = t
     resumePlaybackAfterWaveGesture = isPlaying
-    if (isPlaying) transport.pause(tbind())
+    if (isPlaying) controller.pause()
     attachPointerTracking(e, { capture: false, preventDefault: false })
   }
 
@@ -1400,11 +1377,11 @@
       detailMode === 'maybe-seek' &&
       detailSession.pointerTravelMax <= TAP_VS_SELECT_PX
     if (seekTap) {
-      transport.seek(tbind(), timeAtClientX(e.clientX))
+      controller.seek(timeAtClientX(e.clientX))
     }
     scrubPreviewTime = null
     if (resumePlaybackAfterWaveGesture) {
-      transport.play(tbind())
+      controller.play()
     }
     resumePlaybackAfterWaveGesture = false
     detailSession.onSelectionBody = false
@@ -1486,7 +1463,14 @@
       controller.pause()
       return
     }
-    transport.ensurePlayheadInRange(tbind())
+    // Clamp the playhead into the [rangeStart, rangeEnd] selection
+    // before calling play(); without this, hitting Play with the head
+    // outside the selection auto-stops at `rangeEnd - 0.02` on the
+    // very next frame (the controller's transport rAF) and looks like
+    // "play does nothing".
+    if (audioEl.currentTime < rangeStart || audioEl.currentTime >= rangeEnd - 0.02) {
+      controller.seek(rangeStart)
+    }
     controller.play()
   }
 
@@ -1513,20 +1497,6 @@
   function stopPlayback() {
     if (!audioEl || !mediaReady || !(timelineSec > 0)) return
     controller.stop()
-  }
-
-  function onAudioPlay() {
-    transport.onPlay(tbind())
-  }
-
-  function onAudioPause() {
-    transport.onPause(tbind())
-  }
-
-  /** Sparse `timeupdate` — only when paused (rAF owns the clock during playback). */
-  function onTimeUpdateSparse() {
-    if (isPlaying) return
-    transport.syncPausedFromElement(tbind())
   }
 
   function onLoadedMetadata() {
@@ -1575,10 +1545,6 @@
     onerror={onAudioError}
     onloadedmetadata={onLoadedMetadata}
     oncanplay={onCanPlay}
-    ontimeupdate={onTimeUpdateSparse}
-    onplay={onAudioPlay}
-    onpause={onAudioPause}
-    onended={onAudioPause}
   ></audio>
 
   <div class="flex w-full min-w-0 flex-col gap-3">

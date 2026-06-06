@@ -24,7 +24,6 @@
     serializeChordClipboard,
     songKeyPreferFlats,
   } from '$lib/chords'
-  import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import {
     countInSpeechOutputTimes,
