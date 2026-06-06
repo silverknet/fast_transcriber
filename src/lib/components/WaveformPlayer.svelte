@@ -15,7 +15,7 @@
   } from '@lucide/svelte'
   import { createAudioTransport, type TransportBindings } from '$lib/audio/audioTransport'
   import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
-  import type { PlaybackController } from '$lib/audio/playbackController.svelte'
+  import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
   import {
@@ -156,7 +156,7 @@
      * loop and transport rAF stay inside this component so behavior is
      * unchanged. Pass `null` (default) to skip the wire-up entirely.
      */
-    controller = null as PlaybackController | null,
+    controller: passedController = null as PlaybackController | null,
     /**
      * Grid mode: ghost ticks for the song's count-in beats, in
      * original-time. Each tick = one pre-song click. When the user
@@ -178,29 +178,18 @@
      * affordance (e.g. in non-editable contexts).
      */
     onSetStartBar = undefined as ((barIndex: number) => void) | undefined,
-    /**
-     * Grid mode: pre-roll silence (seconds) needed before audio starts
-     * so all count-in beats can fit. > 0 means the song's natural
-     * lead-in isn't long enough to host the count-in audibly; the play
-     * handler then schedules count-in clicks via Web Audio and
-     * setTimeout-defers audio.play() by this many seconds so the song
-     * hits bar 1 exactly one beat after the last count-in click.
-     * 0 = no pre-roll needed; count-in rides on the lead-in and the
-     * click loop fires it naturally as audio plays through.
-     * Equals `songPlaybackPlan(sm).prependSec`.
-     */
-    countInPrependSec = 0,
-    /**
-     * Grid mode: original-time of bar 1 beat 1 (or `startBeatId`
-     * override). Used by the play handler to decide whether the user
-     * is at the song start — only then does count-in pre-roll trigger
-     * (mid-song play skips the count-in entirely). Kept for the
-     * controller-less trim variant; the controller derives it itself
-     * via `songPlaybackPlan(sm)`.
-     */
-    firstDownbeatOriginalSec = null as number | null,
   } = $props()
 
+  /**
+   * Local fallback controller so callers that don't pass one (the
+   * trim variant on the home page) keep working without forcing every
+   * caller to know the controller exists. With no songMap, the
+   * fallback's click loop and count-in pre-roll never fire, so
+   * behavior matches the pre-controller days for that surface.
+   */
+  const fallbackController = new PlaybackController()
+  const controller = $derived(passedController ?? fallbackController)
+  onDestroy(() => fallbackController.destroy())
 
   let isEditorVariant = $derived(variant === 'editor')
   let beatGridEditing = $derived(
@@ -1487,92 +1476,18 @@
   }
 
   /**
-   * Pending setTimeout id for the count-in deferred audio.play() so
-   * Stop / Pause / Play-again can cancel it before the audio actually
-   * starts. Web Audio clicks already scheduled keep ringing (cancelling
-   * pre-scheduled oscillators would mean tracking each one).
+   * Pause: stay at current time. Play: from current head (clamped into
+   * selection if needed). Click loop + count-in pre-roll lives in the
+   * `PlaybackController`; we just dispatch intents.
    */
-  let pendingPlayTimeoutId: ReturnType<typeof setTimeout> | null = null
-
-  function cancelPendingCountInPlay() {
-    if (pendingPlayTimeoutId !== null) {
-      clearTimeout(pendingPlayTimeoutId)
-      pendingPlayTimeoutId = null
-    }
-  }
-
-  /**
-   * Count-in pre-roll path: schedule N count-in clicks via Web Audio,
-   * then setTimeout-defer audio.play() by `countInPrependSec * 1000`.
-   * No pause-and-resume cycle. Click loop starts immediately so it's
-   * ready to fire song beats the moment audio plays. Used only when
-   * the natural lead-in isn't long enough to host the count-in audibly.
-   */
-  function startCountInPreroll() {
-    if (!audioEl || countInTicks.length === 0) return
-    ensureClickGraph()
-    const ctx = clickCtx!
-    const master = clickMaster!
-    void ctx.resume()
-
-    // Spacing between consecutive count-in clicks IS the beat duration
-    // (count-in is by definition one click per beat at the song's tempo).
-    // Falls back to a sensible default if there's somehow only one tick.
-    const beatDur =
-      countInTicks.length >= 2
-        ? Math.max(0.05, countInTicks[1]!.timeSec - countInTicks[0]!.timeSec)
-        : 0.5
-
-    const baseCtxTime = ctx.currentTime
-    for (let i = 0; i < countInTicks.length; i++) {
-      const t = countInTicks[i]!
-      playMetronomeClick(
-        ctx,
-        master,
-        baseCtxTime + i * beatDur + CLICK_SCHEDULE_LEAD_SEC,
-        t.downbeat,
-      )
-    }
-
-    pendingPlayTimeoutId = setTimeout(() => {
-      pendingPlayTimeoutId = null
-      // Re-check guards in case the user pressed Pause / Stop during the wait.
-      if (!audioEl || isPlaying) return
-      transport.play(tbind())
-    }, countInPrependSec * 1000)
-
-    // Start the click loop now so it's ready when audio actually plays.
-    // The loop self-guards on `el.paused`, so the first frame no-ops
-    // until the deferred play() resolves.
-    startClickLoop()
-  }
-
-  /** Pause: stay at current time. Play: from current head (clamped into selection if needed). */
   function togglePlay() {
     if (!audioEl || !mediaReady || !(timelineSec > 0)) return
     if (isPlaying) {
-      transport.pause(tbind())
-      cancelPendingCountInPlay()
+      controller.pause()
       return
     }
-    cancelPendingCountInPlay()
     transport.ensurePlayheadInRange(tbind())
-    // Count-in pre-roll: only when (a) clicking is enabled, (b) the
-    // song needs pre-roll silence (tight trim — natural lead-in can't
-    // host the count-in), and (c) the user is AT or BEFORE the song
-    // start (mid-song play has no count-in). 0.05 s tolerance for the
-    // "AT the song start" check.
-    if (
-      playWithClick &&
-      countInPrependSec > 1e-6 &&
-      countInTicks.length > 0 &&
-      firstDownbeatOriginalSec !== null &&
-      audioEl.currentTime <= firstDownbeatOriginalSec + 0.05
-    ) {
-      startCountInPreroll()
-      return
-    }
-    transport.play(tbind())
+    controller.play()
   }
 
   function keyTargetIsEditable(target: EventTarget | null): boolean {
@@ -1597,151 +1512,15 @@
   /** Stop: pause and jump to the start of the selection (purple). Next Play begins there. */
   function stopPlayback() {
     if (!audioEl || !mediaReady || !(timelineSec > 0)) return
-    cancelPendingCountInPlay()
-    transport.pause(tbind())
-    transport.seek(tbind(), rangeStart)
+    controller.stop()
   }
-
-  // ── Click loop (lives here so we have direct access to audioEl, no
-  //    bridge, no count-in pause/resume cycle, no setTimeout races.
-  //    When `playWithClick` is on AND audio is playing, fire a
-  //    metronome click on every beat in `beatGrid.beats`. Stops the
-  //    moment audio pauses. State (clickVolume, playWithClick) is
-  //    $bindable so the toolbar checkbox + popover own the UI). ──
-  let clickCtx: AudioContext | undefined
-  let clickMaster: GainNode | undefined
-  let clickLoopRaf = 0
-  let nextClickIdx = 0
-  let cachedClickPoints: { timeSec: number; downbeat: boolean }[] = []
-
-  function ensureClickGraph() {
-    if (clickCtx && clickMaster) return
-    const ctx = new AudioContext()
-    const g = ctx.createGain()
-    g.gain.value = clickVolume
-    g.connect(ctx.destination)
-    clickCtx = ctx
-    clickMaster = g
-  }
-
-  // Keep click master gain in sync with the volume slider.
-  $effect(() => {
-    if (clickMaster) clickMaster.gain.value = clickVolume
-  })
-
-  // Forward songVolume into <audio>.volume so the popover slider works
-  // the moment the user drags, even before play.
-  $effect(() => {
-    if (audioEl) audioEl.volume = Math.max(0, Math.min(1, songVolume))
-  })
-
-  function stopClickLoop() {
-    if (clickLoopRaf) cancelAnimationFrame(clickLoopRaf)
-    clickLoopRaf = 0
-  }
-
-  function syncNextClickIndex(t: number) {
-    nextClickIdx = cachedClickPoints.findIndex((b) => b.timeSec >= t - CLICK_PAST_GRACE_SEC)
-    if (nextClickIdx < 0) nextClickIdx = cachedClickPoints.length
-  }
-
-  // Sync constants — match `playbackController.svelte.ts`. When that
-  // controller is wired into this component (Step 4 of the playback
-  // refactor in `AGENT_NOTES.md`), this whole loop goes away. Until
-  // then the SAME scheduling math runs here so live grid clicks land
-  // on the beat: schedule each click at `ctxNow + (clickPoint − audio)`,
-  // not at `ctxNow + LEAD` (which fires every in-window click up to
-  // 23 ms early), and drop clicks that are too far in the past (so a
-  // seek/jump doesn't dump every missed click into "now").
-  const CLICK_LOOKAHEAD_SEC = 0.025
-  const CLICK_SCHEDULE_LEAD_SEC = 0.002
-  const CLICK_PAST_GRACE_SEC = 0.018
-
-  function runClickLoop() {
-    const el = audioEl
-    const ctx = clickCtx
-    const dest = clickMaster
-    if (!el || !ctx || !dest || !playWithClick || el.paused) {
-      stopClickLoop()
-      return
-    }
-    // `cachedClickPoints[].timeSec` and `el.currentTime` are both in
-    // original-time (audio src = full uploaded file), so they compare
-    // directly. No trim offset needed here.
-    const t = el.currentTime
-    const ctxNow = ctx.currentTime
-
-    // Drop clicks too far in the past (audio seek, app stutter).
-    while (
-      nextClickIdx < cachedClickPoints.length &&
-      cachedClickPoints[nextClickIdx]!.timeSec < t - CLICK_PAST_GRACE_SEC
-    ) {
-      nextClickIdx++
-    }
-
-    while (
-      nextClickIdx < cachedClickPoints.length &&
-      cachedClickPoints[nextClickIdx]!.timeSec <= t + CLICK_LOOKAHEAD_SEC
-    ) {
-      const pt = cachedClickPoints[nextClickIdx]!
-      const delta = pt.timeSec - t
-      const scheduleAt = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, delta)
-      playMetronomeClick(ctx, dest, scheduleAt, pt.downbeat)
-      nextClickIdx++
-    }
-    if (nextClickIdx >= cachedClickPoints.length) {
-      stopClickLoop()
-      return
-    }
-    clickLoopRaf = requestAnimationFrame(runClickLoop)
-  }
-
-  function startClickLoop() {
-    if (!playWithClick || !audioEl || !beatGrid?.beats?.length) return
-    // Two count-in cases:
-    //   - `countInPrependSec === 0` (natural lead-in): count-in ticks
-    //     are in positive original-time, ride on the lead-in, and fire
-    //     here as audio plays through.
-    //   - `countInPrependSec > 0` (tight trim): all count-in clicks
-    //     were Web-Audio pre-rolled in `startCountInPreroll()`. We MUST
-    //     NOT include them here or they'd double-fire when audio
-    //     reaches the (positive-time tail of) count-in.
-    const songPoints = beatsToClickPoints(beatGrid.beats)
-    const countInPoints =
-      countInPrependSec > 1e-6
-        ? []
-        : countInTicks.map((t) => ({ timeSec: t.timeSec, downbeat: t.downbeat }))
-    cachedClickPoints = [...countInPoints, ...songPoints].sort(
-      (a, b) => a.timeSec - b.timeSec,
-    )
-    ensureClickGraph()
-    void clickCtx?.resume()
-    syncNextClickIndex(audioEl.currentTime)
-    stopClickLoop()
-    clickLoopRaf = requestAnimationFrame(runClickLoop)
-  }
-
-  // Restart loop on toggle / seek / beat-grid change / count-in change.
-  $effect(() => {
-    // Re-fire whenever any of these change:
-    void playWithClick
-    void beatGrid?.beats?.length
-    void countInTicks.length
-    if (audioEl && !audioEl.paused && playWithClick) {
-      startClickLoop()
-    } else {
-      stopClickLoop()
-    }
-  })
 
   function onAudioPlay() {
     transport.onPlay(tbind())
-    if (playWithClick) startClickLoop()
   }
 
   function onAudioPause() {
     transport.onPause(tbind())
-    stopClickLoop()
   }
 
   /** Sparse `timeupdate` — only when paused (rAF owns the clock during playback). */

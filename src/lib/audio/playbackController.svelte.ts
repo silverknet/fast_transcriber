@@ -217,8 +217,21 @@ export class PlaybackController {
 
     const plan = this.plan
     const preroll = plan?.prependSec ?? 0
+    // "Are we at the song start?" check — count-in is a lead-IN, not a
+    // mid-song interruption. When the user has scrubbed past bar 1 and
+    // hits Play, no pre-roll: just play. The threshold uses
+    // audio-element time (offset-translated from `firstDownbeatOriginalSec`)
+    // so it works for every surface regardless of trim.
+    const songStartAudioElTime = plan
+      ? plan.firstDownbeatOriginalSec - this.mediaTimeOffsetSec
+      : Number.POSITIVE_INFINITY
+    const atSongStart = el.currentTime <= songStartAudioElTime + 0.05
     const wantsCountIn =
-      this.playWithClick && plan !== null && plan.countInBeats > 0 && preroll > 1e-6
+      this.playWithClick &&
+      plan !== null &&
+      plan.countInBeats > 0 &&
+      preroll > 1e-6 &&
+      atSongStart
 
     if (!wantsCountIn) {
       // Simple path: audio plays now; the click loop picks up positive-time

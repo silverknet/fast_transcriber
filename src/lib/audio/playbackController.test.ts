@@ -319,6 +319,26 @@ describe('PlaybackController.play()', () => {
     c.destroy()
   })
 
+  /**
+   * Mid-song-play guard: pressing Play when the playhead is already past
+   * the song start should skip count-in entirely (count-in is a lead-in,
+   * not an interruption). Otherwise hitting Play in the middle of a song
+   * would unexpectedly delay audio by `prependSec` while a count-in rang.
+   */
+  it('skips count-in when audio.currentTime is past the song start', () => {
+    const c = new PlaybackController()
+    const audio = new MockAudioElement()
+    c.setAudioElement(audio as unknown as HTMLAudioElement)
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.playWithClick = true
+    // Move the playhead past bar 1 beat 1 (= original-time 0 here).
+    audio.currentTime = 1.0
+    c.play()
+    // Should play immediately — no pre-roll, no deferred play.
+    expect(audio.play).toHaveBeenCalledTimes(1)
+    c.destroy()
+  })
+
   /** `destroy()` mid-pre-roll must also cancel — otherwise we leak a play onto a torn-down controller. */
   it('destroy() during count-in pre-roll cancels the deferred play', () => {
     const c = new PlaybackController()

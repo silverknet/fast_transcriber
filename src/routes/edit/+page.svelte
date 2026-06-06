@@ -1367,25 +1367,6 @@
   /** Current song-start bar index (0-based) for the per-bar anchor icon. */
   let songStartBarIndex = $derived(cueStartBeatInfo?.barIndex ?? 0)
 
-  /**
-   * Pre-roll silence the player needs before audio starts so all count-
-   * in beats fit. > 0 → tight-trim: WaveformPlayer schedules count-in
-   * via Web Audio and defers audio.play() by this much. 0 → natural
-   * lead-in is enough; count-in fires inline. Sourced from the canonical
-   * `songPlaybackPlan(sm).prependSec`.
-   */
-  let countInPrependSec = $derived.by(() => {
-    const sm = $songMap
-    if (!sm) return 0
-    return songPlaybackPlan(sm)?.prependSec ?? 0
-  })
-
-  /** Original-time of bar 1 beat 1 / startBeatId. Drives the player's "are we at song start" check. */
-  let firstDownbeatOriginalSec = $derived.by(() => {
-    const sm = $songMap
-    if (!sm) return null
-    return songPlaybackPlan(sm)?.firstDownbeatOriginalSec ?? null
-  })
 
   const CUE_TRACK_REL = 'cue/cue-track.wav'
   const CLICK_TRACK_REL = 'cue/click-track.wav'
@@ -2036,8 +2017,6 @@
           countInTicks={editMode === 'grid' ? countInTicksForGrid : []}
           songStartBarIndex={songStartBarIndex}
           onSetStartBar={editMode === 'grid' ? setStartBar : undefined}
-          countInPrependSec={editMode === 'grid' ? countInPrependSec : 0}
-          firstDownbeatOriginalSec={editMode === 'grid' ? firstDownbeatOriginalSec : null}
           controller={playbackController}
         />
         {#if beatEditError}
