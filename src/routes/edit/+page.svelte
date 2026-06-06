@@ -28,6 +28,7 @@
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import { countInSpeechOutputTimes, songStartBeat } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
+  import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
   import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
@@ -1347,6 +1348,50 @@
     else beatEditError = ''
   }
 
+  /**
+   * Set the song-start anchor to the first beat (downbeat) of the
+   * given bar. Called from the per-bar anchor icon in the grid strip.
+   * Equivalent to `applyStartBeat(<position of bar.beat[0] in sorted
+   * beats>)` — same one writer, same .smap field, same reactive
+   * downstream (cue tab, count-in ghost ticks, click loop, Ableton
+   * export).
+   */
+  function setStartBar(barIndex: number) {
+    const sm = get(songMap)
+    if (!sm) return
+    const bar = sm.timeline.bars.find((b) => b.index === barIndex)
+    if (!bar) return
+    const sorted = sortBeatsByTime(sm.timeline.beats)
+    const firstBeatOfBar = sorted.find((b) => b.barId === bar.id && b.indexInBar === 0)
+    if (!firstBeatOfBar) return
+    const oneIndexed = sorted.indexOf(firstBeatOfBar) + 1
+    applyStartBeat(oneIndexed)
+  }
+
+  /**
+   * Count-in ghost ticks rendered in the grid strip — derived from
+   * `songPlaybackPlan(sm)` so the user instantly SEES count-in change
+   * 4 → 8 as 4 new ticks appearing. Original-time so the strip can
+   * paint them directly into the bar viewport.
+   */
+  let countInTicksForGrid = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return [] as { timeSec: number; downbeat: boolean }[]
+    const plan = songPlaybackPlan(sm)
+    if (!plan || plan.countInBeats === 0) return []
+    // plan.clickPoints[].timeSec is trim-shifted; shift back to original-
+    // time for the strip's viewport coords.
+    return plan.clickPoints
+      .filter((c) => c.isCountIn)
+      .map((c) => ({
+        timeSec: c.timeSec + plan.trimStartSec,
+        downbeat: c.downbeat,
+      }))
+  })
+
+  /** Current song-start bar index (0-based) for the per-bar anchor icon. */
+  let songStartBarIndex = $derived(cueStartBeatInfo?.barIndex ?? 0)
+
   const CUE_TRACK_REL = 'cue/cue-track.wav'
   const CLICK_TRACK_REL = 'cue/click-track.wav'
 
@@ -2019,6 +2064,9 @@
           bind:playWithClick
           bind:clickVolume
           bind:songVolume
+          countInTicks={editMode === 'grid' ? countInTicksForGrid : []}
+          songStartBarIndex={songStartBarIndex}
+          onSetStartBar={editMode === 'grid' ? setStartBar : undefined}
         />
         {#if beatEditError}
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>

@@ -148,6 +148,27 @@
     playWithClick = $bindable(false),
     clickVolume = $bindable(1.5),
     songVolume = $bindable(1),
+    /**
+     * Grid mode: ghost ticks for the song's count-in beats, in
+     * original-time. Each tick = one pre-song click. When the user
+     * changes `countInBeats` 4 → 8 in the SongMap, this list rerenders
+     * and the user SEES 4 new ticks appear before bar 1. Empty array
+     * = no count-in or count-in not visible in the current viewport.
+     */
+    countInTicks = [] as { timeSec: number; downbeat: boolean }[],
+    /**
+     * Grid mode: index of the bar that currently anchors the song
+     * start. The bar with this index gets a persistent anchor icon;
+     * other bars show one only on hover. `null` when nothing is
+     * anchored yet (no beats analyzed).
+     */
+    songStartBarIndex = null as number | null,
+    /**
+     * Grid mode: click handler for the per-bar "Set as start" icon.
+     * Receives the bar's `index` (0-based). Undefined disables the
+     * affordance (e.g. in non-editable contexts).
+     */
+    onSetStartBar = undefined as ((barIndex: number) => void) | undefined,
   } = $props()
 
   let isEditorVariant = $derived(variant === 'editor')
@@ -1871,6 +1892,9 @@
           onResizeSection={onResizeSection}
           onResizeBoundary={onResizeBoundary}
           audioBorderTicks={audioBorderTicks}
+          countInTicks={countInTicks}
+          songStartBarIndex={songStartBarIndex}
+          onSetStartBar={onSetStartBar}
         />
         {#if beatGridEditing && timelineStripMode === 'grid' && onBarGridAction}
           <div
