@@ -2,21 +2,12 @@
  * Offline metronome cue WAV aligned to SongMap trim + count-in prepend.
  * Optional spoken cues (title + count-in numbers + section callouts) via desktop Piper when reachable.
  */
-import {
-  buildCueSpeechEvents,
-  clickWavSongStartSec,
-  countInSpeechOutputTimes,
-  songStartBeat,
-  titleCuePreludeSec,
-} from '$lib/audio/cueTrackSpeechSchedule'
-import { computeCountIn } from '$lib/audio/computeCountIn'
-import { effectiveCountInBeats } from '$lib/songmap/countIn'
+import { buildCueSpeechEvents } from '$lib/audio/cueTrackSpeechSchedule'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
 import { fetchDesktopTtsSynthesizeWav } from '$lib/client/desktopBridge'
-import { sortBeatsByTime } from '$lib/songmap/normalize'
+import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
 
-const END_EPS = 0.028
 const CUE_SAMPLE_RATE = 44100
 /** How loud spoken clips are mixed vs clicks (still peak-limited at end). */
 const SPEECH_MIX_GAIN = 1.04
@@ -103,17 +94,10 @@ function addClipAtOffset(
 
 /** Total duration in seconds, or null if trim/timeline is unusable. */
 export function cueTrackTotalDurationSec(sm: SongMap): number | null {
-  const trim = sm.audio?.trim
-  if (!trim || !(trim.endSec > trim.startSec)) return null
   if (sm.timeline.beats.length === 0) return null
-
-  let prependSec = 0
-  const countInBeats = effectiveCountInBeats(sm)
-  if (countInBeats > 0) {
-    const ci = computeCountIn(sm, countInBeats)
-    if (ci) prependSec = ci.prependSec
-  }
-  return titleCuePreludeSec(sm) + prependSec + (trim.endSec - trim.startSec)
+  const plan = songPlaybackPlan(sm)
+  if (!plan) return null
+  return plan.titlePreludeSec + plan.prependSec + plan.songDurationSec
 }
 
 export type RenderCueTrackResult = {
@@ -152,18 +136,15 @@ export async function renderCueTrackWavBlob(
   if (!trim || !(trim.endSec > trim.startSec)) {
     throw new Error('Cue track needs audio.trim with end > start')
   }
-  const sorted = sortBeatsByTime(sm.timeline.beats)
-  if (sorted.length === 0) throw new Error('Cue track needs at least one beat')
+  if (sm.timeline.beats.length === 0) throw new Error('Cue track needs at least one beat')
 
-  let prependSec = 0
-  const countInBeats = effectiveCountInBeats(sm)
-  if (countInBeats > 0) {
-    const ci = computeCountIn(sm, countInBeats)
-    if (ci) prependSec = ci.prependSec
-  }
+  // ── Single derivation: every layout value below comes from one plan. ──
+  const plan = songPlaybackPlan(sm)
+  if (!plan) throw new Error('Cue track needs audio.trim with end > start')
 
-  const preludeSec = titleCuePreludeSec(sm)
-  const trimLen = trim.endSec - trim.startSec
+  const preludeSec = plan.titlePreludeSec
+  const prependSec = plan.prependSec
+  const trimLen = plan.songDurationSec
   const totalSec = preludeSec + prependSec + trimLen
   if (!(totalSec > 0)) throw new Error('Cue track duration is zero')
 
@@ -171,40 +152,18 @@ export async function renderCueTrackWavBlob(
   const frames = Math.max(1, Math.ceil(totalSec * sampleRate))
   const data = new Float32Array(frames)
 
-  const trimStart = trim.startSec
-  const trimEnd = trim.endSec
-
-  // Single load-bearing anchor: where the song start beat lands on the click WAV.
-  // Both the count-in grid and the song-aligned clicks reference this point,
-  // so the relationship "N count-in clicks end exactly one beat before the
-  // song starts" is enforced by construction.
-  const fd = songStartBeat(sm)
-  const songStartSec = clickWavSongStartSec(sm, { preludeSec, prependSec })
-  const countInActive = countInBeats > 0 && Boolean(fd) && songStartSec !== null
-
-  if (includeClicks && countInActive) {
-    // Contract: emit exactly `countInBeats` clicks, the last one one beat
-    // before `songStartSec`. `countInSpeechOutputTimes` returns N times by
-    // construction; we mix every one of them (no skipping / clamping).
-    const grid = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)
-    for (const t of grid) {
-      const tClick = preludeSec + t
-      mixClickKernel(data, sampleRate, tClick, false)
+  if (includeClicks) {
+    // Single click-emission loop. Count-in and song clicks come from
+    // the same `plan.clickPoints` source of truth (audio-element time);
+    // shifting by `preludeSec + prependSec` puts them on the cue-WAV
+    // timeline. The relationship "N count-in clicks end exactly one
+    // beat before the song starts" is enforced inside `songPlaybackPlan`.
+    const shift = preludeSec + prependSec
+    for (const c of plan.clickPoints) {
+      const tClick = c.timeSec + shift
+      if (tClick < 0 || tClick >= totalSec - 1e-6) continue
+      mixClickKernel(data, sampleRate, tClick, c.downbeat)
     }
-  }
-
-  if (includeClicks) for (const b of sorted) {
-    if (b.timeSec < trimStart - 1e-9) continue
-    if (b.timeSec >= trimEnd - END_EPS) continue
-    if (countInActive && fd && b.timeSec < fd.timeSec) continue
-    // Song-click position = songStart + (beat offset from first downbeat).
-    // Equivalent to `preludeSec + prependSec + (b.timeSec − trimStart)` and
-    // sample-aligned with the count-in grid because both share `songStartSec`.
-    const tClick = fd && songStartSec !== null
-      ? songStartSec + (b.timeSec - fd.timeSec)
-      : preludeSec + prependSec + (b.timeSec - trimStart)
-    if (tClick < 0 || tClick >= totalSec - 1e-6) continue
-    mixClickKernel(data, sampleRate, tClick, b.indexInBar === 0)
   }
 
   let speechOk = true

@@ -31,12 +31,10 @@
  */
 
 import type { SongMap } from '$lib/songmap/types'
-import { sortBeatsByTime } from '$lib/songmap/normalize'
-import { songStartBeat } from '$lib/audio/cueTrackSpeechSchedule'
-import { effectiveCountInBeats } from '$lib/songmap/countIn'
+import { songPlaybackPlan, DEFAULT_BPM as PLAN_DEFAULT_BPM } from '$lib/songmap/playbackPlan'
 
 /** Default BPM when the SongMap has none — used only as a last resort. */
-export const DEFAULT_BPM = 120
+export const DEFAULT_BPM = PLAN_DEFAULT_BPM
 
 export type SongTimings = {
   /** Beats-per-minute used to convert clip play-range seconds to beats. */
@@ -63,49 +61,30 @@ export type SongTimings = {
   countInDurationSec: number
 }
 
-/** Compute timings for one song. Throws on missing/invalid trim. */
+/**
+ * Compute timings for one song.
+ *
+ * Now a thin projection of `songPlaybackPlan(sm)` — same numbers,
+ * Ableton-shaped subset. Kept as `songTimings(sm)` so the orchestrator,
+ * clipPlayRange helpers, and existing tests stay untouched while the
+ * editor's live playback layer migrates onto the same plan.
+ *
+ * Throws on missing/invalid trim (matching old behaviour). The plan
+ * itself returns null in that case; Ableton callers want the throw.
+ */
 export function songTimings(sm: SongMap): SongTimings {
-  const trim = sm.audio?.trim
-  if (!trim || !(trim.endSec > trim.startSec)) {
-    throw new Error('Song has no valid audio.trim')
-  }
-  const bpm = sm.metadata.bpm && sm.metadata.bpm > 0 ? sm.metadata.bpm : DEFAULT_BPM
-
-  const bars = [...sm.timeline.bars].sort((a, b) => a.index - b.index)
-  const sortedBeats = sortBeatsByTime(sm.timeline.beats)
-
-  // Honor an explicit `startBeatId` override via `songStartBeat`; otherwise
-  // fall back to bar 1 beat 1 (the historical implicit anchor).
-  const startBeat = songStartBeat(sm)
-  const firstDownbeatOriginalSec = startBeat?.timeSec ?? trim.startSec
-  // Use THIS beat's bar for `beatDurationSec` so count-in spacing follows
-  // local meter when the user moves the start into a later bar.
-  const startBar = startBeat ? bars.find((b) => b.id === startBeat.barId) : undefined
-  const beatDurationSec =
-    startBar && startBar.beatCount > 0
-      ? (startBar.endSec - startBar.startSec) / startBar.beatCount
-      : 60 / bpm
-
-  const countInBeats = effectiveCountInBeats(sm)
-  const countInDurationSec = countInBeats * beatDurationSec
-
-  // First-beat reference is the first beat AT OR AFTER `trim.startSec`.
-  // Beats before the trim window aren't part of the song proper.
-  const firstBeat = sortedBeats.find((b) => b.timeSec >= trim.startSec - 1e-9)
-  const firstBeatSongTimeSec = firstBeat
-    ? Math.max(0, firstBeat.timeSec - trim.startSec)
-    : 0
-
+  const plan = songPlaybackPlan(sm)
+  if (!plan) throw new Error('Song has no valid audio.trim')
   return {
-    bpm,
-    trimStartSec: trim.startSec,
-    trimEndSec: trim.endSec,
-    songDurationSec: trim.endSec - trim.startSec,
-    firstBeatSongTimeSec,
-    firstDownbeatOriginalSec,
-    beatDurationSec,
-    countInBeats,
-    countInDurationSec,
+    bpm: plan.bpm,
+    trimStartSec: plan.trimStartSec,
+    trimEndSec: plan.trimEndSec,
+    songDurationSec: plan.songDurationSec,
+    firstBeatSongTimeSec: plan.firstBeatSongTimeSec,
+    firstDownbeatOriginalSec: plan.firstDownbeatOriginalSec,
+    beatDurationSec: plan.beatDurationSec,
+    countInBeats: plan.countInBeats,
+    countInDurationSec: plan.countInDurationSec,
   }
 }
 

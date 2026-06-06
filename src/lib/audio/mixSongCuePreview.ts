@@ -3,52 +3,49 @@
  * Timeline matches the cue file: length = cue buffer frames / sample rate.
  */
 import type { BeatClickPoint } from '$lib/audio/debugClickTrack'
-import { computeCountIn } from '$lib/audio/computeCountIn'
-import {
-  countInSpeechOutputTimes,
-  songStartBeat,
-  titleCuePreludeSec,
-} from '$lib/audio/cueTrackSpeechSchedule'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
-import { effectiveCountInBeats } from '$lib/songmap/countIn'
-import { sortBeatsByTime } from '$lib/songmap/normalize'
+import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
 
-const END_EPS = 0.028
-
 /**
- * Click times on the **mix** timeline (0 = start of the mixed preview / cue file):
- * `titleCuePreludeSec + prependSec + (beat.timeSec - trimStart)` for trim beats; count-in mode adds
- * synthetic grid clicks in the prelude and skips pickup beats that would duplicate them.
+ * Click times on the **mix** timeline (0 = start of the mixed preview /
+ * cue file). The mix WAV layout has the title prelude + count-in
+ * prepend silence at the head; clicks land at:
+ *
+ *   `titlePreludeSec + prependSec + (audio-element-time of the click)`
+ *
+ * For count-in beats (audio-element-time < 0), that shifts them into
+ * the prelude / prepend window where they should ring. For song beats,
+ * it shifts them past the prelude into the mixed-down audio region.
+ *
+ * Single source of truth: this is just a projection of
+ * `songPlaybackPlan(sm).clickPoints` onto the mix timeline. The
+ * `trimStart`, `trimEnd`, `prependSec` parameters are vestigial —
+ * the plan derives them from `sm` and ignores the passed values, so
+ * passing mismatched numbers won't silently produce a wrong schedule.
+ * The signature is kept for one migration cycle; once the cue-mode
+ * mix preview is rewritten onto a `PlaybackController`, this function
+ * goes away entirely.
  */
 export function mixTimelineClickPoints(
   sm: SongMap,
-  trimStart: number,
-  trimEnd: number,
-  prependSec: number,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _trimStart: number,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _trimEnd: number,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _prependSec: number,
 ): BeatClickPoint[] {
-  const preludeSec = titleCuePreludeSec(sm)
-  const trim = { startSec: trimStart, endSec: trimEnd }
-  const fd = songStartBeat(sm)
-  const countInBeats = effectiveCountInBeats(sm)
-  const countInActive = countInBeats > 0 && Boolean(fd)
-
+  const plan = songPlaybackPlan(sm)
+  if (!plan) return []
+  const shift = plan.titlePreludeSec + plan.prependSec
   const out: BeatClickPoint[] = []
-
-  if (countInActive) {
-    for (const t of countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)) {
-      out.push({ timeSec: preludeSec + t, downbeat: false })
-    }
+  for (const c of plan.clickPoints) {
+    const t = c.timeSec + shift
+    if (t < 0) continue
+    out.push({ timeSec: t, downbeat: c.downbeat })
   }
-
-  for (const b of sortBeatsByTime(sm.timeline.beats)) {
-    if (b.timeSec < trimStart - 1e-9) continue
-    if (b.timeSec >= trimEnd - END_EPS) continue
-    if (countInActive && fd && b.timeSec < fd.timeSec) continue
-    const t = preludeSec + prependSec + (b.timeSec - trimStart)
-    if (t >= 0) out.push({ timeSec: t, downbeat: b.indexInBar === 0 })
-  }
-  return out.sort((a, b) => a.timeSec - b.timeSec)
+  return out
 }
 
 function linearResampleMono(
@@ -85,13 +82,12 @@ export async function buildSongCueMixWavBlob(
     throw new Error('Song needs audio.trim for mix preview')
   }
 
-  let prependSec = 0
-  const countInBeats = effectiveCountInBeats(sm)
-  if (countInBeats > 0) {
-    const ci = computeCountIn(sm, countInBeats)
-    if (ci) prependSec = ci.prependSec
-  }
-  const preludeSec = titleCuePreludeSec(sm)
+  // Plan-derived layout — same numbers the cue WAV renderer uses, so
+  // the preview WAV's prepend silence is sample-aligned with the cue.
+  const plan = songPlaybackPlan(sm)
+  if (!plan) throw new Error('Song needs audio.trim for mix preview')
+  const prependSec = plan.prependSec
+  const preludeSec = plan.titlePreludeSec
 
   const ac = new AudioContext()
   try {
