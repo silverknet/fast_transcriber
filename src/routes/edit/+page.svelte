@@ -1110,9 +1110,7 @@
       preview = null
       mixPreviewUrl = null
       stopPreviewLoop()
-      stopClickLoop()
       stopMixClickLoop()
-      cancelPendingAudioStart()
       mixPreviewAudioEl?.pause()
       audioEl?.pause()
       return
@@ -1153,21 +1151,10 @@
     clickMaster = g
   }
 
-  // Grid-mode click loop USED to live here; it now lives entirely
-  // inside WaveformPlayer.svelte. The Cue-mode mix preview's click
-  // loop (syncMixNextClickIdx / runMixClickLoop / etc. below) is
-  // separate and still drives its own AudioContext-scheduled clicks.
-  //
-  // The functions below are no-op shims to keep a handful of legacy
-  // call sites (onDestroy, playBarOnly, mix-preview pause cleanup)
-  // compiling without disturbing surrounding logic. Once those flows
-  // get their own targeted cleanup pass these can go away.
-  function stopClickLoop() {
-    /* moved into WaveformPlayer */
-  }
-  function cancelPendingAudioStart() {
-    /* moved into WaveformPlayer (count-in flow removed) */
-  }
+  // Grid-mode click loop lives inside `WaveformPlayer.svelte`. The
+  // Cue-mode mix preview's click loop (`syncMixNextClickIdx` /
+  // `runMixClickLoop` / etc. below) is separate and drives its own
+  // AudioContext-scheduled clicks against `mixPreviewAudioEl`.
 
   function syncMixNextClickIdx(t: number) {
     mixNextClickIdx = mixClickPoints.findIndex((b) => b.timeSec >= t - 0.018)
@@ -1211,7 +1198,6 @@
   }
 
   function onMixPreviewPlay() {
-    stopClickLoop()
     audioEl?.pause()
     if (!mixPreviewClickOverlay) return
     startMixClickLoopFromCurrentTime()
@@ -1267,7 +1253,6 @@
       return
     }
 
-    stopClickLoop()
     pauseMixPreview()
 
     el.pause()
@@ -1683,7 +1668,6 @@
 
   onDestroy(() => {
     stopPreviewLoop()
-    stopClickLoop()
     stopMixClickLoop()
     audioEl?.pause()
     mixPreviewAudioEl?.pause()
