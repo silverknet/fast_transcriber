@@ -234,6 +234,21 @@ export type SongMapAppInfo = {
 export type SongMapTimeline = {
   bars: Bar[]
   beats: Beat[]
+  /**
+   * Snapshot of `{ bars, beats }` captured the last time a full
+   * analysis fragment was merged into this song. Provides a "Reset
+   * grid" affordance for users who edit the timeline and want to undo
+   * back to the analyzed baseline. Survives reloads (lives in `.smap`).
+   * Absent on legacy files that pre-date this field; the UI hides the
+   * Reset action when no snapshot is present.
+   *
+   * Intentionally NOT a full undo history — that lands later. For now
+   * this is a single revert point per song.
+   */
+  original?: {
+    bars: Bar[]
+    beats: Beat[]
+  }
 }
 
 /**

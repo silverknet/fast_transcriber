@@ -59,7 +59,12 @@
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
   import { proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
-  import { applyBarGridAction, type BarGridAction } from '$lib/songmap/timelineEdit'
+  import {
+    applyBarGridAction,
+    resetTimelineToOriginal,
+    timelineMatchesOriginal,
+    type BarGridAction,
+  } from '$lib/songmap/timelineEdit'
   import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey, SongMap } from '$lib/songmap/types'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
@@ -95,6 +100,53 @@
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
   }
+
+  // Two-step confirm for the grid-reset action — first click arms it,
+  // second commits. Avoids a modal for a destructive-but-recoverable
+  // change (the snapshot itself isn't deleted; user can re-edit and
+  // reset again). When full undo/redo lands, this becomes a snackbar
+  // with an Undo action.
+  let resetGridConfirming = $state(false)
+  let resetGridTimeoutId: ReturnType<typeof setTimeout> | null = null
+
+  function startResetGridConfirm() {
+    resetGridConfirming = true
+    if (resetGridTimeoutId) clearTimeout(resetGridTimeoutId)
+    // Auto-cancel after 4s so a stray click doesn't leave the UI armed.
+    resetGridTimeoutId = setTimeout(() => {
+      resetGridConfirming = false
+      resetGridTimeoutId = null
+    }, 4000)
+  }
+
+  function cancelResetGridConfirm() {
+    resetGridConfirming = false
+    if (resetGridTimeoutId) {
+      clearTimeout(resetGridTimeoutId)
+      resetGridTimeoutId = null
+    }
+  }
+
+  function commitResetGrid() {
+    cancelResetGridConfirm()
+    const sm = get(songMap)
+    if (!sm) return
+    const out = resetTimelineToOriginal(sm)
+    if (!out.ok) {
+      beatEditError = out.error
+      return
+    }
+    const p = patchSongMap(() => out.map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  // Reactive — when the live timeline differs from the snapshot, the
+  // Reset button activates. Tracks `$songMap.timeline` because that's
+  // what resetting actually changes.
+  let resetGridDisabled = $derived(
+    !$songMap || !$songMap.timeline.original || timelineMatchesOriginal($songMap),
+  )
 
   let sectionsSelectionBarIds = $state<string[]>([])
 
@@ -1985,6 +2037,52 @@
           onClearChord={clearChordAtBeat}
         />
       {/if}
+    {/if}
+
+    {#if editMode === 'grid' && sm.timeline.beats.length > 0 && sm.timeline.original}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Grid edits"
+      >
+        <h2 class="text-muted-foreground mb-3 text-xs font-medium uppercase tracking-wide">Grid edits</h2>
+        <div class="flex flex-wrap items-center gap-3">
+          {#if resetGridConfirming}
+            <button
+              type="button"
+              onclick={commitResetGrid}
+              class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+            >
+              Yes, reset
+            </button>
+            <button
+              type="button"
+              onclick={cancelResetGridConfirm}
+              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+            >
+              Cancel
+            </button>
+            <span class="text-muted-foreground text-xs">
+              This will erase your bar and beat edits.
+            </span>
+          {:else}
+            <button
+              type="button"
+              onclick={startResetGridConfirm}
+              disabled={resetGridDisabled}
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+            >
+              Reset grid
+            </button>
+            <span class="text-muted-foreground text-xs">
+              {#if resetGridDisabled}
+                No edits to undo.
+              {:else}
+                Restore to the analyzed baseline.
+              {/if}
+            </span>
+          {/if}
+        </div>
+      </section>
     {/if}
 
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
