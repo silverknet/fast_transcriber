@@ -14,6 +14,7 @@
     ZoomOut,
   } from '@lucide/svelte'
   import { createAudioTransport, type TransportBindings } from '$lib/audio/audioTransport'
+  import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
   import {
@@ -1459,12 +1460,100 @@
     transport.seek(tbind(), rangeStart)
   }
 
+  // ── Click loop (lives here so we have direct access to audioEl, no
+  //    bridge, no count-in pause/resume cycle, no setTimeout races.
+  //    When `playWithClick` is on AND audio is playing, fire a
+  //    metronome click on every beat in `beatGrid.beats`. Stops the
+  //    moment audio pauses. State (clickVolume, playWithClick) is
+  //    $bindable so the toolbar checkbox + popover own the UI). ──
+  let clickCtx: AudioContext | undefined
+  let clickMaster: GainNode | undefined
+  let clickLoopRaf = 0
+  let nextClickIdx = 0
+  let cachedClickPoints: { timeSec: number; downbeat: boolean }[] = []
+
+  function ensureClickGraph() {
+    if (clickCtx && clickMaster) return
+    const ctx = new AudioContext()
+    const g = ctx.createGain()
+    g.gain.value = clickVolume
+    g.connect(ctx.destination)
+    clickCtx = ctx
+    clickMaster = g
+  }
+
+  // Keep click master gain in sync with the volume slider.
+  $effect(() => {
+    if (clickMaster) clickMaster.gain.value = clickVolume
+  })
+
+  // Forward songVolume into <audio>.volume so the popover slider works
+  // the moment the user drags, even before play.
+  $effect(() => {
+    if (audioEl) audioEl.volume = Math.max(0, Math.min(1, songVolume))
+  })
+
+  function stopClickLoop() {
+    if (clickLoopRaf) cancelAnimationFrame(clickLoopRaf)
+    clickLoopRaf = 0
+  }
+
+  function syncNextClickIndex(t: number) {
+    nextClickIdx = cachedClickPoints.findIndex((b) => b.timeSec >= t - 0.018)
+    if (nextClickIdx < 0) nextClickIdx = cachedClickPoints.length
+  }
+
+  function runClickLoop() {
+    const el = audioEl
+    const ctx = clickCtx
+    const dest = clickMaster
+    if (!el || !ctx || !dest || !playWithClick || el.paused) {
+      stopClickLoop()
+      return
+    }
+    const t = el.currentTime
+    while (nextClickIdx < cachedClickPoints.length && cachedClickPoints[nextClickIdx]!.timeSec <= t + 0.025) {
+      const pt = cachedClickPoints[nextClickIdx]!
+      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
+      nextClickIdx++
+    }
+    if (nextClickIdx >= cachedClickPoints.length) {
+      stopClickLoop()
+      return
+    }
+    clickLoopRaf = requestAnimationFrame(runClickLoop)
+  }
+
+  function startClickLoop() {
+    if (!playWithClick || !audioEl || !beatGrid?.beats?.length) return
+    cachedClickPoints = beatsToClickPoints(beatGrid.beats)
+    ensureClickGraph()
+    void clickCtx?.resume()
+    syncNextClickIndex(audioEl.currentTime)
+    stopClickLoop()
+    clickLoopRaf = requestAnimationFrame(runClickLoop)
+  }
+
+  // Restart loop on toggle / seek / beat-grid change.
+  $effect(() => {
+    // Re-fire whenever any of these change:
+    void playWithClick
+    void beatGrid?.beats?.length
+    if (audioEl && !audioEl.paused && playWithClick) {
+      startClickLoop()
+    } else {
+      stopClickLoop()
+    }
+  })
+
   function onAudioPlay() {
     transport.onPlay(tbind())
+    if (playWithClick) startClickLoop()
   }
 
   function onAudioPause() {
     transport.onPause(tbind())
+    stopClickLoop()
   }
 
   /** Sparse `timeupdate` — only when paused (rAF owns the clock during playback). */

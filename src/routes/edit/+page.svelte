@@ -992,25 +992,27 @@
   let preview = $state<{ start: number; end: number; barId: string } | null>(null)
   let rafId = 0
 
-  /** When true, the existing WaveformPlayer play button also fires metronome clicks
-   * (and a count-in pre-roll if configured). When false, audio plays without clicks. */
+  /**
+   * Click + volume state. Bound to WaveformPlayer's $bindable props
+   * (the toolbar UI). The click loop logic lives in WaveformPlayer
+   * itself now — no more parent-side click loop, no more orphan
+   * <audio> bridge, no more count-in pause/resume race.
+   *
+   * These are still declared here because (a) the Cue-mode mix
+   * preview also reads `clickVolume` via the shared clickMaster, and
+   * (b) keeping them as parent state makes the bind:propName wiring
+   * round-trip naturally.
+   */
   let playWithClick = $state(false)
-  let clickPoints = $state<{ timeSec: number; downbeat: boolean }[]>([])
-  let clickLoopRaf = 0
-  let nextClickIdx = 0
+  let clickVolume = $state(1.5)
+  let songVolume = $state(1)
+  // Shared click AudioContext / gain for Cue-mode mix preview only.
+  // WaveformPlayer creates its OWN ctx/gain for grid-mode clicks.
   let clickCtx: AudioContext | undefined
   let clickMaster: GainNode | undefined
-  /** Click gain. >1 boosts; the metronome's internal kernel peaks at ~0.62 so a
-   *  value up to ~2.0 stays well below clip. */
-  let clickVolume = $state(1.5)
-  /** Master volume for the audio element (the song). 0 = mute, 1 = unity. */
-  let songVolume = $state(1)
 
   $effect(() => {
     if (clickMaster) clickMaster.gain.value = clickVolume
-  })
-  $effect(() => {
-    if (audioEl) audioEl.volume = songVolume
   })
 
   $effect(() => {
@@ -1094,50 +1096,20 @@
     clickMaster = g
   }
 
+  // Grid-mode click loop USED to live here; it now lives entirely
+  // inside WaveformPlayer.svelte. The Cue-mode mix preview's click
+  // loop (syncMixNextClickIdx / runMixClickLoop / etc. below) is
+  // separate and still drives its own AudioContext-scheduled clicks.
+  //
+  // The functions below are no-op shims to keep a handful of legacy
+  // call sites (onDestroy, playBarOnly, mix-preview pause cleanup)
+  // compiling without disturbing surrounding logic. Once those flows
+  // get their own targeted cleanup pass these can go away.
   function stopClickLoop() {
-    if (clickLoopRaf) cancelAnimationFrame(clickLoopRaf)
-    clickLoopRaf = 0
+    /* moved into WaveformPlayer */
   }
-
-  function syncNextClickIndex(t: number) {
-    nextClickIdx = clickPoints.findIndex((b) => b.timeSec >= t - 0.018)
-    if (nextClickIdx < 0) nextClickIdx = clickPoints.length
-  }
-
-  function runClickLoop() {
-    const el = audioEl
-    const ctx = clickCtx
-    const dest = clickMaster
-    if (!el || !ctx || !dest || !playWithClick || el.paused) {
-      stopClickLoop()
-      return
-    }
-
-    const t = el.currentTime
-    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0
-
-    while (nextClickIdx < clickPoints.length && clickPoints[nextClickIdx]!.timeSec <= t + 0.025) {
-      const pt = clickPoints[nextClickIdx]!
-      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
-      nextClickIdx++
-    }
-
-    if (dur > 0 && t >= dur - 0.04) {
-      el.pause()
-      stopClickLoop()
-      return
-    }
-
-    clickLoopRaf = requestAnimationFrame(runClickLoop)
-  }
-
-  function startClickLoopFromCurrentTime() {
-    if (!playWithClick || !audioEl) return
-    ensureClickGraph()
-    void clickCtx?.resume()
-    syncNextClickIndex(audioEl.currentTime)
-    stopClickLoop()
-    clickLoopRaf = requestAnimationFrame(runClickLoop)
+  function cancelPendingAudioStart() {
+    /* moved into WaveformPlayer (count-in flow removed) */
   }
 
   function syncMixNextClickIdx(t: number) {
@@ -1196,122 +1168,10 @@
     stopMixClickLoop()
   }
 
-  /** setTimeout handle for the count-in pre-roll resume. */
-  let pendingAudioStartTimer: ReturnType<typeof setTimeout> | null = null
-  function cancelPendingAudioStart() {
-    if (pendingAudioStartTimer !== null) {
-      clearTimeout(pendingAudioStartTimer)
-      pendingAudioStartTimer = null
-    }
-  }
-  /** Marker that the next onAudioPlay event is the system resuming after a count-in,
-   *  not a fresh user-initiated play (so we don't re-trigger the count-in pre-roll). */
-  let resumingAfterCountIn = false
-
-  // Attach play/pause/ended listeners directly to the WaveformPlayer's
-  // <audio> element (bound via `bind:audioElement={audioEl}` above).
-  // This replaces the bug-prone callback-prop bridge: one element,
-  // one set of listeners, native event flow. Cleans up on element
-  // change / unmount.
-  $effect(() => {
-    const el = audioEl
-    if (!el) {
-      console.info('[click] audioEl is null — waiting for bind:audioElement from WaveformPlayer')
-      return
-    }
-    console.info('[click] attaching play/pause/ended listeners to', el)
-    el.addEventListener('play', onAudioPlay)
-    el.addEventListener('pause', onAudioPause)
-    el.addEventListener('ended', onAudioEnded)
-    return () => {
-      el.removeEventListener('play', onAudioPlay)
-      el.removeEventListener('pause', onAudioPause)
-      el.removeEventListener('ended', onAudioEnded)
-    }
-  })
-
-  function onAudioPlay() {
-    console.info('[click] onAudioPlay fired. playWithClick=', playWithClick, 'audioEl=', !!audioEl, 'currentTime=', audioEl?.currentTime)
-    if (!playWithClick || !audioEl) return
-
-    const sm = get(songMap)
-    if (!sm) return
-
-    // Fresh user-initiated play (currentTime ≈ 0) with a count-in configured:
-    // pause, schedule count-in clicks, then resume audio.
-    const countInBeats = effectiveCountInBeats(sm)
-    const start = songStartBeat(sm)
-    const songStartSec = start?.timeSec ?? 0
-    const ci = countInBeats > 0 ? computeCountIn(sm, countInBeats) : null
-    const isFreshStart = audioEl.currentTime < 0.05
-
-    if (!resumingAfterCountIn && countInBeats > 0 && ci && isFreshStart) {
-      const countInDuration = countInBeats * ci.beatDurationSec
-      const audioDelaySec = Math.max(0, countInDuration - songStartSec)
-
-      // Pause immediately so audio doesn't bleed into the count-in.
-      audioEl.pause()
-      audioEl.currentTime = 0
-
-      // Filter song clicks: pre-anchor beats are covered by the count-in.
-      const allBeats = beatsToClickPoints(sm.timeline.beats)
-      clickPoints = allBeats.filter((b) => b.timeSec >= songStartSec - 1e-9)
-
-      ensureClickGraph()
-      void clickCtx?.resume()
-
-      if (clickCtx && clickMaster) {
-        const trim = sm.audio?.trim ?? { startSec: 0, endSec: 0 }
-        const songStartNoPrelude = ci.prependSec + (songStartSec - trim.startSec)
-        const grid = countInSpeechOutputTimes(sm, trim, ci.prependSec, countInBeats)
-        const nowCtx = clickCtx.currentTime
-        for (const t of grid) {
-          const wallClock = countInDuration - (songStartNoPrelude - t)
-          if (wallClock < -1e-9) continue
-          playMetronomeClick(clickCtx, clickMaster, nowCtx + Math.max(0, wallClock), false)
-        }
-      }
-
-      cancelPendingAudioStart()
-      console.info('[click] count-in scheduled, audioDelaySec=', audioDelaySec, 'songStartSec=', songStartSec, 'pre-filter clickPoints=', clickPoints.length)
-      pendingAudioStartTimer = setTimeout(() => {
-        pendingAudioStartTimer = null
-        if (!playWithClick || !audioEl) {
-          console.info('[click] setTimeout fired but playWithClick or audioEl gone, aborting')
-          return
-        }
-        resumingAfterCountIn = true
-        console.info('[click] count-in done; calling audioEl.play() to resume')
-        audioEl.play().then(() => {
-          console.info('[click] audioEl.play() resolved — audio is playing')
-        }).catch((e) => {
-          console.error('[click] audioEl.play() REJECTED — autoplay block or other error:', e)
-        })
-      }, audioDelaySec * 1000)
-      return
-    }
-
-    // No count-in pre-roll (or post-count-in resume) — start click loop.
-    console.info('[click] no-count-in / resume branch entered. resumingAfterCountIn was=', resumingAfterCountIn)
-    resumingAfterCountIn = false
-    ensureClickGraph()
-    void clickCtx?.resume()
-    clickPoints = beatsToClickPoints(sm.timeline.beats)
-    console.info('[click] starting loop · clickPoints=', clickPoints.length, 'currentTime=', audioEl.currentTime, 'paused=', audioEl.paused)
-    startClickLoopFromCurrentTime()
-  }
-
-  function onAudioPause() {
-    if (!preview) stopPreviewLoop()
-    cancelPendingAudioStart()
-    stopClickLoop()
-  }
-
-  function onAudioEnded() {
-    if (playWithClick) {
-      stopClickLoop()
-    }
-  }
+  // The Debug-tools "Play bar X" preview uses `audioEl` (bound to
+  // WaveformPlayer's <audio>) and self-stops via `previewTick`'s
+  // own paused-check on each rAF. No play/pause listener needed
+  // here — WaveformPlayer drives its own click loop internally now.
 
   function previewTick() {
     const el = audioEl
