@@ -22,16 +22,19 @@ Branch: `improved-analyze-state`. Main: `main`. Don't push without asking.
 - `f2ea509` — Step 6a-followup: count-in **audio** for tight-trim songs. Web Audio pre-roll + `setTimeout`-deferred `audio.play()`. Same structural pattern as `PlaybackController.play()`. No pause-and-resume race.
 - `9b2d688` — Step 7: `spokenIntroText` input in Cue tab with live readout (`Will announce: "…"`).
 
-Full suite is 312 tests, 0 type errors at HEAD.
+Full suite is 315 tests, 0 type errors at HEAD.
+
+### Shipped after this handoff was first written
+
+- `0f68d7a` — Step 8 deleted (cue mix preview was unreachable; the Mix tab supersedes it).
+- `e8025fc` — Controller pause-during-pre-roll bug fix + Phase A of Step 4 (controller hooked to audio element, dormant for click).
+- `00b5d4f` — Step 4 phases B + C (delete WaveformPlayer's local click loop + count-in pre-roll).
+- `d184413` — Step 4 phase D + Step 5 (delete `audioTransport`, `beatsToClickPoints`; `currentTime` / `isPlaying` become `$derived`).
+- `9984ddd` — No-op shim cleanup (`stopClickLoop` / `cancelPendingAudioStart` removed from edit page).
 
 ### Not yet shipped
 
-- **Step 4** — Wire `PlaybackController` into `WaveformPlayer.svelte`. Delete its local click loop + `audioTransport` import + click toolbar UI. **Listed as in-progress but NOT started.** This is the riskiest item — `WaveformPlayer.svelte` is 2k+ lines with deep transport/peak-render/click entanglement. Take it incrementally (controller as optional prop first, co-existing with old code, migrate one piece at a time, browser-verify each).
-- **Step 5** — Delete `audioTransport.ts`, `beatsToClickPoints`, `mixTimelineClickPoints`. Depends on Step 4 (audioTransport + beatsToClickPoints are still used inside WaveformPlayer). `mixTimelineClickPoints` is already unused at runtime (its only caller is dead code — see Step 8).
-- **Step 8** — Resolved as a delete (commit `4e6...` or whichever lands after this handoff). The cue mix preview was unreachable; the Mix tab supersedes it. `src/lib/audio/mixSongCuePreview.ts` is gone. If Martin asks for the feature back later, instantiate a second `PlaybackController` for it (the grid editor in `edit/+page.svelte` is the working pattern) and render a real `<audio>` in the Cue tab.
-
-There's also work I avoided doing without consent:
-- **No-op shim cleanup:** `stopClickLoop()` and `cancelPendingAudioStart()` in `src/routes/edit/+page.svelte` (lines ~1165-1170) are empty functions kept to satisfy a handful of legacy call sites. Safe to remove with their callers; small focused diff. Do this in the same pass as Step 5 or Step 8.
+- **Step 4 phase E** — Move the click toolbar UI (play-with-click checkbox + volume popover) out of `WaveformPlayer.svelte` into a compact strip beneath it (per the plan's Layer 4). Purely cosmetic. The state itself is already `$bindable` and forwarded into the controller, so moving the chrome is a re-parenting exercise — no behavioral change.
 
 ---
 
