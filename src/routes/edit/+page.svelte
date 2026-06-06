@@ -24,7 +24,7 @@
     serializeChordClipboard,
     songKeyPreferFlats,
   } from '$lib/chords'
-  import { beatsToClickPoints, playMetronomeClick, type BeatClickPoint } from '$lib/audio/debugClickTrack'
+  import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import {
     countInSpeechOutputTimes,
@@ -34,7 +34,6 @@
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
   import { PlaybackController } from '$lib/audio/playbackController.svelte'
-  import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
   import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
@@ -1037,15 +1036,6 @@
 
   let objectUrl = $state<string | null>(null)
   let audioEl = $state<HTMLAudioElement | null>(null)
-  /** Offline-rendered song + cue WAV for Cue-tab preview (separate from main reference player). */
-  let mixPreviewUrl = $state<string | null>(null)
-  let mixPreviewBusy = $state(false)
-  let mixPreviewErr = $state('')
-  let mixPreviewAudioEl = $state<HTMLAudioElement | null>(null)
-  let mixPreviewClickOverlay = $state(false)
-  let mixClickRaf = 0
-  let mixNextClickIdx = 0
-  let mixClickPoints: BeatClickPoint[] = []
   let playingBarId = $state<string | null>(null)
   let preview = $state<{ start: number; end: number; barId: string } | null>(null)
   let rafId = 0
@@ -1126,30 +1116,9 @@
     playbackController.destroy()
   })
 
-  $effect(() => {
-    const u = mixPreviewUrl
-    return () => {
-      if (u) queueMicrotask(() => URL.revokeObjectURL(u))
-    }
-  })
-
-  function stopMixClickLoop() {
-    if (mixClickRaf) cancelAnimationFrame(mixClickRaf)
-    mixClickRaf = 0
-  }
-
-  function pauseMixPreview() {
-    stopMixClickLoop()
-    mixPreviewAudioEl?.pause()
-  }
-
-  $effect(() => {
-    if (!mixPreviewClickOverlay) stopMixClickLoop()
-  })
-
   /**
    * Main `<audio>` blob URL. `$derived($audioSession.file)` still re-fired when the session *object*
-   * was replaced on trim sync, revoking URLs and breaking the cue mix player — so we key off the
+   * was replaced on trim sync, revoking URLs and breaking the audio element — so we key off the
    * `File` reference via an explicit store subscription instead.
    */
   let lastMainFileForObjectUrl: File | null = null
@@ -1162,10 +1131,7 @@
       objectUrl = null
       playingBarId = null
       preview = null
-      mixPreviewUrl = null
       stopPreviewLoop()
-      stopMixClickLoop()
-      mixPreviewAudioEl?.pause()
       audioEl?.pause()
       return
     }
@@ -1175,9 +1141,6 @@
     audioEl?.pause()
     lastMainFileForObjectUrl = f
     objectUrl = URL.createObjectURL(f)
-    mixPreviewUrl = null
-    stopMixClickLoop()
-    mixPreviewAudioEl?.pause()
   }
 
   if (browser) applyMainAudioFromSession()
@@ -1205,70 +1168,10 @@
     clickMaster = g
   }
 
-  // Grid-mode click loop lives inside `WaveformPlayer.svelte`. The
-  // Cue-mode mix preview's click loop (`syncMixNextClickIdx` /
-  // `runMixClickLoop` / etc. below) is separate and drives its own
-  // AudioContext-scheduled clicks against `mixPreviewAudioEl`.
-
-  function syncMixNextClickIdx(t: number) {
-    mixNextClickIdx = mixClickPoints.findIndex((b) => b.timeSec >= t - 0.018)
-    if (mixNextClickIdx < 0) mixNextClickIdx = mixClickPoints.length
-  }
-
-  function runMixClickLoop() {
-    const el = mixPreviewAudioEl
-    const ctx = clickCtx
-    const dest = clickMaster
-    if (!el || !ctx || !dest || !mixPreviewClickOverlay || el.paused) {
-      stopMixClickLoop()
-      return
-    }
-
-    const t = el.currentTime
-    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0
-
-    while (mixNextClickIdx < mixClickPoints.length && mixClickPoints[mixNextClickIdx]!.timeSec <= t + 0.025) {
-      const pt = mixClickPoints[mixNextClickIdx]!
-      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
-      mixNextClickIdx++
-    }
-
-    if (dur > 0 && t >= dur - 0.04) {
-      el.pause()
-      stopMixClickLoop()
-      return
-    }
-
-    mixClickRaf = requestAnimationFrame(runMixClickLoop)
-  }
-
-  function startMixClickLoopFromCurrentTime() {
-    if (!mixPreviewClickOverlay || !mixPreviewAudioEl) return
-    ensureClickGraph()
-    void clickCtx?.resume()
-    syncMixNextClickIdx(mixPreviewAudioEl.currentTime)
-    stopMixClickLoop()
-    mixClickRaf = requestAnimationFrame(runMixClickLoop)
-  }
-
-  function onMixPreviewPlay() {
-    audioEl?.pause()
-    if (!mixPreviewClickOverlay) return
-    startMixClickLoopFromCurrentTime()
-  }
-
-  function onMixPreviewPause() {
-    stopMixClickLoop()
-  }
-
-  function onMixPreviewEnded() {
-    stopMixClickLoop()
-  }
-
   // The Debug-tools "Play bar X" preview uses `audioEl` (bound to
   // WaveformPlayer's <audio>) and self-stops via `previewTick`'s
-  // own paused-check on each rAF. No play/pause listener needed
-  // here — WaveformPlayer drives its own click loop internally now.
+  // own paused-check on each rAF. WaveformPlayer drives its own click
+  // loop internally; no play/pause listener wiring needed here.
 
   function previewTick() {
     const el = audioEl
@@ -1306,8 +1209,6 @@
       stopPreviewLoop()
       return
     }
-
-    pauseMixPreview()
 
     el.pause()
     stopPreviewLoop()
@@ -1633,7 +1534,6 @@
   function downloadCueTrackFile() {
     const sm = get(songMap)
     if (!lastCueDownloadBlob || !sm) return
-    pauseMixPreview()
     audioEl?.pause()
     const url = URL.createObjectURL(lastCueDownloadBlob)
     const a = document.createElement('a')
@@ -1646,7 +1546,6 @@
   function downloadClickTrackFile() {
     const sm = get(songMap)
     if (!lastClickDownloadBlob || !sm) return
-    pauseMixPreview()
     audioEl?.pause()
     const url = URL.createObjectURL(lastClickDownloadBlob)
     const a = document.createElement('a')
@@ -1668,63 +1567,9 @@
     return { ok: true, reason: '' }
   })
 
-  /** Song+cue preview / mix — only this tab’s generated WAV blob (reload clears it). */
-  let mixPreviewGate = $derived.by((): { ok: boolean; reason: string } => {
-    const sm = $songMap
-    if (!sm) return { ok: false, reason: 'No song.' }
-    if (!sm.timeline.beats.length) return { ok: false, reason: 'Need beats (Grid).' }
-    if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) {
-      return { ok: false, reason: 'Need trim (Grid).' }
-    }
-    if (!lastCueDownloadBlob) return { ok: false, reason: 'Generate cue track first (preview uses this tab’s WAV).' }
-    return { ok: true, reason: '' }
-  })
-
-  async function prepareMixPreview() {
-    const sm = get(songMap)
-    const file = get(audioSession).file
-    if (!sm || !file) {
-      mixPreviewErr = 'No audio.'
-      return
-    }
-    if (!mixPreviewGate.ok) {
-      mixPreviewErr = mixPreviewGate.reason
-      return
-    }
-    const trim = sm.audio?.trim
-    if (!trim || !(trim.endSec > trim.startSec)) {
-      mixPreviewErr = 'Need trim.'
-      return
-    }
-    mixPreviewBusy = true
-    mixPreviewErr = ''
-    try {
-      const cue = lastCueDownloadBlob
-      if (!cue) {
-        mixPreviewErr = 'Generate cue track first.'
-        return
-      }
-      const blob = await buildSongCueMixWavBlob(sm, file, cue)
-      mixPreviewUrl = URL.createObjectURL(blob)
-      let prependSec = 0
-      const countInBeats = effectiveCountInBeats(sm)
-      if (countInBeats > 0) {
-        const ci = computeCountIn(sm, countInBeats)
-        if (ci) prependSec = ci.prependSec
-      }
-      mixClickPoints = mixTimelineClickPoints(sm, trim.startSec, trim.endSec, prependSec)
-    } catch (e) {
-      mixPreviewErr = e instanceof Error ? e.message : String(e)
-    } finally {
-      mixPreviewBusy = false
-    }
-  }
-
   onDestroy(() => {
     stopPreviewLoop()
-    stopMixClickLoop()
     audioEl?.pause()
-    mixPreviewAudioEl?.pause()
     void clickCtx?.close()
     clickCtx = undefined
     clickMaster = undefined
