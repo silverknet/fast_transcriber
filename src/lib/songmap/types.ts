@@ -77,6 +77,21 @@ export type CueSettings = {
   prependSec?: number
   template?: string
   language?: string
+  /**
+   * Optional override for the spoken pre-song announcement. When the cue
+   * mode is `'spoken'` (or a count-in is active and a spoken title plays),
+   * this string is what the TTS says. An empty / missing value falls back
+   * to `metadata.title`, preserving today's behaviour.
+   *
+   * Use case: the song's display title is `"Valerie (Amy Winehouse cover) — live"`
+   * but the announcement should just be `"Valerie."`. Independent field so
+   * editing the announcement doesn't rename the song everywhere else (project
+   * list, lead sheet, Ableton track names, etc.).
+   *
+   * Single source of truth for the speech text the user hears. Resolved at
+   * read time via `resolvedSpokenIntroText(sm)` in `cueTrackSpeechSchedule.ts`.
+   */
+  spokenIntroText?: string
 }
 
 /**

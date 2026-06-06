@@ -180,6 +180,9 @@ export function validateSongMap(map: SongMap): ValidationResult {
     if (map.cues.prependSec !== undefined && (!Number.isFinite(map.cues.prependSec) || map.cues.prependSec < 0)) {
       errors.push('cues.prependSec invalid')
     }
+    if (map.cues.spokenIntroText !== undefined && typeof map.cues.spokenIntroText !== 'string') {
+      errors.push('cues.spokenIntroText invalid')
+    }
   }
 
   if (map.countInBeats !== undefined) {

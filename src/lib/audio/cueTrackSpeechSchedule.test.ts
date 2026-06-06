@@ -4,6 +4,7 @@ import {
   buildCueSpeechEvents,
   clickWavSongStartSec,
   countInSpeechOutputTimes,
+  resolvedSpokenIntroText,
   songStartBeat,
   titleCuePreludeSec,
 } from '$lib/audio/cueTrackSpeechSchedule'
@@ -211,6 +212,79 @@ describe('songStartBeat', () => {
     // Falls back to the first downbeat — no crash.
     expect(beat).toBeDefined()
     expect(beat!.indexInBar).toBe(0)
+  })
+})
+
+describe('resolvedSpokenIntroText', () => {
+  it('falls back to metadata.title when no override is set', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Dum av Dig'
+    expect(resolvedSpokenIntroText(sm)).toBe('Dum av Dig')
+  })
+
+  it('uses the override when set', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Valerie (Amy Winehouse cover) — live at Wembley'
+    sm.cues.spokenIntroText = 'Valerie'
+    expect(resolvedSpokenIntroText(sm)).toBe('Valerie')
+  })
+
+  it('treats an empty / whitespace-only override as "not set"', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Real title'
+    sm.cues.spokenIntroText = '   '
+    expect(resolvedSpokenIntroText(sm)).toBe('Real title')
+  })
+
+  it('falls back to "Untitled song" when neither override nor title is usable', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = ''
+    sm.cues.spokenIntroText = undefined
+    expect(resolvedSpokenIntroText(sm)).toBe('Untitled song')
+  })
+
+  it('trims surrounding whitespace from the override', () => {
+    const sm = mapWithCountIn(4)
+    sm.cues.spokenIntroText = '  Valerie  '
+    expect(resolvedSpokenIntroText(sm)).toBe('Valerie')
+  })
+})
+
+describe('titleCuePreludeSec uses the resolved announcement', () => {
+  it('shrinks the prelude when an override is shorter than the title', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'A very long song title that takes a while to say aloud'
+    const longTitlePrelude = titleCuePreludeSec(sm)
+    sm.cues.spokenIntroText = 'Hi'
+    const shortOverridePrelude = titleCuePreludeSec(sm)
+    expect(shortOverridePrelude).toBeLessThan(longTitlePrelude)
+  })
+
+  it('zero prelude when neither speech nor count-in is active', () => {
+    const sm = mapWithCountIn(0)
+    sm.cues.mode = 'off'
+    sm.countInBeats = undefined
+    expect(titleCuePreludeSec(sm)).toBe(0)
+  })
+})
+
+describe('buildCueSpeechEvents uses the announcement override', () => {
+  it('emits the override as the title event (not metadata.title)', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Valerie (Amy Winehouse cover) — live'
+    sm.cues.spokenIntroText = 'Valerie'
+    const ev = buildCueSpeechEvents(sm)
+    const titleEv = ev.find((e) => e.kind === 'title')
+    expect(titleEv?.text).toBe('Valerie.')
+  })
+
+  it('emits metadata.title as the title event when no override is set', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Dum av Dig'
+    sm.cues.spokenIntroText = undefined
+    const ev = buildCueSpeechEvents(sm)
+    const titleEv = ev.find((e) => e.kind === 'title')
+    expect(titleEv?.text).toBe('Dum av Dig.')
   })
 })
 

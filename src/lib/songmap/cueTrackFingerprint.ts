@@ -1,4 +1,4 @@
-import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
+import { resolvedSpokenIntroText, titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { SongMap } from '$lib/songmap/types'
@@ -36,7 +36,7 @@ export function cueTrackFingerprintPayload(sm: SongMap): unknown {
   }))
 
   return {
-    v: 3,
+    v: 4,
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),
@@ -46,6 +46,12 @@ export function cueTrackFingerprintPayload(sm: SongMap): unknown {
       useSectionLabels: sm.cues.useSectionLabels,
       /** Headroom before count-in clicks for spoken title (regenerates cue when title length changes). */
       titlePreludeSec: round6(titleCuePreludeSec(sm)),
+      /**
+       * The resolved announcement text. Changing the override OR the
+       * title-fallback value re-fingerprints, so the rendered TTS audio
+       * stays in lockstep with what the user authored.
+       */
+      spokenIntroText: resolvedSpokenIntroText(sm),
     },
     bars,
     beats,
