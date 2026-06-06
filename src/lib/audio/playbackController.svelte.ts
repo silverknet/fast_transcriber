@@ -106,6 +106,13 @@ export class PlaybackController {
   #clickRaf = 0
   /** Index into `plan.clickPoints` for the next click to schedule. */
   #nextClickIdx = 0
+  /**
+   * setTimeout id for the count-in's deferred `audio.play()`. Tracked so
+   * `pause()` / `stop()` can cancel it before audio actually starts;
+   * without this, the deferred play resolves anyway and audio starts
+   * after the user has clearly told us to stop.
+   */
+  #pendingPlayTimeoutId: ReturnType<typeof setTimeout> | null = null
   /** Cleanup for the $effect.root that owns the controller's effects. */
   #effectCleanup: (() => void) | null = null
 
@@ -265,7 +272,8 @@ export class PlaybackController {
     // wrong for grid-mode where currentTime=0 means "head of full file",
     // not "head of song" (trimStart != 0).
 
-    setTimeout(() => {
+    this.#pendingPlayTimeoutId = setTimeout(() => {
+      this.#pendingPlayTimeoutId = null
       // Re-check guards in case state changed during the delay.
       if (!this.audioEl || this.isPlaying || !this.playWithClick) return
       this.audioEl.play().catch((err) => {
@@ -276,12 +284,22 @@ export class PlaybackController {
     }, preroll * 1000)
   }
 
+  /** Cancel a queued count-in pre-roll deferred play, if any. */
+  #cancelPendingPlay(): void {
+    if (this.#pendingPlayTimeoutId !== null) {
+      clearTimeout(this.#pendingPlayTimeoutId)
+      this.#pendingPlayTimeoutId = null
+    }
+  }
+
   pause(): void {
+    this.#cancelPendingPlay()
     this.audioEl?.pause()
   }
 
   /** Pause and seek to `rangeStart`. */
   stop(): void {
+    this.#cancelPendingPlay()
     const el = this.audioEl
     if (!el) return
     el.pause()
@@ -303,6 +321,7 @@ export class PlaybackController {
    * component unmount (or on swap to another controller instance).
    */
   destroy(): void {
+    this.#cancelPendingPlay()
     this.#stopClickLoop()
     this.#stopTransport()
     if (this.#clickCtx) {

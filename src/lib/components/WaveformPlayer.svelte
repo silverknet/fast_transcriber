@@ -15,6 +15,7 @@
   } from '@lucide/svelte'
   import { createAudioTransport, type TransportBindings } from '$lib/audio/audioTransport'
   import { beatsToClickPoints, playMetronomeClick } from '$lib/audio/debugClickTrack'
+  import type { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
   import {
@@ -149,6 +150,14 @@
     clickVolume = $bindable(1.5),
     songVolume = $bindable(1),
     /**
+     * Centralised playback engine. When provided, WaveformPlayer hands
+     * it the `<audio>` element on mount so future migrations can route
+     * play/click/transport through it. Currently DORMANT — the click
+     * loop and transport rAF stay inside this component so behavior is
+     * unchanged. Pass `null` (default) to skip the wire-up entirely.
+     */
+    controller = null as PlaybackController | null,
+    /**
      * Grid mode: ghost ticks for the song's count-in beats, in
      * original-time. Each tick = one pre-song click. When the user
      * changes `countInBeats` 4 → 8 in the SongMap, this list rerenders
@@ -185,10 +194,13 @@
      * Grid mode: original-time of bar 1 beat 1 (or `startBeatId`
      * override). Used by the play handler to decide whether the user
      * is at the song start — only then does count-in pre-roll trigger
-     * (mid-song play skips the count-in entirely).
+     * (mid-song play skips the count-in entirely). Kept for the
+     * controller-less trim variant; the controller derives it itself
+     * via `songPlaybackPlan(sm)`.
      */
     firstDownbeatOriginalSec = null as number | null,
   } = $props()
+
 
   let isEditorVariant = $derived(variant === 'editor')
   let beatGridEditing = $derived(
@@ -316,6 +328,17 @@
   // and we stay free of "click bridge" / "volume bridge" props.
   $effect(() => {
     audioElement = audioEl ?? null
+  })
+
+  // Wire the (currently-dormant) PlaybackController to the same audio
+  // element. The controller is fed `songMap`, `rangeStart/End`,
+  // volumes from the parent's $effects. Step 8 (cue mix preview)
+  // instantiates a SECOND controller pointed at its own audio element
+  // using the same setAudioElement pattern. When the migration
+  // (handoff doc / Step 4) lands, this controller takes over play /
+  // click / transport from the local logic below.
+  $effect(() => {
+    controller?.setAudioElement(audioEl ?? null)
   })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */

@@ -33,6 +33,7 @@
   } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
+  import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
@@ -1064,12 +1065,65 @@
   let clickVolume = $state(1.5)
   let songVolume = $state(1)
   // Shared click AudioContext / gain for Cue-mode mix preview only.
-  // WaveformPlayer creates its OWN ctx/gain for grid-mode clicks.
+  // WaveformPlayer's grid-mode clicks now route through the
+  // PlaybackController below.
   let clickCtx: AudioContext | undefined
   let clickMaster: GainNode | undefined
 
   $effect(() => {
     if (clickMaster) clickMaster.gain.value = clickVolume
+  })
+
+  /**
+   * Centralised playback engine for the grid editor — single runtime
+   * owner of the `<audio>` element + click loop + count-in pre-roll.
+   * Everything observable about playback flows through this controller;
+   * WaveformPlayer reads its `currentTime` / `isPlaying` and dispatches
+   * `play()` / `pause()` / `stop()` / `seek()`. No more local click
+   * loop or count-in pre-roll inside the component.
+   *
+   * State is fed in via `$effect`s — songMap, mediaTimeOffsetSec
+   * (= `plan.trimStartSec` for grid mode, since the audio element plays
+   * the full uploaded file), rangeStart/end, playWithClick, volumes —
+   * so the controller's `$derived plan` and click-loop lifecycle stay
+   * in lockstep with the `.smap`.
+   */
+  const playbackController = new PlaybackController()
+
+  $effect(() => {
+    playbackController.setSongMap($songMap ?? null)
+  })
+
+  $effect(() => {
+    const sm = $songMap
+    // Grid editor's audio src = full uploaded file → currentTime is
+    // original-time → offset = `plan.trimStartSec`.
+    playbackController.mediaTimeOffsetSec = sm
+      ? songPlaybackPlan(sm)?.trimStartSec ?? 0
+      : 0
+  })
+
+  $effect(() => {
+    playbackController.rangeStart = rangeStart
+    playbackController.rangeEnd = rangeEnd
+  })
+
+  // NOT syncing `playWithClick` into the controller — that keeps the
+  // controller's click loop dormant while WaveformPlayer still owns
+  // grid-mode clicks. Once Step 4 lands and the controller takes over,
+  // un-comment this line and delete WaveformPlayer's local loop.
+  // $effect(() => { playbackController.playWithClick = playWithClick })
+
+  $effect(() => {
+    playbackController.clickVolume = clickVolume
+  })
+
+  $effect(() => {
+    playbackController.songVolume = songVolume
+  })
+
+  onDestroy(() => {
+    playbackController.destroy()
   })
 
   $effect(() => {
@@ -2139,6 +2193,7 @@
           onSetStartBar={editMode === 'grid' ? setStartBar : undefined}
           countInPrependSec={editMode === 'grid' ? countInPrependSec : 0}
           firstDownbeatOriginalSec={editMode === 'grid' ? firstDownbeatOriginalSec : null}
+          controller={playbackController}
         />
         {#if beatEditError}
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>

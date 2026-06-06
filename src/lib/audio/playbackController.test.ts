@@ -279,6 +279,59 @@ describe('PlaybackController.play()', () => {
     c.destroy()
   })
 
+  /**
+   * Regression: previously the count-in setTimeout would fire its
+   * deferred `audio.play()` even after `pause()` had been called. The
+   * `isPlaying` guard at the top of the timeout doesn't help because
+   * `isPlaying` is still `false` (audio hadn't started yet). Now
+   * `pause()` clears the pending timeout.
+   */
+  it('pause() during count-in pre-roll cancels the deferred play', () => {
+    const c = new PlaybackController()
+    const audio = new MockAudioElement()
+    c.setAudioElement(audio as unknown as HTMLAudioElement)
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.playWithClick = true
+    c.play()
+    expect(audio.play).not.toHaveBeenCalled()
+    // Halfway through the pre-roll the user changes their mind.
+    vi.advanceTimersByTime(1000)
+    c.pause()
+    // Drain the remainder + a margin — the deferred play must NOT fire.
+    vi.advanceTimersByTime(2000)
+    expect(audio.play).not.toHaveBeenCalled()
+    c.destroy()
+  })
+
+  /** Same regression check for `stop()`, which is the Stop-button path. */
+  it('stop() during count-in pre-roll cancels the deferred play', () => {
+    const c = new PlaybackController()
+    const audio = new MockAudioElement()
+    c.setAudioElement(audio as unknown as HTMLAudioElement)
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.playWithClick = true
+    c.play()
+    expect(audio.play).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(500)
+    c.stop()
+    vi.advanceTimersByTime(2000)
+    expect(audio.play).not.toHaveBeenCalled()
+    c.destroy()
+  })
+
+  /** `destroy()` mid-pre-roll must also cancel — otherwise we leak a play onto a torn-down controller. */
+  it('destroy() during count-in pre-roll cancels the deferred play', () => {
+    const c = new PlaybackController()
+    const audio = new MockAudioElement()
+    c.setAudioElement(audio as unknown as HTMLAudioElement)
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.playWithClick = true
+    c.play()
+    c.destroy()
+    vi.advanceTimersByTime(3000)
+    expect(audio.play).not.toHaveBeenCalled()
+  })
+
   it('plays immediately when count-in is configured but prependSec == 0 (enough lead-in)', () => {
     const c = new PlaybackController()
     const audio = new MockAudioElement()
