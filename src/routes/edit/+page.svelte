@@ -26,7 +26,11 @@
   } from '$lib/chords'
   import { beatsToClickPoints, playMetronomeClick, type BeatClickPoint } from '$lib/audio/debugClickTrack'
   import { computeCountIn } from '$lib/audio/computeCountIn'
-  import { countInSpeechOutputTimes, songStartBeat } from '$lib/audio/cueTrackSpeechSchedule'
+  import {
+    countInSpeechOutputTimes,
+    resolvedSpokenIntroText,
+    songStartBeat,
+  } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
   import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
@@ -1315,6 +1319,37 @@
     else beatEditError = ''
   }
 
+  /**
+   * Live preview of what the spoken cue will announce — fallback chain
+   * is `cues.spokenIntroText.trim() ?? metadata.title.trim() ?? 'Untitled song'`.
+   * Same helper the cue WAV renderer uses, so the user always sees the
+   * exact text Piper will say.
+   */
+  let cueSpokenIntroPreview = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return 'Untitled song'
+    return resolvedSpokenIntroText(sm)
+  })
+
+  /** Current override (empty when the user hasn't set one — falls back to title). */
+  let cueSpokenIntroOverride = $derived($songMap?.cues.spokenIntroText ?? '')
+
+  function applyCueSpokenIntroText(text: string) {
+    const trimmed = text.trim()
+    const p = patchSongMap((m) => ({
+      ...m,
+      cues: {
+        ...m.cues,
+        // Clear the field when the user empties it — that re-enables the
+        // title fallback. Storing an empty string would not equal "use
+        // default" semantically.
+        spokenIntroText: trimmed.length > 0 ? trimmed : undefined,
+      },
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
   // Start-beat override: a 1-indexed position into `sortBeatsByTime(beats)`.
   // 1 = bar 1 beat 1 (default, no override stored). Higher values store
   // `startBeatId` so the song-start anchor moves N-1 beats into the song.
@@ -1868,9 +1903,40 @@
             <p class="text-muted-foreground text-xs italic">No count-in. Pick one in the Grid tab to see timing details.</p>
           {/if}
 
+          <fieldset class="border-foreground border-2 px-3 py-3">
+            <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
+              Spoken intro
+            </legend>
+            <div class="flex flex-wrap items-center gap-3 pt-1">
+              <input
+                type="text"
+                value={cueSpokenIntroOverride}
+                placeholder={$songMap?.metadata.title ?? 'Untitled song'}
+                onchange={(e) => applyCueSpokenIntroText((e.currentTarget as HTMLInputElement).value)}
+                class="border-foreground bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm"
+                aria-label="Spoken intro text"
+                maxlength="120"
+              />
+            </div>
+            <!-- Live readout so users know exactly what Piper will say. Pulls
+                 from `resolvedSpokenIntroText(sm)` — the same helper the cue
+                 WAV renderer uses, so what you see here matches what you'll
+                 hear. -->
+            <p class="text-muted-foreground mt-2 font-mono text-xs leading-relaxed" role="status">
+              Will announce: <span class="text-foreground">"{cueSpokenIntroPreview}"</span>
+              {#if !cueSpokenIntroOverride}
+                <span class="text-muted-foreground/70"> (from song title)</span>
+              {/if}
+            </p>
+            <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
+              Leave empty to use the song title. Set this when the title's punctuation /
+              parentheses make Piper trip up, or when you want a shorter cue
+              (e.g. "Valerie" while the title is "Valerie (Amy Winehouse cover)").
+            </p>
+          </fieldset>
+
           <p class="text-muted-foreground text-xs leading-relaxed">
-            Spoken cues (title, count-in numbers, section callouts) are a follow-up. Use the
-            <strong>Mix</strong> tab for full multi-track playback with click + stems.
+            Use the <strong>Mix</strong> tab for full multi-track playback with click + stems.
           </p>
         </div>
       </section>
