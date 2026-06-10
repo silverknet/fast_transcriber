@@ -22,6 +22,7 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { defaultCueSettings } from './defaults'
 import { songPlaybackPlan, DEFAULT_BPM } from './playbackPlan'
+import { songTimings } from '../export/setlist/timings'
 import type { SongMap } from './types'
 import { SONGMAP_FORMAT_VERSION } from './version'
 
@@ -279,6 +280,58 @@ describe('songPlaybackPlan — properties', () => {
         },
       ),
       { numRuns: 100 },
+    )
+  })
+})
+
+/**
+ * The load-bearing architectural invariant of the whole refactor:
+ * `songTimings(sm)` is a projection of `songPlaybackPlan(sm)` — they
+ * MUST agree on every shared field, for every playable SongMap.
+ *
+ * Today this is structurally true (`songTimings` literally pulls
+ * fields off the plan), but the property locks it in so a future
+ * "let's reimplement `songTimings` for clarity" refactor would fail
+ * loudly the moment it drifts. Editor and Ableton stay in lockstep
+ * because both ultimately read the same numbers.
+ */
+describe('Ableton parity — songTimings projects songPlaybackPlan', () => {
+  it('all shared fields agree for any playable songMap', () => {
+    fc.assert(
+      fc.property(playableSongArb, (params) => {
+        const sm = makeSong(params)
+        const plan = songPlaybackPlan(sm)
+        if (!plan) {
+          // When the plan is null, `songTimings` is documented to throw.
+          // Confirm so future refactors don't silently swap nulls/throws.
+          expect(() => songTimings(sm)).toThrow()
+          return
+        }
+        const t = songTimings(sm)
+        expect(t.bpm).toBe(plan.bpm)
+        expect(t.trimStartSec).toBe(plan.trimStartSec)
+        expect(t.trimEndSec).toBe(plan.trimEndSec)
+        expect(t.songDurationSec).toBe(plan.songDurationSec)
+        expect(t.firstBeatSongTimeSec).toBe(plan.firstBeatSongTimeSec)
+        expect(t.firstDownbeatOriginalSec).toBe(plan.firstDownbeatOriginalSec)
+        expect(t.beatDurationSec).toBe(plan.beatDurationSec)
+        expect(t.countInBeats).toBe(plan.countInBeats)
+        expect(t.countInDurationSec).toBe(plan.countInDurationSec)
+      }),
+      { numRuns: 100 },
+    )
+  })
+
+  it('songTimings throws for the same songMaps where songPlaybackPlan returns null', () => {
+    fc.assert(
+      fc.property(playableSongArb, (params) => {
+        const sm = makeSong(params)
+        // Force the trim invalid so the plan returns null.
+        sm.audio!.trim = { startSec: 5, endSec: 5 }
+        expect(songPlaybackPlan(sm)).toBeNull()
+        expect(() => songTimings(sm)).toThrow()
+      }),
+      { numRuns: 30 },
     )
   })
 })
