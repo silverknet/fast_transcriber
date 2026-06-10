@@ -120,11 +120,26 @@ If Martin hasn't given new direction, start with the lowest-risk highest-leverag
 ## Test invocation reference
 
 ```
-npm test                                    # full suite (currently 312)
+npm test                                    # unit suite (~2s, 315 tests)
+npm run test:watch                          # unit suite, watch
+npm run test:browser                        # browser suite (~6s, 4 tests in Chromium)
+npm run test:all                            # both projects
 npx vitest run path/to/spec.test.ts         # one file
 npm run check                               # svelte-check (0 errors expected)
 npm run dev                                 # start dev server
 ```
+
+**Browser tests** are the regression catcher for everything the mocked
+unit tests can't see — `$effect` graph ordering, real `audio.play()`
+lifecycle, real `AudioContext` (oscillator counts as a click proxy),
+autoplay-policy edge cases. They live in `*.browser.test.ts` files
+and run only via `test:browser` (excluded from `npm test`).
+
+The browser project passes `--autoplay-policy=no-user-gesture-required`
+to Chromium so `<audio>.play()` resolves without an artificial click
+prelude. The optimizer is told to skip `bits-ui` and `@lucide/svelte`
+because they ship unbundled `.svelte` files that esbuild can't load
+(and the tests don't need them).
 
 ---
 
