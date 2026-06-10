@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import { createEmptySongMap } from './factory'
 import { mergeAnalysisIntoSongMap } from './merge'
 import type { Bar, Beat, SongMap } from './types'
@@ -214,5 +215,64 @@ describe('reset-grid snapshot (timeline.original)', () => {
     expect(reverted2.ok).toBe(true)
     if (!reverted2.ok) return
     expect(timelineMatchesOriginal(reverted2.map)).toBe(true)
+  })
+
+  /**
+   * Property: any sequence of valid `setBarBoundary` edits followed by
+   * `resetTimelineToOriginal` lands back at the snapshot, with
+   * `timelineMatchesOriginal` reporting `true`. This is the load-bearing
+   * invariant the UI relies on: hit Reset → you ALWAYS land at the
+   * analyzed baseline, no matter what edits got you there.
+   */
+  it('property: arbitrary boundary edits followed by reset reproduce the snapshot exactly', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            // We have two bars (bar0, bar1) whose shared boundary lives
+            // at 2.0 in the baseline. Generate edits that bump that
+            // boundary to a random valid position.
+            barId: fc.constantFrom('bar0', 'bar1'),
+            edge: fc.constantFrom('left', 'right') as fc.Arbitrary<'left' | 'right'>,
+            // Boundary positions clamped to a safe range (the helper
+            // enforces minimum bar duration internally).
+            position: fc.double({
+              min: 0.5,
+              max: 3.8,
+              noNaN: true,
+              noDefaultInfinity: true,
+            }),
+          }),
+          { minLength: 0, maxLength: 6 },
+        ),
+        (edits) => {
+          const base = mapTwoBars()
+          const seeded = mergeAnalysisIntoSongMap(base, {
+            bars: base.timeline.bars,
+            beats: base.timeline.beats,
+          })
+
+          // Apply the edits. Failures (e.g. "bar too short to stretch")
+          // are silently ignored — we just skip to the next edit. The
+          // property is about the FINAL reset, not whether every edit
+          // succeeded.
+          let current = seeded
+          for (const e of edits) {
+            const r = setBarBoundary(current, e.barId, e.edge, e.position, 0, 4)
+            if (r.ok) current = r.map
+          }
+
+          const reverted = resetTimelineToOriginal(current)
+          expect(reverted.ok).toBe(true)
+          if (!reverted.ok) return
+          expect(timelineMatchesOriginal(reverted.map)).toBe(true)
+          // The reverted bars and beats must be DEEP-equal to the
+          // original snapshot — not just match-on-id.
+          expect(reverted.map.timeline.bars).toEqual(seeded.timeline.original!.bars)
+          expect(reverted.map.timeline.beats).toEqual(seeded.timeline.original!.beats)
+        },
+      ),
+      { numRuns: 100 },
+    )
   })
 })

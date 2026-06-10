@@ -120,14 +120,26 @@ If Martin hasn't given new direction, start with the lowest-risk highest-leverag
 ## Test invocation reference
 
 ```
-npm test                                    # unit suite (~2s, 315 tests)
+npm test                                    # unit suite (~2s, 326 tests)
 npm run test:watch                          # unit suite, watch
-npm run test:browser                        # browser suite (~6s, 4 tests in Chromium)
-npm run test:all                            # both projects
+npm run test:browser                        # browser suite (~7s, 6 tests in Chromium)
+npm run test:all                            # both projects (332 tests)
 npx vitest run path/to/spec.test.ts         # one file
 npm run check                               # svelte-check (0 errors expected)
 npm run dev                                 # start dev server
 ```
+
+**Property-based tests** (`*.property.test.ts`) live in the unit project
+and use `fast-check`. They generate hundreds of valid input shapes and
+check invariants that are too tedious to cover by example:
+
+- `playbackPlan.property.test.ts` — 10 properties of `songPlaybackPlan`:
+  click points sorted, count-in spacing, `prependSec` formula,
+  song-click trim window, etc. Caught one wrong assumption already
+  (a property fired and the minimised counter-example revealed an
+  edge case where `firstDownbeat` < `trim.startSec`).
+- `timelineEdit.test.ts` — "any sequence of bar edits + reset reproduces
+  the snapshot exactly". 100 randomised edit sequences per run.
 
 **Browser tests** are the regression catcher for everything the mocked
 unit tests can't see — `$effect` graph ordering, real `audio.play()`

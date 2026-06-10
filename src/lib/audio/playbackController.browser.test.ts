@@ -282,4 +282,66 @@ describe('PlaybackController (real browser)', () => {
     expect(playSpy).not.toHaveBeenCalled()
     expect(audio.paused).toBe(true)
   })
+
+  /**
+   * Range-end auto-stop. The controller's `#tickTransport` watches the
+   * audio element via rAF and pauses + seeks-to-rangeStart when
+   * `currentTime >= rangeEnd`. If this regresses we'd hear audio keep
+   * playing past the user's selection — annoying enough to be load-
+   * bearing.
+   */
+  it('auto-stops at rangeEnd and seeks back to rangeStart', async () => {
+    const c = new PlaybackController()
+    const { audio, cleanup } = makeAudio(5)
+    cleanups.push(() => c.destroy(), cleanup)
+
+    c.setAudioElement(audio)
+    c.setSongMap(makeSong({ barCount: 4 }))
+    // Selection: 0.3 .. 1.2 in audio-element time. Tight window so the
+    // test exits within a couple of seconds.
+    c.rangeStart = 0.3
+    c.rangeEnd = 1.2
+    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
+
+    c.seek(0.3)
+    c.play()
+    await vi.waitFor(() => expect(c.isPlaying).toBe(true), { timeout: 3000 })
+
+    // Wait for the auto-stop. Allow up to 2.5 s; the window is 0.9 s of
+    // audio.
+    await vi.waitFor(() => expect(c.isPlaying).toBe(false), { timeout: 2500 })
+    expect(audio.paused).toBe(true)
+    // After auto-stop, currentTime should land at rangeStart (within
+    // the END_EPS the controller uses internally).
+    expect(audio.currentTime).toBeLessThan(0.4)
+  })
+
+  /**
+   * Mid-song-play guard: if the playhead is already past bar 1 beat 1,
+   * pressing Play must NOT trigger a count-in pre-roll (count-in is a
+   * lead-in, not a mid-song interruption). The synthetic SongMap
+   * doesn't have a real audio reference, so we put the playhead at
+   * 1.0 s — past `firstDownbeatOriginalSec = 0` for this synthetic
+   * song — and expect immediate play.
+   */
+  it('skips count-in when audio.currentTime is past the song start', async () => {
+    const c = new PlaybackController()
+    const { audio, cleanup } = makeAudio(5)
+    cleanups.push(() => c.destroy(), cleanup)
+
+    c.setAudioElement(audio)
+    // Tight-trim song where the count-in path would otherwise activate.
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.playWithClick = true
+    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
+
+    // Park the playhead past bar 1 beat 1 (= 0 for this song).
+    c.seek(1.0)
+
+    const playSpy = vi.spyOn(audio, 'play')
+    c.play()
+    // Audio plays IMMEDIATELY — no deferred path.
+    expect(playSpy).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(c.isPlaying).toBe(true), { timeout: 2000 })
+  })
 })
