@@ -47,8 +47,16 @@ export function compareSidecarVersion(a: string, b: string): number {
  * what it is; don't force-redirect on guesswork — the broader
  * `reachable` check already covers "no sidecar at all"). A parseable
  * version below `MIN_SIDECAR_VERSION` → `'outdated'`; otherwise `'ok'`.
+ *
+ * Dev mode bypass: when running `npm run dev`, the local sidecar's
+ * `desktop/package.json#version` lags the deployed `MIN_SIDECAR_VERSION`
+ * routinely (we bump the web constant ahead of cutting the desktop
+ * release). Force-redirecting to `/download` mid-development is just
+ * noise — the dev sidecar is the right one to talk to. Production
+ * gating is untouched.
  */
 export function classifySidecarVersion(reported: string | null): SidecarVersionStatus {
+  if (import.meta.env.DEV) return 'ok'
   if (!reported) return 'unknown'
   return compareSidecarVersion(reported, MIN_SIDECAR_VERSION) >= 0 ? 'ok' : 'outdated'
 }
