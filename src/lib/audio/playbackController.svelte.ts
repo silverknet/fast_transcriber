@@ -144,9 +144,25 @@ export class PlaybackController {
         const onPlay = () => {
           this.isPlaying = true
           this.#startTransport()
+          // Belt-and-suspenders: the click-loop $effect below ALSO
+          // restarts the loop when `isPlaying` flips true, but if for
+          // any reason that effect doesn't fire (race with reactive
+          // graph ordering, or the loop bailed on a first frame where
+          // `el.paused` was still racing the play event), this direct
+          // call is the load-bearing path that gets clicks back on
+          // the beat. `#startClickLoop` is idempotent — early returns
+          // if the rAF is already running.
+          if (
+            this.playWithClick &&
+            this.plan &&
+            this.plan.clickPoints.length > 0
+          ) {
+            this.#startClickLoop()
+          }
         }
         const onPause = () => {
           this.isPlaying = false
+          this.#stopClickLoop()
         }
         const onCanPlay = () => {
           this.mediaReady = true
