@@ -2043,42 +2043,48 @@
           >
             Redo ↷
           </button>
-          {#if sm.timeline.original}
-            <span class="text-muted-foreground mx-2 text-xs">·</span>
-            {#if resetGridConfirming}
-              <button
-                type="button"
-                onclick={commitResetGrid}
-                class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
-              >
-                Yes, reset
-              </button>
-              <button
-                type="button"
-                onclick={cancelResetGridConfirm}
-                class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
-              >
-                Cancel
-              </button>
+          <span class="text-muted-foreground mx-2 text-xs">·</span>
+          {#if resetGridConfirming}
+            <button
+              type="button"
+              onclick={commitResetGrid}
+              class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+            >
+              Yes, reset
+            </button>
+            <button
+              type="button"
+              onclick={cancelResetGridConfirm}
+              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+            >
+              Cancel
+            </button>
+            <span class="text-muted-foreground text-xs">
+              Erases ALL bar and beat edits.
+            </span>
+          {:else}
+            <button
+              type="button"
+              onclick={startResetGridConfirm}
+              disabled={resetGridDisabled}
+              title={sm.timeline.original
+                ? 'Restore to the originally analyzed grid'
+                : 'Re-analyze the song to enable. Old projects don’t have a snapshot of the analyzed grid.'}
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+            >
+              Reset to analyzed
+            </button>
+            {#if !sm.timeline.original}
               <span class="text-muted-foreground text-xs">
-                Erases ALL bar and beat edits.
+                (re-analyze to enable)
               </span>
-            {:else}
-              <button
-                type="button"
-                onclick={startResetGridConfirm}
-                disabled={resetGridDisabled}
-                title="Restore to the originally analyzed grid"
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
-              >
-                Reset to analyzed
-              </button>
             {/if}
           {/if}
         </div>
         <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
-          ⌘Z / Ctrl+Z undoes the last edit. Hold ⇧ to redo. "Reset to
-          analyzed" jumps straight back to the analyzed baseline.
+          ⌘Z / Ctrl+Z undoes the last edit. Hold ⇧ to redo. Drag-edits
+          coalesce into one undo step. "Reset to analyzed" jumps
+          straight back to the analyzed baseline.
         </p>
       </section>
     {/if}

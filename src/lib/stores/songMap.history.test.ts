@@ -9,9 +9,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { get } from 'svelte/store'
 import {
+  beginPatchBatch,
   canRedo,
   canUndo,
   clearSongMap,
+  endPatchBatch,
   patchSongMap,
   redoSongMap,
   setSongMap,
@@ -113,6 +115,61 @@ describe('songMap undo / redo', () => {
     clearSongMap()
     expect(get(canUndo)).toBe(false)
     expect(get(canRedo)).toBe(false)
+  })
+
+  it('beginPatchBatch + endPatchBatch coalesces many edits into one undo entry', () => {
+    setSongMap(fresh())
+    beginPatchBatch()
+    for (let i = 0; i < 50; i++) {
+      patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: `t${i}` } }))
+    }
+    endPatchBatch()
+    expect(get(songMap)!.metadata.title).toBe('t49')
+    // One undo should return us to the PRE-BATCH state.
+    undoSongMap()
+    expect(get(songMap)!.metadata.title).toBe('Untitled')
+    expect(get(canUndo)).toBe(false)
+  })
+
+  it('redo walks back a batched undo as one step', () => {
+    setSongMap(fresh())
+    beginPatchBatch()
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'A' } }))
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'B' } }))
+    endPatchBatch()
+    undoSongMap()
+    expect(get(songMap)!.metadata.title).toBe('Untitled')
+    redoSongMap()
+    expect(get(songMap)!.metadata.title).toBe('B')
+  })
+
+  it('a batch with no net change pushes nothing', () => {
+    setSongMap(fresh())
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'A' } }))
+    expect(get(canUndo)).toBe(true)
+    const undoSizeBefore = get(songMap)!.metadata.title
+    beginPatchBatch()
+    // No patches inside the batch.
+    endPatchBatch()
+    undoSongMap()
+    expect(get(songMap)!.metadata.title).not.toBe(undoSizeBefore)
+    // Only one undo step exists (the pre-A state).
+    expect(get(canUndo)).toBe(false)
+  })
+
+  it('nested batches commit as one entry', () => {
+    setSongMap(fresh())
+    beginPatchBatch()
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'A' } }))
+    beginPatchBatch()
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'B' } }))
+    endPatchBatch()
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'C' } }))
+    endPatchBatch()
+    expect(get(songMap)!.metadata.title).toBe('C')
+    undoSongMap()
+    expect(get(songMap)!.metadata.title).toBe('Untitled')
+    expect(get(canUndo)).toBe(false)
   })
 
   it('caps the history stack — oldest entries drop when full', () => {

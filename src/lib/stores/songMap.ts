@@ -32,11 +32,15 @@ export const canRedo = derived(history, (h) => h.future.length > 0)
 
 export function setSongMap(map: SongMap | null) {
   history.set({ past: [], future: [] })
+  batchDepth = 0
+  batchStartState = null
   songMap.set(map)
 }
 
 export function clearSongMap() {
   history.set({ past: [], future: [] })
+  batchDepth = 0
+  batchStartState = null
   songMap.set(null)
 }
 
@@ -75,9 +79,62 @@ export function redoSongMap(): boolean {
 }
 
 /**
+ * Coalesce a sequence of `patchSongMap` calls into a single history
+ * entry. Used by the drag handlers in the bar strip / waveform so a
+ * pointer drag from boundary X to boundary Y produces ONE undo step,
+ * not one per pointermove frame.
+ *
+ * Usage:
+ *
+ *   beginPatchBatch()
+ *   try {
+ *     // ... many patchSongMap(...) calls
+ *   } finally {
+ *     endPatchBatch()
+ *   }
+ *
+ * Nested batches share the outermost batch — the stack only commits
+ * once per outermost `endPatchBatch()`. While a batch is active,
+ * intermediate patches update the store but do NOT push to history;
+ * the redo stack is cleared on first patch (consistent with single
+ * patches). On `endPatchBatch`, the PRE-BATCH state goes onto the
+ * undo stack as ONE entry.
+ */
+let batchDepth = 0
+let batchStartState: SongMap | null = null
+
+export function beginPatchBatch(): void {
+  if (batchDepth === 0) {
+    batchStartState = get(songMap)
+  }
+  batchDepth++
+}
+
+export function endPatchBatch(): void {
+  if (batchDepth === 0) return
+  batchDepth--
+  if (batchDepth !== 0) return
+  const start = batchStartState
+  batchStartState = null
+  const current = get(songMap)
+  // Push only when the batch actually moved the map. No-op batches
+  // (start === current) leave history untouched.
+  if (start && current && start !== current) {
+    history.update((h) => {
+      const past = [...h.past, start]
+      if (past.length > MAX_HISTORY) past.shift()
+      return { past, future: [] }
+    })
+  }
+}
+
+/**
  * Apply an immutable update to the current map. On validation failure the store is unchanged.
  * On success the PREVIOUS map is pushed onto the undo stack and the
  * redo stack is cleared (a fresh edit invalidates any forward path).
+ *
+ * While a `beginPatchBatch()` is active, the per-patch history push is
+ * suppressed — `endPatchBatch()` pushes ONE entry for the whole batch.
  */
 export function patchSongMap(
   updater: (map: SongMap) => SongMap,
@@ -114,11 +171,17 @@ export function patchSongMap(
     }
   })
   if (prev !== null) {
-    history.update((h) => {
-      const past = [...h.past, prev!]
-      if (past.length > MAX_HISTORY) past.shift()
-      return { past, future: [] }
-    })
+    if (batchDepth > 0) {
+      // Inside a batch: don't push per-patch entries. The future stack
+      // still clears, since any patch invalidates redo regardless.
+      history.update((h) => ({ past: h.past, future: [] }))
+    } else {
+      history.update((h) => {
+        const past = [...h.past, prev!]
+        if (past.length > MAX_HISTORY) past.shift()
+        return { past, future: [] }
+      })
+    }
   }
   return result
 }

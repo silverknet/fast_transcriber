@@ -7,6 +7,7 @@
   import type { BarGridAction } from '$lib/songmap/timelineEdit'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
+  import { beginPatchBatch, endPatchBatch } from '$lib/stores/songMap'
 
   /** Inline preview of an unaccepted suggested next section. */
   export type SuggestionPreview = {
@@ -641,6 +642,11 @@
     let raf = 0
     let pending: number | null = null
 
+    // Coalesce the whole drag into ONE undo step. Each pointermove
+    // emits a patchSongMap inside the batch; `endPatchBatch()` pushes
+    // exactly one history entry on pointerup.
+    beginPatchBatch()
+
     const emit = (t: number) => {
       onAction({
         type: 'setBarBoundary',
@@ -674,6 +680,7 @@
         emit(pending)
         pending = null
       }
+      endPatchBatch()
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
