@@ -132,27 +132,13 @@
      */
     audioElement = $bindable<HTMLAudioElement | null>(null),
     /**
-     * Editor-mode "Play with click" toolbar controls. All three are
-     * two-way bound so the parent owns the state and the click loop
-     * lives in /edit, but the *UI* (checkbox + volume popover) lives
-     * here in the toolbar where the play button is. DRY: the same
-     * playWithClick state drives both the toggle visual AND the
-     * parent's onAudioPlay decision; same clickVolume drives both
-     * the slider AND the click-loop gain node; same songVolume drives
-     * both the slider AND audioEl.volume.
-     *
-     * Only renders when variant === 'editor' AND there are beats to
-     * click against.
-     */
-    playWithClick = $bindable(false),
-    clickVolume = $bindable(1.5),
-    songVolume = $bindable(1),
-    /**
-     * Centralised playback engine. When provided, WaveformPlayer hands
-     * it the `<audio>` element on mount so future migrations can route
-     * play/click/transport through it. Currently DORMANT — the click
-     * loop and transport rAF stay inside this component so behavior is
-     * unchanged. Pass `null` (default) to skip the wire-up entirely.
+     * Centralised playback engine. Owns play / pause / click loop /
+     * count-in pre-roll / range-end auto-stop / volumes. The toolbar
+     * binds DIRECTLY to its fields (`bind:checked={controller.playWithClick}`,
+     * `bind:value={controller.clickVolume}`, etc.) — no parent-side
+     * $bindable bridge, no $effect sync, no race. When no controller
+     * is passed (the trim variant on the home page), we instantiate a
+     * local fallback so the binding still has a target.
      */
     controller: passedController = null as PlaybackController | null,
     /**
@@ -1586,7 +1572,7 @@
         >
           <input
             type="checkbox"
-            bind:checked={playWithClick}
+            bind:checked={controller.playWithClick}
             class="accent-foreground size-3.5"
           />
           <span class="font-bold uppercase tracking-wider">Click</span>
@@ -1611,12 +1597,12 @@
                   min="0"
                   max="2"
                   step="0.05"
-                  bind:value={clickVolume}
+                  bind:value={controller.clickVolume}
                   class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
                   aria-label="Click volume"
                 />
               </div>
-              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{clickVolume.toFixed(1)}×</span>
+              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{controller.clickVolume.toFixed(1)}×</span>
             </div>
             <div class="flex flex-col items-center gap-1">
               <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
@@ -1626,12 +1612,12 @@
                   min="0"
                   max="1"
                   step="0.01"
-                  bind:value={songVolume}
+                  bind:value={controller.songVolume}
                   class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
                   aria-label="Song volume"
                 />
               </div>
-              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(songVolume * 100)}%</span>
+              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(controller.songVolume * 100)}%</span>
             </div>
           </div>
         </details>

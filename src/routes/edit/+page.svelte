@@ -1040,42 +1040,14 @@
   let rafId = 0
 
   /**
-   * Click + volume state. Bound to WaveformPlayer's $bindable props
-   * (the toolbar UI). The click loop logic lives in WaveformPlayer
-   * itself now — no more parent-side click loop, no more orphan
-   * <audio> bridge, no more count-in pause/resume race.
-   *
-   * These are still declared here because (a) the Cue-mode mix
-   * preview also reads `clickVolume` via the shared clickMaster, and
-   * (b) keeping them as parent state makes the bind:propName wiring
-   * round-trip naturally.
-   */
-  let playWithClick = $state(false)
-  let clickVolume = $state(1.5)
-  let songVolume = $state(1)
-  // Shared click AudioContext / gain for Cue-mode mix preview only.
-  // WaveformPlayer's grid-mode clicks now route through the
-  // PlaybackController below.
-  let clickCtx: AudioContext | undefined
-  let clickMaster: GainNode | undefined
-
-  $effect(() => {
-    if (clickMaster) clickMaster.gain.value = clickVolume
-  })
-
-  /**
-   * Centralised playback engine for the grid editor — single runtime
-   * owner of the `<audio>` element + click loop + count-in pre-roll.
-   * Everything observable about playback flows through this controller;
-   * WaveformPlayer reads its `currentTime` / `isPlaying` and dispatches
-   * `play()` / `pause()` / `stop()` / `seek()`. No more local click
-   * loop or count-in pre-roll inside the component.
-   *
-   * State is fed in via `$effect`s — songMap, mediaTimeOffsetSec
-   * (= `plan.trimStartSec` for grid mode, since the audio element plays
-   * the full uploaded file), rangeStart/end, playWithClick, volumes —
-   * so the controller's `$derived plan` and click-loop lifecycle stay
-   * in lockstep with the `.smap`.
+   * Centralised playback engine for the grid editor — single owner of
+   * the `<audio>` element, click loop, count-in pre-roll, transport,
+   * range-end auto-stop, AND the click/volume UI state. The toolbar
+   * inside `WaveformPlayer` binds directly to `playbackController.playWithClick`
+   * / `.clickVolume` / `.songVolume` — no intermediate parent state,
+   * no $effect bridge. WaveformPlayer reads `currentTime` / `isPlaying`
+   * via `$derived` from the controller and dispatches `play() / pause()
+   * / stop() / seek()`.
    */
   const playbackController = new PlaybackController()
 
@@ -1095,20 +1067,6 @@
   $effect(() => {
     playbackController.rangeStart = rangeStart
     playbackController.rangeEnd = rangeEnd
-  })
-
-  // NOT syncing `playWithClick` into the controller — that keeps the
-  // controller's click loop dormant while WaveformPlayer still owns
-  // grid-mode clicks. Once Step 4 lands and the controller takes over,
-  // un-comment this line and delete WaveformPlayer's local loop.
-  // $effect(() => { playbackController.playWithClick = playWithClick })
-
-  $effect(() => {
-    playbackController.clickVolume = clickVolume
-  })
-
-  $effect(() => {
-    playbackController.songVolume = songVolume
   })
 
   onDestroy(() => {
@@ -1155,16 +1113,6 @@
   function stopPreviewLoop() {
     if (rafId) cancelAnimationFrame(rafId)
     rafId = 0
-  }
-
-  function ensureClickGraph() {
-    if (clickCtx && clickMaster) return
-    const ctx = new AudioContext()
-    const g = ctx.createGain()
-    g.gain.value = clickVolume
-    g.connect(ctx.destination)
-    clickCtx = ctx
-    clickMaster = g
   }
 
   // The Debug-tools "Play bar X" preview uses `audioEl` (bound to
@@ -1550,9 +1498,6 @@
   onDestroy(() => {
     stopPreviewLoop()
     audioEl?.pause()
-    void clickCtx?.close()
-    clickCtx = undefined
-    clickMaster = undefined
   })
 </script>
 
@@ -2010,9 +1955,6 @@
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
           bind:audioElement={audioEl}
-          bind:playWithClick
-          bind:clickVolume
-          bind:songVolume
           countInTicks={editMode === 'grid' ? countInTicksForGrid : []}
           songStartBarIndex={songStartBarIndex}
           onSetStartBar={editMode === 'grid' ? setStartBar : undefined}
