@@ -72,7 +72,14 @@
   import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey, SongMap } from '$lib/songmap/types'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
-  import { patchSongMap, songMap } from '$lib/stores/songMap'
+  import {
+    canRedo,
+    canUndo,
+    patchSongMap,
+    redoSongMap,
+    songMap,
+    undoSongMap,
+  } from '$lib/stores/songMap'
   import { ArrowLeft, Music, Pause, Pencil, Play } from '@lucide/svelte'
 
   /** Half-open bar interval [start, end) — match `audioTransport` end clamp */
@@ -81,6 +88,38 @@
   const previewBars = 5
 
   let beatEditError = $state('')
+
+  /**
+   * Global Cmd/Ctrl+Z undo + Cmd/Ctrl+Shift+Z (or Cmd/Ctrl+Y) redo.
+   * Registered once via `onMount`; teardown runs in `onDestroy`. The
+   * handler ignores key events that originated in an editable field
+   * (text inputs, contentEditable, the chord picker) so we don't fight
+   * native browser undo while the user is typing.
+   */
+  function isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false
+    if (target.isContentEditable) return true
+    const tag = target.tagName
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+  }
+
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod) return
+      if (isEditableTarget(e.target)) return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undoSongMap()
+      } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+        e.preventDefault()
+        redoSongMap()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
 
   function confirmBackToImport() {
     const ok = confirm(
@@ -1979,49 +2018,68 @@
       {/if}
     {/if}
 
-    {#if editMode === 'grid' && sm.timeline.beats.length > 0 && sm.timeline.original}
+    {#if editMode === 'grid' && sm.timeline.beats.length > 0}
       <section
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Grid edits"
+        aria-label="Edit history"
       >
-        <h2 class="text-muted-foreground mb-3 text-xs font-medium uppercase tracking-wide">Grid edits</h2>
-        <div class="flex flex-wrap items-center gap-3">
-          {#if resetGridConfirming}
-            <button
-              type="button"
-              onclick={commitResetGrid}
-              class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
-            >
-              Yes, reset
-            </button>
-            <button
-              type="button"
-              onclick={cancelResetGridConfirm}
-              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
-            >
-              Cancel
-            </button>
-            <span class="text-muted-foreground text-xs">
-              This will erase your bar and beat edits.
-            </span>
-          {:else}
-            <button
-              type="button"
-              onclick={startResetGridConfirm}
-              disabled={resetGridDisabled}
-              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
-            >
-              Reset grid
-            </button>
-            <span class="text-muted-foreground text-xs">
-              {#if resetGridDisabled}
-                No edits to undo.
-              {:else}
-                Restore to the analyzed baseline.
-              {/if}
-            </span>
+        <h2 class="text-muted-foreground mb-3 text-xs font-medium uppercase tracking-wide">History</h2>
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onclick={undoSongMap}
+            disabled={!$canUndo}
+            title="Undo (⌘Z / Ctrl+Z)"
+            class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
+          >
+            ↶ Undo
+          </button>
+          <button
+            type="button"
+            onclick={redoSongMap}
+            disabled={!$canRedo}
+            title="Redo (⌘⇧Z / Ctrl+Shift+Z)"
+            class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
+          >
+            Redo ↷
+          </button>
+          {#if sm.timeline.original}
+            <span class="text-muted-foreground mx-2 text-xs">·</span>
+            {#if resetGridConfirming}
+              <button
+                type="button"
+                onclick={commitResetGrid}
+                class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+              >
+                Yes, reset
+              </button>
+              <button
+                type="button"
+                onclick={cancelResetGridConfirm}
+                class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+              >
+                Cancel
+              </button>
+              <span class="text-muted-foreground text-xs">
+                Erases ALL bar and beat edits.
+              </span>
+            {:else}
+              <button
+                type="button"
+                onclick={startResetGridConfirm}
+                disabled={resetGridDisabled}
+                title="Restore to the originally analyzed grid"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+              >
+                Reset to analyzed
+              </button>
+            {/if}
           {/if}
         </div>
+        <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
+          ⌘Z / Ctrl+Z undoes the last edit. Hold ⇧ to redo. "Reset to
+          analyzed" jumps straight back to the analyzed baseline.
+        </p>
       </section>
     {/if}
 
