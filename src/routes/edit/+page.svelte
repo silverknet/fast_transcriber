@@ -81,6 +81,10 @@
     undoSongMap,
   } from '$lib/stores/songMap'
   import { ArrowLeft, Music, Pause, Pencil, Play } from '@lucide/svelte'
+  import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
+  import { trimAudioFileToWav } from '$lib/audio/trimAudio'
+  import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
+  import { reanalyzeShape, reanalyzeWithHarmony } from '$lib/songmap/reanalyze'
 
   /** Half-open bar interval [start, end) — match `audioTransport` end clamp */
   const END_EPS = 0.028
@@ -190,6 +194,74 @@
   let resetGridDisabled = $derived(
     !$songMap || !$songMap.timeline.original || timelineMatchesOriginal($songMap),
   )
+
+  /**
+   * Re-run beat detection on the current audio + trim. When the new
+   * grid has the same beat AND bar count as the old one, chords and
+   * sections survive (chord beatIds are re-anchored by sorted-time
+   * position; sections are bar.index-positional). When the counts
+   * differ, the user is warned before chords + sections are dropped.
+   *
+   * Available even when `timeline.original` is absent (legacy projects)
+   * — re-analyzing populates it as a side effect, which is the
+   * intended way to enable "Reset to analyzed" for those projects.
+   */
+  let reanalyzeBusy = $state(false)
+  let reanalyzeError = $state('')
+
+  async function reanalyzeGrid(): Promise<void> {
+    if (reanalyzeBusy) return
+    const sm = get(songMap)
+    const file = get(audioSession).file
+    if (!sm || !file) {
+      reanalyzeError = 'No audio loaded.'
+      return
+    }
+    const trim = sm.audio?.trim
+    if (!trim || !(trim.endSec > trim.startSec)) {
+      reanalyzeError = 'Trim is missing or empty. Set it in the Grid tab first.'
+      return
+    }
+    reanalyzeBusy = true
+    reanalyzeError = ''
+    try {
+      const { file: trimmedWav } = await trimAudioFileToWav(file, trim.startSec, trim.endSec)
+      const r = await analyzeDownbeatsViaDesktop(trimmedWav)
+      if (!r.ok) {
+        throw new Error(r.error ?? 'Analyzer returned no beats.')
+      }
+      const fresh = beatsToSongMap({
+        filename: trimmedWav.name,
+        durationSec: Math.max(0, trim.endSec - trim.startSec),
+        mimeType: trimmedWav.type || 'audio/wav',
+        beats: r.beats,
+      })
+      const shape = reanalyzeShape(sm, fresh.timeline.bars, fresh.timeline.beats)
+      if (shape === 'mismatch') {
+        const oldB = sm.timeline.beats.length
+        const newB = fresh.timeline.beats.length
+        const oldBars = sm.timeline.bars.length
+        const newBars = fresh.timeline.bars.length
+        const lostChords = sm.harmony.length
+        const lostSections = sm.sections.length
+        const proceed = confirm(
+          `Re-analysis returned a different grid (${newB} beats / ${newBars} bars; you had ${oldB} / ${oldBars}).\n\n` +
+            `${lostChords} chord${lostChords === 1 ? '' : 's'} and ${lostSections} section${lostSections === 1 ? '' : 's'} ` +
+            `can't be matched and will be removed.\n\nContinue?`,
+        )
+        if (!proceed) return
+      }
+      const out = reanalyzeWithHarmony(sm, fresh.timeline.bars, fresh.timeline.beats)
+      const p = patchSongMap(() => out.map)
+      if (!p.ok) {
+        reanalyzeError = p.errors.join('; ')
+      }
+    } catch (e) {
+      reanalyzeError = e instanceof Error ? e.message : String(e)
+    } finally {
+      reanalyzeBusy = false
+    }
+  }
 
   let sectionsSelectionBarIds = $state<string[]>([])
 
@@ -2074,17 +2146,27 @@
             >
               Reset to analyzed
             </button>
-            {#if !sm.timeline.original}
-              <span class="text-muted-foreground text-xs">
-                (re-analyze to enable)
-              </span>
-            {/if}
+            <button
+              type="button"
+              onclick={reanalyzeGrid}
+              disabled={reanalyzeBusy || !$audioSession.file}
+              title="Re-run beat detection. Chords + sections survive when the new grid has the same beat count; otherwise you'll get a warning before they're cleared."
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+            >
+              {reanalyzeBusy ? 'Re-analyzing…' : 'Re-analyze grid'}
+            </button>
           {/if}
         </div>
+        {#if reanalyzeError}
+          <p class="text-destructive mt-2 text-xs" role="status">{reanalyzeError}</p>
+        {/if}
         <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
           ⌘Z / Ctrl+Z undoes the last edit. Hold ⇧ to redo. Drag-edits
           coalesce into one undo step. "Reset to analyzed" jumps
-          straight back to the analyzed baseline.
+          straight back to the analyzed baseline. "Re-analyze grid"
+          re-runs beat detection — chords + sections survive when the
+          new grid has the same beat count, otherwise you'll be warned
+          before they're cleared.
         </p>
       </section>
     {/if}
