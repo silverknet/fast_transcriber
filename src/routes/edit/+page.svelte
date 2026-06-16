@@ -1162,6 +1162,33 @@
    */
   const playbackController = new PlaybackController()
 
+  // Restore the per-device click sync calibration from localStorage —
+  // it's a property of the audio output chain (speakers / Bluetooth /
+  // USB interface), not the song, so it persists across reloads.
+  const CLICK_OFFSET_STORAGE_KEY = 'barbro:clickOffsetSec'
+  if (browser) {
+    try {
+      const raw = localStorage.getItem(CLICK_OFFSET_STORAGE_KEY)
+      if (raw !== null) {
+        const v = Number(raw)
+        if (Number.isFinite(v) && Math.abs(v) <= 0.5) {
+          playbackController.clickOffsetSec = v
+        }
+      }
+    } catch {
+      /* ignore localStorage errors (Safari private mode, etc.) */
+    }
+  }
+  $effect(() => {
+    if (!browser) return
+    const v = playbackController.clickOffsetSec
+    try {
+      localStorage.setItem(CLICK_OFFSET_STORAGE_KEY, String(v))
+    } catch {
+      /* ignore */
+    }
+  })
+
   $effect(() => {
     playbackController.setSongMap($songMap ?? null)
   })

@@ -1620,6 +1620,43 @@
               <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(controller.songVolume * 100)}%</span>
             </div>
           </div>
+          <!-- Click sync calibration — fine-tune if you hear the click
+               sitting ahead of or behind the beat. Saved to localStorage
+               so it survives reloads (per-device, not per-song — sync
+               drift comes from the audio output chain, not the song). -->
+          <div class="border-foreground/10 mt-3 flex flex-col gap-2 border-t pt-3">
+            <div class="flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wider">
+              <span class="text-muted-foreground">Click sync</span>
+              <span class="text-foreground font-mono tabular-nums">{(controller.clickOffsetSec * 1000).toFixed(0)} ms</span>
+            </div>
+            <input
+              type="range"
+              min="-0.05"
+              max="0.05"
+              step="0.001"
+              bind:value={controller.clickOffsetSec}
+              class="accent-foreground w-full cursor-pointer"
+              aria-label="Click offset (seconds, ±50ms)"
+            />
+            <div class="flex items-center justify-between gap-2 text-[10px]">
+              <button
+                type="button"
+                onclick={() => (controller.clickOffsetSec = 0)}
+                class="border-foreground/40 hover:bg-foreground/5 border px-1.5 py-0.5 uppercase tracking-wider"
+              >
+                Reset
+              </button>
+              <label class="flex cursor-pointer items-center gap-1.5 uppercase tracking-wider">
+                <input type="checkbox" bind:checked={controller.debugClickTiming} class="size-3" />
+                <span class="text-muted-foreground">Log timing</span>
+              </label>
+            </div>
+            <p class="text-muted-foreground text-[10px] leading-snug">
+              Negative = clicks fire earlier; positive = later. Toggle "Log
+              timing" + open DevTools console; press Play. First 16 clicks
+              print their scheduling numbers so you can compare drift.
+            </p>
+          </div>
         </details>
       {/if}
       <span class="text-muted-foreground font-mono text-xs tabular-nums">

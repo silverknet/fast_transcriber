@@ -84,6 +84,25 @@ export class PlaybackController {
   clickVolume = $state(1.5)
   songVolume = $state(1)
 
+  /**
+   * Per-system fine-tune. Positive = clicks fire LATER (in seconds);
+   * negative = clicks fire EARLIER. Compensates for any residual
+   * latency mismatch between the audio element's playback pipeline and
+   * Web Audio's scheduling pipeline that the `MediaElementAudioSourceNode`
+   * routing didn't fully eliminate (different speakers / Bluetooth /
+   * USB interfaces / etc.). Default 0 — change with the calibration
+   * slider in the Vol popover until clicks lock to the beat.
+   */
+  clickOffsetSec = $state(0)
+  /**
+   * Set true to log every scheduled click's `(planTime, ctxNow, scheduleAt,
+   * delta, offsetApplied)` to the console for the first N firings after
+   * each play. Used to verify sync numerically without ear-balling.
+   */
+  debugClickTiming = $state(false)
+  /** How many remaining debug log lines to print before going quiet. */
+  #debugLogBudget = 0
+
   // ── Audio-element mirrors (updated in the transport rAF) ───────────
   isPlaying = $state(false)
   currentTime = $state(0)
@@ -246,6 +265,9 @@ export class PlaybackController {
   play(): void {
     const el = this.audioEl
     if (!el || this.isPlaying) return
+    // Each play() refreshes the debug log budget so we can compare
+    // sync across multiple takes without remembering to toggle.
+    if (this.debugClickTiming) this.#debugLogBudget = 16
 
     const plan = this.plan
     const preroll = plan?.prependSec ?? 0
@@ -295,12 +317,14 @@ export class PlaybackController {
     void ctx.resume()
 
     const baseCtxTime = ctx.currentTime
+    const calOffset = this.clickOffsetSec
     for (const c of plan.clickPoints) {
       if (!c.isCountIn) continue
       // c.timeSec is in [-prependSec, 0). Shift by +prependSec so the
       // first count-in click rings ~now and the last lands one beat
-      // before audio starts.
-      const offset = preroll + c.timeSec
+      // before audio starts. `clickOffsetSec` calibration is applied
+      // so count-in stays in lockstep with the song clicks.
+      const offset = preroll + c.timeSec + calOffset
       if (offset < -1e-9) continue
       playMetronomeClick(
         ctx,
@@ -532,8 +556,33 @@ export class PlaybackController {
         // scheduling them all at `ctxNow + LEAD` would fire them up to
         // `CLICK_LOOKAHEAD_SEC` early (audible drift).
         const delta = c.timeSec - planTime
-        const scheduleAt = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, delta)
+        const offset = this.clickOffsetSec
+        const scheduleAt = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, delta + offset)
         playMetronomeClick(ctx, master, scheduleAt, c.downbeat)
+        if (this.debugClickTiming && this.#debugLogBudget > 0) {
+          this.#debugLogBudget--
+          // Numbers are in seconds; we log to 4 decimals (= 100 µs) which
+          // is finer than human perception (~10 ms). What to look at:
+          //   delta       = how far in the future this click should fire,
+          //                 derived purely from the plan + audio.currentTime.
+          //                 If consecutive deltas drift down toward 0 over
+          //                 time the audio + Web Audio clocks are drifting.
+          //   scheduleAt  = absolute ctx.currentTime at which the click
+          //                 oscillator starts ramping in.
+          //   audioElTime = the audio element's reported currentTime.
+          //                 Compare against ctxNow to see if the two
+          //                 pipelines stay locked through a track.
+          console.log('[click]', {
+            beat: this.#nextClickIdx,
+            downbeat: c.downbeat,
+            planTime: planTime.toFixed(4),
+            ctxNow: ctxNow.toFixed(4),
+            delta: delta.toFixed(4),
+            offsetApplied: offset.toFixed(4),
+            scheduleAt: scheduleAt.toFixed(4),
+            audioElTime: el.currentTime.toFixed(4),
+          })
+        }
       }
       this.#nextClickIdx++
     }
