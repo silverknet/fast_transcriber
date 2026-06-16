@@ -1585,77 +1585,96 @@
             Vol
           </summary>
           <div
-            class="border-foreground bg-background absolute right-0 top-9 z-20 flex items-end gap-4 border-2 px-4 py-3 shadow-lg"
+            class="border-foreground bg-background absolute right-0 top-9 z-20 flex w-64 flex-col gap-4 border-2 px-4 py-3 shadow-lg"
             role="dialog"
-            aria-label="Volume sliders"
+            aria-label="Volume and click sync"
           >
-            <div class="flex flex-col items-center gap-1">
-              <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
-              <div class="relative h-24 w-6">
-                <input
-                  type="range"
-                  min="0"
-                  max="2"
-                  step="0.05"
-                  bind:value={controller.clickVolume}
-                  class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
-                  aria-label="Click volume"
-                />
+            <div class="flex items-end justify-around gap-4">
+              <div class="flex flex-col items-center gap-1">
+                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
+                <div class="relative h-24 w-6">
+                  <input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.05"
+                    bind:value={controller.clickVolume}
+                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                    aria-label="Click volume"
+                  />
+                </div>
+                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{controller.clickVolume.toFixed(1)}×</span>
               </div>
-              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{controller.clickVolume.toFixed(1)}×</span>
-            </div>
-            <div class="flex flex-col items-center gap-1">
-              <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
-              <div class="relative h-24 w-6">
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  bind:value={controller.songVolume}
-                  class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
-                  aria-label="Song volume"
-                />
+              <div class="flex flex-col items-center gap-1">
+                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
+                <div class="relative h-24 w-6">
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    bind:value={controller.songVolume}
+                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                    aria-label="Song volume"
+                  />
+                </div>
+                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(controller.songVolume * 100)}%</span>
               </div>
-              <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(controller.songVolume * 100)}%</span>
             </div>
-          </div>
-          <!-- Click sync calibration — fine-tune if you hear the click
-               sitting ahead of or behind the beat. Saved to localStorage
-               so it survives reloads (per-device, not per-song — sync
-               drift comes from the audio output chain, not the song). -->
-          <div class="border-foreground/10 mt-3 flex flex-col gap-2 border-t pt-3">
-            <div class="flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wider">
-              <span class="text-muted-foreground">Click sync</span>
-              <span class="text-foreground font-mono tabular-nums">{(controller.clickOffsetSec * 1000).toFixed(0)} ms</span>
+            <!-- Click sync calibration. Default 0 is what the engine
+                 considers correct after routing audio + clicks through
+                 the same Web Audio context. The slider is a fine-tune
+                 escape hatch for unusual output chains (Bluetooth
+                 latency, USB interfaces, etc.) — IF clicks ever feel
+                 off relative to the waveform. Snaps to zero in the
+                 ±2 ms detent so it’s easy to recenter. Saved per
+                 device (it’s an output-chain property, not a song
+                 property). The "Log timing" toggle prints scheduling
+                 numbers to DevTools so we can verify drift instead of
+                 ear-balling it. -->
+            <div class="border-foreground/10 flex flex-col gap-2 border-t pt-3">
+              <div class="flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wider">
+                <span class="text-muted-foreground">Click sync</span>
+                <span
+                  class="font-mono tabular-nums {controller.clickOffsetSec === 0 ? 'text-muted-foreground' : 'text-foreground'}"
+                >
+                  {controller.clickOffsetSec === 0 ? '0 ms' : `${controller.clickOffsetSec > 0 ? '+' : ''}${(controller.clickOffsetSec * 1000).toFixed(0)} ms`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="-0.05"
+                max="0.05"
+                step="0.001"
+                value={controller.clickOffsetSec}
+                oninput={(e) => {
+                  const raw = Number((e.currentTarget as HTMLInputElement).value)
+                  controller.clickOffsetSec = Math.abs(raw) < 0.002 ? 0 : raw
+                }}
+                ondblclick={() => (controller.clickOffsetSec = 0)}
+                class="accent-foreground w-full cursor-pointer"
+                aria-label="Click offset (seconds, ±50ms; snaps to zero inside ±2 ms; double-click to reset)"
+              />
+              <div class="flex items-center justify-between gap-2 text-[10px]">
+                <button
+                  type="button"
+                  onclick={() => (controller.clickOffsetSec = 0)}
+                  disabled={controller.clickOffsetSec === 0}
+                  class="border-foreground/40 hover:bg-foreground/5 disabled:opacity-40 border px-1.5 py-0.5 uppercase tracking-wider"
+                >
+                  Reset
+                </button>
+                <label class="flex cursor-pointer items-center gap-1.5 uppercase tracking-wider">
+                  <input type="checkbox" bind:checked={controller.debugClickTiming} class="size-3" />
+                  <span class="text-muted-foreground">Log to console</span>
+                </label>
+              </div>
+              <p class="text-muted-foreground text-[10px] leading-snug">
+                Leave at 0 — engine targets perfect sync with the waveform.
+                Only nudge if clicks feel off through specific headphones /
+                speakers; the value is saved per device.
+              </p>
             </div>
-            <input
-              type="range"
-              min="-0.05"
-              max="0.05"
-              step="0.001"
-              bind:value={controller.clickOffsetSec}
-              class="accent-foreground w-full cursor-pointer"
-              aria-label="Click offset (seconds, ±50ms)"
-            />
-            <div class="flex items-center justify-between gap-2 text-[10px]">
-              <button
-                type="button"
-                onclick={() => (controller.clickOffsetSec = 0)}
-                class="border-foreground/40 hover:bg-foreground/5 border px-1.5 py-0.5 uppercase tracking-wider"
-              >
-                Reset
-              </button>
-              <label class="flex cursor-pointer items-center gap-1.5 uppercase tracking-wider">
-                <input type="checkbox" bind:checked={controller.debugClickTiming} class="size-3" />
-                <span class="text-muted-foreground">Log timing</span>
-              </label>
-            </div>
-            <p class="text-muted-foreground text-[10px] leading-snug">
-              Negative = clicks fire earlier; positive = later. Toggle "Log
-              timing" + open DevTools console; press Play. First 16 clicks
-              print their scheduling numbers so you can compare drift.
-            </p>
           </div>
         </details>
       {/if}
