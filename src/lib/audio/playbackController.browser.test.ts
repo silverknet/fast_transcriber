@@ -1,67 +1,52 @@
 /**
- * Browser tests for `PlaybackController`. These run in a REAL Chromium
- * via vitest-browser + Playwright (`npm run test:browser`), so:
- *   - `<audio>` events fire on real timing.
- *   - `AudioContext` is the real one (with user-gesture gating).
- *   - Svelte 5 `$effect`s actually run; effect-graph ordering is the
- *     real browser ordering, not a node mock.
- *   - The audio element's `play()` returns a Promise that resolves on
- *     actual playback start (with real lifecycle).
+ * Browser tests for the buffer-based `PlaybackController`. Runs in a
+ * REAL Chromium via `npm run test:browser`, exercising real Web Audio
+ * scheduling, real `AudioBufferSourceNode`, and the real `$effect`
+ * graph. The unit tests in `playbackController.test.ts` cover the
+ * algebra; these cover the things mocks structurally can't.
  *
- * The unit tests in `playbackController.test.ts` already cover the
- * algebra (sync math, clamp ranges, derivations). These tests cover
- * the things mocks structurally can't:
- *   1. The `isPlaying × playWithClick × clickPoints.length` $effect
- *      actually fires in a real browser.
- *   2. The 'play' event listener attaches and re-fires `#startClickLoop`.
- *   3. `pause()` during a count-in pre-roll cancels the deferred play
- *      against a real audio element.
- *   4. The click loop creates OscillatorNodes (one per click) so we
- *      can count them as a proxy for "clicks actually fired".
- *
- * Test-audio strategy: a 5-second silent WAV blob URL drives the
- * `<audio>` element. Silent so headless Chromium doesn't gate playback
- * on user-gesture (it still needs ONE user gesture to start, but
- * a programmatic .play() call from inside the test counts since
- * `vitest-browser` runs in a real interaction context).
+ * Fixtures: a small silent WAV is decoded once via a real
+ * `AudioContext`, then handed to the controller as the `audioBuffer`.
+ * Headless Chromium is launched with `--autoplay-policy=no-user-
+ * gesture-required` so the context resumes without an artificial
+ * click prelude (see `vite.config.js`).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PlaybackController } from '$lib/audio/playbackController.svelte'
 import { defaultCueSettings } from '$lib/songmap/defaults'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 import type { SongMap } from '$lib/songmap/types'
 
-// ── Test fixtures ────────────────────────────────────────────────────
+// ── Fixtures ─────────────────────────────────────────────────────────
 
-/**
- * Make a tiny silent WAV blob. 5 seconds is plenty for the play/pause
- * tests; we don't care about the actual audio content, just that the
- * `<audio>` element accepts the source and fires real play/pause/ended
- * events.
- */
-function makeSilentWavBlob(durationSec = 5, sampleRate = 8000): Blob {
+function makeSilentWavArrayBuffer(durationSec = 5, sampleRate = 8000): ArrayBuffer {
   const numFrames = Math.floor(durationSec * sampleRate)
   const dataSize = numFrames * 2
   const buffer = new ArrayBuffer(44 + dataSize)
   const view = new DataView(buffer)
-  // RIFF chunk descriptor
   view.setUint32(0, 0x52494646, false) // "RIFF"
   view.setUint32(4, 36 + dataSize, true)
   view.setUint32(8, 0x57415645, false) // "WAVE"
-  // fmt sub-chunk
   view.setUint32(12, 0x666d7420, false) // "fmt "
-  view.setUint32(16, 16, true) // fmt size
+  view.setUint32(16, 16, true)
   view.setUint16(20, 1, true) // PCM
   view.setUint16(22, 1, true) // mono
   view.setUint32(24, sampleRate, true)
   view.setUint32(28, sampleRate * 2, true)
   view.setUint16(32, 2, true)
   view.setUint16(34, 16, true)
-  // data sub-chunk
   view.setUint32(36, 0x64617461, false) // "data"
   view.setUint32(40, dataSize, true)
-  // Samples are already zero from ArrayBuffer init — silent.
-  return new Blob([buffer], { type: 'audio/wav' })
+  return buffer
+}
+
+async function decodeSilentBuffer(durationSec = 5): Promise<AudioBuffer> {
+  const ac = new AudioContext()
+  try {
+    return await ac.decodeAudioData(makeSilentWavArrayBuffer(durationSec))
+  } finally {
+    await ac.close().catch(() => {})
+  }
 }
 
 function makeSong(opts: {
@@ -120,101 +105,69 @@ function makeSong(opts: {
   } as SongMap
 }
 
-/**
- * Spin up a real `<audio>` element with the silent WAV source. Caller
- * gets the element and a cleanup function that revokes the blob URL.
- * The element is appended to `document.body` so play() works without
- * "element not connected" complaints in some browsers.
- */
-function makeAudio(durationSec = 5): { audio: HTMLAudioElement; cleanup: () => void } {
-  const blob = makeSilentWavBlob(durationSec)
-  const url = URL.createObjectURL(blob)
-  const audio = document.createElement('audio')
-  audio.preload = 'auto'
-  audio.src = url
-  document.body.appendChild(audio)
-  return {
-    audio,
-    cleanup: () => {
-      audio.pause()
-      audio.remove()
-      URL.revokeObjectURL(url)
-    },
-  }
-}
-
-/** Sleep `ms` real milliseconds — used for letting browser timing settle. */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// ── Lifecycle ────────────────────────────────────────────────────────
+const cleanups: Array<() => void | Promise<void>> = []
 
-const cleanups: Array<() => void> = []
-
-afterEach(() => {
-  while (cleanups.length) cleanups.pop()!()
+afterEach(async () => {
+  while (cleanups.length) {
+    const fn = cleanups.pop()!
+    await fn()
+  }
 })
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-describe('PlaybackController (real browser)', () => {
-  it('play() flips isPlaying true after the real audio element starts', async () => {
+describe('PlaybackController (real browser, buffer-based)', () => {
+  it('play() flips isPlaying true and schedules a BufferSource', async () => {
     const c = new PlaybackController()
-    const { audio, cleanup } = makeAudio()
-    cleanups.push(() => c.destroy(), cleanup)
+    const buf = await decodeSilentBuffer(2)
+    cleanups.push(() => c.destroy())
 
-    c.setAudioElement(audio)
     c.setSongMap(makeSong({ barCount: 1 }))
-
-    // Wait for the element to be ready enough to actually play. `poll`
-    // sidesteps the addEventListener race where canplay can fire
-    // between our `if (readyState < 2)` check and the listener attach.
-    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
+    c.setAudioBuffer(buf)
+    c.rangeEnd = buf.duration
 
     expect(c.isPlaying).toBe(false)
     c.play()
-    // Wait for the controller's listener to flip isPlaying — which it
-    // does inside its 'play' event handler, set by the controller's
-    // `$effect`. If this never flips, the regression is "the play
-    // event listener isn't wired in a real browser".
-    await vi.waitFor(() => expect(c.isPlaying).toBe(true), { timeout: 3000 })
-    expect(audio.paused).toBe(false)
+    expect(c.isPlaying).toBe(true)
+    // Give the source a frame to actually start playing.
+    await sleep(100)
+    expect(c.currentTime).toBeGreaterThan(0)
   })
 
-  it('pause() flips isPlaying false against the real audio element', async () => {
+  it('pause() flips isPlaying false and freezes currentTime', async () => {
     const c = new PlaybackController()
-    const { audio, cleanup } = makeAudio()
-    cleanups.push(() => c.destroy(), cleanup)
+    const buf = await decodeSilentBuffer(3)
+    cleanups.push(() => c.destroy())
 
-    c.setAudioElement(audio)
     c.setSongMap(makeSong({ barCount: 1 }))
-    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
-
+    c.setAudioBuffer(buf)
+    c.rangeEnd = buf.duration
     c.play()
-    await vi.waitFor(() => expect(c.isPlaying).toBe(true), { timeout: 3000 })
-
+    await sleep(300)
+    const tBeforePause = c.currentTime
     c.pause()
-    await vi.waitFor(() => expect(c.isPlaying).toBe(false), { timeout: 3000 })
-    expect(audio.paused).toBe(true)
+    expect(c.isPlaying).toBe(false)
+    await sleep(200)
+    // currentTime stays put (within rAF tolerance).
+    expect(Math.abs(c.currentTime - tBeforePause)).toBeLessThan(0.1)
   })
 
   /**
-   * This is the test that catches today's regression class: the click
-   * loop must actually start when `playWithClick` is true at play
-   * time. We can't easily inspect Web Audio output, but each click
-   * goes through `playMetronomeClick` → `ctx.createOscillator()`, so
-   * spying on `createOscillator` counts clicks. One oscillator per
-   * click. Our `barCount = 1, beatsPerBar = 4` song has 4 beats; the
-   * loop fires them all once audio progresses past their time.
+   * Live grid regression: the click loop must actually fire
+   * oscillators when `playWithClick = true`. Each `playMetronomeClick`
+   * creates one `OscillatorNode`, so spying on `createOscillator`
+   * gives us a count. A 1-bar, 4-beat song should produce ≥3 within
+   * a couple of seconds of playback.
    */
-  it('click loop creates oscillators when playWithClick is on (the live grid regression catcher)', async () => {
+  it('click loop creates oscillators when playWithClick is on', async () => {
     const c = new PlaybackController()
-    const { audio, cleanup } = makeAudio()
-    cleanups.push(() => c.destroy(), cleanup)
+    const buf = await decodeSilentBuffer(3)
+    cleanups.push(() => c.destroy())
 
-    // Spy on AudioContext.createOscillator across all instances —
-    // `playMetronomeClick` creates exactly one oscillator per click.
     const origCreate = AudioContext.prototype.createOscillator
     const oscillatorCalls: number[] = []
     AudioContext.prototype.createOscillator = function (this: AudioContext) {
@@ -225,123 +178,85 @@ describe('PlaybackController (real browser)', () => {
       AudioContext.prototype.createOscillator = origCreate
     })
 
-    c.setAudioElement(audio)
-    // beatDur = 0.5 s → 4 beats span 0..1.5 s in plan-time.
     c.setSongMap(makeSong({ barCount: 1, beatsPerBar: 4, beatDurationSec: 0.5 }))
+    c.setAudioBuffer(buf)
+    c.rangeEnd = buf.duration
     c.playWithClick = true
-    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
-
     c.play()
-    await vi.waitFor(() => expect(audio.paused).toBe(false), { timeout: 3000 })
-    // Let the rAF loop run while audio plays through the 4 beats.
-    // 2.5 s real time gives the click loop plenty of headroom even on
-    // slow CI machines.
-    await sleep(2500)
+    // 4 beats × 0.5 s = 2 s of play; wait a bit more so the loop fires.
+    await sleep(2300)
     c.pause()
 
-    // The controller can also pre-schedule count-in clicks via the
-    // same `createOscillator` path, but this song has none — so every
-    // oscillator we counted is a song click. Allow a small tolerance
-    // in case the loop missed the very last one (audio paused right
-    // around it).
     expect(oscillatorCalls.length).toBeGreaterThanOrEqual(3)
     expect(oscillatorCalls.length).toBeLessThanOrEqual(5)
   })
 
   /**
-   * The bug fixed in commit e8025fc: pause/stop during count-in
-   * pre-roll must cancel the deferred `audio.play()`. Unit tests with
-   * fake timers covered the timing; this exercises the real audio
-   * element so we'd catch any drift in the real lifecycle.
+   * Tight-trim count-in: when `prependSec > 0`, the source is started
+   * AFTER the pre-roll. We don't measure the count-in oscillators
+   * directly (they're scheduled in advance and counted in the unit
+   * tests); here we just check that audio actually starts playing
+   * within a window that fits prependSec + lookahead.
    */
-  it('pause() during count-in pre-roll prevents the deferred audio.play()', async () => {
+  it('count-in pre-roll delays audio start by ~prependSec', async () => {
     const c = new PlaybackController()
-    const { audio, cleanup } = makeAudio()
-    cleanups.push(() => c.destroy(), cleanup)
+    const buf = await decodeSilentBuffer(5)
+    cleanups.push(() => c.destroy())
 
-    const playSpy = vi.spyOn(audio, 'play')
-
-    c.setAudioElement(audio)
-    // Tight trim: 4 beats × 0.5 s count-in needs 2.0 s pre-roll silence.
     c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.setAudioBuffer(buf)
+    c.rangeEnd = buf.duration
     c.playWithClick = true
-    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
-
     c.play()
-    // Verify the deferred path was taken — audio.play() must NOT have
-    // been called yet at this point (pre-roll is 2 s).
-    expect(playSpy).not.toHaveBeenCalled()
-
-    // Halfway through the pre-roll: user changes their mind.
-    await sleep(500)
-    c.pause()
-
-    // Wait past where the deferred play would have fired. If the cancel
-    // didn't work, playSpy would record a call here.
+    // Mid-prerollthe currentTime should still be ~0 (or the start position).
+    await sleep(800)
+    expect(c.currentTime).toBeLessThan(0.5)
+    // After the full pre-roll (2 s) + a buffer, currentTime should
+    // have started advancing.
     await sleep(2000)
-    expect(playSpy).not.toHaveBeenCalled()
-    expect(audio.paused).toBe(true)
+    expect(c.currentTime).toBeGreaterThan(0.2)
   })
 
   /**
-   * Range-end auto-stop. The controller's `#tickTransport` watches the
-   * audio element via rAF and pauses + seeks-to-rangeStart when
-   * `currentTime >= rangeEnd`. If this regresses we'd hear audio keep
-   * playing past the user's selection — annoying enough to be load-
-   * bearing.
+   * Range-end auto-stop. Playback pauses + currentTime snaps back to
+   * rangeStart when the playhead crosses rangeEnd.
    */
   it('auto-stops at rangeEnd and seeks back to rangeStart', async () => {
     const c = new PlaybackController()
-    const { audio, cleanup } = makeAudio(5)
-    cleanups.push(() => c.destroy(), cleanup)
+    const buf = await decodeSilentBuffer(5)
+    cleanups.push(() => c.destroy())
 
-    c.setAudioElement(audio)
     c.setSongMap(makeSong({ barCount: 4 }))
-    // Selection: 0.3 .. 1.2 in audio-element time. Tight window so the
-    // test exits within a couple of seconds.
+    c.setAudioBuffer(buf)
     c.rangeStart = 0.3
-    c.rangeEnd = 1.2
-    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
-
+    c.rangeEnd = 1.0
     c.seek(0.3)
-    c.play()
-    await vi.waitFor(() => expect(c.isPlaying).toBe(true), { timeout: 3000 })
 
-    // Wait for the auto-stop. Allow up to 2.5 s; the window is 0.9 s of
-    // audio.
+    c.play()
+    expect(c.isPlaying).toBe(true)
+    // 700 ms of play range — wait for the auto-stop with margin.
     await vi.waitFor(() => expect(c.isPlaying).toBe(false), { timeout: 2500 })
-    expect(audio.paused).toBe(true)
-    // After auto-stop, currentTime should land at rangeStart (within
-    // the END_EPS the controller uses internally).
-    expect(audio.currentTime).toBeLessThan(0.4)
+    expect(c.currentTime).toBeCloseTo(0.3, 1)
   })
 
   /**
-   * Mid-song-play guard: if the playhead is already past bar 1 beat 1,
-   * pressing Play must NOT trigger a count-in pre-roll (count-in is a
-   * lead-in, not a mid-song interruption). The synthetic SongMap
-   * doesn't have a real audio reference, so we put the playhead at
-   * 1.0 s — past `firstDownbeatOriginalSec = 0` for this synthetic
-   * song — and expect immediate play.
+   * Mid-song-play guard. If `currentTime > firstDownbeatOriginalSec`,
+   * no count-in pre-roll fires — `play()` starts the buffer at
+   * `ctxStart + 0`, not `ctxStart + prependSec`.
    */
-  it('skips count-in when audio.currentTime is past the song start', async () => {
+  it('skips count-in when currentTime is past the song start', async () => {
     const c = new PlaybackController()
-    const { audio, cleanup } = makeAudio(5)
-    cleanups.push(() => c.destroy(), cleanup)
+    const buf = await decodeSilentBuffer(3)
+    cleanups.push(() => c.destroy())
 
-    c.setAudioElement(audio)
-    // Tight-trim song where the count-in path would otherwise activate.
     c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.setAudioBuffer(buf)
+    c.rangeEnd = buf.duration
     c.playWithClick = true
-    await vi.waitFor(() => expect(audio.readyState).toBeGreaterThanOrEqual(2), { timeout: 3000 })
-
-    // Park the playhead past bar 1 beat 1 (= 0 for this song).
-    c.seek(1.0)
-
-    const playSpy = vi.spyOn(audio, 'play')
+    c.seek(1.0) // past firstDownbeatOriginalSec = 0
     c.play()
-    // Audio plays IMMEDIATELY — no deferred path.
-    expect(playSpy).toHaveBeenCalledTimes(1)
-    await vi.waitFor(() => expect(c.isPlaying).toBe(true), { timeout: 2000 })
+    await sleep(150)
+    // currentTime jumped to ~1.0+ immediately, NOT held at 1.0 for 2 s.
+    expect(c.currentTime).toBeGreaterThan(1.05)
   })
 })

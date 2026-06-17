@@ -1,70 +1,68 @@
 /**
- * PlaybackController unit tests.
+ * Unit tests for the buffer-based `PlaybackController`.
  *
- * The controller wraps a `<audio>` element and an `AudioContext`. Both
- * are mocked here so the tests run in the Node env without a browser.
- * The mocks expose just enough surface for the controller to schedule
- * clicks, observe play/pause events, and have its $effects fire.
- *
- * What we're proving:
- *  - The reactive lens works: mutating `songMap` recomputes `plan`,
- *    which (post-play) feeds the click loop without explicit restart.
- *  - `play()` schedules count-in clicks via Web Audio when prependSec > 0
- *    AND defers audio.play() by exactly that many milliseconds.
- *  - `play()` does NOT pre-schedule count-in clicks when prependSec === 0
- *    (clicks land in the audio's own lead-in window, picked up by rAF).
- *  - Volume bindings sync into the right places (clickMaster.gain,
- *    audioEl.volume) the moment the input changes.
- *  - destroy() tears down everything.
+ * The controller plays audio via `AudioBufferSourceNode` against ONE
+ * `AudioContext` that ALSO hosts the click oscillators. There is only
+ * one clock; sync between song and clicks is guaranteed by
+ * construction. These tests check the math + the lifecycle hooks; the
+ * "does it actually ring in sync" question lives in the browser
+ * tests (`*.browser.test.ts`) where we can run a real `AudioContext`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushSync } from 'svelte'
+import { PlaybackController } from '$lib/audio/playbackController.svelte'
 import { defaultCueSettings } from '$lib/songmap/defaults'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 import type { SongMap } from '$lib/songmap/types'
-import { PlaybackController } from '$lib/audio/playbackController.svelte'
 
-// ── Mocks ─────────────────────────────────────────────────────────────
+// ── Mocks ────────────────────────────────────────────────────────────
 
-/**
- * GainNode with the methods playMetronomeClick uses for envelope shaping.
- * The non-`value` setters are no-ops in tests; we only care that the
- * controller's plumbing reaches them without throwing.
- */
-class MockGainNode {
-  gain = {
-    value: 1,
-    setValueAtTime: vi.fn(),
-    linearRampToValueAtTime: vi.fn(),
-    exponentialRampToValueAtTime: vi.fn(),
-  }
-  connect = vi.fn()
+class MockAudioParam {
+  value = 0
+  setValueAtTime = vi.fn()
+  linearRampToValueAtTime = vi.fn()
+  exponentialRampToValueAtTime = vi.fn()
 }
 
-/**
- * OscillatorNode whose `start(time)` writes into a shared array so tests
- * can assert exactly when each metronome click was scheduled to fire.
- */
+class MockGainNode {
+  gain = new MockAudioParam()
+  connect = vi.fn()
+  disconnect = vi.fn()
+}
+
 class MockOscillatorNode {
-  frequency = { setValueAtTime: vi.fn() }
+  frequency = new MockAudioParam()
   type = ''
   connect = vi.fn()
-  start: (time: number) => void
+  start: (t: number) => void
   stop = vi.fn()
-
   constructor(public _scheduledStarts: number[]) {
-    this.start = (time: number) => {
-      this._scheduledStarts.push(time)
+    this.start = (t: number) => {
+      this._scheduledStarts.push(t)
     }
   }
+}
+
+class MockBufferSourceNode {
+  buffer: { duration: number } | null = null
+  connect = vi.fn()
+  disconnect = vi.fn()
+  /** Each `start` call records `[ctxTime, offset]`. */
+  starts: Array<[number, number?]> = []
+  start = (when: number, offset?: number) => {
+    this.starts.push([when, offset])
+  }
+  stop = vi.fn()
+  onended: (() => void) | null = null
 }
 
 class MockAudioContext {
   currentTime = 0
   destination = {}
   state: 'running' | 'suspended' | 'closed' = 'running'
-  /** Every `osc.start(time)` call ends up here (one per metronome click). */
+  /** Every `osc.start(t)` call ends up here. */
   scheduledStarts: number[] = []
+  /** Buffer sources created via `createBufferSource`. */
+  bufferSources: MockBufferSourceNode[] = []
   resume = vi.fn(async () => {
     this.state = 'running'
   })
@@ -77,33 +75,14 @@ class MockAudioContext {
   createOscillator() {
     return new MockOscillatorNode(this.scheduledStarts)
   }
+  createBufferSource() {
+    const s = new MockBufferSourceNode()
+    this.bufferSources.push(s)
+    return s
+  }
 }
 
 let lastCtx: MockAudioContext | null = null
-
-class MockAudioElement extends EventTarget {
-  duration = 60
-  currentTime = 0
-  paused = true
-  volume = 1
-  readyState = 4
-
-  play = vi.fn(async () => {
-    this.paused = false
-    this.dispatchEvent(new Event('play'))
-  })
-  pause = vi.fn(() => {
-    this.paused = true
-    this.dispatchEvent(new Event('pause'))
-  })
-}
-
-// ── Stub the metronome click so we can count + inspect schedule ──────
-// playMetronomeClick(ctx, master, startTime, downbeat) — the function
-// itself is in $lib/audio/debugClickTrack. We don't replace it; instead
-// we use the AudioContext's createOscillator/createGain spy chain: each
-// call to playMetronomeClick triggers one createOscillator + one createGain.
-// The OscillatorNode.start(time) call gives us the schedule.
 
 function makeSong(opts: {
   barCount?: number
@@ -127,12 +106,7 @@ function makeSong(opts: {
     for (let i = 0; i < beatsPerBar; i++) {
       const id = `b${bar}_${i}`
       beatIds.push(id)
-      beats.push({
-        id,
-        barId,
-        indexInBar: i,
-        timeSec: barStart + i * bd,
-      })
+      beats.push({ id, barId, indexInBar: i, timeSec: barStart + i * bd })
     }
     bars.push({
       id: barId,
@@ -166,25 +140,14 @@ function makeSong(opts: {
   } as SongMap
 }
 
-/** Pending rAF callbacks queued by the controller; flushed by `rafTick()`. */
-let pendingRaf: FrameRequestCallback[] = []
-
-/**
- * Drain the rAF queue once (drives both the transport rAF and click rAF).
- * Mimics a single animation frame; the test advances `ctx.currentTime`
- * and `audio.currentTime` manually between ticks to simulate playback.
- */
-function rafTick(time = 0): void {
-  const cbs = pendingRaf.slice()
-  pendingRaf = []
-  for (const cb of cbs) cb(time)
+/** Build a fake decoded buffer with the requested duration. */
+function makeBuffer(durationSec: number): AudioBuffer {
+  return { duration: durationSec } as unknown as AudioBuffer
 }
 
 beforeEach(() => {
   vi.useFakeTimers()
   lastCtx = null
-  // Stub the global AudioContext so the controller's #ensureClickGraph
-  // picks up our mock and we can introspect scheduled clicks.
   ;(globalThis as { AudioContext: typeof AudioContext }).AudioContext = function (
     this: MockAudioContext,
   ) {
@@ -192,17 +155,10 @@ beforeEach(() => {
     lastCtx = c
     return c
   } as unknown as typeof AudioContext
-  // requestAnimationFrame: capture the latest callback so tests can
-  // step the rAF loops deterministically via `rafTick()`. Returning a
-  // truthy handle lets the controller's loop-stop guards work normally.
-  pendingRaf = []
-  ;(globalThis as { requestAnimationFrame: (cb: FrameRequestCallback) => number }).requestAnimationFrame = ((
-    cb: FrameRequestCallback,
-  ) => {
-    pendingRaf.push(cb)
-    return pendingRaf.length as number
-  }) as unknown as (cb: FrameRequestCallback) => number
-  ;(globalThis as { cancelAnimationFrame: (handle: number) => void }).cancelAnimationFrame = vi.fn()
+  ;(globalThis as { requestAnimationFrame: (cb: FrameRequestCallback) => number }).requestAnimationFrame = vi.fn(
+    () => 1 as number,
+  )
+  ;(globalThis as { cancelAnimationFrame: (h: number) => void }).cancelAnimationFrame = vi.fn()
 })
 
 afterEach(() => {
@@ -232,6 +188,16 @@ describe('PlaybackController construction', () => {
     c.destroy()
   })
 
+  it('mediaReady is derived from audioBuffer (not audio element)', () => {
+    const c = new PlaybackController()
+    expect(c.mediaReady).toBe(false)
+    c.setAudioBuffer(makeBuffer(10))
+    expect(c.mediaReady).toBe(true)
+    c.setAudioBuffer(null)
+    expect(c.mediaReady).toBe(false)
+    c.destroy()
+  })
+
   it('plan recomputes when songMap is mutated through setSongMap', () => {
     const c = new PlaybackController()
     c.setSongMap(makeSong({ barCount: 2, countInBeats: 4 }))
@@ -242,261 +208,202 @@ describe('PlaybackController construction', () => {
   })
 })
 
-describe('PlaybackController.play()', () => {
-  it('calls audioEl.play() immediately when there is no count-in', async () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 2 }))
-    c.play()
-    expect(audio.play).toHaveBeenCalledTimes(1)
-    c.destroy()
-  })
-
-  it('calls audioEl.play() immediately when count-in is configured but playWithClick is off', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.play()
-    expect(audio.play).toHaveBeenCalledTimes(1)
-    c.destroy()
-  })
-
-  it('defers audioEl.play() by prependSec when count-in is active and prependSec > 0', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    // Tight trim — 4-beat count-in needs 2.0 s of prepend silence.
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play()
-    // Audio.play() should NOT have been called yet.
-    expect(audio.play).not.toHaveBeenCalled()
-    // Advance fake timers by the prepend duration; deferred play() should fire.
-    vi.advanceTimersByTime(2000)
-    expect(audio.play).toHaveBeenCalledTimes(1)
-    c.destroy()
-  })
-
-  /**
-   * Regression: previously the count-in setTimeout would fire its
-   * deferred `audio.play()` even after `pause()` had been called. The
-   * `isPlaying` guard at the top of the timeout doesn't help because
-   * `isPlaying` is still `false` (audio hadn't started yet). Now
-   * `pause()` clears the pending timeout.
-   */
-  it('pause() during count-in pre-roll cancels the deferred play', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play()
-    expect(audio.play).not.toHaveBeenCalled()
-    // Halfway through the pre-roll the user changes their mind.
-    vi.advanceTimersByTime(1000)
-    c.pause()
-    // Drain the remainder + a margin — the deferred play must NOT fire.
-    vi.advanceTimersByTime(2000)
-    expect(audio.play).not.toHaveBeenCalled()
-    c.destroy()
-  })
-
-  /** Same regression check for `stop()`, which is the Stop-button path. */
-  it('stop() during count-in pre-roll cancels the deferred play', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play()
-    expect(audio.play).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(500)
-    c.stop()
-    vi.advanceTimersByTime(2000)
-    expect(audio.play).not.toHaveBeenCalled()
-    c.destroy()
-  })
-
-  /**
-   * Mid-song-play guard: pressing Play when the playhead is already past
-   * the song start should skip count-in entirely (count-in is a lead-in,
-   * not an interruption). Otherwise hitting Play in the middle of a song
-   * would unexpectedly delay audio by `prependSec` while a count-in rang.
-   */
-  it('skips count-in when audio.currentTime is past the song start', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    // Move the playhead past bar 1 beat 1 (= original-time 0 here).
-    audio.currentTime = 1.0
-    c.play()
-    // Should play immediately — no pre-roll, no deferred play.
-    expect(audio.play).toHaveBeenCalledTimes(1)
-    c.destroy()
-  })
-
-  /** `destroy()` mid-pre-roll must also cancel — otherwise we leak a play onto a torn-down controller. */
-  it('destroy() during count-in pre-roll cancels the deferred play', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play()
-    c.destroy()
-    vi.advanceTimersByTime(3000)
-    expect(audio.play).not.toHaveBeenCalled()
-  })
-
-  it('plays immediately when count-in is configured but prependSec == 0 (enough lead-in)', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    // Wide trim — first downbeat is at 3.0 s in song-time; 4-beat
-    // count-in (2.0 s) fits inside the lead-in, prependSec == 0.
-    const sm = makeSong({
-      barCount: 6,
-      trimStartSec: -3,
-      trimEndSec: 12,
-      countInBeats: 4,
-    })
-    c.setSongMap(sm)
-    c.playWithClick = true
-    c.play()
-    expect(c.plan?.prependSec).toBe(0)
-    // Audio should play right away — no setTimeout.
-    expect(audio.play).toHaveBeenCalledTimes(1)
-    c.destroy()
-  })
-
-  it('does nothing when there is no audio element', () => {
+describe('PlaybackController.play() — buffer scheduling', () => {
+  it('no-ops when there is no audioBuffer', () => {
     const c = new PlaybackController()
     c.setSongMap(makeSong({ barCount: 2 }))
-    c.play() // no throw
+    c.play()
+    expect(c.isPlaying).toBe(false)
+    expect(lastCtx).toBeNull()
     c.destroy()
   })
 
-  it('does nothing when already playing', () => {
+  it('creates a BufferSource and schedules it at ctx.currentTime + lookahead', () => {
     const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 2 }))
-    audio.paused = false
-    c.isPlaying = true
+    c.setSongMap(makeSong({ barCount: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeEnd = 8
     c.play()
-    expect(audio.play).not.toHaveBeenCalled()
-    c.destroy()
-  })
-
-  it('pre-roll count-in clicks schedule at ctx.currentTime + i*beatDur (not all at "now")', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    // 4 beats × 0.5s, trimStart=0 → prependSec = 2.0s.
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play()
-
+    expect(c.isPlaying).toBe(true)
     expect(lastCtx).not.toBeNull()
-    const starts = lastCtx!.scheduledStarts.slice().sort((a, b) => a - b)
-    // 4 distinct count-in clicks scheduled in advance.
+    const ctx = lastCtx!
+    expect(ctx.bufferSources.length).toBe(1)
+    const src = ctx.bufferSources[0]!
+    // Lookahead is 0.04 s (matches MixerEngine).
+    expect(src.starts[0]![0]).toBeCloseTo(0.04, 3)
+    // Started from buffer offset 0 (we're at currentTime 0).
+    expect(src.starts[0]![1]).toBeCloseTo(0, 6)
+    c.destroy()
+  })
+
+  it('starts the source from the rangeStart when currentTime is outside the range', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeStart = 1.5
+    c.rangeEnd = 7
+    c.currentTime = 0 // outside [1.5, 7)
+    c.play()
+    const src = lastCtx!.bufferSources[0]!
+    expect(src.starts[0]![1]).toBeCloseTo(1.5, 6)
+    c.destroy()
+  })
+
+  it('with count-in, schedules source AFTER prependSec of pre-roll', () => {
+    const c = new PlaybackController()
+    // Tight trim — 4-beat count-in × 0.5 s needs 2.0 s prepend.
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeEnd = 8
+    c.playWithClick = true
+    c.play()
+    const src = lastCtx!.bufferSources[0]!
+    // Source starts at lookahead + prependSec = 0.04 + 2.0
+    expect(src.starts[0]![0]).toBeCloseTo(2.04, 2)
+    c.destroy()
+  })
+
+  it('with count-in, pre-schedules N click oscillators at ctxStart + c.timeSec', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeEnd = 8
+    c.playWithClick = true
+    c.play()
+    const ctx = lastCtx!
+    const starts = ctx.scheduledStarts.slice().sort((a, b) => a - b)
+    // 4 count-in clicks.
     expect(starts.length).toBe(4)
-    // First click rings ~now (LEAD_SEC of slack); last lands one beat
-    // before bar 1 (= 1.5s from now, since beatDur=0.5 and the 4th
-    // count-in click is 1 beat before bar 1, which is 2.0s from now).
-    expect(starts[0]).toBeGreaterThan(0)
-    expect(starts[0]).toBeLessThan(0.01)
-    expect(starts[3]! - starts[0]!).toBeCloseTo(1.5, 2)
+    // First click rings ~one beat into the pre-roll (count-in starts
+    // at `ctxStart - countInDuration = ctxStart - 2.0`; the first c.timeSec
+    // is `-prependSec = -2.0`, so fireAt = ctxStart - 2.0 = 0.04).
+    expect(starts[0]).toBeCloseTo(0.04, 2)
     // Even spacing — every consecutive pair is exactly beatDur (0.5s) apart.
     for (let i = 1; i < starts.length; i++) {
       expect(starts[i]! - starts[i - 1]!).toBeCloseTo(0.5, 3)
     }
     c.destroy()
   })
+
+  it('does nothing if already playing', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 2 }))
+    c.setAudioBuffer(makeBuffer(4))
+    c.rangeEnd = 4
+    c.play()
+    expect(lastCtx!.bufferSources.length).toBe(1)
+    c.play() // second call
+    expect(lastCtx!.bufferSources.length).toBe(1)
+    c.destroy()
+  })
+
+  it('skips count-in when playWithClick is off', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeEnd = 8
+    c.playWithClick = false
+    c.play()
+    const src = lastCtx!.bufferSources[0]!
+    // No pre-roll — source starts at lookahead only.
+    expect(src.starts[0]![0]).toBeCloseTo(0.04, 3)
+    c.destroy()
+  })
 })
 
-describe('PlaybackController volume sync', () => {
+describe('PlaybackController.pause() and seek()', () => {
+  it('pause() stops the source and freezes currentTime', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeEnd = 8
+    c.play()
+    expect(c.isPlaying).toBe(true)
+    // Pretend ctx advanced 1 second.
+    lastCtx!.currentTime = 1.04
+    c.pause()
+    expect(c.isPlaying).toBe(false)
+    // playStartCtxTime was 0.04; after 1.04 we're 1.0 s into the buffer.
+    expect(c.currentTime).toBeCloseTo(1.0, 3)
+    c.destroy()
+  })
+
+  it('stop() resets currentTime to rangeStart and clears state', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.rangeStart = 2
+    c.rangeEnd = 6
+    c.currentTime = 4
+    c.play()
+    c.stop()
+    expect(c.isPlaying).toBe(false)
+    expect(c.currentTime).toBe(2)
+    c.destroy()
+  })
+
+  it('seek() updates currentTime', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.seek(3.0)
+    expect(c.currentTime).toBe(3.0)
+    c.destroy()
+  })
+
+  it('seek() clamps to the buffer duration', () => {
+    const c = new PlaybackController()
+    c.setSongMap(makeSong({ barCount: 4 }))
+    c.setAudioBuffer(makeBuffer(8))
+    c.seek(100)
+    expect(c.currentTime).toBe(8)
+    c.seek(-1)
+    expect(c.currentTime).toBe(0)
+    c.destroy()
+  })
+})
+
+describe('PlaybackController volume sync (derived clamps)', () => {
   it('clampedSongVolume tracks songVolume in [0, 1]', () => {
-    // `clampedSongVolume` is the $derived the effect-sink writes to
-    // <audio>.volume. Asserting on the derived covers the math directly;
-    // the live-element write is a one-liner $effect verified in browser.
     const c = new PlaybackController()
     c.songVolume = 0.42
     expect(c.clampedSongVolume).toBeCloseTo(0.42, 4)
-    c.songVolume = 5.0
-    expect(c.clampedSongVolume).toBeCloseTo(1, 4)
-    c.songVolume = -0.5
-    expect(c.clampedSongVolume).toBeCloseTo(0, 4)
+    c.songVolume = 5
+    expect(c.clampedSongVolume).toBe(1)
+    c.songVolume = -1
+    expect(c.clampedSongVolume).toBe(0)
     c.destroy()
   })
 
-  it('clampedClickVolume tracks clickVolume clamped at zero (no upper cap)', () => {
+  it('clampedClickVolume clamps at zero (no upper cap)', () => {
     const c = new PlaybackController()
     c.clickVolume = 1.7
     expect(c.clampedClickVolume).toBeCloseTo(1.7, 4)
-    c.clickVolume = -3.0
-    expect(c.clampedClickVolume).toBeCloseTo(0, 4)
+    c.clickVolume = -3
+    expect(c.clampedClickVolume).toBe(0)
     c.destroy()
-  })
-
-  it('clickVolume writes through to clickMaster.gain.value (after play creates the graph)', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play()
-    // Graph was created lazily by play(); change clickVolume, expect sync.
-    c.clickVolume = 0.7
-    flushSync()
-    {
-      expect(lastCtx).not.toBeNull()
-      const expectedV = 0.7
-      // Click master is a MockGainNode whose `gain.value` was set by our $effect.
-      // The ctx.createGain() spy returned our MockGainNode; pull it back.
-      // The $effect read clickVolume and wrote to clickMaster.gain.value.
-      // We can't easily get a ref without exposing internals, so we re-check
-      // by changing volume and observing no throw + lastCtx remains alive.
-      void expectedV
-      // The MockGainNode is private; this test confirms the path is wired
-      // and doesn't crash. Direct observation is exercised in browser.
-      c.destroy()
-    }
   })
 })
 
 describe('PlaybackController destroy', () => {
-  it('closes the click AudioContext if one was created', () => {
+  it('closes the AudioContext if one was created', () => {
     const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
-    c.playWithClick = true
-    c.play() // creates clickCtx
+    c.setSongMap(makeSong({ barCount: 2 }))
+    c.setAudioBuffer(makeBuffer(4))
+    c.rangeEnd = 4
+    c.play()
     expect(lastCtx).not.toBeNull()
     c.destroy()
     expect(lastCtx?.close).toHaveBeenCalled()
   })
 
-  it('is safe to call without prior play() (no click graph created)', () => {
+  it('is safe to call without prior play()', () => {
     const c = new PlaybackController()
     expect(() => c.destroy()).not.toThrow()
   })
-
-  it('detaches the audio element', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    c.destroy()
-    expect(c.audioEl).toBeNull()
-  })
 })
 
-describe('PlaybackController reactivity (the natural flow)', () => {
+describe('PlaybackController reactivity', () => {
   it('mutating countInBeats mid-stream changes plan.clickPoints count', () => {
     const c = new PlaybackController()
     c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
@@ -512,153 +419,8 @@ describe('PlaybackController reactivity (the natural flow)', () => {
     const c = new PlaybackController()
     c.setSongMap(makeSong({ barCount: 4 }))
     expect(c.plan?.firstDownbeatOriginalSec).toBe(0)
-    c.setSongMap(makeSong({ barCount: 4, startBeatId: 'b1_0' /* bar 2 */ }))
+    c.setSongMap(makeSong({ barCount: 4, startBeatId: 'b1_0' }))
     expect(c.plan?.firstDownbeatOriginalSec).toBeCloseTo(2.0, 6)
-    c.destroy()
-  })
-})
-
-describe('PlaybackController click sync — the math the user relies on', () => {
-  /**
-   * The bug we keep hitting: clicks within the rAF lookahead window
-   * (~25 ms) were all scheduled at `ctx.currentTime + 0.002`, firing up
-   * to 23 ms early. The fix schedules each click at
-   * `ctxNow + (clickPoint.timeSec − planTime)` so future clicks land at
-   * their actual future time, not "now".
-   */
-  it('schedules an in-window click at its true future time (delta, not now)', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    // trimStartSec=0 makes plan-time === original-time so beat 2 lives
-    // at plan-time 0.5 and the test math reads naturally.
-    const sm = makeSong({
-      barCount: 4,
-      trimStartSec: 0,
-      countInBeats: 0,
-    })
-    c.setSongMap(sm)
-    c.playWithClick = true
-    c.mediaTimeOffsetSec = 0 // trim.startSec is 0 in this scenario
-
-    // Position audio at plan-time = 0.48 BEFORE play(): the next click is
-    // at plan-time 0.5 (= 20 ms in the future), well inside the 25 ms
-    // lookahead window. The OLD bug fired any in-window click at
-    // ctxNow + LEAD (0.002), i.e. 18 ms early. The fix fires at
-    // ctxNow + (clickPoint − planTime) — i.e. ctxNow + 0.020.
-    audio.currentTime = 0.48
-    c.play()
-    flushSync()
-
-    expect(lastCtx).not.toBeNull()
-    const ctx = lastCtx!
-    ctx.currentTime = 0.48 // anchor ctx clock at the same plan-time
-
-    rafTick()
-
-    // Expected scheduleAt = ctxNow (0.48) + delta (0.02) = 0.50.
-    // OLD bug would have produced 0.482.
-    const targeted = ctx.scheduledStarts.find((t) => t > 0.48 && t < 0.6)
-    expect(targeted).toBeDefined()
-    expect(targeted!).toBeCloseTo(0.5, 2)
-    expect(targeted!).not.toBeCloseTo(0.482, 3)
-
-    c.destroy()
-  })
-
-  /**
-   * In grid view, the `<audio>` plays the full uploaded file, so
-   * `audioEl.currentTime` is **original-time**, not trim-shifted.
-   * `plan.clickPoints[].timeSec` lives on trim-shifted time. The
-   * controller bridges via `mediaTimeOffsetSec`. Wrong offset → every
-   * click is shifted by exactly `trim.startSec` (potentially many
-   * seconds of audible misalignment).
-   */
-  it('uses mediaTimeOffsetSec to map audio-element time → plan time', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    // Trim starts at original-time 5.0s. First beat at plan-time 0 lives
-    // at original-time 5.0s.
-    const sm = makeSong({
-      barCount: 4,
-      trimStartSec: 5,
-      trimEndSec: 13,
-      countInBeats: 0,
-    })
-    c.setSongMap(sm)
-    c.playWithClick = true
-    c.mediaTimeOffsetSec = 5.0 // grid mode
-
-    c.play()
-    flushSync()
-
-    expect(lastCtx).not.toBeNull()
-    const ctx = lastCtx!
-    ctx.currentTime = 0
-    // Audio is playing the full file; currentTime is original-time. At
-    // original-time 5.0 we're at plan-time 0 (first beat).
-    audio.currentTime = 5.0
-    rafTick()
-
-    // First click corresponds to plan-time 0; the loop sees plan-time 0
-    // and schedules with delta clamped to LEAD.
-    const firstClick = ctx.scheduledStarts[0]
-    expect(firstClick).toBeCloseTo(0.002, 3)
-
-    // Now advance audio to plan-time 0.5 (= original-time 5.5). Second
-    // beat is at plan-time 0.5; delta = 0; should schedule at
-    // ctxNow + LEAD.
-    audio.currentTime = 5.5
-    ctx.currentTime = 0.5
-    rafTick()
-    const secondClick = ctx.scheduledStarts[1]
-    expect(secondClick).toBeCloseTo(0.502, 3)
-
-    c.destroy()
-  })
-
-  /**
-   * Wrong-offset regression: if a host forgets to set
-   * `mediaTimeOffsetSec`, plan-time evaluates as raw audio-element time.
-   * In grid mode (audio src = full file, trim.startSec > 0), the loop
-   * would think it's already past every song beat and never fire any
-   * click. This test pins that the OFFSET fix is load-bearing.
-   */
-  it('without mediaTimeOffsetSec, grid-view plan-time mismatch would skip clicks (regression guard)', () => {
-    const c = new PlaybackController()
-    const audio = new MockAudioElement()
-    c.setAudioElement(audio as unknown as HTMLAudioElement)
-    const sm = makeSong({
-      barCount: 4,
-      trimStartSec: 5,
-      trimEndSec: 13,
-      countInBeats: 0,
-    })
-    c.setSongMap(sm)
-    c.playWithClick = true
-    // Bug: offset left at 0 (the default). Now plan-time = audio.currentTime.
-    // audio.currentTime starts at 5.0 → loop thinks plan-time is 5.0 →
-    // it's "past" the song's first beats and the nextClickIdx jumps past
-    // them. Result: silent grid view.
-    c.mediaTimeOffsetSec = 0
-
-    c.play()
-    flushSync()
-
-    expect(lastCtx).not.toBeNull()
-    const ctx = lastCtx!
-    ctx.currentTime = 0
-    audio.currentTime = 5.0 // would-be plan-time 0 if offset were correct
-    rafTick()
-
-    // With the wrong offset, the loop "skipped" past the early beats.
-    // The first scheduled click (if any) would be from plan-time 5+ —
-    // way past the first 8 beats. We assert there are zero clicks fired
-    // from the early-song window: the precise symptom of the bug.
-    const earlyClicks = ctx.scheduledStarts.filter((t) => t < 0.05)
-    expect(earlyClicks.length).toBe(0)
-
     c.destroy()
   })
 })

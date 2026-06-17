@@ -302,15 +302,16 @@
     audioElement = audioEl ?? null
   })
 
-  // Wire the (currently-dormant) PlaybackController to the same audio
-  // element. The controller is fed `songMap`, `rangeStart/End`,
-  // volumes from the parent's $effects. Step 8 (cue mix preview)
-  // instantiates a SECOND controller pointed at its own audio element
-  // using the same setAudioElement pattern. When the migration
-  // (handoff doc / Step 4) lands, this controller takes over play /
-  // click / transport from the local logic below.
+  // Hand the audio element (back-compat) AND the decoded `AudioBuffer`
+  // to the controller. The buffer is what actually drives playback
+  // (buffer-based, single Web Audio context — same architecture as
+  // `MixerEngine`); the element is kept around purely for the blob URL
+  // lifetime and any host that wants to inspect it.
   $effect(() => {
     controller?.setAudioElement(audioEl ?? null)
+  })
+  $effect(() => {
+    controller?.setAudioBuffer(decodedAudioBuffer)
   })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */
@@ -1454,7 +1455,7 @@
     // outside the selection auto-stops at `rangeEnd - 0.02` on the
     // very next frame (the controller's transport rAF) and looks like
     // "play does nothing".
-    if (audioEl.currentTime < rangeStart || audioEl.currentTime >= rangeEnd - 0.02) {
+    if (controller.currentTime < rangeStart || controller.currentTime >= rangeEnd - 0.02) {
       controller.seek(rangeStart)
     }
     controller.play()
