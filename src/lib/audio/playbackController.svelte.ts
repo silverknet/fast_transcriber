@@ -86,12 +86,11 @@ export class PlaybackController {
 
   /**
    * Per-system fine-tune. Positive = clicks fire LATER (in seconds);
-   * negative = clicks fire EARLIER. Compensates for any residual
-   * latency mismatch between the audio element's playback pipeline and
-   * Web Audio's scheduling pipeline that the `MediaElementAudioSourceNode`
-   * routing didn't fully eliminate (different speakers / Bluetooth /
-   * USB interfaces / etc.). Default 0 — change with the calibration
-   * slider in the Vol popover until clicks lock to the beat.
+   * negative = clicks fire EARLIER. Audio plays via the native
+   * `<audio>` pipeline and clicks via Web Audio — two pipelines, two
+   * output latencies. They're usually close enough that 0 sounds in
+   * sync, but headphones / interfaces with unusual latency can push
+   * the two apart. Saved per-device so the user dials it in once.
    */
   clickOffsetSec = $state(0)
   /**
@@ -121,17 +120,6 @@ export class PlaybackController {
   // ── Private internals ──────────────────────────────────────────────
   #clickCtx: AudioContext | null = null
   #clickMaster: GainNode | null = null
-  /**
-   * Routes `audioEl` THROUGH `#clickCtx` so both song and clicks share
-   * one Web Audio clock + one output latency. Without this the song
-   * plays via the native `<audio>` pipeline (one latency) and the
-   * clicks fire via Web Audio (a different latency); the mismatch is
-   * exactly the audible drift the mixer doesn't have (because there
-   * everything's already in Web Audio). Created lazily the first time
-   * the click graph spins up.
-   */
-  #songSourceNode: MediaElementAudioSourceNode | null = null
-  #songGain: GainNode | null = null
   #transportRaf = 0
   #clickRaf = 0
   /** Index into `plan.clickPoints` for the next click to schedule. */
@@ -158,15 +146,14 @@ export class PlaybackController {
         }
       })
 
-      // 2. Sync song volume to BOTH the audio element (native pipeline
-      //    fallback before the graph wires up) AND the Web Audio gain
-      //    that sits after `MediaElementAudioSourceNode`. Both stay in
-      //    sync — whichever pipeline is actually outputting reads the
-      //    same value.
+      // 2. Sync `<audio>.volume` from `songVolume`. Audio plays via
+      //    the native HTMLAudioElement pipeline (NOT routed through
+      //    Web Audio); the click graph runs in a separate AudioContext
+      //    and the two share a system clock via `audioEl.currentTime`
+      //    vs `ctx.currentTime` (advancing 1:1 at the OS level).
       $effect(() => {
         const v = this.clampedSongVolume
         if (this.audioEl) this.audioEl.volume = v
-        if (this.#songGain) this.#songGain.gain.value = v
       })
 
       // 3. Attach play/pause/canplay listeners to the bound audio
@@ -288,15 +275,6 @@ export class PlaybackController {
       atSongStart
 
     if (!wantsCountIn) {
-      // Ensure the shared Web Audio graph (click + song routing) is up
-      // BEFORE the first sample of audio plays, so the audio element's
-      // output goes through the same context as clicks. Otherwise the
-      // first play emits via the native `<audio>` pipeline, and
-      // creating the MediaElementAudioSourceNode mid-playback is racey
-      // in some browsers.
-      this.#ensureClickGraph()
-      void this.#clickCtx?.resume()
-
       el.play().catch((err) => {
         if (import.meta.env.DEV) {
           console.error('[PlaybackController] audioEl.play() rejected:', err)
@@ -392,14 +370,6 @@ export class PlaybackController {
     this.#cancelPendingPlay()
     this.#stopClickLoop()
     this.#stopTransport()
-    try {
-      this.#songSourceNode?.disconnect()
-      this.#songGain?.disconnect()
-    } catch {
-      // Disconnect throws if the node was already disconnected — fine.
-    }
-    this.#songSourceNode = null
-    this.#songGain = null
     if (this.#clickCtx) {
       void this.#clickCtx.close().catch(() => {})
     }
@@ -420,34 +390,6 @@ export class PlaybackController {
     click.connect(ctx.destination)
     this.#clickCtx = ctx
     this.#clickMaster = click
-    // Route the audio element through this same context so song and
-    // clicks share one Web Audio pipeline. After the source node is
-    // connected, native `<audio>` output is gone — playback comes out
-    // of `ctx.destination`. `audioEl.volume` still scales the source
-    // (it's applied BEFORE the MediaElementAudioSourceNode), and the
-    // dedicated `#songGain` lets us match the click gain semantics.
-    this.#ensureSongInGraph()
-  }
-
-  #ensureSongInGraph(): void {
-    if (!this.#clickCtx || !this.audioEl) return
-    if (this.#songSourceNode) return
-    try {
-      const src = this.#clickCtx.createMediaElementSource(this.audioEl)
-      const songGain = this.#clickCtx.createGain()
-      songGain.gain.value = Math.max(0, Math.min(1, this.songVolume))
-      src.connect(songGain)
-      songGain.connect(this.#clickCtx.destination)
-      this.#songSourceNode = src
-      this.#songGain = songGain
-    } catch (err) {
-      // `createMediaElementSource` throws if called twice on the same
-      // element. We protect against that with the guard above, but
-      // log so a regression doesn't go silent.
-      if (import.meta.env.DEV) {
-        console.error('[PlaybackController] could not route audio through Web Audio:', err)
-      }
-    }
   }
 
   #startTransport(): void {
