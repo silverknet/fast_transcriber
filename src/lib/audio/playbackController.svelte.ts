@@ -169,13 +169,10 @@ export class PlaybackController {
         else this.#stopClickLoop()
       })
 
-      // 4. Buffer swap mid-play: stop the source (the buffer it was
-      //    bound to is going away).
-      $effect(() => {
-        const buf = this.audioBuffer
-        void buf
-        if (this.isPlaying) this.#stopSourceOnly()
-      })
+      // (No effect for "buffer swap mid-play stop" — that was a bug:
+      // it tracked `isPlaying` too, and fired the moment `play()` set
+      // `isPlaying = true`, killing the source we just started. Buffer
+      // swap mid-play is handled imperatively in `setAudioBuffer()`.)
     })
   }
 
@@ -189,8 +186,20 @@ export class PlaybackController {
    * Provide the decoded `AudioBuffer` for the current song. REQUIRED
    * before `play()` — without it `play()` no-ops. Hosts already decode
    * this for waveform peaks; pass that same buffer here.
+   *
+   * If a new buffer arrives mid-play, the currently-playing source is
+   * stopped imperatively here (NOT via a `$effect` — that path tracked
+   * `isPlaying` too and would kill the source `play()` had just
+   * started in the same microtask).
    */
   setAudioBuffer(buf: AudioBuffer | null): void {
+    const swapMidPlay = this.isPlaying && this.audioBuffer !== null && this.audioBuffer !== buf
+    if (swapMidPlay) {
+      this.#stopSourceOnly()
+      this.#cancelAutoStop()
+      this.isPlaying = false
+      this.#stopTransport()
+    }
     this.audioBuffer = buf
   }
 
@@ -200,9 +209,22 @@ export class PlaybackController {
   }
 
   play(): void {
-    if (this.isPlaying) return
+    if (this.isPlaying) {
+      if (import.meta.env.DEV) {
+        console.warn('[PlaybackController] play() ignored — already playing')
+      }
+      return
+    }
     const buf = this.audioBuffer
-    if (!buf) return
+    if (!buf) {
+      if (import.meta.env.DEV) {
+        console.warn(
+          '[PlaybackController] play() ignored — no audioBuffer set yet. ' +
+            'Did the host call setAudioBuffer(decodedAudioBuffer) after decode?',
+        )
+      }
+      return
+    }
     const plan = this.plan
 
     if (this.debugClickTiming) this.#debugLogBudget = 16
@@ -225,7 +247,31 @@ export class PlaybackController {
     const endPos = this.rangeEnd > this.rangeStart
       ? Math.min(this.rangeEnd, dur)
       : dur
-    if (endPos - startPos < 0.005) return
+    if (endPos - startPos < 0.005) {
+      if (import.meta.env.DEV) {
+        console.warn('[PlaybackController] play() ignored — empty range', {
+          startPos,
+          endPos,
+          rangeStart: this.rangeStart,
+          rangeEnd: this.rangeEnd,
+          currentTime: this.currentTime,
+          bufferDuration: dur,
+        })
+      }
+      return
+    }
+    if (import.meta.env.DEV) {
+      console.log('[PlaybackController] play() starting source', {
+        startPos,
+        endPos,
+        ctxState: ctx.state,
+        ctxCurrentTime: ctx.currentTime,
+        bufferDuration: dur,
+        songGainValue: this.#songGain?.gain.value,
+        rangeStart: this.rangeStart,
+        rangeEnd: this.rangeEnd,
+      })
+    }
 
     // Count-in pre-roll: only when (a) click enabled, (b) tight trim
     // needs prepend silence, (c) playhead at/before song start.
