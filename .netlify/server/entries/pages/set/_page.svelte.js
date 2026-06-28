@@ -1,9 +1,10 @@
 import "../../../chunks/index-server.js";
 import { A as escape_html, a as derived, h as unsubscribe_stores, p as store_get, s as ensure_array_like } from "../../../chunks/server.js";
 import "../../../chunks/index-server2.js";
-import "../../../chunks/persist.js";
-import { N as songMap } from "../../../chunks/commit.js";
-import { d as pickFolderViaDesktop, v as Button } from "../../../chunks/desktopBridge.js";
+import "../../../chunks/navigation.js";
+import { t as Button } from "../../../chunks/button.js";
+import { m as pickFolderViaDesktop } from "../../../chunks/desktopBridge.js";
+import { O as songMap } from "../../../chunks/commit.js";
 import { t as desktopCompanionStatus } from "../../../chunks/desktopCompanionStatus.js";
 import { n as StemSplitter, o as STEM_TRACKS } from "../../../chunks/gzip.js";
 //#endregion

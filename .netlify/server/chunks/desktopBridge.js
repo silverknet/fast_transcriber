@@ -1,80 +1,4 @@
-import { i as bind_props, k as clsx$1, r as attributes } from "./server.js";
 import { t as BARBRO_DESKTOP_BEACON_PORT } from "./desktopBeacon.js";
-import { clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
-import { tv } from "tailwind-variants";
-//#region src/lib/utils.js
-function cn(...inputs) {
-	return twMerge(clsx(inputs));
-}
-//#endregion
-//#region src/lib/components/ui/button/button.svelte
-var buttonVariants = tv({
-	base: "focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 brutalist-shadow-sm rounded-none border-2 border-border bg-clip-padding text-sm font-semibold focus-visible:ring-3 active:not-aria-[haspopup]:translate-x-0.5 active:not-aria-[haspopup]:translate-y-0.5 active:not-aria-[haspopup]:shadow-none aria-invalid:ring-3 [&_svg:not([class*='size-'])]:size-4 group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap transition-all outline-none select-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
-	variants: {
-		variant: {
-			default: "bg-primary text-primary-foreground [a]:hover:bg-primary/80",
-			outline: "border-foreground bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground",
-			secondary: "border-foreground bg-secondary text-secondary-foreground hover:bg-secondary/80 aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
-			ghost: "hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 aria-expanded:bg-muted aria-expanded:text-foreground",
-			destructive: "bg-destructive/10 hover:bg-destructive/20 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/20 text-destructive focus-visible:border-destructive/40 dark:hover:bg-destructive/30",
-			link: "text-primary underline-offset-4 hover:underline"
-		},
-		size: {
-			default: "h-8 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
-			xs: "h-6 gap-1 px-2 text-xs has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
-			sm: "h-7 gap-1 px-2.5 text-[0.8rem] has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3.5",
-			lg: "h-9 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
-			icon: "size-8",
-			"icon-xs": "size-6 [&_svg:not([class*='size-'])]:size-3",
-			"icon-sm": "size-7",
-			"icon-lg": "size-9"
-		}
-	},
-	defaultVariants: {
-		variant: "default",
-		size: "default"
-	}
-});
-function Button($$renderer, $$props) {
-	$$renderer.component(($$renderer) => {
-		let { class: className, variant = "default", size = "default", ref = null, href = void 0, type = "button", disabled = void 0, children, $$slots, $$events, ...restProps } = $$props;
-		if (href) {
-			$$renderer.push("<!--[0-->");
-			$$renderer.push(`<a${attributes({
-				"data-slot": "button",
-				class: clsx$1(cn(buttonVariants({
-					variant,
-					size
-				}), className)),
-				href: disabled ? void 0 : href,
-				"aria-disabled": disabled,
-				role: disabled ? "link" : void 0,
-				tabindex: disabled ? -1 : void 0,
-				...restProps
-			})}>`);
-			children?.($$renderer);
-			$$renderer.push(`<!----></a>`);
-		} else {
-			$$renderer.push("<!--[-1-->");
-			$$renderer.push(`<button${attributes({
-				"data-slot": "button",
-				class: clsx$1(cn(buttonVariants({
-					variant,
-					size
-				}), className)),
-				type,
-				disabled,
-				...restProps
-			})}>`);
-			children?.($$renderer);
-			$$renderer.push(`<!----></button>`);
-		}
-		$$renderer.push(`<!--]-->`);
-		bind_props($$props, { ref });
-	});
-}
-//#endregion
 //#region src/lib/client/desktopBridge.ts
 /**
 * Web ⇄ desktop bridge over the same loopback the `/ping` beacon uses.
@@ -399,6 +323,80 @@ async function pickFolderViaDesktop(opts) {
 		};
 	}
 }
+async function pickFileViaDesktop(endpoint, opts) {
+	let res;
+	try {
+		res = await fetch(`${BASE_URL}${endpoint}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(opts ?? {}),
+			cache: "no-store"
+		});
+	} catch (e) {
+		return {
+			ok: false,
+			error: e instanceof Error ? e.message : String(e)
+		};
+	}
+	try {
+		return await res.json();
+	} catch {
+		return {
+			ok: false,
+			error: `Picker returned non-JSON (HTTP ${res.status})`
+		};
+	}
+}
+var pickSaveFileViaDesktop = (opts) => pickFileViaDesktop("/native/pick-save-file", opts);
+var pickOpenFileViaDesktop = (opts) => pickFileViaDesktop("/native/pick-open-file", opts);
+async function exportHydrationPackViaDesktop(args) {
+	let res;
+	try {
+		res = await fetch(`${BASE_URL}/native/project/hydration/export`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(args),
+			cache: "no-store"
+		});
+	} catch (e) {
+		return {
+			ok: false,
+			error: e instanceof Error ? e.message : String(e)
+		};
+	}
+	try {
+		return await res.json();
+	} catch {
+		return {
+			ok: false,
+			error: `Sidecar returned non-JSON (HTTP ${res.status})`
+		};
+	}
+}
+async function importHydrationPackViaDesktop(args) {
+	let res;
+	try {
+		res = await fetch(`${BASE_URL}/native/project/hydration/import`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(args),
+			cache: "no-store"
+		});
+	} catch (e) {
+		return {
+			ok: false,
+			error: e instanceof Error ? e.message : String(e)
+		};
+	}
+	try {
+		return await res.json();
+	} catch {
+		return {
+			ok: false,
+			error: `Sidecar returned non-JSON (HTTP ${res.status})`
+		};
+	}
+}
 /** Snapshot of all known jobs on the sidecar. Useful on reload. */
 async function listJobsViaDesktop() {
 	let res;
@@ -417,7 +415,8 @@ async function listJobsViaDesktop() {
 }
 /**
 * Cancel a queued or running job (or destroy a terminal one). The sidecar
-* sends SIGTERM if the job is running.
+* sends SIGTERM if the job is running. For a paused job the sidecar thaws
+* it first (SIGCONT) so SIGTERM actually delivers.
 */
 async function cancelJob(jobId) {
 	try {
@@ -426,6 +425,53 @@ async function cancelJob(jobId) {
 			cache: "no-store"
 		});
 	} catch {}
+}
+async function postJobControl(jobId, action) {
+	let res;
+	try {
+		res = await fetch(`${BASE_URL}/native/jobs/${encodeURIComponent(jobId)}/${action}`, {
+			method: "POST",
+			cache: "no-store"
+		});
+	} catch (e) {
+		return {
+			ok: false,
+			error: `Desktop sidecar unreachable: ${e instanceof Error ? e.message : String(e)}`
+		};
+	}
+	let data;
+	try {
+		data = await res.json();
+	} catch {
+		return {
+			ok: false,
+			error: `Non-JSON response (HTTP ${res.status})`
+		};
+	}
+	if (!res.ok || data.ok !== true || !data.state) return {
+		ok: false,
+		error: data.error ?? `${action} failed (HTTP ${res.status})`
+	};
+	return {
+		ok: true,
+		state: data.state
+	};
+}
+/**
+* Suspend a running Demucs job via SIGSTOP — CPU/GPU usage drops to zero,
+* progress freezes. The job keeps its queue slot, so other queued jobs
+* still wait their turn. Cancel + re-enqueue if you'd rather free the slot.
+*
+* Limitations:
+*  - macOS/Linux only.
+*  - Does not survive sidecar restart.
+*/
+async function pauseJob(jobId) {
+	return postJobControl(jobId, "pause");
+}
+/** Resume a paused Demucs job via SIGCONT. Picks up exactly where it left off. */
+async function resumeJob(jobId) {
+	return postJobControl(jobId, "resume");
 }
 /**
 * Create the stems venv on the sidecar and pip-install Demucs. Streams the
@@ -772,4 +818,4 @@ async function releaseStemsJob(jobId) {
 	} catch {}
 }
 //#endregion
-export { suggestSectionBordersViaDesktop as _, enqueueStemSeparation as a, getPiperTtsSetupStatus as c, pickFolderViaDesktop as d, releaseStemsJob as f, subscribeToJobEvents as g, setupStemsDeps as h, cancelJob as i, getSectionsSetupStatus as l, setupSectionsDeps as m, STEM_QUALITY_PRESETS as n, fetchDesktopTtsHelloWorldWav as o, setupPiperTtsDeps as p, analyzeDownbeatsViaDesktop as r, fetchDesktopTtsSynthesizeWav as s, STEM_PRESET_PRIORITY as t, listJobsViaDesktop as u, Button as v, cn as y };
+export { suggestSectionBordersViaDesktop as C, subscribeToJobEvents as S, releaseStemsJob as _, enqueueStemSeparation as a, setupSectionsDeps as b, fetchDesktopTtsSynthesizeWav as c, importHydrationPackViaDesktop as d, listJobsViaDesktop as f, pickSaveFileViaDesktop as g, pickOpenFileViaDesktop as h, cancelJob as i, getPiperTtsSetupStatus as l, pickFolderViaDesktop as m, STEM_QUALITY_PRESETS as n, exportHydrationPackViaDesktop as o, pauseJob as p, analyzeDownbeatsViaDesktop as r, fetchDesktopTtsHelloWorldWav as s, STEM_PRESET_PRIORITY as t, getSectionsSetupStatus as u, resumeJob as v, setupStemsDeps as x, setupPiperTtsDeps as y };

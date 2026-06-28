@@ -1,0 +1,1 @@
+.song-row-grid{grid-template-columns:1.5rem 1.5rem minmax(0,1fr) 5rem 2.5rem 1.75rem repeat(5,1.75rem) 1.75rem 2rem 2rem;display:grid}

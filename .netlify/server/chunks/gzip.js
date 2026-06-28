@@ -1,9 +1,11 @@
-import { A as escape_html, F as writable, N as get, O as attr, a as derived, f as spread_props, h as unsubscribe_stores, m as stringify, n as attr_style, p as store_get, s as ensure_array_like } from "./server.js";
+import { A as escape_html, F as writable, N as get, O as attr, a as derived, f as spread_props, h as unsubscribe_stores, k as clsx, m as stringify, n as attr_style, p as store_get, s as ensure_array_like, t as attr_class } from "./server.js";
 import "./index-server2.js";
-import { a as enqueueStemSeparation, f as releaseStemsJob, g as subscribeToJobEvents, h as setupStemsDeps, i as cancelJob, n as STEM_QUALITY_PRESETS, v as Button } from "./desktopBridge.js";
+import { t as Button } from "./button.js";
 import { t as Icon } from "./Icon.js";
 import { t as X } from "./x.js";
-import { t as Play } from "./play.js";
+import { S as subscribeToJobEvents, _ as releaseStemsJob, a as enqueueStemSeparation, i as cancelJob, n as STEM_QUALITY_PRESETS, p as pauseJob, v as resumeJob, x as setupStemsDeps } from "./desktopBridge.js";
+import { t as Download } from "./download.js";
+import { n as Pause, t as Play } from "./play.js";
 //#region node_modules/@lucide/svelte/dist/icons/circle-question-mark.svelte
 function Circle_question_mark($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
@@ -68,77 +70,6 @@ function Circle_question_mark($$renderer, $$props) {
 					}],
 					["path", { "d": "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
 					["path", { "d": "M12 17h.01" }]
-				],
-				children: ($$renderer) => {
-					props.children?.($$renderer);
-					$$renderer.push(`<!---->`);
-				},
-				$$slots: { default: true }
-			}
-		]));
-	});
-}
-//#endregion
-//#region node_modules/@lucide/svelte/dist/icons/download.svelte
-function Download($$renderer, $$props) {
-	$$renderer.component(($$renderer) => {
-		/**
-		* @license @lucide/svelte v1.7.0 - ISC
-		*
-		* ISC License
-		*
-		* Copyright (c) 2026 Lucide Icons and Contributors
-		*
-		* Permission to use, copy, modify, and/or distribute this software for any
-		* purpose with or without fee is hereby granted, provided that the above
-		* copyright notice and this permission notice appear in all copies.
-		*
-		* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-		* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-		* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-		* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-		* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-		* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-		* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-		*
-		* ---
-		*
-		* The following Lucide icons are derived from the Feather project:
-		*
-		* airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
-		*
-		* The MIT License (MIT) (for the icons listed above)
-		*
-		* Copyright (c) 2013-present Cole Bemis
-		*
-		* Permission is hereby granted, free of charge, to any person obtaining a copy
-		* of this software and associated documentation files (the "Software"), to deal
-		* in the Software without restriction, including without limitation the rights
-		* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-		* copies of the Software, and to permit persons to whom the Software is
-		* furnished to do so, subject to the following conditions:
-		*
-		* The above copyright notice and this permission notice shall be included in all
-		* copies or substantial portions of the Software.
-		*
-		* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-		* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-		* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-		* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-		* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-		* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-		* SOFTWARE.
-		*
-		*/
-		let { $$slots, $$events, ...props } = $$props;
-		Icon($$renderer, spread_props([
-			{ name: "download" },
-			props,
-			{
-				iconNode: [
-					["path", { "d": "M12 15V3" }],
-					["path", { "d": "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }],
-					["path", { "d": "m7 10 5 5 5-5" }]
 				],
 				children: ($$renderer) => {
 					props.children?.($$renderer);
@@ -1970,11 +1901,14 @@ function handleEvent(jobId, ev) {
 			patchEntry(jobId, { error: ev.msg });
 			appendLog(jobId, `⛔  ${ev.msg}`);
 			break;
-		case "state":
+		case "state": {
+			const prevState = get(stemJobs).get(jobId)?.state ?? null;
 			patchEntry(jobId, {
 				state: ev.state,
 				finishedAt: ev.state === "done" || ev.state === "error" || ev.state === "cancelled" ? (/* @__PURE__ */ new Date()).toISOString() : null
 			});
+			if (ev.state === "paused") appendLog(jobId, "⏸  Paused.");
+			else if (ev.state === "running" && prevState === "paused") appendLog(jobId, "▶  Resumed.");
 			if (ev.state === "done") {
 				const entry = get(stemJobs).get(jobId);
 				const finalize = finalizers.get(jobId);
@@ -1984,6 +1918,7 @@ function handleEvent(jobId, ev) {
 				}
 			}
 			break;
+		}
 		case "cleanup":
 			removeJob(jobId);
 			break;
@@ -2068,13 +2003,33 @@ function removeJob(jobId) {
 async function cancelStemJob(jobId) {
 	await cancelJob(jobId);
 }
+/**
+* Pause a running stems job (SIGSTOP on the desktop sidecar). The store
+* updates via the streamed `state: 'paused'` event, not here. Returns the
+* sidecar's reply so the caller can surface invalid-transition errors.
+*/
+async function pauseStemJob(jobId) {
+	return pauseJob(jobId);
+}
+/** Resume a paused stems job (SIGCONT). State update flows in via NDJSON. */
+async function resumeStemJob(jobId) {
+	return resumeJob(jobId);
+}
 /** Release the sidecar's temp dir (called after stems are fetched). */
 async function releaseStemJob(jobId) {
 	await releaseStemsJob(jobId);
 	removeJob(jobId);
 }
+/**
+* In-flight = queued, running, or paused. A paused job still occupies the
+* song's slot (the sidecar's queue worker treats it as the current job), so
+* for UI purposes "is this song busy with stems?" is true while paused too.
+*/
 function activeJobForSong(songId) {
-	for (const j of get(stemJobs).values()) if (j.songId === songId && (j.state === "queued" || j.state === "running")) return j;
+	for (const j of get(stemJobs).values()) {
+		if (j.songId !== songId) continue;
+		if (j.state === "queued" || j.state === "running" || j.state === "paused") return j;
+	}
 	return null;
 }
 //#endregion
@@ -2090,7 +2045,7 @@ function StemSplitter($$renderer, $$props) {
 		* cross HTTP**. The web app's only job is to trigger, observe, and
 		* (lightly) finalize the .smap stemRefs.
 		*
-		* The parent (`SongSetPanel`) hands us a `finalizeJob` callback that runs
+		* The parent (`StemsDialog`) hands us a `finalizeJob` callback that runs
 		* when the job's state becomes `done`. The stems are already on disk by
 		* then — the callback just refreshes the folder listing and updates the
 		* song's `.smap` `stemRefs`.
@@ -2102,7 +2057,7 @@ function StemSplitter($$renderer, $$props) {
 			"other"
 		];
 		const DEMUX_SETUP_HELP = "Demucs is not installed in the desktop sidecar yet. One-time setup creates a venv under the app data folder and pip-installs Demucs (~1 GB download, several minutes). Leave this tab open while installing.";
-		let { songId, inputPath, outputDir, inputLabel, desktopReachable, finalizeJob } = $$props;
+		let { songId, inputPath, outputDir, inputLabel, desktopReachable, finalizeJob, chromeless = false, currentQualityByStem = {} } = $$props;
 		/** Stable identity used to associate jobs with this card. */
 		/** Stable identity used to associate jobs with this card. */
 		/**
@@ -2114,16 +2069,38 @@ function StemSplitter($$renderer, $$props) {
 		*/
 		/** Human-friendly label for the Audio File fieldset (filename, etc.). */
 		/** Runs once when the job's state becomes `done`. Stems are already on disk. */
-		const selected = {
-			vocals: true,
-			drums: true,
-			bass: true,
-			other: true
+		/**
+		* Drop the outer card border + "Stem Splitter" h2. Used by `StemsDialog`
+		* since the surrounding dialog already supplies a border and a title.
+		*/
+		/**
+		* Highest preset slug each stem currently exists at on disk. Drives the
+		* per-stem quality badge and the "smart default" checkbox state (queue
+		* stems that are missing OR lower than the chosen target). Empty / unset
+		* means "no info" — falls back to selecting everything by default.
+		*/
+		const PRESET_RANK = {
+			best: 0,
+			balanced: 1,
+			preview: 2,
+			legacy: 3
 		};
+		const MISSING_RANK = 99;
 		let presetIndex = 1;
+		const preset = derived(() => STEM_QUALITY_PRESETS[presetIndex] ?? STEM_QUALITY_PRESETS[1]);
+		const targetRank = derived(() => PRESET_RANK[preset().slug] ?? MISSING_RANK);
+		function stemRank(s) {
+			const cur = currentQualityByStem[s] ?? null;
+			return cur ? PRESET_RANK[cur] ?? MISSING_RANK : MISSING_RANK;
+		}
+		/**
+		* Initial selection mirrors the smart default: tick stems that are missing
+		* OR exist at lower quality than the current target. The $effect below
+		* keeps this honest whenever the target preset changes.
+		*/
+		const selected = Object.fromEntries(ALL_STEMS.map((s) => [s, stemRank(s) > (PRESET_RANK["balanced"] ?? MISSING_RANK)]));
 		const allSelected = derived(() => ALL_STEMS.every((s) => selected[s]));
 		const anySelected = derived(() => ALL_STEMS.some((s) => selected[s]));
-		const preset = derived(() => STEM_QUALITY_PRESETS[presetIndex] ?? STEM_QUALITY_PRESETS[1]);
 		let enqueueError = "";
 		/**
 		* The job (if any) the UI should display state for. Derived from the
@@ -2201,6 +2178,15 @@ function StemSplitter($$renderer, $$props) {
 			if (!id) return;
 			await cancelStemJob(id);
 		}
+		/** Surface invalid-transition / sidecar errors via the existing error slot. */
+		let pauseError = "";
+		async function togglePause() {
+			const id = jobEntry()?.jobId;
+			if (!id || !jobEntry()) return;
+			pauseError = "";
+			const r = jobEntry().state === "paused" ? await resumeStemJob(id) : await pauseStemJob(id);
+			if (!r.ok) pauseError = r.error;
+		}
 		/** Whether the sidecar already has a working stems venv (probed on mount). */
 		let depsReady = null;
 		/** Live state while pip is running. */
@@ -2266,12 +2252,22 @@ function StemSplitter($$renderer, $$props) {
 		const hint = derived(reasonHint);
 		const splitButtonTitle = derived(() => canRun().ok ? "Run Demucs stem separation in the desktop app" : hint() || "Cannot split yet");
 		const phase = derived(() => jobEntry()?.state ?? "idle");
-		const stepLabel = derived(() => jobEntry()?.label ?? "Idle");
+		const stepLabel = derived(() => phase() === "paused" ? `Paused — ${jobEntry()?.label ?? "…"}` : jobEntry()?.label ?? "Idle");
+		derived(() => phase() === "paused");
 		const currentPct = derived(() => jobEntry()?.currentPct ?? 0);
 		const overallPct = derived(() => jobEntry()?.overallPct ?? 0);
 		const logLines = derived(() => jobEntry()?.log ?? []);
 		const progressDetailsOpen = derived(() => phase() !== "idle");
-		$$renderer.push(`<section class="border-foreground border-2 p-4 space-y-4"><h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Stem Splitter</h2> <fieldset class="border-foreground/30 border space-y-1 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Audio source</legend> `);
+		$$renderer.push(`<section${attr_class("space-y-4", void 0, {
+			"border-foreground": !chromeless,
+			"border-2": !chromeless,
+			"p-4": !chromeless
+		})}>`);
+		if (!chromeless) {
+			$$renderer.push("<!--[0-->");
+			$$renderer.push(`<h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Stem Splitter</h2>`);
+		} else $$renderer.push("<!--[-1-->");
+		$$renderer.push(`<!--]-->  <fieldset class="border-foreground/30 border min-w-0 space-y-1 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Audio source</legend> `);
 		if (inputPath) {
 			$$renderer.push("<!--[0-->");
 			$$renderer.push(`<p class="font-mono text-sm truncate"${attr("title", inputPath)}>${escape_html(inputLabel ?? inputPath.split("/").pop() ?? inputPath)}</p> <p class="text-muted-foreground font-mono text-[10px] truncate"${attr("title", inputPath)}>${escape_html(inputPath)}</p>`);
@@ -2284,13 +2280,31 @@ function StemSplitter($$renderer, $$props) {
 			$$renderer.push("<!--[0-->");
 			$$renderer.push(`<p class="text-muted-foreground mt-1 font-mono text-[10px] truncate"${attr("title", `${stringify(outputDir)}/${stringify(preset().slug)}`)}>Output → ${escape_html(outputDir)}/${escape_html(preset().slug)}</p>`);
 		} else $$renderer.push("<!--[-1-->");
-		$$renderer.push(`<!--]--></fieldset> <fieldset class="border-foreground/30 border space-y-2 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Stems to Export</legend> <div class="flex flex-wrap gap-x-4 gap-y-2"><!--[-->`);
+		$$renderer.push(`<!--]--></fieldset> <fieldset class="border-foreground/30 border min-w-0 space-y-2 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Stems</legend> <div class="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1.5"><!--[-->`);
 		const each_array = ensure_array_like(ALL_STEMS);
 		for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
 			let s = each_array[$$index];
-			$$renderer.push(`<label class="flex cursor-pointer items-center gap-1.5 text-sm"><input type="checkbox" class="size-4"${attr("checked", selected[s], true)}${attr("disabled", songIsBusy(), true)}/> <span class="capitalize">${escape_html(s)}</span></label>`);
+			const cur = currentQualityByStem[s] ?? null;
+			const curRank = stemRank(s);
+			const atTarget = curRank === targetRank();
+			const willUpgrade = curRank > targetRank();
+			const willRun = selected[s];
+			$$renderer.push(`<label class="contents cursor-pointer"><input type="checkbox" class="size-4"${attr("checked", selected[s], true)}${attr("disabled", songIsBusy(), true)}/> <span class="capitalize text-sm">${escape_html(s)}</span> <span class="font-mono text-[10px] uppercase tracking-wider whitespace-nowrap tabular-nums">`);
+			if (cur === null) {
+				$$renderer.push("<!--[0-->");
+				$$renderer.push(`<span class="text-muted-foreground">none</span>`);
+			} else {
+				$$renderer.push("<!--[-1-->");
+				$$renderer.push(`<span${attr_class(clsx(atTarget ? "text-emerald-700 dark:text-emerald-400" : willUpgrade ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"))}>${escape_html(cur)}</span>`);
+			}
+			$$renderer.push(`<!--]--> `);
+			if (willRun && !atTarget) {
+				$$renderer.push("<!--[0-->");
+				$$renderer.push(`<span class="text-foreground">→ ${escape_html(preset().slug)}</span>`);
+			} else $$renderer.push("<!--[-1-->");
+			$$renderer.push(`<!--]--></span></label>`);
 		}
-		$$renderer.push(`<!--]--></div> <label class="text-muted-foreground flex cursor-pointer items-center gap-1.5 pt-1 text-xs"><input type="checkbox" class="size-3.5"${attr("checked", allSelected(), true)}${attr("disabled", songIsBusy(), true)}/> <span>Select all</span></label></fieldset> <fieldset class="border-foreground/30 border space-y-1 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Quality</legend> `);
+		$$renderer.push(`<!--]--></div> <label class="text-muted-foreground flex cursor-pointer items-center gap-1.5 pt-1 text-xs"><input type="checkbox" class="size-3.5"${attr("checked", allSelected(), true)}${attr("disabled", songIsBusy(), true)}/> <span>Run all</span></label></fieldset> <fieldset class="border-foreground/30 border min-w-0 space-y-1 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1">Quality</legend> `);
 		$$renderer.select({
 			class: "border-foreground/30 bg-background text-foreground w-full border px-2 py-1 font-mono text-xs",
 			value: presetIndex,
@@ -2322,7 +2336,45 @@ function StemSplitter($$renderer, $$props) {
 			$$slots: { default: true }
 		});
 		$$renderer.push(`<!----> `);
-		if (jobEntry() && (phase() === "queued" || phase() === "running")) {
+		if (jobEntry() && phase() === "running") {
+			$$renderer.push("<!--[0-->");
+			Button($$renderer, {
+				variant: "outline",
+				size: "sm",
+				class: "gap-1",
+				onclick: () => void togglePause(),
+				"aria-label": "Pause this stem job",
+				title: "Suspend Demucs (SIGSTOP). Resume later to continue from where it left off.",
+				children: ($$renderer) => {
+					Pause($$renderer, {
+						class: "size-3.5",
+						"aria-hidden": "true"
+					});
+					$$renderer.push(`<!----> Pause`);
+				},
+				$$slots: { default: true }
+			});
+		} else $$renderer.push("<!--[-1-->");
+		$$renderer.push(`<!--]--> `);
+		if (jobEntry() && phase() === "paused") {
+			$$renderer.push("<!--[0-->");
+			Button($$renderer, {
+				size: "sm",
+				class: "gap-1",
+				onclick: () => void togglePause(),
+				"aria-label": "Resume this stem job",
+				children: ($$renderer) => {
+					Play($$renderer, {
+						class: "size-3.5",
+						"aria-hidden": "true"
+					});
+					$$renderer.push(`<!----> Resume`);
+				},
+				$$slots: { default: true }
+			});
+		} else $$renderer.push("<!--[-1-->");
+		$$renderer.push(`<!--]--> `);
+		if (jobEntry() && (phase() === "queued" || phase() === "running" || phase() === "paused")) {
 			$$renderer.push("<!--[0-->");
 			Button($$renderer, {
 				variant: "outline",
@@ -2345,10 +2397,15 @@ function StemSplitter($$renderer, $$props) {
 			$$renderer.push("<!--[0-->");
 			$$renderer.push(`<p class="text-destructive text-xs" role="status">${escape_html(enqueueError)}</p>`);
 		} else $$renderer.push("<!--[-1-->");
+		$$renderer.push(`<!--]--> `);
+		if (pauseError) {
+			$$renderer.push("<!--[0-->");
+			$$renderer.push(`<p class="text-destructive text-xs" role="status">${escape_html(pauseError)}</p>`);
+		} else $$renderer.push("<!--[-1-->");
 		$$renderer.push(`<!--]--></div> `);
 		if (desktopReachable && (showSetupButton() || setupRunning || setupError)) {
 			$$renderer.push("<!--[0-->");
-			$$renderer.push(`<fieldset class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border space-y-2 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1 text-amber-700 dark:text-amber-200">Python deps</legend> <p class="text-muted-foreground flex flex-wrap items-center gap-1.5 text-xs">`);
+			$$renderer.push(`<fieldset class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border min-w-0 space-y-2 px-3 py-2"><legend class="text-[10px] font-semibold uppercase tracking-wider px-1 text-amber-700 dark:text-amber-200">Python deps</legend> <p class="text-muted-foreground flex flex-wrap items-center gap-1.5 text-xs">`);
 			if (depsReady === false || needsSetupAfterError()) {
 				$$renderer.push("<!--[0-->");
 				$$renderer.push(`<span>One-time Demucs install (~1 GB).</span>`);
@@ -2393,7 +2450,7 @@ function StemSplitter($$renderer, $$props) {
 			$$renderer.push(`<!--]--></div> `);
 			if (setupLog.length > 0) {
 				$$renderer.push("<!--[0-->");
-				$$renderer.push(`<details class="group"><summary class="text-muted-foreground hover:text-foreground cursor-pointer list-none text-xs font-medium select-none marker:content-none [&amp;::-webkit-details-marker]:hidden">Install log (${escape_html(setupLog.length)} lines)</summary> <div class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-32 min-h-12 overflow-y-auto border p-2 font-mono text-[10px] leading-tight whitespace-pre-wrap"><!--[-->`);
+				$$renderer.push(`<details class="group"><summary class="text-muted-foreground hover:text-foreground cursor-pointer list-none text-xs font-medium select-none marker:content-none [&amp;::-webkit-details-marker]:hidden">Install log (${escape_html(setupLog.length)} lines)</summary> <div class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-32 min-h-12 overflow-y-auto border p-2 font-mono text-[10px] leading-tight break-all whitespace-pre-wrap"><!--[-->`);
 				const each_array_2 = ensure_array_like(setupLog);
 				for (let i = 0, $$length = each_array_2.length; i < $$length; i++) {
 					let line = each_array_2[i];
@@ -2408,7 +2465,7 @@ function StemSplitter($$renderer, $$props) {
 			$$renderer.push("<!--[0-->");
 			$$renderer.push(`(${escape_html(logLines().length)})`);
 		} else $$renderer.push("<!--[-1-->");
-		$$renderer.push(`<!--]--></summary> <div class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-40 min-h-16 overflow-y-auto border p-2 font-mono text-[11px] leading-tight whitespace-pre-wrap"><!--[-->`);
+		$$renderer.push(`<!--]--></summary> <div class="border-foreground/10 bg-neutral-900 text-neutral-200 mt-2 max-h-40 min-h-16 overflow-y-auto border p-2 font-mono text-[11px] leading-tight break-all whitespace-pre-wrap"><!--[-->`);
 		const each_array_3 = ensure_array_like(logLines());
 		for (let i = 0, $$length = each_array_3.length; i < $$length; i++) {
 			let line = each_array_3[i];
@@ -2446,4 +2503,4 @@ async function gzipString(text) {
 	return new Blob(chunks, { type: "application/octet-stream" });
 }
 //#endregion
-export { stemJobs as a, generateAbletonSetXml as c, releaseStemJob as i, Download as l, StemSplitter as n, STEM_TRACKS as o, hydrateFromSidecar as r, generateAbletonProjectSetXml as s, gzipString as t };
+export { stemJobs as a, generateAbletonSetXml as c, releaseStemJob as i, StemSplitter as n, STEM_TRACKS as o, hydrateFromSidecar as r, generateAbletonProjectSetXml as s, gzipString as t };

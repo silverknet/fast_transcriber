@@ -1,9 +1,286 @@
-import { F as writable, N as get } from "./server.js";
+import { F as writable, M as derived, N as get } from "./server.js";
 import "./index-server2.js";
-import { c as encodeSmapFile, d as validateSongMap, f as defaultCueSettings, n as exportRestorableStateAsSmapBlob, o as safeExportBasename, p as emptySongMetadata, s as decodeSmapFile, u as smapFileDataToRestorableState } from "./persist.js";
-import "./client.js";
 import { t as STEM_PRESET_PRIORITY } from "./desktopBridge.js";
-import { t as BARBRO_DESKTOP_BEACON_PORT } from "./desktopBeacon.js";
+import { c as validateSongMap, i as encodeSmapFile, l as defaultCueSettings, o as smapFileDataToRestorableState, r as decodeSmapFile, s as songProjectFromRestorableState, u as emptySongMetadata } from "./smapFile.js";
+import { a as readProjectSong, c as removeProjectSong, f as writeProjectManifest, i as getProjectWavInfoBatch, l as scanProjectSongAudio, m as writeProjectSongAsset, n as createProjectSong, o as readProjectSongAsset, p as writeProjectSong, r as getProjectInfo } from "./desktopProjectFs2.js";
+//#region src/lib/project/types.ts
+var PROJECT_SONGS_DIR = "songs";
+/**
+* Single helper used by every loop that walks the project for export
+* purposes (Ableton bulk export, future PDF set list, future cloud sync).
+* Hidden entries are filtered out at the source so future code can't
+* accidentally include them.
+*/
+function getExportableSongs(project) {
+	return project.songs.filter((s) => !s.hidden);
+}
+/** Returns the leaf folder name from `"songs/opener-7f3a9c2d"` → `"opener-7f3a9c2d"`. */
+function songFolderLeaf(folder) {
+	const ix = folder.lastIndexOf("/");
+	return ix === -1 ? folder : folder.slice(ix + 1);
+}
+//#endregion
+//#region src/lib/songmap/persist.ts
+/**
+* Encode full restorable state as a single binary `.smap` file (see `smapFile.ts`).
+*
+* v2 `.smap` is JSON-only — `state.audioBlob` is intentionally **not**
+* embedded. The user's audio file lives on disk under `<song>/audio/` via
+* the sidecar and is referenced by `songMap.audio.originalPath`. Saving
+* a legacy session that still carries audio bytes simply drops them
+* here; on next load the audio comes back from `originalPath`.
+*/
+async function exportRestorableStateAsSmapBlob(state) {
+	return encodeSmapFile({ project: songProjectFromRestorableState(state) });
+}
+/** Browser download for a `Blob` (e.g. `.smap`). */
+function downloadBlob(blob, filename) {
+	if (typeof document === "undefined") return;
+	const a = document.createElement("a");
+	const url = URL.createObjectURL(blob);
+	a.href = url;
+	a.download = filename;
+	a.click();
+	URL.revokeObjectURL(url);
+}
+/** Safe single-segment filename stem from song title. */
+function safeExportBasename(title) {
+	return (title.trim() || "song").replace(/[^\w\s-]/g, "").replace(/\s+/g, "-").slice(0, 80) || "song";
+}
+//#endregion
+//#region src/lib/songmap/factory.ts
+var defaultIdFactory = () => crypto.randomUUID();
+function createEmptySongMap(options = {}) {
+	return {
+		formatVersion: 1,
+		app: { name: "BarBro" },
+		metadata: emptySongMetadata(options.now?.() ?? (/* @__PURE__ */ new Date()).toISOString()),
+		timeline: {
+			bars: [],
+			beats: []
+		},
+		sections: [],
+		harmony: [],
+		cues: defaultCueSettings()
+	};
+}
+/**
+* Builds a SongMap with `AudioReference` from the current session and empty timeline.
+* Bars/beats are filled by analysis or import later.
+*/
+function createSongMapFromAudioSession(session, options = {}) {
+	const nowIso = options.now?.() ?? (/* @__PURE__ */ new Date()).toISOString();
+	const baseName = session.name.replace(/\.[^.]+$/, "") || "Untitled";
+	const title = options.title ?? baseName;
+	const map = createEmptySongMap({
+		...options,
+		now: () => nowIso
+	});
+	map.metadata = {
+		...map.metadata,
+		title,
+		createdAt: nowIso,
+		updatedAt: nowIso
+	};
+	map.audio = {
+		fileName: session.name,
+		mimeType: session.file?.type,
+		durationSec: Math.max(0, session.endSec - session.startSec),
+		trim: {
+			startSec: session.startSec,
+			endSec: session.endSec
+		},
+		source: "upload"
+	};
+	return map;
+}
+function newId(factory = defaultIdFactory) {
+	return factory();
+}
+//#endregion
+//#region src/lib/songmap/countIn.ts
+/**
+* Single source of truth for "how many count-in beats does this song have."
+*
+* Reads the top-level `countInBeats` (decoupled from `cues.mode`). Returns
+* `0` when absent, non-positive, or not a finite integer. A song with cue
+* speech enabled AND a count-in coexist freely.
+*
+* Transitional behavior: while `.smap` migration to v2 is still landing,
+* legacy files may carry the value at `cues.countInBeats` only. We honor
+* that as a fallback so renderers keep working on un-migrated content.
+* The fallback is removed in Step 4 of the v2 cutover.
+*/
+function effectiveCountInBeats(sm) {
+	const top = sm.countInBeats;
+	if (Number.isInteger(top) && top > 0) return top;
+	if (sm.cues.mode === "countIn" && Number.isInteger(sm.cues.countInBeats) && sm.cues.countInBeats > 0) return sm.cues.countInBeats;
+	return 0;
+}
+//#endregion
+//#region src/lib/songmap/audioIdentity.ts
+function identityFromAudioRef(audio) {
+	if (!audio) return {};
+	return {
+		sha256: audio.sha256,
+		originalSha256: audio.originalSha256,
+		durationSec: audio.durationSec,
+		sampleRate: audio.sampleRate,
+		channels: audio.channels,
+		fileSize: audio.fileSize,
+		fileName: audio.fileName
+	};
+}
+/** Tolerance for the loose duration comparison. ~100ms covers transcoding jitter. */
+var DURATION_TOLERANCE_SEC = .1;
+/**
+* Strict identity: ANY sha256 on either side equal to ANY sha256 on
+* the other. Conclusive — two files with the same sha256 are
+* byte-identical, full stop. Cross-kind matches (a local sha256 from
+* a scanned file equalling the cloud's `originalSha256`) are valid:
+* the reconciler doesn't know whether the local file is a compressed
+* derivative or the original master, only that its bytes hash to a
+* value the SongMap claims somewhere.
+*
+* Returns `null` (= undecided) when neither side has any sha256 to
+* compare against. Returns `false` when both sides have at least one
+* sha256 each but none of them coincide.
+*/
+function identityMatchesStrict(local, expected) {
+	const localShas = [local.sha256, local.originalSha256].filter((s) => typeof s === "string" && s.length > 0);
+	const expectedShas = [expected.sha256, expected.originalSha256].filter((s) => typeof s === "string" && s.length > 0);
+	if (localShas.length === 0 || expectedShas.length === 0) return null;
+	for (const a of localShas) for (const b of expectedShas) if (a === b) return true;
+	return false;
+}
+/**
+* Loose identity: every comparable field must match within tolerance.
+*
+* Returns `true` only when ALL fields present on both sides match
+* (sample rate exact; channels exact; fileSize exact; duration within
+* the 100ms tolerance). Missing fields are not deal-breakers — a side
+* that doesn't claim a value can't disagree with one that does. But at
+* least ONE field must actually be compared, otherwise we'd happily
+* "match" two empty identities.
+*/
+function identityMatchesLoose(local, expected) {
+	let compared = 0;
+	if (local.durationSec !== void 0 && expected.durationSec !== void 0) {
+		compared++;
+		if (Math.abs(local.durationSec - expected.durationSec) > DURATION_TOLERANCE_SEC) return false;
+	}
+	if (local.sampleRate !== void 0 && expected.sampleRate !== void 0) {
+		compared++;
+		if (local.sampleRate !== expected.sampleRate) return false;
+	}
+	if (local.channels !== void 0 && expected.channels !== void 0) {
+		compared++;
+		if (local.channels !== expected.channels) return false;
+	}
+	if (local.fileSize !== void 0 && expected.fileSize !== void 0) {
+		compared++;
+		if (local.fileSize !== expected.fileSize) return false;
+	}
+	return compared > 0;
+}
+//#endregion
+//#region src/lib/project/audioReconcile.ts
+/**
+* The identity bundle the SongMap claims the song's audio should be.
+* Falls back to `audio` when `expectedAudio` (cloud-collab) isn't set.
+*/
+function expectedIdentityForSong(songMap) {
+	const exp = songMap.expectedAudio;
+	if (exp) return identityFromAudioRef(exp);
+	return identityFromAudioRef(songMap.audio);
+}
+/**
+* Walk `<projectPath>/<songFolder>/audio/` and try to identify which
+* file (if any) matches what the SongMap expects. Does NOT mutate
+* anything — caller decides whether to stamp `audio.originalPath`,
+* surface a banner, or both.
+*
+* Pure I/O: no Svelte stores read or written; safe to call from any
+* load / refresh path.
+*/
+async function reconcileSongAudio(songMap, projectPath, songFolder) {
+	const expected = expectedIdentityForSong(songMap);
+	const scan = await scanProjectSongAudio(projectPath, songFolder);
+	if (!scan.ok) return {
+		kind: "scan-failed",
+		error: scan.error
+	};
+	const scanned = scan.items.filter((i) => !i.error);
+	const hasExpectedShas = !!(expected.sha256 || expected.originalSha256);
+	const hasExpectedFields = expected.durationSec !== void 0 || expected.sampleRate !== void 0 || expected.channels !== void 0 || expected.fileSize !== void 0;
+	if (!hasExpectedShas && !hasExpectedFields) return {
+		kind: "no-expected",
+		scanned
+	};
+	for (const item of scanned) {
+		const local = {
+			sha256: item.sha256,
+			durationSec: item.durationSec,
+			sampleRate: item.sampleRate,
+			channels: item.channels,
+			fileSize: item.fileSize,
+			fileName: item.fileName
+		};
+		if (identityMatchesStrict(local, expected) === true) return {
+			kind: "strict-match",
+			fileName: item.fileName,
+			identity: local
+		};
+	}
+	for (const item of scanned) {
+		const local = {
+			sha256: item.sha256,
+			durationSec: item.durationSec,
+			sampleRate: item.sampleRate,
+			channels: item.channels,
+			fileSize: item.fileSize,
+			fileName: item.fileName
+		};
+		if (identityMatchesLoose(local, expected)) return {
+			kind: "loose-match",
+			fileName: item.fileName,
+			identity: local
+		};
+	}
+	return {
+		kind: "no-match",
+		expected,
+		scanned
+	};
+}
+/**
+* Stamp the matched filename into `audio.originalPath` and (when the
+* scan recovered them) the missing identity fields. Returns the
+* updated `AudioReference`. Caller is responsible for persisting the
+* .smap on disk and updating any store.
+*/
+function applyReconcileMatch(audio, match) {
+	const base = audio ?? {
+		fileName: match.fileName,
+		trim: {
+			startSec: 0,
+			endSec: 0
+		},
+		source: "import"
+	};
+	const next = {
+		...base,
+		fileName: base.fileName || match.fileName,
+		originalPath: `audio/${match.fileName}`
+	};
+	if (match.identity.sha256 && !next.sha256) next.sha256 = match.identity.sha256;
+	if (match.identity.durationSec !== void 0 && next.durationSec === void 0) next.durationSec = match.identity.durationSec;
+	if (match.identity.sampleRate !== void 0 && next.sampleRate === void 0) next.sampleRate = match.identity.sampleRate;
+	if (match.identity.channels !== void 0 && next.channels === void 0) next.channels = match.identity.channels;
+	if (match.identity.fileSize !== void 0 && next.fileSize === void 0) next.fileSize = match.identity.fileSize;
+	return next;
+}
+//#endregion
 //#region src/lib/songmap/session.ts
 /**
 * After timeline/metadata edits, keep `map.audio` aligned with the live trim/file in `audioSession`
@@ -91,26 +368,6 @@ function computeCountIn(songMap, countInBeats) {
 		beatDurationSec,
 		effectiveFirstDownbeatSec
 	};
-}
-//#endregion
-//#region src/lib/songmap/countIn.ts
-/**
-* Single source of truth for "how many count-in beats does this song have."
-*
-* Reads the top-level `countInBeats` (decoupled from `cues.mode`). Returns
-* `0` when absent, non-positive, or not a finite integer. A song with cue
-* speech enabled AND a count-in coexist freely.
-*
-* Transitional behavior: while `.smap` migration to v2 is still landing,
-* legacy files may carry the value at `cues.countInBeats` only. We honor
-* that as a fallback so renderers keep working on un-migrated content.
-* The fallback is removed in Step 4 of the v2 cutover.
-*/
-function effectiveCountInBeats(sm) {
-	const top = sm.countInBeats;
-	if (Number.isInteger(top) && top > 0) return top;
-	if (sm.cues.mode === "countIn" && Number.isInteger(sm.cues.countInBeats) && sm.cues.countInBeats > 0) return sm.cues.countInBeats;
-	return 0;
 }
 //#endregion
 //#region src/lib/songmap/sectionEdit.ts
@@ -399,19 +656,40 @@ function pushSectionCountInPack(events, opts) {
 	});
 }
 /**
+* Single source of truth for the spoken pre-song announcement text.
+*
+* Resolves in this priority:
+*  1. `sm.cues.spokenIntroText` — the explicit author override.
+*  2. `sm.metadata.title` — historical default; what the announcement
+*     was always derived from before the override field existed.
+*  3. `'Untitled song'` — last-resort fallback for songs with neither.
+*
+* Whitespace is trimmed; empty strings count as "not set" so the user
+* can clear the field to revert to title-based behaviour.
+*/
+function resolvedSpokenIntroText(sm) {
+	const override = sm.cues.spokenIntroText?.trim();
+	if (override) return override;
+	const title = sm.metadata.title?.trim();
+	if (title) return title;
+	return "Untitled song";
+}
+/**
 * Seconds of **cue-file** timeline reserved at t=0 before the first count-in click, so the
 * spoken title can finish without overlapping count numbers (desktop TTS).
 *
 * Needed whenever there's speech to fit at the head of the cue WAV — that is,
 * when the cue mode is `'spoken'` OR a count-in is active (both create content
 * the title would otherwise step on).
+*
+* Length math uses `resolvedSpokenIntroText(sm)` so the override shrinks /
+* grows the prelude just like a different title would.
 */
 function titleCuePreludeSec(sm) {
 	const hasSpeech = sm.cues.mode === "spoken";
 	const hasCountIn = effectiveCountInBeats(sm) > 0;
 	if (!hasSpeech && !hasCountIn) return 0;
-	const raw = (sm.metadata.title || "Untitled song").trim();
-	const len = Math.min(72, raw.length);
+	const len = Math.min(72, resolvedSpokenIntroText(sm).length);
 	return Math.min(2.85, Math.max(.82, .34 + len * .055));
 }
 function firstBarDownbeatBeat(sm) {
@@ -440,38 +718,6 @@ function songStartBeat(sm) {
 function sanitizeCueSpeechText(raw, maxLen) {
 	const t = raw.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
 	return t.length <= maxLen ? t : `${t.slice(0, maxLen - 1).trimEnd()}…`;
-}
-/**
-* Position on the click/cue WAV timeline (seconds from sample 0) where the
-* song's first musical downbeat — bar 1, beat 1 — lands. This is the
-* single, unambiguous "song start" anchor that the renderer uses for both
-* count-in clicks and song-aligned clicks.
-*
-* Click WAV layout:
-*
-*   [0,                    preludeSec)           — title-cue silence
-*   [preludeSec,           preludeSec + prependSec) — count-in silence
-*   [preludeSec + prependSec, songStart)         — pre-roll inside the trimmed
-*                                                  audio (= 0 if trim is tight
-*                                                  to the first downbeat)
-*    songStart                                   — bar 1, beat 1
-*   [songStart, …)                               — song clicks (downbeat first)
-*
-* Invariants downstream depend on this:
-*   - Count-in (N beats) → exactly N clicks at `[songStart − N·bd, songStart − bd]`,
-*     each spaced one beat apart, ending one beat before the downbeat lands.
-*   - The first downbeat-tone song click is mixed AT `songStart`.
-*
-* Returns null when timeline data is insufficient (no first-bar downbeat,
-* no usable beat duration, no trim).
-*/
-function clickWavSongStartSec(sm, opts) {
-	const start = songStartBeat(sm);
-	if (!start) return null;
-	const trim = sm.audio?.trim;
-	if (!trim) return null;
-	const t = opts.preludeSec + opts.prependSec + (start.timeSec - trim.startSec);
-	return Number.isFinite(t) ? t : null;
 }
 /**
 * Output-file times (seconds, on the click-WAV timeline BEFORE the title
@@ -537,7 +783,7 @@ function buildCueSpeechEvents(sm) {
 	const events = [{
 		kind: "title",
 		tSec: .02,
-		text: `${sanitizeCueSpeechText(sm.metadata.title || "Untitled song", 72)}.`
+		text: `${sanitizeCueSpeechText(resolvedSpokenIntroText(sm), 72)}.`
 	}];
 	if (countInBeats > 0) {
 		const times = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats);
@@ -622,7 +868,7 @@ function cueTrackFingerprintPayload(sm) {
 		e: s.barRange.endBarIndex
 	}));
 	return {
-		v: 3,
+		v: 4,
 		trim: {
 			startSec: round6(trim.startSec),
 			endSec: round6(trim.endSec)
@@ -633,7 +879,8 @@ function cueTrackFingerprintPayload(sm) {
 		cues: {
 			mode: sm.cues.mode,
 			useSectionLabels: sm.cues.useSectionLabels,
-			titlePreludeSec: round6(titleCuePreludeSec(sm))
+			titlePreludeSec: round6(titleCuePreludeSec(sm)),
+			spokenIntroText: resolvedSpokenIntroText(sm)
 		},
 		bars,
 		beats,
@@ -648,63 +895,27 @@ function fingerprintCueTrackInputs(sm) {
 	return (h >>> 0).toString(16).padStart(8, "0");
 }
 //#endregion
-//#region src/lib/songmap/factory.ts
-var defaultIdFactory = () => crypto.randomUUID();
-function createEmptySongMap(options = {}) {
-	return {
-		formatVersion: 1,
-		app: { name: "BarBro" },
-		metadata: emptySongMetadata(options.now?.() ?? (/* @__PURE__ */ new Date()).toISOString()),
-		timeline: {
-			bars: [],
-			beats: []
-		},
-		sections: [],
-		harmony: [],
-		cues: defaultCueSettings()
-	};
-}
-/**
-* Builds a SongMap with `AudioReference` from the current session and empty timeline.
-* Bars/beats are filled by analysis or import later.
-*/
-function createSongMapFromAudioSession(session, options = {}) {
-	const nowIso = options.now?.() ?? (/* @__PURE__ */ new Date()).toISOString();
-	const baseName = session.name.replace(/\.[^.]+$/, "") || "Untitled";
-	const title = options.title ?? baseName;
-	const map = createEmptySongMap({
-		...options,
-		now: () => nowIso
-	});
-	map.metadata = {
-		...map.metadata,
-		title,
-		createdAt: nowIso,
-		updatedAt: nowIso
-	};
-	map.audio = {
-		fileName: session.name,
-		mimeType: session.file?.type,
-		durationSec: Math.max(0, session.endSec - session.startSec),
-		trim: {
-			startSec: session.startSec,
-			endSec: session.endSec
-		},
-		source: "upload"
-	};
-	return map;
-}
-function newId(factory = defaultIdFactory) {
-	return factory();
-}
-//#endregion
 //#region src/lib/songmap/merge.ts
 /**
 * Merges analysis fragments into a copy of `map` and bumps `metadata.updatedAt`.
 * Replaces `timeline.bars` / `timeline.beats` when the fragment includes them.
+*
+* Full analyses (`bars` AND `beats` present) capture a snapshot into
+* `timeline.original` so the editor can offer a "Reset grid" affordance.
+* Partial fragments (just bars or just beats) preserve any existing
+* snapshot — they're patching, not redefining the baseline.
 */
 function mergeAnalysisIntoSongMap(map, fragment) {
 	const now = (/* @__PURE__ */ new Date()).toISOString();
+	const newBars = fragment.bars ?? map.timeline.bars;
+	const newBeats = fragment.beats ?? map.timeline.beats;
+	const original = fragment.bars !== void 0 && fragment.beats !== void 0 ? {
+		bars: newBars.map((b) => ({
+			...b,
+			beatIds: [...b.beatIds]
+		})),
+		beats: newBeats.map((b) => ({ ...b }))
+	} : map.timeline.original;
 	const next = {
 		...map,
 		metadata: {
@@ -712,8 +923,9 @@ function mergeAnalysisIntoSongMap(map, fragment) {
 			updatedAt: now
 		},
 		timeline: {
-			bars: fragment.bars ?? map.timeline.bars,
-			beats: fragment.beats ?? map.timeline.beats
+			bars: newBars,
+			beats: newBeats,
+			...original ? { original } : {}
 		}
 	};
 	const v = validateSongMap(next);
@@ -781,6 +993,29 @@ function clearHarmonyAtBeat(map, beatId) {
 //#endregion
 //#region src/lib/songmap/timelineEdit.ts
 var T_EPS = 1e-4;
+/**
+* Cheap, allocation-free check: does the live timeline already match
+* the snapshot? Used by the UI to disable the Reset button when there's
+* nothing to revert.
+*/
+function timelineMatchesOriginal(map) {
+	const orig = map.timeline.original;
+	if (!orig) return true;
+	const bars = map.timeline.bars;
+	const beats = map.timeline.beats;
+	if (bars.length !== orig.bars.length || beats.length !== orig.beats.length) return false;
+	for (let i = 0; i < bars.length; i++) {
+		const a = bars[i];
+		const b = orig.bars[i];
+		if (a.id !== b.id || a.startSec !== b.startSec || a.endSec !== b.endSec || a.beatCount !== b.beatCount) return false;
+	}
+	for (let i = 0; i < beats.length; i++) {
+		const a = beats[i];
+		const b = orig.beats[i];
+		if (a.id !== b.id || a.barId !== b.barId || a.timeSec !== b.timeSec || a.indexInBar !== b.indexInBar) return false;
+	}
+	return true;
+}
 function ok(map) {
 	return {
 		ok: true,
@@ -1365,20 +1600,114 @@ function applyBarGridAction(map, action, idFactory) {
 * Full snapshot: `RestorableSongState` + `hydrateRestorableSong`.
 */
 var songMap = writable(null);
+/**
+* Undo / redo history. Each successful `patchSongMap` pushes the
+* PREVIOUS `SongMap` reference onto `past` and clears `future`.
+* `undoSongMap()` pops `past` → current → `future`. Snapshots are
+* just references (`SongMap` is treated immutably throughout the
+* codebase) so the stack is cheap.
+*
+* `setSongMap` / `clearSongMap` reset the stack — switching projects
+* shouldn't let you undo into someone else's document.
+*
+* Capped at `MAX_HISTORY` so a long editing session doesn't grow
+* unbounded. Oldest entries dropped when full.
+*/
+var MAX_HISTORY = 100;
+var history = writable({
+	past: [],
+	future: []
+});
+var canUndo = derived(history, (h) => h.past.length > 0);
+var canRedo = derived(history, (h) => h.future.length > 0);
 function setSongMap(map) {
+	history.set({
+		past: [],
+		future: []
+	});
+	batchDepth = 0;
+	batchStartState = null;
 	songMap.set(map);
 }
 function clearSongMap() {
+	history.set({
+		past: [],
+		future: []
+	});
+	batchDepth = 0;
+	batchStartState = null;
 	songMap.set(null);
 }
 /**
+* Roll back the previous `patchSongMap`. No-op when the past stack is
+* empty. The current state moves onto `future` so `redoSongMap()` can
+* walk it back.
+*/
+function undoSongMap() {
+	const h = get(history);
+	if (h.past.length === 0) return false;
+	const current = get(songMap);
+	if (!current) return false;
+	const prev = h.past[h.past.length - 1];
+	history.set({
+		past: h.past.slice(0, -1),
+		future: [...h.future, current]
+	});
+	songMap.set(prev);
+	return true;
+}
+/** Walk forward past an undo. No-op when `future` is empty. */
+function redoSongMap() {
+	const h = get(history);
+	if (h.future.length === 0) return false;
+	const current = get(songMap);
+	if (!current) return false;
+	const nextState = h.future[h.future.length - 1];
+	history.set({
+		past: [...h.past, current],
+		future: h.future.slice(0, -1)
+	});
+	songMap.set(nextState);
+	return true;
+}
+/**
+* Coalesce a sequence of `patchSongMap` calls into a single history
+* entry. Used by the drag handlers in the bar strip / waveform so a
+* pointer drag from boundary X to boundary Y produces ONE undo step,
+* not one per pointermove frame.
+*
+* Usage:
+*
+*   beginPatchBatch()
+*   try {
+*     // ... many patchSongMap(...) calls
+*   } finally {
+*     endPatchBatch()
+*   }
+*
+* Nested batches share the outermost batch — the stack only commits
+* once per outermost `endPatchBatch()`. While a batch is active,
+* intermediate patches update the store but do NOT push to history;
+* the redo stack is cleared on first patch (consistent with single
+* patches). On `endPatchBatch`, the PRE-BATCH state goes onto the
+* undo stack as ONE entry.
+*/
+var batchDepth = 0;
+var batchStartState = null;
+/**
 * Apply an immutable update to the current map. On validation failure the store is unchanged.
+* On success the PREVIOUS map is pushed onto the undo stack and the
+* redo stack is cleared (a fresh edit invalidates any forward path).
+*
+* While a `beginPatchBatch()` is active, the per-patch history push is
+* suppressed — `endPatchBatch()` pushes ONE entry for the whole batch.
 */
 function patchSongMap(updater) {
 	let result = {
 		ok: false,
 		errors: ["No song map loaded"]
 	};
+	let prev = null;
 	songMap.update((sm) => {
 		if (!sm) return sm;
 		let next = updater(sm);
@@ -1404,6 +1733,7 @@ function patchSongMap(updater) {
 			return sm;
 		}
 		result = { ok: true };
+		prev = sm;
 		const now = (/* @__PURE__ */ new Date()).toISOString();
 		return {
 			...next,
@@ -1411,6 +1741,18 @@ function patchSongMap(updater) {
 				...next.metadata,
 				updatedAt: now
 			}
+		};
+	});
+	if (prev !== null) if (batchDepth > 0) history.update((h) => ({
+		past: h.past,
+		future: []
+	}));
+	else history.update((h) => {
+		const past = [...h.past, prev];
+		if (past.length > MAX_HISTORY) past.shift();
+		return {
+			past,
+			future: []
 		};
 	});
 	return result;
@@ -1517,235 +1859,6 @@ function closeProject() {
 	project.set(empty);
 }
 //#endregion
-//#region src/lib/project/types.ts
-var PROJECT_SONGS_DIR = "songs";
-/**
-* Single helper used by every loop that walks the project for export
-* purposes (Ableton bulk export, future PDF set list, future cloud sync).
-* Hidden entries are filtered out at the source so future code can't
-* accidentally include them.
-*/
-function getExportableSongs(project) {
-	return project.songs.filter((s) => !s.hidden);
-}
-/** Returns the leaf folder name from `"songs/opener-7f3a9c2d"` → `"opener-7f3a9c2d"`. */
-function songFolderLeaf(folder) {
-	const ix = folder.lastIndexOf("/");
-	return ix === -1 ? folder : folder.slice(ix + 1);
-}
-//#endregion
-//#region src/lib/client/desktopProjectFs.ts
-/**
-* Web ⇄ desktop project filesystem bridge.
-*
-* All project I/O (manifest read/write, song.smap create/read/write,
-* stems scan, song-folder remove) goes through these loopback HTTP calls.
-* The browser File System Access API is NOT used for project mode — the
-* desktop sidecar is the only disk-IO layer.
-*
-* Every function returns a typed Result `{ ok: true, ... } | { ok: false, error }`.
-* No throws on network failure; callers handle the sidecar-offline case
-* explicitly (project mode requires the desktop client).
-*/
-var BASE_URL = `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`;
-async function postJson(url, body) {
-	let res;
-	try {
-		res = await fetch(url, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(body),
-			cache: "no-store"
-		});
-	} catch (e) {
-		return {
-			ok: false,
-			error: `Desktop sidecar unreachable: ${e instanceof Error ? e.message : String(e)}`
-		};
-	}
-	try {
-		return await res.json();
-	} catch {
-		return {
-			ok: false,
-			error: `Sidecar returned non-JSON (HTTP ${res.status})`
-		};
-	}
-}
-/** Encode a Uint8Array as base64 (browser-safe). */
-function bytesToBase64(bytes) {
-	let bin = "";
-	const chunk = 32768;
-	for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-	return btoa(bin);
-}
-async function createProject(parentPath, name) {
-	return await postJson(`${BASE_URL}/native/project/create`, {
-		parentPath,
-		name
-	});
-}
-async function getProjectInfo(projectPath) {
-	return await postJson(`${BASE_URL}/native/project/info`, { projectPath });
-}
-async function writeProjectManifest(projectPath, manifest) {
-	return await postJson(`${BASE_URL}/native/project/manifest/write`, {
-		projectPath,
-		manifest
-	});
-}
-async function createProjectSong(projectPath, songFolder, smapBytes) {
-	return await postJson(`${BASE_URL}/native/project/song/create`, {
-		projectPath,
-		songFolder,
-		smapBase64: bytesToBase64(smapBytes)
-	});
-}
-async function readProjectSong(projectPath, songFolder) {
-	const url = new URL(`${BASE_URL}/native/project/song/read`);
-	url.searchParams.set("projectPath", projectPath);
-	url.searchParams.set("songFolder", songFolder);
-	let res;
-	try {
-		res = await fetch(url.toString(), { cache: "no-store" });
-	} catch (e) {
-		return {
-			ok: false,
-			error: `Desktop sidecar unreachable: ${e instanceof Error ? e.message : String(e)}`
-		};
-	}
-	if (!res.ok) {
-		let err = `Read failed (HTTP ${res.status})`;
-		try {
-			const j = await res.json();
-			if (j.error) err = j.error;
-		} catch {}
-		return {
-			ok: false,
-			error: err
-		};
-	}
-	const buf = await res.arrayBuffer();
-	return {
-		ok: true,
-		bytes: new Uint8Array(buf)
-	};
-}
-async function writeProjectSong(projectPath, songFolder, smapBytes) {
-	return await postJson(`${BASE_URL}/native/project/song/write`, {
-		projectPath,
-		songFolder,
-		smapBase64: bytesToBase64(smapBytes)
-	});
-}
-async function removeProjectSong(projectPath, songFolder, deleteFiles) {
-	return await postJson(`${BASE_URL}/native/project/song/remove`, {
-		projectPath,
-		songFolder,
-		deleteFiles
-	});
-}
-/**
-* Write an arbitrary file under a song folder (e.g. `cue/cue-track.wav`).
-* Path is validated by the sidecar; no `..` segments allowed. Intermediate
-* directories are created.
-*/
-async function writeProjectSongAsset(projectPath, songFolder, subpath, bytes) {
-	return await postJson(`${BASE_URL}/native/project/song/asset/write`, {
-		projectPath,
-		songFolder,
-		subpath,
-		contentBase64: bytesToBase64(bytes)
-	});
-}
-/**
-* Write a single file at the PROJECT ROOT (e.g. `<projectName>.als`).
-* Path is validated by the sidecar; no `..` segments allowed. Intermediate
-* directories are created.
-*/
-async function writeProjectAsset(projectPath, subpath, bytes) {
-	return await postJson(`${BASE_URL}/native/project/asset/write`, {
-		projectPath,
-		subpath,
-		contentBase64: bytesToBase64(bytes)
-	});
-}
-/**
-* Read WAV header info (duration / sample rate / channels) for a batch of
-* files under the project tree. Per-file errors don't abort the batch
-* — each item either has the info fields or an `error` field.
-*/
-async function getProjectWavInfoBatch(projectPath, files) {
-	return await postJson(`${BASE_URL}/native/project/wav-info/batch`, {
-		projectPath,
-		files
-	});
-}
-/**
-* Transcode a compressed audio file (typically MP3) to 16-bit PCM WAV
-* inside the project tree. Cache-aware via sidecar mtime check — the
-* actual ffmpeg call only runs when needed.
-*
-* Used by the Ableton setlist export to ensure every clip is uncompressed
-* (no encoder priming offsets) for sample-accurate alignment.
-*/
-async function transcodeProjectAudioToWav(projectPath, songFolder, srcSubpath, dstSubpath) {
-	return await postJson(`${BASE_URL}/native/project/transcode-to-wav`, {
-		projectPath,
-		songFolder,
-		srcSubpath,
-		dstSubpath
-	});
-}
-/**
-* Open the OS file picker, copy the chosen audio file into
-* `<song>/audio/<filename>`, and return the relative path + SHA-256 in one
-* round-trip. Callers compare the returned `sha256` against the SongMap's
-* `audio.originalSha256` to detect a content mismatch.
-*/
-async function relinkProjectSongAudio(projectPath, songFolder, defaultName) {
-	return await postJson(`${BASE_URL}/native/project/song/audio/relink`, {
-		projectPath,
-		songFolder,
-		defaultName: defaultName ?? null
-	});
-}
-/**
-* Read an arbitrary file from under a song folder (e.g. `stems/vocals.wav`,
-* `cue/cue-track.wav`). Returns the bytes as a Blob for direct use with
-* `AudioContext.decodeAudioData`. 404 → ok:false.
-*/
-async function readProjectSongAsset(projectPath, songFolder, subpath) {
-	const url = new URL(`${BASE_URL}/native/project/song/asset/read`);
-	url.searchParams.set("projectPath", projectPath);
-	url.searchParams.set("songFolder", songFolder);
-	url.searchParams.set("subpath", subpath);
-	let res;
-	try {
-		res = await fetch(url.toString(), { cache: "no-store" });
-	} catch (e) {
-		return {
-			ok: false,
-			error: `Desktop sidecar unreachable: ${e instanceof Error ? e.message : String(e)}`
-		};
-	}
-	if (!res.ok) {
-		let err = `Read failed (HTTP ${res.status})`;
-		try {
-			const j = await res.json();
-			if (j.error) err = j.error;
-		} catch {}
-		return {
-			ok: false,
-			error: err
-		};
-	}
-	return {
-		ok: true,
-		blob: await res.blob()
-	};
-}
-//#endregion
 //#region src/lib/project/commit.ts
 /**
 * Project mutation primitives — create / open / commit-new-song /
@@ -1767,7 +1880,6 @@ var LAST_PROJECT_PATH_KEY = "barbro::lastProjectPath";
 var ACTIVE_SONG_ID_KEY = "barbro::activeSongId";
 /** localStorage key for the recents list (`string[]` of abs OS paths). */
 var RECENT_PROJECTS_KEY = "barbro::recentProjects";
-var SONG_SMAP_FILENAME = "song.smap";
 var RECENT_PROJECTS_CAP = 10;
 function lsGet(key) {
 	try {
@@ -1826,6 +1938,9 @@ function metadataLiteFromSongMap(map) {
 	const countIn = effectiveCountInBeats(map);
 	if (countIn > 0) out.countInBeats = countIn;
 	if (map.stemRefs && Object.keys(map.stemRefs).length > 0) out.stemRefs = { ...map.stemRefs };
+	if (map.audio?.sha256) out.audioSha256 = map.audio.sha256;
+	if (map.audio?.durationSec !== void 0) out.audioDurationSec = map.audio.durationSec;
+	if (map.audio?.fileName || map.audio?.originalPath) out.hasAudio = true;
 	return out;
 }
 /** Translate the sidecar's per-song info shape into the store-friendly lite shape. */
@@ -1839,6 +1954,7 @@ function liteFromInfo(info, fallbackFolder) {
 	if (info.hasAls) out.hasAls = true;
 	if (info.hasCueTrack) out.hasCueTrack = true;
 	if (info.hasClickTrack) out.hasClickTrack = true;
+	if (info.hasAudio) out.hasAudio = true;
 	if (typeof info.countInBeats === "number" && info.countInBeats > 0) out.countInBeats = info.countInBeats;
 	return out;
 }
@@ -1874,19 +1990,6 @@ function songFolderName(title, id) {
 	return `${safeExportBasename(title)}-${id.slice(0, 8)}`;
 }
 /**
-* Create a brand-new project on disk via the sidecar. The picked
-* `parentPath` is the containing location; the sidecar slugifies `name`
-* and creates a subfolder there. Hydrates the project store on success.
-*/
-async function createProjectOnDisk(parentPath, name) {
-	const r = await createProject(parentPath, name);
-	if (!r.ok) throw new Error(r.error);
-	setActiveProject(r.projectPath, r.manifest, {});
-	writeLastProjectPath(r.projectPath);
-	recordRecentProjectPath(r.projectPath);
-	return r.manifest;
-}
-/**
 * Open an existing project by absolute OS path. The sidecar reads the
 * manifest, scans each song's folder (smap header + stems), and we
 * populate the store in one shot.
@@ -1913,6 +2016,11 @@ async function openProjectByPath(projectPath) {
 		};
 	});
 	if (migrated.migrated > 0) console.info(`[project] migrated ${migrated.migrated} song(s) to v2 (skipped ${migrated.skipped}, failed ${migrated.failed})`);
+	backfillAudioIdentity(projectPath, r.manifest).then((res) => {
+		if (res.stamped > 0) console.info(`[project] identity backfill: stamped ${res.stamped} song(s) (skipped ${res.skipped}, failed ${res.failed})`);
+	}).catch((e) => {
+		console.warn("[project] identity backfill failed:", e);
+	});
 	return r.manifest;
 }
 /**
@@ -1977,6 +2085,104 @@ async function migrateProjectSongsToV2(projectPath, manifest) {
 	}
 	return {
 		migrated,
+		skipped,
+		failed
+	};
+}
+/**
+* Phase 3 identity backfill: for every song that already has a resolvable
+* `audio.originalPath` but is missing any of the new identity fields
+* (`sampleRate`, `channels`, `fileSize`, or `sha256`), batch a single
+* sidecar `wav-info` call (with `withSha`) and stamp the results into the
+* .smap. One call covers the whole project, so this is cheap on next
+* open after the initial sweep.
+*
+* Idempotent — songs that already have a full identity bundle are
+* skipped before we even ask the sidecar.
+*/
+async function backfillAudioIdentity(projectPath, manifest) {
+	let stamped = 0;
+	let skipped = 0;
+	let failed = 0;
+	const pending = [];
+	for (const entry of manifest.songs) try {
+		const r = await readProjectSong(projectPath, entry.folder);
+		if (!r.ok) {
+			failed++;
+			continue;
+		}
+		const data = await decodeSmapFile(new Blob([r.bytes], { type: "application/octet-stream" }));
+		const audio = data.project.songMap.audio;
+		if (!audio?.originalPath) {
+			skipped++;
+			continue;
+		}
+		if (!(audio.sampleRate === void 0 || audio.channels === void 0 || audio.fileSize === void 0 || audio.sha256 === void 0)) {
+			skipped++;
+			continue;
+		}
+		pending.push({
+			entry,
+			songMap: data.project.songMap,
+			originalPath: audio.originalPath
+		});
+	} catch (e) {
+		failed++;
+		console.warn(`[project] identity backfill: read failed for ${entry.folder}:`, e);
+	}
+	if (pending.length === 0) return {
+		stamped,
+		skipped,
+		failed
+	};
+	const info = await getProjectWavInfoBatch(projectPath, pending.map((p) => ({
+		songFolder: p.entry.folder,
+		subpath: p.originalPath
+	})), { withSha: true });
+	if (!info.ok) return {
+		stamped,
+		skipped,
+		failed: failed + pending.length
+	};
+	const infoByFolder = /* @__PURE__ */ new Map();
+	for (const item of info.items) infoByFolder.set(item.songFolder, item);
+	for (const p of pending) try {
+		const item = infoByFolder.get(p.entry.folder);
+		if (!item || "error" in item) {
+			failed++;
+			continue;
+		}
+		const audio = p.songMap.audio;
+		if (!audio) {
+			failed++;
+			continue;
+		}
+		const out = await encodeSmapFile({ project: {
+			projectFormatVersion: 1,
+			songMap: {
+				...p.songMap,
+				audio: {
+					...audio,
+					sampleRate: audio.sampleRate ?? item.sampleRate,
+					channels: audio.channels ?? item.channels,
+					fileSize: audio.fileSize ?? item.fileSize,
+					durationSec: audio.durationSec ?? item.durationSec,
+					sha256: audio.sha256 ?? item.sha256
+				}
+			}
+		} });
+		const outBytes = new Uint8Array(await out.arrayBuffer());
+		if (!(await writeProjectSong(projectPath, p.entry.folder, outBytes)).ok) {
+			failed++;
+			continue;
+		}
+		stamped++;
+	} catch (e) {
+		failed++;
+		console.warn(`[project] identity backfill: rewrite failed for ${p.entry.folder}:`, e);
+	}
+	return {
+		stamped,
 		skipped,
 		failed
 	};
@@ -2142,19 +2348,6 @@ function sanitizeAudioFilename(name) {
 	return cleaned.length > 0 ? cleaned : "audio.bin";
 }
 /**
-* Import an existing `.smap` file from anywhere into the active project.
-* Bytes are copied as-is (audio preserved); a fresh song id is generated.
-*/
-async function importSmapToProject(smapBlob, meta) {
-	const snap = get(project);
-	if (!snap.osPath || !snap.data) throw new Error("No active project");
-	const smapBytes = new Uint8Array(await smapBlob.arrayBuffer());
-	const { entry, nextManifest } = await writeSongIntoProject(snap.osPath, snap.data, smapBytes, meta);
-	setProjectData(nextManifest);
-	patchMetadataForFolder(entry.folder, meta);
-	return { entry };
-}
-/**
 * Read a project song's `.smap` (with audio) and hydrate the editor stores.
 * Caller still navigates to /edit.
 */
@@ -2177,6 +2370,38 @@ async function loadProjectSongIntoEditor(songId) {
 				audioBlob: file
 			};
 		} else console.warn(`[project] audio file missing at ${audio.originalPath}:`, got.error);
+	}
+	if (!state.audioBlob && state.songMap.audio) try {
+		const outcome = await reconcileSongAudio(state.songMap, snap.osPath, entry.folder);
+		if (outcome.kind === "strict-match") {
+			const repaired = applyReconcileMatch(state.songMap.audio, {
+				fileName: outcome.fileName,
+				identity: outcome.identity
+			});
+			const repairedMap = {
+				...state.songMap,
+				audio: repaired
+			};
+			const got = await readProjectSongAsset(snap.osPath, entry.folder, repaired.originalPath ?? `audio/${outcome.fileName}`);
+			if (got.ok) {
+				const file = new File([got.blob], repaired.fileName, { type: repaired.mimeType ?? "audio/*" });
+				state = {
+					...state,
+					audioBlob: file,
+					songMap: repairedMap
+				};
+				try {
+					const repairedSmap = await exportRestorableStateAsSmapBlob(state);
+					const repairedBytes = new Uint8Array(await repairedSmap.arrayBuffer());
+					const ws = await writeProjectSong(snap.osPath, entry.folder, repairedBytes);
+					if (!ws.ok) console.warn(`[project] reconcile .smap rewrite failed: ${ws.error}`);
+				} catch (e) {
+					console.warn("[project] reconcile .smap rewrite threw:", e);
+				}
+			}
+		}
+	} catch (e) {
+		console.warn("[project] audio reconcile failed:", e);
 	}
 	if (state.audioBlob && audio && !audio.originalPath) {
 		const fileName = sanitizeAudioFilename(audio.fileName ?? "audio.bin");
@@ -2208,6 +2433,10 @@ async function loadProjectSongIntoEditor(songId) {
 		}
 	}
 	hydrateRestorableSong(state);
+	audioSession.update((s) => ({
+		...s,
+		missingAudioIgnored: false
+	}));
 	if (!state.audioBlob && state.songMap.audio?.originalPath) audioSession.update((s) => ({
 		...s,
 		missingReason: "file-not-found"
@@ -2299,4 +2528,4 @@ async function mergeStemRefsIntoSmap(projectPath, songFolder, newRefs) {
 	if (!w.ok) throw new Error(w.error);
 }
 //#endregion
-export { computeCountIn as $, hydrateRestorableSong as A, createSongMapFromAudioSession as B, writeProjectSong as C, patchMetadataForFolder as D, closeProject as E, evenBeatTimes as F, songStartBeat as G, buildCueSpeechEvents as H, clearHarmonyAtBeat as I, defaultSectionLabel as J, titleCuePreludeSec as K, upsertHarmonyAtBeat as L, setSongMap as M, songMap as N, project as O, applyBarGridAction as P, effectiveCountInBeats as Q, mergeAnalysisIntoSongMap as R, writeProjectAsset as S, getExportableSongs as T, clickWavSongStartSec as U, newId as V, countInSpeechOutputTimes as W, resizeSectionRange as X, resizeSectionBoundary as Y, setSectionForBarRange as Z, getProjectWavInfoBatch as _, createProjectOnDisk as a, relinkProjectSongAudio as b, loadProjectSongIntoEditor as c, readRecentProjectPaths as d, audioSession as et, refreshProjectInfo as f, tryRestoreLastProject as g, setSongHidden as h, commitNewSongToProject as i, patchSongMap as j, clearFullAppSongState as k, metadataLiteFromSongMap as l, selectBestStemSet as m, SONG_SMAP_FILENAME as n, dropRecentProjectPath as o, removeSongFromProject as p, sortBeatsByTime as q, clearLastProjectPath as r, importSmapToProject as s, ACTIVE_SONG_ID_KEY as t, restorableSongState as tt, openProjectByPath as u, readProjectSong as v, writeProjectSongAsset as w, transcodeProjectAudioToWav as x, readProjectSongAsset as y, createEmptySongMap as z };
+export { downloadBlob as $, applyBarGridAction as A, titleCuePreludeSec as B, canRedo as C, setSongMap as D, redoSongMap as E, mergeAnalysisIntoSongMap as F, setSectionForBarRange as G, defaultSectionLabel as H, buildCueSpeechEvents as I, restorableSongState as J, computeCountIn as K, countInSpeechOutputTimes as L, timelineMatchesOriginal as M, clearHarmonyAtBeat as N, songMap as O, upsertHarmonyAtBeat as P, newId as Q, resolvedSpokenIntroText as R, clearFullAppSongState as S, patchSongMap as T, resizeSectionBoundary as U, sortBeatsByTime as V, resizeSectionRange as W, createEmptySongMap as X, effectiveCountInBeats as Y, createSongMapFromAudioSession as Z, closeProject as _, loadProjectSongIntoEditor as a, setActiveProject as b, readRecentProjectPaths as c, removeSongFromProject as d, exportRestorableStateAsSmapBlob as et, selectBestStemSet as f, writeLastProjectPath as g, tryRestoreLastProject as h, dropRecentProjectPath as i, evenBeatTimes as j, undoSongMap as k, recordRecentProjectPath as l, songFolderName as m, clearLastProjectPath as n, PROJECT_SONGS_DIR as nt, metadataLiteFromSongMap as o, setSongHidden as p, audioSession as q, commitNewSongToProject as r, getExportableSongs as rt, openProjectByPath as s, ACTIVE_SONG_ID_KEY as t, safeExportBasename as tt, refreshProjectInfo as u, patchMetadataForFolder as v, canUndo as w, setProjectData as x, project as y, songStartBeat as z };

@@ -1,7 +1,7 @@
 import { a as tick, n as mount, o as unmount } from "./index-server.js";
 import { Et as run, S as setContext, a as derived, b as getContext, f as spread_props, i as bind_props, k as clsx$1, l as props_id, mt as ATTACHMENT_KEY, r as attributes, x as hasContext, y as getAllContexts } from "./server.js";
 import { a as on } from "./internal.js";
-import { v as Button, y as cn } from "./desktopBridge.js";
+import { n as cn, t as Button } from "./button.js";
 import { t as X } from "./x.js";
 import { clsx } from "clsx";
 import parse from "style-to-object";
@@ -3935,7 +3935,7 @@ function Dialog_content($$renderer, $$props) {
 						Dialog_content$1($$renderer, spread_props([
 							{
 								"data-slot": "dialog-content",
-								class: cn("brutalist-shadow bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 grid max-w-[calc(100%-2rem)] gap-4 rounded-none border-2 border-foreground p-4 text-sm duration-100 sm:max-w-sm fixed top-1/2 left-1/2 z-50 w-full -translate-x-1/2 -translate-y-1/2 outline-none", className)
+								class: cn("brutalist-shadow bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 grid max-w-[calc(100%-2rem)] gap-4 rounded-[var(--radius)] border-2 border-foreground p-4 text-sm duration-100 sm:max-w-sm fixed top-1/2 left-1/2 z-50 w-full -translate-x-1/2 -translate-y-1/2 outline-none", className)
 							},
 							restProps,
 							{

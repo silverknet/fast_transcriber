@@ -1,19 +1,168 @@
 import "../../../chunks/index-server.js";
-import { A as escape_html, O as attr, a as derived, h as unsubscribe_stores, i as bind_props, m as stringify, p as store_get, s as ensure_array_like, t as attr_class } from "../../../chunks/server.js";
+import { A as escape_html, O as attr, a as derived, f as spread_props, h as unsubscribe_stores, i as bind_props, m as stringify, p as store_get, s as ensure_array_like, t as attr_class } from "../../../chunks/server.js";
 import "../../../chunks/index-server2.js";
-import { l as readSmapJsonOnly, o as safeExportBasename, t as downloadBlob } from "../../../chunks/persist.js";
-import "../../../chunks/client.js";
-import { G as songStartBeat, N as songMap, O as project, Q as effectiveCountInBeats, S as writeProjectAsset, T as getExportableSongs, _ as getProjectWavInfoBatch, l as metadataLiteFromSongMap, m as selectBestStemSet, p as removeSongFromProject, q as sortBeatsByTime, s as importSmapToProject, v as readProjectSong, w as writeProjectSongAsset, x as transcodeProjectAudioToWav, y as readProjectSongAsset } from "../../../chunks/commit.js";
-import { v as Button } from "../../../chunks/desktopBridge.js";
+import { n as goto } from "../../../chunks/client.js";
+import "../../../chunks/navigation.js";
+import { t as Button } from "../../../chunks/button.js";
 import { a as Dialog_title, i as Dialog_footer, n as Dialog_content, o as Dialog, r as Dialog_header, t as Dialog_description } from "../../../chunks/dialog.js";
-import { i as fetchCloudSongAsSmap } from "../../../chunks/cloud.js";
-import "../../../chunks/Icon.js";
-import "../../../chunks/desktopCompanionStatus.js";
-import "../../../chunks/stores.js";
-import { o as STEM_TRACKS, s as generateAbletonProjectSetXml, t as gzipString } from "../../../chunks/gzip.js";
+import { a as disableCloudProject, i as createCloudProject, o as getCloudProjectManifest, p as NewProjectDialog, s as joinCloudProject, u as listPendingInvites } from "../../../chunks/folder-open.js";
+import { t as Icon } from "../../../chunks/Icon.js";
+import { t as X } from "../../../chunks/x.js";
+import { m as pickFolderViaDesktop, t as STEM_PRESET_PRIORITY } from "../../../chunks/desktopBridge.js";
+import { $ as downloadBlob, O as songMap, d as removeSongFromProject, f as selectBestStemSet, rt as getExportableSongs, tt as safeExportBasename, u as refreshProjectInfo, y as project } from "../../../chunks/commit.js";
+import { a as readSmapJsonOnly } from "../../../chunks/smapFile.js";
+import { a as readProjectSong, d as writeProjectAsset, i as getProjectWavInfoBatch, m as writeProjectSongAsset, o as readProjectSongAsset, u as transcodeProjectAudioToWav } from "../../../chunks/desktopProjectFs2.js";
+import { t as page } from "../../../chunks/stores.js";
+import { t as desktopCompanionStatus } from "../../../chunks/desktopCompanionStatus.js";
+import { n as StemSplitter, o as STEM_TRACKS, s as generateAbletonProjectSetXml, t as gzipString } from "../../../chunks/gzip.js";
+import "../../../chunks/download.js";
 import { t as renderCueTrackWavBlob } from "../../../chunks/renderCueTrack.js";
+import "../../../chunks/music-4.js";
 import "../../../chunks/refresh-cw.js";
+import "../../../chunks/sparkles.js";
+import "../../../chunks/upload.js";
+import { t as User_plus } from "../../../chunks/user-plus.js";
+import { t as songPlaybackPlan } from "../../../chunks/playbackPlan.js";
 import { t as audioBufferToWavBlob } from "../../../chunks/trimAudio.js";
+//#region node_modules/@lucide/svelte/dist/icons/cloud.svelte
+function Cloud($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		/**
+		* @license @lucide/svelte v1.7.0 - ISC
+		*
+		* ISC License
+		*
+		* Copyright (c) 2026 Lucide Icons and Contributors
+		*
+		* Permission to use, copy, modify, and/or distribute this software for any
+		* purpose with or without fee is hereby granted, provided that the above
+		* copyright notice and this permission notice appear in all copies.
+		*
+		* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+		* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+		* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+		* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+		* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+		* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+		* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+		*
+		* ---
+		*
+		* The following Lucide icons are derived from the Feather project:
+		*
+		* airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+		*
+		* The MIT License (MIT) (for the icons listed above)
+		*
+		* Copyright (c) 2013-present Cole Bemis
+		*
+		* Permission is hereby granted, free of charge, to any person obtaining a copy
+		* of this software and associated documentation files (the "Software"), to deal
+		* in the Software without restriction, including without limitation the rights
+		* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+		* copies of the Software, and to permit persons to whom the Software is
+		* furnished to do so, subject to the following conditions:
+		*
+		* The above copyright notice and this permission notice shall be included in all
+		* copies or substantial portions of the Software.
+		*
+		* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+		* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+		* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+		* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+		* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+		* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+		* SOFTWARE.
+		*
+		*/
+		let { $$slots, $$events, ...props } = $$props;
+		Icon($$renderer, spread_props([
+			{ name: "cloud" },
+			props,
+			{
+				iconNode: [["path", { "d": "M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" }]],
+				children: ($$renderer) => {
+					props.children?.($$renderer);
+					$$renderer.push(`<!---->`);
+				},
+				$$slots: { default: true }
+			}
+		]));
+	});
+}
+//#endregion
+//#region node_modules/@lucide/svelte/dist/icons/trash-2.svelte
+function Trash_2($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		/**
+		* @license @lucide/svelte v1.7.0 - ISC
+		*
+		* ISC License
+		*
+		* Copyright (c) 2026 Lucide Icons and Contributors
+		*
+		* Permission to use, copy, modify, and/or distribute this software for any
+		* purpose with or without fee is hereby granted, provided that the above
+		* copyright notice and this permission notice appear in all copies.
+		*
+		* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+		* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+		* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+		* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+		* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+		* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+		* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+		*
+		* ---
+		*
+		* The following Lucide icons are derived from the Feather project:
+		*
+		* airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+		*
+		* The MIT License (MIT) (for the icons listed above)
+		*
+		* Copyright (c) 2013-present Cole Bemis
+		*
+		* Permission is hereby granted, free of charge, to any person obtaining a copy
+		* of this software and associated documentation files (the "Software"), to deal
+		* in the Software without restriction, including without limitation the rights
+		* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+		* copies of the Software, and to permit persons to whom the Software is
+		* furnished to do so, subject to the following conditions:
+		*
+		* The above copyright notice and this permission notice shall be included in all
+		* copies or substantial portions of the Software.
+		*
+		* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+		* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+		* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+		* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+		* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+		* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+		* SOFTWARE.
+		*
+		*/
+		let { $$slots, $$events, ...props } = $$props;
+		Icon($$renderer, spread_props([
+			{ name: "trash-2" },
+			props,
+			{
+				iconNode: [
+					["path", { "d": "M10 11v6" }],
+					["path", { "d": "M14 11v6" }],
+					["path", { "d": "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" }],
+					["path", { "d": "M3 6h18" }],
+					["path", { "d": "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }]
+				],
+				children: ($$renderer) => {
+					props.children?.($$renderer);
+					$$renderer.push(`<!---->`);
+				},
+				$$slots: { default: true }
+			}
+		]));
+	});
+}
 //#endregion
 //#region src/lib/components/RemoveSongDialog.svelte
 function RemoveSongDialog($$renderer, $$props) {
@@ -445,135 +594,6 @@ function ExportBackingTrackDialog($$renderer, $$props) {
 	});
 }
 //#endregion
-//#region src/lib/components/CopyFromCloudDialog.svelte
-function CopyFromCloudDialog($$renderer, $$props) {
-	$$renderer.component(($$renderer) => {
-		let { open = false } = $$props;
-		let cloudSongs = [];
-		let copyingId = null;
-		let copyError = "";
-		let copiedIds = /* @__PURE__ */ new Set();
-		async function onCopy(item) {
-			if (copyingId) return;
-			copyingId = item.id;
-			copyError = "";
-			try {
-				const dl = await fetchCloudSongAsSmap(item.id);
-				if (!dl.ok) {
-					copyError = dl.error;
-					return;
-				}
-				const meta = metadataLiteFromSongMap((await readSmapJsonOnly(dl.blob)).songMap);
-				await importSmapToProject(dl.blob, meta);
-				copiedIds = new Set(copiedIds).add(item.id);
-			} catch (e) {
-				copyError = e instanceof Error ? e.message : "Copy failed";
-			} finally {
-				copyingId = null;
-			}
-		}
-		function formatDate(iso) {
-			const d = new Date(iso);
-			const diffDays = Math.floor(((/* @__PURE__ */ new Date()).getTime() - d.getTime()) / 864e5);
-			if (diffDays === 0) return "Today · " + d.toLocaleTimeString([], {
-				hour: "2-digit",
-				minute: "2-digit"
-			});
-			if (diffDays === 1) return "Yesterday";
-			if (diffDays < 7) return d.toLocaleDateString([], { weekday: "long" });
-			return d.toLocaleDateString([], {
-				month: "short",
-				day: "numeric",
-				year: "numeric"
-			});
-		}
-		let $$settled = true;
-		let $$inner_renderer;
-		function $$render_inner($$renderer) {
-			Dialog($$renderer, {
-				get open() {
-					return open;
-				},
-				set open($$value) {
-					open = $$value;
-					$$settled = false;
-				},
-				children: ($$renderer) => {
-					Dialog_content($$renderer, {
-						class: "flex max-h-[80vh] w-full max-w-lg flex-col gap-4 p-5",
-						showCloseButton: true,
-						children: ($$renderer) => {
-							Dialog_header($$renderer, {
-								children: ($$renderer) => {
-									Dialog_title($$renderer, {
-										children: ($$renderer) => {
-											$$renderer.push(`<!---->Copy song from cloud`);
-										},
-										$$slots: { default: true }
-									});
-									$$renderer.push(`<!----> `);
-									Dialog_description($$renderer, {
-										children: ($$renderer) => {
-											$$renderer.push(`<!---->Each copy becomes a new file inside this project. Edits to the copy do not affect the cloud
-        original.`);
-										},
-										$$slots: { default: true }
-									});
-									$$renderer.push(`<!---->`);
-								},
-								$$slots: { default: true }
-							});
-							$$renderer.push(`<!----> `);
-							if (cloudSongs.length === 0) {
-								$$renderer.push("<!--[2-->");
-								$$renderer.push(`<p class="text-muted-foreground py-6 text-center text-sm">No cloud songs found.</p>`);
-							} else {
-								$$renderer.push("<!--[-1-->");
-								if (copyError) {
-									$$renderer.push("<!--[0-->");
-									$$renderer.push(`<p class="text-destructive text-sm" role="status">${escape_html(copyError)}</p>`);
-								} else $$renderer.push("<!--[-1-->");
-								$$renderer.push(`<!--]--> <ul class="flex flex-col gap-2 overflow-y-auto"><!--[-->`);
-								const each_array = ensure_array_like(cloudSongs);
-								for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
-									let item = each_array[$$index];
-									const busy = copyingId === item.id;
-									const done = copiedIds.has(item.id);
-									const disabled = !item.hasSongMap || busy || copyingId !== null && copyingId !== item.id;
-									$$renderer.push(`<li class="border-foreground/15 bg-muted/30 flex items-center justify-between gap-3 rounded-lg border p-3"><div class="min-w-0 flex-1"><p class="truncate font-medium">${escape_html(item.name)}</p> <p class="text-muted-foreground mt-0.5 text-xs">${escape_html(item.hasSongMap ? formatDate(item.updatedAt) : "No saved content yet")}</p></div> <div class="flex shrink-0 gap-2">`);
-									Button($$renderer, {
-										class: "",
-										variant: done ? "outline" : "default",
-										size: "sm",
-										disabled,
-										onclick: () => void onCopy(item),
-										children: ($$renderer) => {
-											$$renderer.push(`<!---->${escape_html(busy ? "Copying…" : done ? "Copied" : "Copy")}`);
-										},
-										$$slots: { default: true }
-									});
-									$$renderer.push(`<!----></div></li>`);
-								}
-								$$renderer.push(`<!--]--></ul>`);
-							}
-							$$renderer.push(`<!--]-->`);
-						},
-						$$slots: { default: true }
-					});
-				},
-				$$slots: { default: true }
-			});
-		}
-		do {
-			$$settled = true;
-			$$inner_renderer = $$renderer.copy();
-			$$render_inner($$inner_renderer);
-		} while (!$$settled);
-		$$renderer.subsume($$inner_renderer);
-		bind_props($$props, { open });
-	});
-}
-//#endregion
 //#region src/lib/components/SetlistExportDialog.svelte
 function SetlistExportDialog($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
@@ -706,31 +726,846 @@ function SetlistExportDialog($$renderer, $$props) {
 		bind_props($$props, { open });
 	});
 }
-/** Compute timings for one song. Throws on missing/invalid trim. */
+//#endregion
+//#region src/lib/components/StemsDialog.svelte
+function StemsDialog($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		var $$store_subs;
+		/**
+		* "Stems" dialog: hosts the [`StemSplitter`](./StemSplitter.svelte) for the
+		* currently loaded project song. Replaces the old expandable in-row panel
+		* so it stops fighting drag-and-drop in the project list.
+		*
+		* Parent (`routes/project/+page.svelte`) loads the song into the editor
+		* (`loadProjectSongIntoEditor`) before flipping `open` so `$songMap` is the
+		* songMap for `entry.id` by the time we render the splitter.
+		*
+		* Audio path resolution: v2 songs store playable audio at
+		* `<song>/<songMap.audio.originalPath>` (typically `audio/<filename>`).
+		* The `.smap` itself no longer carries an audio chunk, so we must hand
+		* the sidecar that file path — not the `.smap` path.
+		*
+		* Layout: the DialogHeader (with title + close button) stays fixed at the
+		* top; the body scrolls inside a capped-height wrapper so the splitter's
+		* progress + log can grow without spilling off the viewport.
+		*/
+		const DEMUCS_STEMS = [
+			"vocals",
+			"drums",
+			"bass",
+			"other"
+		];
+		let { open = false, entry } = $$props;
+		/** Target song; null when the dialog is dormant. */
+		/** True when the global songMap store holds the song we were asked to render. */
+		const isThisSongActive = derived(() => !!entry && store_get($$store_subs ??= {}, "$projectStore", project).editingMode === "project-song" && store_get($$store_subs ??= {}, "$projectStore", project).activeSongId === entry.id);
+		const projectOsPath = derived(() => store_get($$store_subs ??= {}, "$projectStore", project).osPath);
+		const audioRel = derived(() => store_get($$store_subs ??= {}, "$songMap", songMap)?.audio?.originalPath ?? null);
+		/**
+		* Absolute OS path to the playable audio file. v2 layout: `audio/<filename>`
+		* under the song folder. Null until the song is loaded AND the SongMap
+		* actually records an `audio.originalPath` (legacy / web-only smaps don't).
+		*/
+		const inputPath = derived(() => isThisSongActive() && projectOsPath() && entry && audioRel() ? `${projectOsPath()}/${entry.folder}/${audioRel()}` : null);
+		const outputDir = derived(() => projectOsPath() && entry ? `${projectOsPath()}/${entry.folder}/stems` : null);
+		const inputLabel = derived(() => store_get($$store_subs ??= {}, "$songMap", songMap)?.audio?.fileName ?? audioRel() ?? null);
+		const songTitle = derived(() => entry && store_get($$store_subs ??= {}, "$projectStore", project).metadataByFolder[entry.folder]?.title || entry?.folder || "song");
+		/**
+		* For each Demucs stem, the highest-quality preset slug it currently exists
+		* at on disk (or null if missing). Walks `stemsByPreset` in priority order
+		* so the first hit wins.
+		*/
+		const currentQualityByStem = derived(() => {
+			const out = {};
+			if (!entry) return out;
+			const sets = store_get($$store_subs ??= {}, "$projectStore", project).metadataByFolder[entry.folder]?.stemsByPreset;
+			if (!sets) return out;
+			for (const slug of STEM_PRESET_PRIORITY) {
+				const files = sets[slug];
+				if (!files) continue;
+				for (const filename of files) {
+					const base = filename.toLowerCase().replace(/\.[^.]+$/, "");
+					if (DEMUCS_STEMS.includes(base) && !out[base]) out[base] = slug;
+				}
+			}
+			return out;
+		});
+		async function onJobDone() {
+			await refreshProjectInfo();
+		}
+		let $$settled = true;
+		let $$inner_renderer;
+		function $$render_inner($$renderer) {
+			Dialog($$renderer, {
+				get open() {
+					return open;
+				},
+				set open($$value) {
+					open = $$value;
+					$$settled = false;
+				},
+				children: ($$renderer) => {
+					Dialog_content($$renderer, {
+						class: "max-w-xl max-h-[90vh] flex flex-col gap-0 overflow-hidden p-0",
+						children: ($$renderer) => {
+							Dialog_header($$renderer, {
+								class: "border-foreground/20 shrink-0 border-b px-4 pt-4 pb-3",
+								children: ($$renderer) => {
+									Dialog_title($$renderer, {
+										class: "pr-8 truncate",
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Stems — ${escape_html(songTitle())}`);
+										},
+										$$slots: { default: true }
+									});
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> <div class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-4">`);
+							if (!entry) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<p class="text-muted-foreground text-sm">No song selected.</p>`);
+							} else if (!isThisSongActive()) {
+								$$renderer.push("<!--[1-->");
+								$$renderer.push(`<p class="text-muted-foreground text-sm">Loading song…</p>`);
+							} else if (!projectOsPath() || !store_get($$store_subs ??= {}, "$desktopCompanionStatus", desktopCompanionStatus).reachable) {
+								$$renderer.push("<!--[2-->");
+								$$renderer.push(`<p class="text-amber-700 dark:text-amber-300 text-sm">Stems need the BarBro desktop client to be running. Start the desktop
+          app to manage stems for this song.</p>`);
+							} else if (!inputPath()) {
+								$$renderer.push("<!--[3-->");
+								$$renderer.push(`<p class="text-amber-700 dark:text-amber-300 text-sm">This song's <code class="font-mono">.smap</code> doesn't reference a playable
+          audio file on disk yet. Open the song in Edit and use the relink banner
+          to point it at the source, then try again.</p>`);
+							} else {
+								$$renderer.push("<!--[-1-->");
+								StemSplitter($$renderer, {
+									songId: entry.id,
+									inputPath: inputPath(),
+									outputDir: outputDir(),
+									inputLabel: inputLabel(),
+									currentQualityByStem: currentQualityByStem(),
+									desktopReachable: store_get($$store_subs ??= {}, "$desktopCompanionStatus", desktopCompanionStatus).reachable,
+									finalizeJob: onJobDone,
+									chromeless: true
+								});
+							}
+							$$renderer.push(`<!--]--></div>`);
+						},
+						$$slots: { default: true }
+					});
+				},
+				$$slots: { default: true }
+			});
+		}
+		do {
+			$$settled = true;
+			$$inner_renderer = $$renderer.copy();
+			$$render_inner($$inner_renderer);
+		} while (!$$settled);
+		$$renderer.subsume($$inner_renderer);
+		if ($$store_subs) unsubscribe_stores($$store_subs);
+		bind_props($$props, { open });
+	});
+}
+//#endregion
+//#region src/lib/components/ShareProjectDialog.svelte
+function ShareProjectDialog($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		var $$store_subs;
+		/**
+		* Project sharing dialog — the prominent "Share" entrypoint on the
+		* project page header. Combines what was scattered before:
+		*
+		*   - Enable cloud sync (if not already enabled)
+		*   - Members list with role pills
+		*   - Invite form (email + role) with friendly "pending" feedback
+		*   - Pending invites with revoke
+		*   - Disable cloud sync (destructive footer)
+		*
+		* Pending invites bridge the "invitee hasn't signed up yet" gap: the
+		* `POST /members` endpoint quietly creates a `cloud_pending_invites`
+		* row when it can't find the email's auth user, and the
+		* access-gate hook auto-promotes those rows to memberships on the
+		* invitee's first sign-in.
+		*/
+		let { open = false } = $$props;
+		const proj = derived(() => store_get($$store_subs ??= {}, "$project", project).data);
+		const cloud = derived(() => proj()?.cloud ?? null);
+		const userId = derived(() => store_get($$store_subs ??= {}, "$page", page).data?.user?.id ?? null);
+		let busy = false;
+		let errorMsg = "";
+		let infoMsg = "";
+		let confirmDisable = false;
+		let members = [];
+		let pending = [];
+		let inviteEmail = "";
+		let inviteRole = "editor";
+		const isOwner = derived(() => {
+			if (!cloud() || !userId()) return false;
+			return members.some((m) => m.user_id === userId() && m.role === "owner");
+		});
+		async function refresh() {
+			if (!cloud()) {
+				members = [];
+				pending = [];
+				return;
+			}
+			const [m, p] = await Promise.all([getCloudProjectManifest(cloud().projectId), listPendingInvites(cloud().projectId)]);
+			members = m?.members ?? [];
+			pending = p;
+		}
+		async function onEnable() {
+			busy = true;
+			errorMsg = "";
+			infoMsg = "";
+			const r = await createCloudProject();
+			busy = false;
+			if (!r.ok) errorMsg = r.error;
+			else refresh();
+		}
+		async function onDisable() {
+			confirmDisable = false;
+			busy = true;
+			errorMsg = "";
+			const r = await disableCloudProject({ deleteRemote: isOwner() });
+			busy = false;
+			if (!r.ok) errorMsg = r.error;
+			else open = false;
+		}
+		let $$settled = true;
+		let $$inner_renderer;
+		function $$render_inner($$renderer) {
+			Dialog($$renderer, {
+				get open() {
+					return open;
+				},
+				set open($$value) {
+					open = $$value;
+					$$settled = false;
+				},
+				children: ($$renderer) => {
+					Dialog_content($$renderer, {
+						class: "max-w-lg",
+						children: ($$renderer) => {
+							Dialog_header($$renderer, {
+								class: "",
+								children: ($$renderer) => {
+									Dialog_title($$renderer, {
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Share project`);
+										},
+										$$slots: { default: true }
+									});
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							if (!cloud()) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<p class="text-sm text-muted-foreground">Cloud sync isn't enabled for this project yet. Enable it to invite
+        collaborators — the project syncs to Supabase so changes show up on
+        their machine.</p> `);
+								Dialog_footer($$renderer, {
+									class: "",
+									children: ($$renderer) => {
+										Button($$renderer, {
+											class: "",
+											variant: "outline",
+											onclick: () => open = false,
+											children: ($$renderer) => {
+												$$renderer.push(`<!---->Cancel`);
+											},
+											$$slots: { default: true }
+										});
+										$$renderer.push(`<!----> `);
+										Button($$renderer, {
+											class: "gap-2",
+											onclick: () => void onEnable(),
+											disabled: busy,
+											children: ($$renderer) => {
+												Cloud($$renderer, {
+													class: "size-4",
+													"aria-hidden": "true"
+												});
+												$$renderer.push(`<!----> ${escape_html(busy ? "Enabling…" : "Enable cloud sync")}`);
+											},
+											$$slots: { default: true }
+										});
+										$$renderer.push(`<!---->`);
+									},
+									$$slots: { default: true }
+								});
+								$$renderer.push(`<!---->`);
+							} else {
+								$$renderer.push("<!--[-1-->");
+								$$renderer.push(`<div class="space-y-4"><div class="space-y-2"><h3 class="text-muted-foreground text-xs font-bold uppercase tracking-wider">Members (${escape_html(members.length)})</h3> <ul class="border-foreground/20 divide-foreground/10 divide-y border text-xs"><!--[-->`);
+								const each_array = ensure_array_like(members);
+								for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
+									let m = each_array[$$index];
+									$$renderer.push(`<li class="flex items-center justify-between gap-3 px-2 py-1.5"><span class="truncate font-mono">${escape_html(m.user_id === userId() ? "you" : `${m.user_id.slice(0, 8)}…`)}</span> <span class="text-muted-foreground text-[10px] uppercase">${escape_html(m.role)}</span></li>`);
+								}
+								$$renderer.push(`<!--]--></ul></div> `);
+								if (isOwner()) {
+									$$renderer.push("<!--[0-->");
+									$$renderer.push(`<form class="space-y-2"><h3 class="text-muted-foreground text-xs font-bold uppercase tracking-wider">Invite by email</h3> <div class="flex flex-wrap items-end gap-2"><input type="email"${attr("value", inviteEmail)} placeholder="collaborator@example.com" class="border-foreground/30 bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"/> `);
+									$$renderer.select({
+										value: inviteRole,
+										class: "border-foreground/30 bg-background border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
+									}, ($$renderer) => {
+										$$renderer.option({ value: "editor" }, ($$renderer) => {
+											$$renderer.push(`editor`);
+										});
+										$$renderer.option({ value: "owner" }, ($$renderer) => {
+											$$renderer.push(`owner`);
+										});
+									});
+									$$renderer.push(` `);
+									Button($$renderer, {
+										type: "submit",
+										size: "sm",
+										class: "h-9 gap-1",
+										disabled: busy || !inviteEmail.trim(),
+										children: ($$renderer) => {
+											User_plus($$renderer, {
+												class: "size-3.5",
+												"aria-hidden": "true"
+											});
+											$$renderer.push(`<!----> Invite`);
+										},
+										$$slots: { default: true }
+									});
+									$$renderer.push(`<!----></div> <p class="text-muted-foreground text-[11px]">If they don't have an account yet, the invite waits and shows up when they first sign in.</p></form>`);
+								} else $$renderer.push("<!--[-1-->");
+								$$renderer.push(`<!--]--> `);
+								if (isOwner() && pending.length > 0) {
+									$$renderer.push("<!--[0-->");
+									$$renderer.push(`<div class="space-y-2"><h3 class="text-muted-foreground text-xs font-bold uppercase tracking-wider">Pending invites (${escape_html(pending.length)})</h3> <ul class="border-foreground/20 divide-foreground/10 divide-y border text-xs"><!--[-->`);
+									const each_array_1 = ensure_array_like(pending);
+									for (let $$index_1 = 0, $$length = each_array_1.length; $$index_1 < $$length; $$index_1++) {
+										let inv = each_array_1[$$index_1];
+										$$renderer.push(`<li class="flex items-center justify-between gap-3 px-2 py-1.5"><span class="truncate">${escape_html(inv.invited_email)}</span> <span class="text-muted-foreground text-[10px] uppercase">${escape_html(inv.role)}</span> <button type="button" class="text-muted-foreground hover:text-destructive" title="Revoke invite"${attr("disabled", busy, true)} aria-label="Revoke invite">`);
+										X($$renderer, {
+											class: "size-3.5",
+											"aria-hidden": "true"
+										});
+										$$renderer.push(`<!----></button></li>`);
+									}
+									$$renderer.push(`<!--]--></ul></div>`);
+								} else $$renderer.push("<!--[-1-->");
+								$$renderer.push(`<!--]--></div> `);
+								if (errorMsg) {
+									$$renderer.push("<!--[0-->");
+									$$renderer.push(`<p class="text-destructive text-xs" role="status">${escape_html(errorMsg)}</p>`);
+								} else $$renderer.push("<!--[-1-->");
+								$$renderer.push(`<!--]--> `);
+								if (infoMsg) {
+									$$renderer.push("<!--[0-->");
+									$$renderer.push(`<p class="text-emerald-600 dark:text-emerald-400 text-xs" role="status">${escape_html(infoMsg)}</p>`);
+								} else $$renderer.push("<!--[-1-->");
+								$$renderer.push(`<!--]--> `);
+								Dialog_footer($$renderer, {
+									class: "flex-wrap gap-2",
+									children: ($$renderer) => {
+										Button($$renderer, {
+											variant: "outline",
+											class: "text-destructive hover:text-destructive mr-auto gap-1",
+											onclick: () => confirmDisable = true,
+											disabled: busy,
+											children: ($$renderer) => {
+												Trash_2($$renderer, {
+													class: "size-3.5",
+													"aria-hidden": "true"
+												});
+												$$renderer.push(`<!----> Disable cloud sync`);
+											},
+											$$slots: { default: true }
+										});
+										$$renderer.push(`<!----> `);
+										Button($$renderer, {
+											class: "",
+											variant: "outline",
+											onclick: () => open = false,
+											children: ($$renderer) => {
+												$$renderer.push(`<!---->Close`);
+											},
+											$$slots: { default: true }
+										});
+										$$renderer.push(`<!---->`);
+									},
+									$$slots: { default: true }
+								});
+								$$renderer.push(`<!---->`);
+							}
+							$$renderer.push(`<!--]-->`);
+						},
+						$$slots: { default: true }
+					});
+				},
+				$$slots: { default: true }
+			});
+			$$renderer.push(`<!----> `);
+			Dialog($$renderer, {
+				get open() {
+					return confirmDisable;
+				},
+				set open($$value) {
+					confirmDisable = $$value;
+					$$settled = false;
+				},
+				children: ($$renderer) => {
+					Dialog_content($$renderer, {
+						class: "max-w-md",
+						children: ($$renderer) => {
+							Dialog_header($$renderer, {
+								class: "",
+								children: ($$renderer) => {
+									Dialog_title($$renderer, {
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Disable collaboration?`);
+										},
+										$$slots: { default: true }
+									});
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							if (isOwner()) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<p class="text-sm">You're the owner. Disabling deletes the cloud project for everyone —
+        members lose access, sync history is gone. Local files on disk are untouched.</p>`);
+							} else {
+								$$renderer.push("<!--[-1-->");
+								$$renderer.push(`<p class="text-sm">Removes this project's cloud link on your machine. The cloud project
+        stays — other members keep using it. Local files on disk are untouched.</p>`);
+							}
+							$$renderer.push(`<!--]--> `);
+							Dialog_footer($$renderer, {
+								class: "",
+								children: ($$renderer) => {
+									Button($$renderer, {
+										class: "",
+										variant: "outline",
+										onclick: () => confirmDisable = false,
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Cancel`);
+										},
+										$$slots: { default: true }
+									});
+									$$renderer.push(`<!----> `);
+									Button($$renderer, {
+										class: "text-destructive",
+										variant: "outline",
+										onclick: () => void onDisable(),
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Disable`);
+										},
+										$$slots: { default: true }
+									});
+									$$renderer.push(`<!---->`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!---->`);
+						},
+						$$slots: { default: true }
+					});
+				},
+				$$slots: { default: true }
+			});
+			$$renderer.push(`<!---->`);
+		}
+		do {
+			$$settled = true;
+			$$inner_renderer = $$renderer.copy();
+			$$render_inner($$inner_renderer);
+		} while (!$$settled);
+		$$renderer.subsume($$inner_renderer);
+		if ($$store_subs) unsubscribe_stores($$store_subs);
+		bind_props($$props, { open });
+	});
+}
+//#endregion
+//#region src/lib/components/NewSongDialog.svelte
+function NewSongDialog($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		/**
+		* "Add song" dialog — owns the title input + the two-way branch:
+		*
+		*   1. **Add empty** — commits a title-only stub `.smap` into the active
+		*      project and stays here. Audio + analysis happen later when the
+		*      user opens the song in the editor.
+		*   2. **Open in editor** — primes the editor's SongMap with the title
+		*      then navigates to `/?project=1`, which auto-restores the title
+		*      from the store and runs the normal upload + analyze flow.
+		*
+		* Both paths use the same title field, so the user only types it once.
+		*/
+		let { open = false, onCreated } = $$props;
+		/** Fires after a successful "Add empty" commit. */
+		let title = "";
+		let busy = false;
+		let error = "";
+		function cancel() {
+			open = false;
+		}
+		async function addEmpty() {
+			title.trim();
+			error = "Give the song a title first.";
+		}
+		let $$settled = true;
+		let $$inner_renderer;
+		function $$render_inner($$renderer) {
+			Dialog($$renderer, {
+				get open() {
+					return open;
+				},
+				set open($$value) {
+					open = $$value;
+					$$settled = false;
+				},
+				children: ($$renderer) => {
+					Dialog_content($$renderer, {
+						class: "max-w-md",
+						children: ($$renderer) => {
+							Dialog_header($$renderer, {
+								class: "",
+								children: ($$renderer) => {
+									Dialog_title($$renderer, {
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Add song`);
+										},
+										$$slots: { default: true }
+									});
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> <form class="flex flex-col gap-4"><label class="flex flex-col gap-1.5 text-xs"><span class="text-muted-foreground uppercase tracking-wider">Title</span> <input type="text"${attr("value", title)} placeholder="Untitled" class="border-foreground/30 bg-background w-full border-2 px-3 py-2 text-sm focus:border-foreground focus:outline-none"/></label> `);
+							if (error) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<p class="text-destructive text-xs" role="status">${escape_html(error)}</p>`);
+							} else $$renderer.push("<!--[-1-->");
+							$$renderer.push(`<!--]--> <div class="space-y-2"><p class="text-muted-foreground text-[11px]">Open in editor to upload audio and analyze right away, or add an
+          empty placeholder and fill it in later.</p> <div class="flex flex-wrap justify-end gap-2">`);
+							Button($$renderer, {
+								type: "button",
+								class: "",
+								variant: "outline",
+								onclick: cancel,
+								disabled: busy,
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->Cancel`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							Button($$renderer, {
+								type: "button",
+								class: "",
+								variant: "outline",
+								onclick: () => void addEmpty(),
+								disabled: !title.trim(),
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->${escape_html("Add empty")}`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							Button($$renderer, {
+								class: "",
+								type: "submit",
+								disabled: !title.trim(),
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->Open in editor`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----></div></div></form>`);
+						},
+						$$slots: { default: true }
+					});
+				},
+				$$slots: { default: true }
+			});
+		}
+		do {
+			$$settled = true;
+			$$inner_renderer = $$renderer.copy();
+			$$render_inner($$inner_renderer);
+		} while (!$$settled);
+		$$renderer.subsume($$inner_renderer);
+		bind_props($$props, { open });
+	});
+}
+//#endregion
+//#region src/lib/components/RenameSongDialog.svelte
+function RenameSongDialog($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		/**
+		* Rename a song in the active project. Edits `metadata.title` inside the
+		* song's `.smap` via `renameSongInProject`. The folder slug stays as-is
+		* so stem refs / cloud links / audio paths don't break.
+		*/
+		let { open = false, songId, currentTitle } = $$props;
+		let title = "";
+		let busy = false;
+		function cancel() {
+			open = false;
+		}
+		let $$settled = true;
+		let $$inner_renderer;
+		function $$render_inner($$renderer) {
+			Dialog($$renderer, {
+				get open() {
+					return open;
+				},
+				set open($$value) {
+					open = $$value;
+					$$settled = false;
+				},
+				children: ($$renderer) => {
+					Dialog_content($$renderer, {
+						class: "max-w-md",
+						children: ($$renderer) => {
+							Dialog_header($$renderer, {
+								class: "",
+								children: ($$renderer) => {
+									Dialog_title($$renderer, {
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Rename song`);
+										},
+										$$slots: { default: true }
+									});
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> <form class="flex flex-col gap-4"><label class="flex flex-col gap-1.5 text-xs"><span class="text-muted-foreground uppercase tracking-wider">Title</span> <input type="text"${attr("value", title)} placeholder="Untitled" class="border-foreground/30 bg-background w-full border-2 px-3 py-2 text-sm focus:border-foreground focus:outline-none"/></label> `);
+							$$renderer.push("<!--[-1-->");
+							$$renderer.push(`<!--]--> <div class="flex justify-end gap-2">`);
+							Button($$renderer, {
+								type: "button",
+								class: "",
+								variant: "outline",
+								onclick: cancel,
+								disabled: busy,
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->Cancel`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							Button($$renderer, {
+								class: "",
+								type: "submit",
+								disabled: !title.trim(),
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->${escape_html("Save")}`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----></div></form>`);
+						},
+						$$slots: { default: true }
+					});
+				},
+				$$slots: { default: true }
+			});
+		}
+		do {
+			$$settled = true;
+			$$inner_renderer = $$renderer.copy();
+			$$render_inner($$inner_renderer);
+		} while (!$$settled);
+		$$renderer.subsume($$inner_renderer);
+		bind_props($$props, { open });
+	});
+}
+//#endregion
+//#region src/lib/components/JoinCloudProjectDialog.svelte
+function JoinCloudProjectDialog($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		/**
+		* Join a cloud project on this machine. Opens with a preselected
+		* cloud project meta (passed as `cloudProject`); the user picks a
+		* parent folder on disk and clicks Join. The dialog handles the
+		* download + materialize flow via `joinCloudProject`, then navigates
+		* to `/project`.
+		*
+		* Identical UX rhythm to `NewProjectDialog`: dialog opens first, native
+		* picker is triggered from a button inside, errors land inline.
+		*/
+		let { open = false, cloudProject, onJoined } = $$props;
+		/** The target. Required when open=true; ignored otherwise. */
+		let parentPath = null;
+		let busy = false;
+		let error = "";
+		async function pickFolder() {
+			error = "";
+			const pick = await pickFolderViaDesktop({ title: "Pick the folder that will contain the joined project" });
+			if (!pick.ok) {
+				if ("cancelled" in pick) return;
+				error = pick.error ?? "Could not open picker";
+				return;
+			}
+			parentPath = pick.path;
+		}
+		async function join() {
+			error = "";
+			if (!cloudProject) {
+				error = "No project selected.";
+				return;
+			}
+			if (!parentPath) {
+				error = "Choose a folder first.";
+				return;
+			}
+			busy = true;
+			try {
+				const r = await joinCloudProject(cloudProject.id, parentPath);
+				if (!r.ok) {
+					error = r.error;
+					return;
+				}
+				open = false;
+				onJoined?.();
+				await goto("/project");
+			} catch (e) {
+				error = e instanceof Error ? e.message : "Join failed";
+			} finally {
+				busy = false;
+			}
+		}
+		function cancel() {
+			if (busy) return;
+			open = false;
+		}
+		let $$settled = true;
+		let $$inner_renderer;
+		function $$render_inner($$renderer) {
+			Dialog($$renderer, {
+				get open() {
+					return open;
+				},
+				set open($$value) {
+					open = $$value;
+					$$settled = false;
+				},
+				children: ($$renderer) => {
+					Dialog_content($$renderer, {
+						class: "max-w-md",
+						children: ($$renderer) => {
+							Dialog_header($$renderer, {
+								class: "",
+								children: ($$renderer) => {
+									Dialog_title($$renderer, {
+										children: ($$renderer) => {
+											$$renderer.push(`<!---->Join shared project`);
+										},
+										$$slots: { default: true }
+									});
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> <div class="space-y-4">`);
+							if (cloudProject) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<div class="border-foreground/20 border-2 px-3 py-2"><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Project</p> <p class="truncate font-mono text-sm">${escape_html(cloudProject.name)}</p> <p class="text-muted-foreground font-mono text-[11px]">rev ${escape_html(cloudProject.revision)}</p></div>`);
+							} else $$renderer.push("<!--[-1-->");
+							$$renderer.push(`<!--]--> <div class="flex flex-col gap-1.5 text-xs"><span class="text-muted-foreground uppercase tracking-wider">Folder</span> <div class="flex items-center gap-2">`);
+							Button($$renderer, {
+								type: "button",
+								class: "",
+								variant: "outline",
+								size: "sm",
+								onclick: () => void pickFolder(),
+								disabled: busy,
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->${escape_html(parentPath ? "Change…" : "Choose folder…")}`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							if (parentPath) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<span class="text-muted-foreground min-w-0 flex-1 truncate font-mono text-[11px]"${attr("title", parentPath)}>${escape_html(parentPath)}</span>`);
+							} else $$renderer.push("<!--[-1-->");
+							$$renderer.push(`<!--]--></div> `);
+							if (parentPath) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<span class="text-muted-foreground text-[11px]">A subfolder will be created here. Audio files don't sync — you'll see "missing audio"
+            for each song until you relink or import an audio pack.</span>`);
+							} else $$renderer.push("<!--[-1-->");
+							$$renderer.push(`<!--]--></div> `);
+							if (error) {
+								$$renderer.push("<!--[0-->");
+								$$renderer.push(`<p class="text-destructive text-xs" role="status">${escape_html(error)}</p>`);
+							} else $$renderer.push("<!--[-1-->");
+							$$renderer.push(`<!--]--> <div class="flex justify-end gap-2">`);
+							Button($$renderer, {
+								type: "button",
+								class: "",
+								variant: "outline",
+								onclick: cancel,
+								disabled: busy,
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->Cancel`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----> `);
+							Button($$renderer, {
+								class: "",
+								type: "button",
+								onclick: () => void join(),
+								disabled: busy || !parentPath || !cloudProject,
+								children: ($$renderer) => {
+									$$renderer.push(`<!---->${escape_html(busy ? "Joining…" : "Join")}`);
+								},
+								$$slots: { default: true }
+							});
+							$$renderer.push(`<!----></div></div>`);
+						},
+						$$slots: { default: true }
+					});
+				},
+				$$slots: { default: true }
+			});
+		}
+		do {
+			$$settled = true;
+			$$inner_renderer = $$renderer.copy();
+			$$render_inner($$inner_renderer);
+		} while (!$$settled);
+		$$renderer.subsume($$inner_renderer);
+		bind_props($$props, { open });
+	});
+}
+//#endregion
+//#region src/lib/export/setlist/timings.ts
+/**
+* Compute timings for one song.
+*
+* Now a thin projection of `songPlaybackPlan(sm)` — same numbers,
+* Ableton-shaped subset. Kept as `songTimings(sm)` so the orchestrator,
+* clipPlayRange helpers, and existing tests stay untouched while the
+* editor's live playback layer migrates onto the same plan.
+*
+* Throws on missing/invalid trim (matching old behaviour). The plan
+* itself returns null in that case; Ableton callers want the throw.
+*/
 function songTimings(sm) {
-	const trim = sm.audio?.trim;
-	if (!trim || !(trim.endSec > trim.startSec)) throw new Error("Song has no valid audio.trim");
-	const bpm = sm.metadata.bpm && sm.metadata.bpm > 0 ? sm.metadata.bpm : 120;
-	const bars = [...sm.timeline.bars].sort((a, b) => a.index - b.index);
-	const sortedBeats = sortBeatsByTime(sm.timeline.beats);
-	const startBeat = songStartBeat(sm);
-	const firstDownbeatOriginalSec = startBeat?.timeSec ?? trim.startSec;
-	const startBar = startBeat ? bars.find((b) => b.id === startBeat.barId) : void 0;
-	const beatDurationSec = startBar && startBar.beatCount > 0 ? (startBar.endSec - startBar.startSec) / startBar.beatCount : 60 / bpm;
-	const countInBeats = effectiveCountInBeats(sm);
-	const countInDurationSec = countInBeats * beatDurationSec;
-	const firstBeat = sortedBeats.find((b) => b.timeSec >= trim.startSec - 1e-9);
-	const firstBeatSongTimeSec = firstBeat ? Math.max(0, firstBeat.timeSec - trim.startSec) : 0;
+	const plan = songPlaybackPlan(sm);
+	if (!plan) throw new Error("Song has no valid audio.trim");
 	return {
-		bpm,
-		trimStartSec: trim.startSec,
-		trimEndSec: trim.endSec,
-		songDurationSec: trim.endSec - trim.startSec,
-		firstBeatSongTimeSec,
-		firstDownbeatOriginalSec,
-		beatDurationSec,
-		countInBeats,
-		countInDurationSec
+		bpm: plan.bpm,
+		trimStartSec: plan.trimStartSec,
+		trimEndSec: plan.trimEndSec,
+		songDurationSec: plan.songDurationSec,
+		firstBeatSongTimeSec: plan.firstBeatSongTimeSec,
+		firstDownbeatOriginalSec: plan.firstDownbeatOriginalSec,
+		beatDurationSec: plan.beatDurationSec,
+		countInBeats: plan.countInBeats,
+		countInDurationSec: plan.countInDurationSec
 	};
 }
 /**
@@ -1100,11 +1935,17 @@ createStore(false);
 function _page($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
 		var $$store_subs;
+		let newProjectDialogOpen = false;
+		let joinDialogOpen = false;
+		let joinTarget = null;
+		let shareDialogOpen = false;
+		function refreshRecents() {}
 		let removeDialogOpen = false;
 		let removeTarget = null;
 		let exportDialogOpen = false;
 		let exportTarget = null;
-		let copyFromCloudOpen = false;
+		let stemsDialogOpen = false;
+		let stemsTarget = null;
 		/** Setlist .als export state. */
 		let setlistExportStatus = "idle";
 		let setlistExportMsg = "";
@@ -1150,6 +1991,12 @@ function _page($$renderer, $$props) {
 				e instanceof Error && e.message;
 			}
 		}
+		let newSongDialogOpen = false;
+		let renameSongDialogOpen = false;
+		let renameSongTarget = null;
+		async function onSongAdded() {
+			await refreshProjectInfo().catch(() => {});
+		}
 		derived(() => store_get($$store_subs ??= {}, "$project", project).data?.songs ?? []);
 		let $$settled = true;
 		let $$inner_renderer;
@@ -1185,12 +2032,69 @@ function _page($$renderer, $$props) {
 				}
 			});
 			$$renderer.push(`<!----> `);
-			CopyFromCloudDialog($$renderer, {
+			StemsDialog($$renderer, {
+				entry: stemsTarget,
 				get open() {
-					return copyFromCloudOpen;
+					return stemsDialogOpen;
 				},
 				set open($$value) {
-					copyFromCloudOpen = $$value;
+					stemsDialogOpen = $$value;
+					$$settled = false;
+				}
+			});
+			$$renderer.push(`<!----> `);
+			NewProjectDialog($$renderer, {
+				onCreated: refreshRecents,
+				get open() {
+					return newProjectDialogOpen;
+				},
+				set open($$value) {
+					newProjectDialogOpen = $$value;
+					$$settled = false;
+				}
+			});
+			$$renderer.push(`<!----> `);
+			NewSongDialog($$renderer, {
+				onCreated: onSongAdded,
+				get open() {
+					return newSongDialogOpen;
+				},
+				set open($$value) {
+					newSongDialogOpen = $$value;
+					$$settled = false;
+				}
+			});
+			$$renderer.push(`<!----> `);
+			RenameSongDialog($$renderer, {
+				songId: renameSongTarget?.id ?? null,
+				currentTitle: renameSongTarget?.title ?? "",
+				get open() {
+					return renameSongDialogOpen;
+				},
+				set open($$value) {
+					renameSongDialogOpen = $$value;
+					$$settled = false;
+				}
+			});
+			$$renderer.push(`<!----> `);
+			JoinCloudProjectDialog($$renderer, {
+				cloudProject: joinTarget,
+				onJoined: refreshRecents,
+				get open() {
+					return joinDialogOpen;
+				},
+				set open($$value) {
+					joinDialogOpen = $$value;
+					$$settled = false;
+				}
+			});
+			$$renderer.push(`<!----> `);
+			ShareProjectDialog($$renderer, {
+				get open() {
+					return shareDialogOpen;
+				},
+				set open($$value) {
+					shareDialogOpen = $$value;
 					$$settled = false;
 				}
 			});

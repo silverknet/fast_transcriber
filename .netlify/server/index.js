@@ -6,6 +6,7 @@ import { S as compact, _ as add_resolution_suffix, b as strip_data_suffix, d as 
 import { F as writable, P as readable } from "./chunks/server.js";
 import "./chunks/index-server2.js";
 import { c as set_read_implementation, n as options, o as read_implementation, s as set_manifest, t as get_hooks } from "./chunks/internal.js";
+import { t as set_app } from "./chunks/app.js";
 import { error, json, text } from "@sveltejs/kit";
 import { ActionFailure, HttpError, Redirect, SvelteKitError } from "@sveltejs/kit/internal";
 import { merge_tracing, with_request_store } from "@sveltejs/kit/internal/server";
@@ -3246,10 +3247,6 @@ function propagate_context(fn) {
 function filter_env(env, allowed, disallowed) {
 	return Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith(allowed) && (disallowed === "" || !k.startsWith(disallowed))));
 }
-/**
-* @param {{ decoders: Record<string, (data: any) => any> }} value
-*/
-function set_app(value) {}
 //#endregion
 //#region node_modules/@sveltejs/kit/src/runtime/server/index.js
 /** @import { PromiseWithResolvers } from '../../utils/promise.js' */

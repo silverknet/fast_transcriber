@@ -1,20 +1,35 @@
-import { n as isDatabaseConfigured } from "../../chunks/pool2.js";
-import { n as isValidSessionId } from "../../chunks/sessionRepo.js";
+import { n as decideRouteAccess } from "../../chunks/access.js";
+import { redirect } from "@sveltejs/kit";
 //#region src/routes/+layout.server.ts
-async function load({ cookies }) {
-	const sid = cookies.get("barbro_session") ?? "";
-	if (!sid || !isValidSessionId(sid) || !isDatabaseConfigured()) return { savedSessionId: null };
-	const { getPgPool } = await import("../../chunks/pool.js");
-	const pool = getPgPool();
-	if (!pool) return { savedSessionId: null };
-	try {
-		return { savedSessionId: (await pool.query(`SELECT (song_map_json IS NOT NULL) AS has_song
-       FROM editor_sessions
-       WHERE id = $1::uuid`, [sid])).rows[0]?.has_song === true ? sid : null };
-	} catch (e) {
-		console.warn("[layout.server] Postgres unavailable — skipping session restore:", e instanceof Error ? e.message : e);
-		return { savedSessionId: null };
-	}
-}
+/**
+* Root layout load.
+*
+*  1. Resolve the route-level access gate (invite-only). Signed-out
+*     visitors get bounced to /welcome on any protected route; signed-in
+*     but-not-yet-granted users get bounced to /pending. The decision
+*     table lives in `src/lib/server/access.ts:decideRouteAccess`.
+*
+*  2. Expose the projected user shape to every page (also `accessStatus`
+*     and `isAdmin` so the UI can render chips / hide admin entries).
+*
+* Auth and access are read from `event.locals.{user,accessStatus,isAdmin}`,
+* which `hooks.server.ts` populated. No DB round-trip in here.
+*/
+var load = async ({ locals, route, url }) => {
+	const gate = decideRouteAccess(route.id, !!locals.user, locals.accessStatus);
+	if (!gate.allow && url.pathname !== gate.redirectTo) throw redirect(303, gate.redirectTo);
+	if (route.id?.startsWith("/admin") && !locals.isAdmin) throw redirect(303, locals.user ? "/pending" : "/welcome");
+	const u = locals.user;
+	return {
+		user: u ? {
+			id: u.id,
+			email: u.email ?? null,
+			name: u.user_metadata?.full_name ?? null,
+			avatarUrl: u.user_metadata?.avatar_url ?? null
+		} : null,
+		accessStatus: locals.accessStatus,
+		isAdmin: locals.isAdmin
+	};
+};
 //#endregion
 export { load };

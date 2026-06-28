@@ -1,20 +1,26 @@
 import { r as onDestroy } from "../../../chunks/index-server.js";
 import { a as derived, h as unsubscribe_stores, p as store_get } from "../../../chunks/server.js";
 import "../../../chunks/index-server2.js";
-import "../../../chunks/persist.js";
 import "../../../chunks/client.js";
-import { $ as computeCountIn, J as defaultSectionLabel, N as songMap, Q as effectiveCountInBeats, et as audioSession, q as sortBeatsByTime } from "../../../chunks/commit.js";
-import "../../../chunks/desktopBridge.js";
+import "../../../chunks/navigation.js";
+import "../../../chunks/button.js";
 import "../../../chunks/dialog.js";
 import "../../../chunks/Icon.js";
 import "../../../chunks/x.js";
-import "../../../chunks/iterate.js";
+import "../../../chunks/desktopBridge.js";
+import { H as defaultSectionLabel, K as computeCountIn, M as timelineMatchesOriginal, O as songMap, R as resolvedSpokenIntroText, V as sortBeatsByTime, Y as effectiveCountInBeats, q as audioSession } from "../../../chunks/commit.js";
+import "../../../chunks/desktopProjectFs2.js";
 import "../../../chunks/desktopCompanionStatus.js";
 import "../../../chunks/arrow-left.js";
 import "../../../chunks/renderCueTrack.js";
+import "../../../chunks/loader-circle.js";
+import { n as PlaybackController } from "../../../chunks/WaveformPlayer.js";
 import "../../../chunks/play.js";
 import "../../../chunks/refresh-cw.js";
-import "../../../chunks/WaveformPlayer.js";
+import "../../../chunks/sparkles.js";
+import "../../../chunks/triangle-alert.js";
+import "../../../chunks/iterate.js";
+import { t as songPlaybackPlan } from "../../../chunks/playbackPlan.js";
 //#endregion
 //#region src/lib/chords/pitchClass.ts
 /** C = 0 … B = 11 */
@@ -698,6 +704,7 @@ function proposeChordSuggestions(songMap) {
 function _page($$renderer, $$props) {
 	$$renderer.component(($$renderer) => {
 		var $$store_subs;
+		derived(() => !store_get($$store_subs ??= {}, "$songMap", songMap) || !store_get($$store_subs ??= {}, "$songMap", songMap).timeline.original || timelineMatchesOriginal(store_get($$store_subs ??= {}, "$songMap", songMap)));
 		/**
 		* Suggestion lifecycle (multi-candidate):
 		*   - `predictNextSectionCandidates` returns a ranked list of next-section
@@ -880,22 +887,24 @@ function _page($$renderer, $$props) {
 		});
 		derived(() => store_get($$store_subs ??= {}, "$songMap", songMap)?.metadata.keyDetail ?? keyDraft);
 		let audioEl = null;
-		let mixPreviewAudioEl = null;
-		let mixClickRaf = 0;
 		let rafId = 0;
-		let clickLoopRaf = 0;
-		let clickCtx;
-		function stopMixClickLoop() {
-			if (mixClickRaf) cancelAnimationFrame(mixClickRaf);
-			mixClickRaf = 0;
-		}
+		/**
+		* Centralised playback engine for the grid editor — single owner of
+		* the `<audio>` element, click loop, count-in pre-roll, transport,
+		* range-end auto-stop, AND the click/volume UI state. The toolbar
+		* inside `WaveformPlayer` binds directly to `playbackController.playWithClick`
+		* / `.clickVolume` / `.songVolume` — no intermediate parent state,
+		* no $effect bridge. WaveformPlayer reads `currentTime` / `isPlaying`
+		* via `$derived` from the controller and dispatches `play() / pause()
+		* / stop() / seek()`.
+		*/
+		const playbackController = new PlaybackController();
+		onDestroy(() => {
+			playbackController.destroy();
+		});
 		function stopPreviewLoop() {
 			if (rafId) cancelAnimationFrame(rafId);
 			rafId = 0;
-		}
-		function stopClickLoop() {
-			if (clickLoopRaf) cancelAnimationFrame(clickLoopRaf);
-			clickLoopRaf = 0;
 		}
 		let cueCountInBeats = derived(() => {
 			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
@@ -907,6 +916,12 @@ function _page($$renderer, $$props) {
 			if (!sm || cueCountInBeats() === 0) return null;
 			return computeCountIn(sm, cueCountInBeats());
 		});
+		derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm) return "Untitled song";
+			return resolvedSpokenIntroText(sm);
+		});
+		derived(() => store_get($$store_subs ??= {}, "$songMap", songMap)?.cues.spokenIntroText ?? "");
 		derived(() => store_get($$store_subs ??= {}, "$songMap", songMap) ? sortBeatsByTime(store_get($$store_subs ??= {}, "$songMap", songMap).timeline.beats).length : 0);
 		let cueStartBeatIndex = derived(() => {
 			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
@@ -914,7 +929,7 @@ function _page($$renderer, $$props) {
 			const i = sortBeatsByTime(sm.timeline.beats).findIndex((b) => b.id === sm.startBeatId);
 			return i >= 0 ? i + 1 : 1;
 		});
-		derived(() => {
+		let cueStartBeatInfo = derived(() => {
 			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
 			if (!sm) return null;
 			const beat = sortBeatsByTime(sm.timeline.beats)[Math.max(0, cueStartBeatIndex() - 1)];
@@ -925,6 +940,17 @@ function _page($$renderer, $$props) {
 				timeSec: beat.timeSec
 			};
 		});
+		derived(() => {
+			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
+			if (!sm) return [];
+			const plan = songPlaybackPlan(sm);
+			if (!plan || plan.countInBeats === 0) return [];
+			return plan.clickPoints.filter((c) => c.isCountIn).map((c) => ({
+				timeSec: c.timeSec + plan.trimStartSec,
+				downbeat: c.downbeat
+			}));
+		});
+		derived(() => cueStartBeatInfo()?.barIndex ?? 0);
 		derived(() => {
 			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
 			if (!sm) return {
@@ -944,33 +970,9 @@ function _page($$renderer, $$props) {
 				reason: "BarBro desktop + Piper required."
 			};
 		});
-		derived(() => {
-			const sm = store_get($$store_subs ??= {}, "$songMap", songMap);
-			if (!sm) return {
-				ok: false,
-				reason: "No song."
-			};
-			if (!sm.timeline.beats.length) return {
-				ok: false,
-				reason: "Need beats (Grid)."
-			};
-			if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) return {
-				ok: false,
-				reason: "Need trim (Grid)."
-			};
-			return {
-				ok: false,
-				reason: "Generate cue track first (preview uses this tab’s WAV)."
-			};
-		});
 		onDestroy(() => {
 			stopPreviewLoop();
-			stopClickLoop();
-			stopMixClickLoop();
 			audioEl?.pause();
-			mixPreviewAudioEl?.pause();
-			clickCtx?.close();
-			clickCtx = void 0;
 		});
 		let $$settled = true;
 		let $$inner_renderer;

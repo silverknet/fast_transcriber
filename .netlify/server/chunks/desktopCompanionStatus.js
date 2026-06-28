@@ -4,8 +4,12 @@ import "./index-server2.js";
 var desktopCompanionStatus = writable({
 	reachable: false,
 	version: null,
+	versionStatus: "unknown",
 	lastCheckedAt: null,
-	lastError: null
+	lastError: null,
+	pythonHealth: "unknown",
+	brokenChecks: [],
+	setup: null
 });
 //#endregion
 export { desktopCompanionStatus as t };

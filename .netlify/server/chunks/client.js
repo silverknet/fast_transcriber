@@ -1264,6 +1264,13 @@ function push_invalidated(resource) {
 	}
 }
 /**
+* Causes all `load` and `query` functions belonging to the currently active page to re-run. Returns a `Promise` that resolves when the page is subsequently updated.
+* @returns {Promise<void>}
+*/
+function invalidateAll() {
+	throw new Error("Cannot call invalidateAll() on the server");
+}
+/**
 * @param {URL} url
 * @param {boolean[]} invalid
 * @returns {Promise<import('types').ServerNodesResponse | import('types').ServerRedirectNode>}
@@ -1468,4 +1475,4 @@ function get_id(url) {
 	return decodeURIComponent(id);
 }
 //#endregion
-export { page as a, navigating as i, goto as n, updated as o, stores as r, beforeNavigate as t };
+export { navigating as a, stores as i, goto as n, page as o, invalidateAll as r, updated as s, beforeNavigate as t };
