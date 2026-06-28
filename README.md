@@ -63,6 +63,8 @@ Audio is handled the same way: after analysis (on full-quality WAV), the clip is
 
 High-level goals and a simple **N → P** completion scale per feature live in [`docs/goal-plan.md`](docs/goal-plan.md). Regression checks after migrations are in [`docs/regression-checklist.md`](docs/regression-checklist.md).
 
+For agents and contributors, start with [`AGENTS.md`](AGENTS.md) and the documentation map at [`docs/index.md`](docs/index.md). Current architecture notes are in [`docs/architecture.md`](docs/architecture.md).
+
 The **desktop shell** is a separate package (Electron): [`desktop/README.md`](desktop/README.md). Apple Silicon build + **same-origin** download URL:
 
 ```bash

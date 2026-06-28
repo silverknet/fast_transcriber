@@ -1,4 +1,16 @@
-# Claude Handover (Desktop Track)
+# Legacy Claude Handover (Stale)
+
+This file is archived session context. It is not current operating guidance.
+
+The desktop sidecar is now headless and HTTP-only. It has no renderer, no
+preload script, and no IPC API. Current docs:
+
+- [`../domains/desktop-sidecar.md`](../domains/desktop-sidecar.md)
+- [`../../desktop/README.md`](../../desktop/README.md)
+
+---
+
+# Original Handover
 
 ## Current state
 
@@ -71,4 +83,3 @@
 - Build desktop arm64: `npm run dist:mac-arm64 --prefix desktop`
 - Copy DMG into static + update manifest: `npm run sync-desktop-release`
 - One-shot build + sync: `npm run desktop:dist-mac-sync`
-

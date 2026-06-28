@@ -33,7 +33,9 @@
     MoreVertical,
     Pencil,
     Sliders,
+    TextCursorInput,
     Trash2,
+    Upload,
   } from '@lucide/svelte'
 
   let {
@@ -44,6 +46,8 @@
     onOpenStems,
     onToggleHidden,
     onRemove,
+    onRename,
+    onAttachAudio,
     onExport,
   } = $props<{
     entry: ProjectSongEntry
@@ -55,6 +59,9 @@
     onOpenStems: () => void
     onToggleHidden: () => void
     onRemove: () => void
+    onRename: () => void
+    /** Trigger the project-level hidden file input + attach the audio bytes here. */
+    onAttachAudio: () => void
     onExport: () => void
   }>()
 
@@ -80,6 +87,7 @@
     STEM_TRACKS.map((t) => ({ name: t.name, present: !!metadata?.stemRefs?.[t.name] })),
   )
   let hasCueTrack = $derived(!!metadata?.hasCueTrack)
+  let hasAudio = $derived(!!metadata?.hasAudio)
 
   /** Active stem job for this song (queued / running / paused) — drives the row pill. */
   let activeJob = $derived.by<StemJobEntry | null>(() => {
@@ -111,7 +119,7 @@
 -->
 <li
   data-song-id={entry.id}
-  class="border-foreground bg-background border-2 {entry.hidden ? 'opacity-60' : ''}"
+  class="border-foreground border-b-2 last:border-b-0 py-1.5 {entry.hidden ? 'opacity-60' : ''}"
 >
   <!-- ── Thin row aligned to the column header ──────────────────────────── -->
   <!--
@@ -144,13 +152,27 @@
 
     <!-- Title (+ artist + hidden tag). min-w-0 lets the cell shrink so
          the next column doesn't overflow into it. -->
-    <div class="flex min-w-0 items-baseline gap-1.5 overflow-hidden">
+    <div class="flex min-w-0 items-center gap-1.5 overflow-hidden">
       <span class="truncate font-semibold">{title}</span>
       {#if artist}
         <span class="text-muted-foreground truncate text-xs">— {artist}</span>
       {/if}
       {#if entry.hidden}
         <span class="border-foreground/40 text-muted-foreground shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider">hidden</span>
+      {/if}
+      {#if !hasAudio}
+        <!-- Inline upload affordance for stub songs. Triggers the project-level
+             hidden file input via `onAttachAudio`; one click → file picker →
+             attach. Hides itself the moment audio lands on disk. -->
+        <button
+          type="button"
+          class="border-foreground/40 hover:border-foreground hover:bg-muted text-muted-foreground hover:text-foreground inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+          onclick={onAttachAudio}
+          title="Upload an audio file for this song"
+        >
+          <Upload class="size-2.5" aria-hidden="true" />
+          Add audio
+        </button>
       {/if}
     </div>
 
@@ -165,6 +187,18 @@
     >
       {bpmText}
     </div>
+
+    <!-- Audio file dot — matches the stem/cue badge pattern; header icon
+         carries the column label. -->
+    <span
+      class="flex min-w-0 justify-center"
+      title={hasAudio ? 'Audio file: ready' : 'Audio file: not added yet'}
+    >
+      <span
+        class="size-2 shrink-0 rounded-full {hasAudio ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        aria-label={`audio: ${hasAudio ? 'ready' : 'not added yet'}`}
+      ></span>
+    </span>
 
     <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). -->
     {#each stemPresence as s (s.name)}
@@ -219,6 +253,10 @@
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" class="min-w-44">
+        <DropdownMenuItem class="" onclick={onRename}>
+          <TextCursorInput class="size-3.5" aria-hidden="true" />
+          Rename…
+        </DropdownMenuItem>
         <DropdownMenuItem class="" onclick={onOpenStems}>
           <Sliders class="size-3.5" aria-hidden="true" />
           Stems…

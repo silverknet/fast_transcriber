@@ -2,8 +2,7 @@
 """
 Beat / downbeat detection via madmom (stdout = JSON only on success).
 
-Desktop copy — keep in sync with BarBro server script when madmom logic changes:
-  ../../../../src/lib/server/analysis/python/analyze_downbeats.py
+Desktop-sidecar analyzer used by /native/analyze-downbeats.
 
 Setup:
   bash desktop/native/python/beats/install-deps.sh

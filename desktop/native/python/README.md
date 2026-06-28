@@ -4,7 +4,7 @@ These scripts live **only** under `desktop/native/python/`. They are **not** imp
 
 | Folder | Role | Origin |
 |--------|------|--------|
-| `beats/` | Downbeat JSON (`madmom`) | Logic aligned with BarBro server [`analyze_downbeats.py`](../../../src/lib/server/analysis/python/analyze_downbeats.py) — maintained here for desktop spawn |
+| `beats/` | Downbeat JSON (`madmom`) | Desktop-sidecar analyzer used by `/native/analyze-downbeats` |
 | `stems/` | Demucs CLI wrapper | Derived from the sibling **frequency_domain** repo (`stem_splitter.py`) separation logic (no Tk UI) |
 | `piper_tts/` | Piper ONNX TTS (`piper-tts` wheel) | Isolated venv + `synthesize_wav.py`; voice files downloaded to userData by the sidecar — see [`piper_tts/README.md`](piper_tts/README.md) |
 

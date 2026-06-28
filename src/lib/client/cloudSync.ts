@@ -84,6 +84,78 @@ export async function listCloudProjects(): Promise<CloudProjectMeta[]> {
   return data?.ok ? (data.projects ?? []) : []
 }
 
+export interface CloudPendingInviteView {
+  id: string
+  cloud_project_id: string
+  invited_email: string
+  role: 'owner' | 'editor'
+  created_at: string
+}
+
+export interface CloudPendingInviteForMe extends CloudPendingInviteView {
+  project_name: string
+}
+
+/** Pending invites owned by the current user's project (owner-only). */
+export async function listPendingInvites(
+  cloudProjectId: string,
+): Promise<CloudPendingInviteView[]> {
+  const res = await fetch(`${BASE}/projects/${cloudProjectId}/pending-invites`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) return []
+  const data = (await res.json().catch(() => null)) as
+    | { ok: boolean; invites: CloudPendingInviteView[] }
+    | null
+  return data?.ok ? (data.invites ?? []) : []
+}
+
+export async function revokePendingInvite(
+  cloudProjectId: string,
+  inviteId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await fetch(
+    `${BASE}/projects/${cloudProjectId}/pending-invites?id=${encodeURIComponent(inviteId)}`,
+    { method: 'DELETE', cache: 'no-store' },
+  )
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    return { ok: false, error: text || `HTTP ${res.status}` }
+  }
+  return { ok: true }
+}
+
+/** Pending invites visible to the signed-in user (matched by email). */
+export async function listMyPendingInvites(): Promise<CloudPendingInviteForMe[]> {
+  const res = await fetch(`${BASE}/invites/mine`, { cache: 'no-store' })
+  if (!res.ok) return []
+  const data = (await res.json().catch(() => null)) as
+    | { ok: boolean; invites: CloudPendingInviteForMe[] }
+    | null
+  return data?.ok ? (data.invites ?? []) : []
+}
+
+/**
+ * Accept one pending invite — promotes it to a `cloud_project_members`
+ * row server-side. Caller still has to call `joinCloudProject()` to
+ * materialize the project locally.
+ */
+export async function acceptPendingInvite(
+  cloudProjectId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await fetch(`${BASE}/invites/mine`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: cloudProjectId }),
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    return { ok: false, error: text || `HTTP ${res.status}` }
+  }
+  return { ok: true }
+}
+
 export async function getCloudProjectManifest(
   cloudProjectId: string,
 ): Promise<{ project: CloudProjectMeta; members: CloudMemberView[] } | null> {

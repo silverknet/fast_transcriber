@@ -126,7 +126,7 @@ For now: ship the Safari warning and revisit this when the Mac user base big eno
 |------|------|
 | `electron/main.mjs` | Headless main process: loopback HTTP server + Python spawning. No window. |
 | `electron/nativePython.mjs` | Resolve `native/python` paths (packaged `asar.unpacked`), spawn helpers |
-| `native/python/beats/` | `analyze_downbeats.py` (madmom) — twin of server script |
+| `native/python/beats/` | `analyze_downbeats.py` (madmom) — desktop-sidecar beat analyzer |
 | `native/python/stems/` | `demucs_separate.py` — headless Demucs (derived from **frequency_domain** workflow) |
 | `native/python/piper_tts/` | Piper TTS — `synthesize_wav.py` + `requirements.txt` (separate venv from stems) |
 

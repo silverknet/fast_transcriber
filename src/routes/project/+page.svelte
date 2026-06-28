@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { get } from 'svelte/store'
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
   import { Button } from '$lib/components/ui/button'
@@ -15,10 +16,19 @@
   import SetlistExportDialog from '$lib/components/SetlistExportDialog.svelte'
   import StemsDialog from '$lib/components/StemsDialog.svelte'
   import CloudCollabSection from '$lib/components/CloudCollabSection.svelte'
+  import ShareProjectDialog from '$lib/components/ShareProjectDialog.svelte'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
+  import NewSongDialog from '$lib/components/NewSongDialog.svelte'
+  import RenameSongDialog from '$lib/components/RenameSongDialog.svelte'
   import JoinCloudProjectDialog from '$lib/components/JoinCloudProjectDialog.svelte'
-  import { Cloud, FolderOpen, FolderPlus, ListPlus, Plus, RefreshCw, Music4 } from '@lucide/svelte'
-  import { listCloudProjects, type CloudProjectMeta } from '$lib/client/cloudSync'
+  import { Cloud, FolderOpen, FolderPlus, ListPlus, MailOpen, Plus, RefreshCw, Music4, Share2 } from '@lucide/svelte'
+  import {
+    acceptPendingInvite,
+    listCloudProjects,
+    listMyPendingInvites,
+    type CloudPendingInviteForMe,
+    type CloudProjectMeta,
+  } from '$lib/client/cloudSync'
   import {
     exportProjectSetAls,
     preflightProjectSetlist,
@@ -27,6 +37,7 @@
   import { safeExportBasename } from '$lib/songmap/persist'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import {
+    attachAudioToSong,
     dropRecentProjectPath,
     importSmapToProject,
     loadProjectSongIntoEditor,
@@ -65,6 +76,18 @@
   let joinDialogOpen = $state(false)
   let joinTarget = $state<CloudProjectMeta | null>(null)
 
+  // Pending invites visible to the signed-in user — surfaced as an
+  // "Invited to" section on the no-project landing. Accept promotes the
+  // invite to membership server-side, then opens JoinCloudProjectDialog
+  // so the user picks a parent folder to materialize into.
+  let myInvites = $state<CloudPendingInviteForMe[]>([])
+  let myInvitesLoading = $state(false)
+  let acceptingInviteId = $state<string | null>(null)
+  let acceptError = $state('')
+
+  // Share dialog (header button on the project-open view).
+  let shareDialogOpen = $state(false)
+
   async function loadCloudProjects() {
     cloudProjectsLoading = true
     try {
@@ -72,6 +95,32 @@
     } finally {
       cloudProjectsLoading = false
     }
+  }
+
+  async function loadMyInvites() {
+    myInvitesLoading = true
+    try {
+      myInvites = await listMyPendingInvites()
+    } finally {
+      myInvitesLoading = false
+    }
+  }
+
+  async function onAcceptInvite(inv: CloudPendingInviteForMe) {
+    acceptingInviteId = inv.id
+    acceptError = ''
+    const r = await acceptPendingInvite(inv.cloud_project_id)
+    acceptingInviteId = null
+    if (!r.ok) {
+      acceptError = r.error
+      return
+    }
+    // Refresh both lists — the invite is gone, and the project should
+    // now appear under "Shared with me" so JoinCloudProjectDialog has
+    // the full metadata to work with.
+    await Promise.all([loadMyInvites(), loadCloudProjects()])
+    const proj = cloudProjects.find((p) => p.id === inv.cloud_project_id)
+    if (proj) startJoin(proj)
   }
 
   function startJoin(p: CloudProjectMeta) {
@@ -220,6 +269,7 @@
     if (!browser) return
     refreshRecents()
     void loadCloudProjects()
+    void loadMyInvites()
     void (async () => {
       try {
         if (!$project.data || !$project.osPath) {
@@ -264,7 +314,16 @@
     actionError = ''
     try {
       await loadProjectSongIntoEditor(songId)
-      await goto('/edit')
+      // If audio was attached but never analyzed (e.g. via the row's "Add
+      // audio" button), jump straight into the analyze flow instead of the
+      // editor. Stub songs without audio still route to /edit; the editor
+      // surfaces a "no audio" empty state for them.
+      const sm = get(songMap)
+      const needsAnalyze =
+        !!sm?.audio &&
+        sm.metadata.analyzed === false &&
+        sm.timeline.bars.length === 0
+      await goto(needsAnalyze ? '/analyzing?project=1' : '/edit')
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'Could not open song'
     }
@@ -365,8 +424,62 @@
     }
   }
 
+  let newSongDialogOpen = $state(false)
+  let renameSongDialogOpen = $state(false)
+  let renameSongTarget = $state<{ id: string; title: string } | null>(null)
+
   function onAddCreateNew() {
-    void goto('/?project=1')
+    actionError = ''
+    newSongDialogOpen = true
+  }
+
+  function askRenameSong(entry: ProjectSongEntry) {
+    const meta = $project.metadataByFolder[entry.folder]
+    renameSongTarget = {
+      id: entry.id,
+      title: meta?.title ?? entry.folder.replace(/^songs\//, ''),
+    }
+    renameSongDialogOpen = true
+  }
+
+  // ── Attach-audio flow ────────────────────────────────────────────────
+  // One hidden file input shared by every row. The card's "Add audio"
+  // button calls onAttachAudio(entry) which stores the target song id and
+  // fires .click() on the input. The input's change handler reads the
+  // file, attaches it via attachAudioToSong, then refreshes the cache.
+  let attachAudioInput = $state<HTMLInputElement | undefined>()
+  let attachAudioTargetId = $state<string | null>(null)
+  let attachAudioBusyId = $state<string | null>(null)
+
+  function onAttachAudio(entry: ProjectSongEntry) {
+    actionError = ''
+    attachAudioTargetId = entry.id
+    attachAudioInput?.click()
+  }
+
+  async function onAttachAudioPicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = ''
+    const songId = attachAudioTargetId
+    attachAudioTargetId = null
+    if (!file || !songId) return
+    attachAudioBusyId = songId
+    actionError = ''
+    try {
+      await attachAudioToSong(songId, file)
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : 'Could not attach audio'
+    } finally {
+      attachAudioBusyId = null
+    }
+  }
+
+  async function onSongAdded() {
+    // After "Add empty" commits, refresh project info so the new card
+    // shows its (empty) stem/click/cue badges right away. Navigation
+    // doesn't happen here — user stays on the project page.
+    await refreshProjectInfo().catch(() => {})
   }
 
   function onAddImportLocal() {
@@ -396,7 +509,7 @@
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}
     <header class="border-foreground border-b-2 pb-4">
-      <h1 class="text-3xl font-black tracking-tight">Projects</h1>
+      <h1 class="font-display text-3xl font-black tracking-tight">Projects</h1>
     </header>
 
     <div class="grid gap-3 sm:grid-cols-2">
@@ -457,6 +570,50 @@
       fresh local copy + pulls metadata. Audio doesn't sync (Phase 6's job)
       so each song lands with an "audio missing" badge until relinked.
     -->
+    <!--
+      Invited to: cloud projects whose owner sent an invite to this
+      user's email BUT they haven't accepted yet. Accepting promotes
+      the pending row to a membership server-side, then opens
+      JoinCloudProjectDialog to materialize the local copy.
+    -->
+    {#if myInvites.length > 0 || myInvitesLoading}
+      <section class="space-y-2">
+        <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
+          <MailOpen class="size-3.5" aria-hidden="true" />
+          Invited to
+          {#if myInvitesLoading}
+            <span class="text-muted-foreground/60 normal-case">loading…</span>
+          {/if}
+        </h2>
+        {#if myInvites.length > 0}
+          <ul class="border-foreground/20 border-2 divide-foreground/10 divide-y">
+            {#each myInvites as inv (inv.id)}
+              <li class="flex items-center gap-3 px-3 py-2">
+                <MailOpen class="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-sm font-semibold">{inv.project_name || 'Untitled project'}</p>
+                  <p class="text-muted-foreground truncate font-mono text-[11px]">
+                    invited as {inv.role}
+                  </p>
+                </div>
+                <Button
+                  class=""
+                  size="sm"
+                  onclick={() => void onAcceptInvite(inv)}
+                  disabled={acceptingInviteId === inv.id}
+                >
+                  {acceptingInviteId === inv.id ? 'Accepting…' : 'Accept & join'}
+                </Button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if acceptError}
+          <p class="text-destructive text-xs" role="status">{acceptError}</p>
+        {/if}
+      </section>
+    {/if}
+
     <section class="space-y-2">
       <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
         <Cloud class="size-3.5" aria-hidden="true" />
@@ -496,7 +653,7 @@
     <header class="border-foreground border-b-2 pb-4">
       <input
         type="text"
-        class="border-foreground/0 bg-transparent w-full border-b-2 pb-1 text-3xl font-black tracking-tight focus:border-foreground focus:outline-none"
+        class="font-display border-foreground/0 bg-transparent w-full border-b-2 pb-1 text-3xl font-black tracking-tight focus:border-foreground focus:outline-none"
         placeholder="Untitled project"
         bind:value={renameInput}
         onblur={commitNameRename}
@@ -512,6 +669,16 @@
           variant="outline"
           size="sm"
           class="ml-auto gap-1"
+          onclick={() => (shareDialogOpen = true)}
+          title="Invite collaborators or manage cloud sync for this project"
+        >
+          <Share2 class="size-3.5" aria-hidden="true" />
+          Share
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          class="gap-1"
           disabled={refreshing}
           onclick={() => void onRefreshProject()}
           title="Re-scan every song folder for stems and metadata changes"
@@ -545,7 +712,7 @@
           enough to anchor the column visually).
         -->
         <div
-          class="song-row-grid border-foreground bg-muted text-muted-foreground sticky top-0 z-10 h-8 items-center gap-2 border-2 px-2 text-[10px] font-semibold uppercase tracking-wider"
+          class="song-row-grid border-foreground bg-muted text-muted-foreground sticky top-0 z-10 h-8 items-center gap-2 rounded-none border-2 px-2 text-[10px] font-semibold uppercase tracking-wider"
           role="row"
         >
           <span aria-hidden="true"></span>
@@ -553,6 +720,9 @@
           <span class="truncate">Song</span>
           <span class="truncate">Key</span>
           <span class="truncate text-right">BPM</span>
+          <span class="flex items-center justify-center" title="Audio file present">
+            <Music4 class="size-3" aria-hidden="true" />
+          </span>
           {#each STEM_TRACKS as t (t.name)}
             <span class="truncate text-center" title={t.name === 'FX' ? 'Other' : t.name}>
               {t.name === 'FX' ? 'O' : t.name.charAt(0)}
@@ -573,7 +743,7 @@
           use:dndzone={{ items: dragSongs, flipDurationMs: 260, dropTargetStyle: {} }}
           onconsider={(e) => onDndConsider(e as CustomEvent<{ items: ProjectSongEntry[] }>)}
           onfinalize={(e) => onDndFinalize(e as CustomEvent<{ items: ProjectSongEntry[] }>)}
-          class="mt-1 flex flex-col gap-1"
+          class="border-foreground border-x-2 border-b-2 flex flex-col"
         >
           {#each dragSongs as entry, index (entry.id)}
             <ProjectSongCard
@@ -584,6 +754,8 @@
               onOpenStems={() => void onOpenStems(entry)}
               onToggleHidden={() => void onToggleHidden(entry)}
               onRemove={() => askRemove(entry)}
+              onRename={() => askRenameSong(entry)}
+              onAttachAudio={() => onAttachAudio(entry)}
               onExport={() => void askExport(entry)}
             />
           {/each}
@@ -644,6 +816,14 @@
       accept=".smap"
       onchange={onSmapPicked}
     />
+
+    <input
+      bind:this={attachAudioInput}
+      type="file"
+      class="sr-only"
+      accept=".wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff,audio/*"
+      onchange={onAttachAudioPicked}
+    />
   {/if}
 </main>
 
@@ -666,11 +846,21 @@
 
 <NewProjectDialog bind:open={newProjectDialogOpen} onCreated={refreshRecents} />
 
+<NewSongDialog bind:open={newSongDialogOpen} onCreated={onSongAdded} />
+
+<RenameSongDialog
+  bind:open={renameSongDialogOpen}
+  songId={renameSongTarget?.id ?? null}
+  currentTitle={renameSongTarget?.title ?? ''}
+/>
+
 <JoinCloudProjectDialog
   bind:open={joinDialogOpen}
   cloudProject={joinTarget}
   onJoined={refreshRecents}
 />
+
+<ShareProjectDialog bind:open={shareDialogOpen} />
 
 <SetlistExportDialog
   bind:open={setlistExportOpen}
@@ -687,8 +877,8 @@
   (the shadow's CSS-variable inheritance is lost when it's reparented under
   <body>). The header and every row share this template so columns line up
   even mid-drag.
-    handle (24) | # (24) | title (1fr) | key (80) | bpm (40) | 5× stem (28) |
-    cue (28) | edit (32) | ⋮ (32)
+    handle (24) | # (24) | title (1fr) | key (80) | bpm (40) | audio (28) |
+    5× stem (28) | cue (28) | edit (32) | ⋮ (32)
 -->
 <style>
   :global(.song-row-grid) {
@@ -699,6 +889,7 @@
       minmax(0, 1fr)
       5rem
       2.5rem
+      1.75rem
       repeat(5, 1.75rem)
       1.75rem
       2rem

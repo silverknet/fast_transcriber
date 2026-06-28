@@ -132,7 +132,10 @@
       // a reason and an auto-restore should not steal focus from sign-in
       // or the OAuth callback round-trip.
       const onAuthRoute = here === '/login' || here?.startsWith('/auth')
-      if (onAuthRoute) return
+      // /debug/* is for inspection — don't steal focus to /edit when the
+      // user navigates here intentionally to look at typography, etc.
+      const onDebugRoute = here?.startsWith('/debug')
+      if (onAuthRoute || onDebugRoute) return
       if (openedSong && here !== '/edit') {
         await goto('/edit', { replaceState: true })
       } else if (!openedSong && here === '/') {
@@ -256,6 +259,8 @@
     if (here === '/download') return
     if (here === '/welcome' || here === '/login' || here === '/pending') return
     if (here?.startsWith('/auth')) return
+    // /debug/* is for inspection — doesn't need the sidecar.
+    if (here?.startsWith('/debug')) return
     // Four reasons to lock the user to /download:
     //   1. Sidecar unreachable (no companion running)
     //   2. Sidecar reachable but its version is below the web app's
@@ -280,16 +285,50 @@
   <meta name="description" content="BarBro — bar-first songs, beats, and cues." />
 </svelte:head>
 
-<div class="relative min-h-dvh overflow-x-hidden overscroll-x-none font-sans">
+<!--
+  App frame: a rounded black outline that is static against the viewport.
+  The body itself doesn't scroll; the `.app-scroll` div below the chrome
+  is the only scrollable area. That way the frame and the chrome stay
+  pinned no matter how long the page content gets.
+
+  Chrome (menubar + context bar) live in a single flex column above the
+  scroll area — no per-bar `top-N` offsets anywhere. Adding or removing
+  a chrome row never requires touching another component.
+-->
+<div class="app-frame bg-background font-sans">
   {#if showChrome}
-    <div class="relative z-30">
+    <div class="shrink-0">
       <AppMenuBar />
       <ProjectContextBar />
     </div>
   {/if}
-  <!-- AppMenuBar (3rem) + optional project context bar (2.5rem). Bare on /download. -->
-  <div class={!showChrome ? '' : showProjectBar ? 'pt-[5.25rem]' : 'pt-12'}>
+  <div class="app-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-x-none">
     <slot />
   </div>
   <ConflictResolutionDialog />
 </div>
+
+<style>
+  :global(html),
+  :global(body) {
+    height: 100dvh;
+    overflow: hidden;
+  }
+  :global(body) {
+    /* The visible matte around the frame. */
+    background-color: var(--foreground);
+    padding: 12px;
+  }
+
+  .app-frame {
+    /* Static rounded outline around the entire app. Fills the body's
+       content area (viewport minus body padding) and is the flex column
+       that contains the chrome stack + scrollable content area. */
+    height: calc(100dvh - 24px);
+    display: flex;
+    flex-direction: column;
+    border: 2px solid var(--foreground);
+    border-radius: 14px;
+    overflow: clip;
+  }
+</style>

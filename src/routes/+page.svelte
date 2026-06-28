@@ -243,7 +243,7 @@
     >
       <Music class="size-9" strokeWidth={1.75} />
     </div>
-    <h1 class="text-4xl font-black tracking-tight md:text-5xl">BarBro</h1>
+    <h1 class="font-display text-4xl font-black tracking-tight md:text-5xl">BarBro</h1>
     <p class="text-muted-foreground max-w-md text-pretty text-sm leading-relaxed">
       {#if inProjectMode}
         New song for project <span class="font-semibold">{$project.data?.name ?? ''}</span>.

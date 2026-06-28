@@ -74,3 +74,17 @@ If you need to touch any of these, leave a note below first so I can pause/rebas
 - `songPlaybackPlan(sm)` is the only place beat math happens. No second derivation anywhere.
 
 Free to message back here when you start work — even just "looking at X, won't touch Y."
+
+## 2026-05-28 17:35 — claude (improved-analyze-state) — db:migrate hosted env quirk
+
+`npm run db:migrate` against the hosted Supabase project fails with `ENOTFOUND db.<ref>.supabase.co` — direct 5432 host isn't resolvable from this network. Use the Management API path the cloud-auth-sync doc already calls out:
+
+```bash
+supabase link --project-ref <ref>      # one-time
+supabase db query --linked --file db/migrations/<NNN>_xxx.sql
+# Then record in the runner's bookkeeping so subsequent `db:migrate` invocations skip it:
+echo "INSERT INTO public.schema_migrations (name) VALUES ('<NNN>_xxx.sql') ON CONFLICT DO NOTHING;" \
+  | supabase db query --linked --file /dev/stdin
+```
+
+Migration 012 (`cloud_pending_invites`) was applied this way + back-filled. Future migrations targeting hosted Supabase should follow the same pattern unless someone fixes the DNS path.

@@ -163,10 +163,9 @@ manually before working on that section.
 6. **Per-section key fit / modulation detection** — Phase 3 in the
    plan file. Needed for any song that doesn't stay in one key.
 
-## Plan-file reference
+## Documentation entrypoint
 
-The full design history is in
-`~/.claude/plans/ok-next-up-is-iridescent-hummingbird.md`. It's been
-overwritten as planning has progressed; current contents are the
-Phase 2 plan. Earlier phases (Phase 1 + chord auto-fill from earlier
-sessions) live only in git history.
+The stable agent-facing entrypoint is
+[`docs/domains/chord-suggestions.md`](../../../docs/domains/chord-suggestions.md).
+Keep any future decision history in tracked docs rather than private local
+planning files.

@@ -469,6 +469,13 @@ function extractSongMetadataLite(songProject) {
   if (cues && cues.mode === 'countIn' && typeof cues.countInBeats === 'number' && cues.countInBeats > 0) {
     out.countInBeats = cues.countInBeats
   }
+  // True when the SongMap names an audio source — covers both v1 baked
+  // audio (`fileName` set) and v2 disk-stored audio (`originalPath` set).
+  // Stub songs added via "Add empty" have no `audio` block at all.
+  const a = map.audio
+  if (a && typeof a === 'object' && (typeof a.fileName === 'string' || typeof a.originalPath === 'string')) {
+    out.hasAudio = true
+  }
   if (map.stemRefs && typeof map.stemRefs === 'object') out.stemRefs = { ...map.stemRefs }
   return out
 }
@@ -649,7 +656,7 @@ async function handleProjectCreate(req, res, cors) {
  * `POST /native/project/info` — body `{ projectPath }`. Reads the manifest,
  * for each entry scans the song folder for `song.smap` header (title, etc),
  * `song.als` presence, and stems WAVs. Returns
- * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, countInBeats?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
+ * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, countInBeats?, hasAudio?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
  *
  * `stemsByPreset` groups stem WAVs by quality preset (`best`/`balanced`/
  * `preview`) corresponding to `<song>/stems/<preset>/<file>.wav`. Flat-

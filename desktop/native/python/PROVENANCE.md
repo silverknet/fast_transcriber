@@ -1,6 +1,6 @@
 # Provenance
 
-- **`beats/analyze_downbeats.py`** — Logic maintained in parallel with BarBro server [`src/lib/server/analysis/python/analyze_downbeats.py`](../../../src/lib/server/analysis/python/analyze_downbeats.py). Merge fixes both sides when madmom / NumPy patches change.
+- **`beats/analyze_downbeats.py`** — Desktop-sidecar madmom analyzer. Earlier versions mirrored a server analyzer; the current app runs beat analysis through the desktop sidecar.
 
 - **`stems/demucs_separate.py`** — New headless CLI inspired by **frequency_domain** `stem_splitter.py` (Demucs invocation, PATH/env patterns). The original Tkinter UI is not copied; only the subprocess workflow is reflected here.
 

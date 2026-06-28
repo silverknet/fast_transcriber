@@ -22,6 +22,13 @@ export interface ProjectSongMetadataLite {
   keyDetail?: SongKey
   bpm?: number
   /**
+   * Count-in beats from `cues.countInBeats` when `cues.mode === 'countIn'`.
+   * Absent / 0 when the song has no count-in. Surfaced on the project song
+   * card so users see at a glance how much lead-in each song carries
+   * before Ableton playback (the count-in is baked into the click WAV).
+   */
+  countInBeats?: number
+  /**
    * Persisted stem refs from the song's .smap — used by the project view
    * to render a stem-status overview without loading the full audio chunk.
    */
@@ -46,8 +53,12 @@ export interface ProjectSongMetadataLite {
   hasCueTrack?: boolean
   /** True iff `<song>/cue/click-track.wav` exists on disk. */
   hasClickTrack?: boolean
-  /** Count-in beats before bar 1 when `cues.mode === 'countIn'`; absent otherwise. */
-  countInBeats?: number
+  /**
+   * True when the song's `.smap` names an audio source. Stub songs from
+   * "Add empty" have no `audio` block; these get a dimmed audio badge on
+   * the project card until the user opens them in the editor and uploads.
+   */
+  hasAudio?: boolean
 }
 
 export type ProjectEditingMode = 'project-song' | 'standalone' | null

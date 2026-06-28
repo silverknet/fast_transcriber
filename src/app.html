@@ -4,6 +4,24 @@
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      Always-loaded platform font (drives `--font-sans` in app.css).
+      Space Grotesk powers all body / UI / chrome text.
+    -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
+    />
+    <!--
+      Additional fonts used only by /debug/typography for evaluating body
+      font alternatives. Safe to drop once a winner ships.
+    -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist:wght@400;500;700&family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Mono:wght@400;500&family=Bricolage+Grotesque:wght@500;700&family=Archivo+Black&family=Anton&family=Big+Shoulders+Display:wght@600;800;900&family=Spline+Sans+Mono:wght@400;600&family=DM+Mono:wght@400;500&family=Major+Mono+Display&family=VT323&display=swap"
+    />
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

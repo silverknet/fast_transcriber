@@ -267,3 +267,132 @@ export async function deleteCloudProject(
   if (error) return { ok: false, error: error.message }
   return { ok: true }
 }
+
+// ── Pending invites (migration 012) ────────────────────────────────────
+
+export interface CloudPendingInviteRow {
+  id: string
+  cloud_project_id: string
+  invited_email: string
+  role: 'owner' | 'editor'
+  invited_by: string | null
+  created_at: string
+}
+
+/** Owner view of a project's pending invites. RLS gates by `is_project_owner`. */
+export async function listPendingInvitesForProject(
+  supa: SupabaseClient,
+  projectId: string,
+): Promise<CloudPendingInviteRow[]> {
+  const { data, error } = await supa
+    .from('cloud_pending_invites')
+    .select('id,cloud_project_id,invited_email,role,invited_by,created_at')
+    .eq('cloud_project_id', projectId)
+    .order('created_at', { ascending: true })
+  if (error) throw new Error(error.message)
+  return (data ?? []) as CloudPendingInviteRow[]
+}
+
+/**
+ * Pending invites visible to the current caller (matched by JWT email).
+ * Returned shape includes the project name so the invitee can decide
+ * whether to accept without an extra lookup per row.
+ */
+export async function listPendingInvitesForCurrentUser(
+  supa: SupabaseClient,
+): Promise<Array<CloudPendingInviteRow & { project_name: string }>> {
+  // RLS limits rows to ones matching the caller's email. We can't join
+  // through Supabase's auto-policy on cloud_projects (caller isn't a
+  // member yet), so fetch invites first, then resolve names via a second
+  // query that does a service-side lookup — but to stay RLS-only we
+  // resolve names through a SECURITY DEFINER RPC. For now, lean on the
+  // fact that a brand-new invitee can read the project NAME via a
+  // dedicated SECURITY DEFINER function added below.
+  const { data: invites, error: invErr } = await supa
+    .from('cloud_pending_invites')
+    .select('id,cloud_project_id,invited_email,role,invited_by,created_at')
+    .order('created_at', { ascending: false })
+  if (invErr) throw new Error(invErr.message)
+  const rows = (invites ?? []) as CloudPendingInviteRow[]
+  if (rows.length === 0) return []
+
+  // Resolve names via the RPC `cloud_pending_invite_project_names` which
+  // returns name for projects the caller has a pending invite to. This
+  // sidesteps the membership-gated SELECT on cloud_projects.
+  const { data: names, error: nameErr } = await supa.rpc(
+    'cloud_pending_invite_project_names',
+  )
+  if (nameErr) throw new Error(nameErr.message)
+  const nameById = new Map<string, string>(
+    (names ?? []).map((r: { project_id: string; name: string }) => [r.project_id, r.name]),
+  )
+  return rows.map((r) => ({ ...r, project_name: nameById.get(r.cloud_project_id) ?? '' }))
+}
+
+/**
+ * Create a pending invite. Idempotent on `(project, lower(email))` — a
+ * duplicate insert just updates the role. Goes through service-role
+ * because the owner-insert policy requires `invited_by = auth.uid()`
+ * but we want the route to set the inviter explicitly.
+ */
+export async function createPendingInvite(
+  service: SupabaseClient,
+  projectId: string,
+  email: string,
+  role: 'owner' | 'editor',
+  invitedBy: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await service.from('cloud_pending_invites').upsert(
+    {
+      cloud_project_id: projectId,
+      invited_email: email,
+      role,
+      invited_by: invitedBy,
+    },
+    { onConflict: 'cloud_project_id,invited_email' },
+  )
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+export async function deletePendingInvite(
+  supa: SupabaseClient,
+  inviteId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await supa.from('cloud_pending_invites').delete().eq('id', inviteId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+/**
+ * Promote one pending invite (matched by project + caller email) into a
+ * `cloud_project_members` row and delete the pending row. Returns true
+ * if the invite existed and was consumed.
+ */
+export async function acceptPendingInvite(
+  supa: SupabaseClient,
+  projectId: string,
+): Promise<{ ok: true; accepted: boolean } | { ok: false; error: string }> {
+  const { data, error } = await supa.rpc('cloud_accept_pending_invite', {
+    p_project_id: projectId,
+  })
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, accepted: Boolean(data) }
+}
+
+/**
+ * Called from the access-gate after a fresh sign-in. Walks every pending
+ * invite for the caller's email, inserts memberships, deletes the rows.
+ * Idempotent — returns 0 when there's nothing to do.
+ */
+export async function consumePendingInvitesForCurrentUser(
+  supa: SupabaseClient,
+): Promise<number> {
+  const { data, error } = await supa.rpc('cloud_consume_pending_invites_for_email')
+  if (error) {
+    // Don't blow up the access gate on a sync hiccup — log and continue.
+    console.warn('[cloud] consume pending invites failed:', error.message)
+    return 0
+  }
+  return typeof data === 'number' ? data : 0
+}

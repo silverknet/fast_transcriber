@@ -26,6 +26,12 @@ export interface ProjectSongMetadataInfo {
   bpm?: number
   /** Count-in beats when `cues.mode === 'countIn'`; 0/absent otherwise. */
   countInBeats?: number
+  /**
+   * True when the song's `.smap` names an audio source (`audio.fileName`
+   * or `audio.originalPath`). Stub songs added via "Add empty" have no
+   * `audio` block at all — these report `hasAudio !== true`.
+   */
+  hasAudio?: boolean
   stemRefs?: StemRefs
   hasSmap: boolean
   hasAls: boolean
