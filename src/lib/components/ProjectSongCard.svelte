@@ -48,6 +48,7 @@
     onRemove,
     onRename,
     onAttachAudio,
+    onReplaceAudio,
     onExport,
   } = $props<{
     entry: ProjectSongEntry
@@ -62,6 +63,8 @@
     onRename: () => void
     /** Trigger the project-level hidden file input + attach the audio bytes here. */
     onAttachAudio: () => void
+    /** Replace the audio of a song that already has it (hard reset of derived data). */
+    onReplaceAudio: () => void
     onExport: () => void
   }>()
 
@@ -288,6 +291,12 @@
           <Sliders class="size-3.5" aria-hidden="true" />
           Stems…
         </DropdownMenuItem>
+        {#if hasAudio}
+          <DropdownMenuItem class="" onclick={onReplaceAudio}>
+            <Upload class="size-3.5" aria-hidden="true" />
+            Replace audio…
+          </DropdownMenuItem>
+        {/if}
         <DropdownMenuItem class="" onclick={onExport}>
           <Download class="size-3.5" aria-hidden="true" />
           Export…

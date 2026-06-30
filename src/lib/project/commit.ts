@@ -45,6 +45,7 @@ import {
   readProjectSong,
   readProjectSongAsset,
   removeProjectSong,
+  removeProjectSongAsset,
   writeProjectManifest,
   writeProjectSong,
   writeProjectSongAsset,
@@ -1046,6 +1047,85 @@ export async function attachAudioToSong(
     )
   }
   await attachImportedAudioToSong(songId, artifact)
+}
+
+/**
+ * Replace the audio of a song that already has it. Different audio invalidates
+ * everything derived from the old recording, so this is a hard reset of the
+ * song's content: it keeps the title (and folder/id/cloud linkage) but rebuilds
+ * the `.smap` as a clean slate — **dropping bars/beats, chords, sections,
+ * stemRefs, chord chroma, and trim** — stamps the new audio + identity, sets
+ * `analyzed: false`, and deletes the now-stale on-disk artifacts (`stems/`,
+ * `cue/`, the old audio file). Opening the song afterwards re-enters the
+ * analyze flow (and auto-stems re-renders if the project has it enabled).
+ */
+export async function replaceAudioForSong(songId: string, audioFile: File): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const entry = snap.data.songs.find((s) => s.id === songId)
+  if (!entry) throw new Error('Song not found in project')
+  const osPath = snap.osPath
+
+  let artifact: ImportedAudioArtifact
+  try {
+    artifact = await prepareImportedAudio(audioFile, { source: 'upload' })
+  } catch (e) {
+    throw new Error(`Could not decode audio file: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  // Read the old smap to preserve the title and locate the old audio file.
+  const r = await readProjectSong(osPath, entry.folder)
+  if (!r.ok) throw new Error(`Could not read song.smap: ${r.error}`)
+  const data = await decodeSmapFile(new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' }))
+  const oldMap = data.project.songMap
+  const oldTitle = oldMap.metadata?.title ?? ''
+  const oldAudioPath = oldMap.audio?.originalPath ?? null
+
+  // Write the new audio bytes.
+  const fileName = sanitizeAudioFilename(artifact.fileName || artifact.file?.name || 'audio.bin')
+  const subpath = `audio/${fileName}`
+  if (!artifact.file) throw new Error('No audio bytes available to replace.')
+  const bytes = new Uint8Array(await artifact.file.arrayBuffer())
+  const w = await writeProjectSongAsset(osPath, entry.folder, subpath, bytes)
+  if (!w.ok) throw new Error(`Could not write audio file: ${w.error}`)
+
+  // Clean-slate SongMap: empty timeline/sections/harmony/cues (so no stale
+  // chords/grid/chroma/stemRefs survive), title preserved, new audio block.
+  const fresh = createEmptySongMap()
+  const updatedMap: SongMap = {
+    ...fresh,
+    metadata: {
+      ...fresh.metadata,
+      title: oldTitle || fresh.metadata.title,
+      analyzed: false,
+      updatedAt: nowIso(),
+    },
+    audio: {
+      ...audioReferenceFromImportedArtifact(
+        {
+          ...artifact,
+          fileName,
+          mimeType: artifact.mimeType || artifact.file?.type,
+          alreadyWrittenSubpath: subpath,
+        },
+        { startSec: 0, endSec: artifact.durationSec },
+      ),
+      originalPath: subpath,
+    },
+  }
+  const reEncoded = await encodeSmapFile({ project: { ...data.project, songMap: updatedMap } })
+  const ww = await writeProjectSong(osPath, entry.folder, new Uint8Array(await reEncoded.arrayBuffer()))
+  if (!ww.ok) throw new Error(`Could not write song.smap: ${ww.error}`)
+
+  // Delete stale derived artifacts so they aren't re-discovered for the new
+  // audio. Best-effort — the smap reset above is what actually matters.
+  await removeProjectSongAsset(osPath, entry.folder, 'stems').catch(() => {})
+  await removeProjectSongAsset(osPath, entry.folder, 'cue').catch(() => {})
+  if (oldAudioPath && oldAudioPath !== subpath) {
+    await removeProjectSongAsset(osPath, entry.folder, oldAudioPath).catch(() => {})
+  }
+
+  patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(updatedMap))
 }
 
 /**

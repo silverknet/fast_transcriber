@@ -1065,6 +1065,36 @@ async function handleProjectSongAssetWrite(req, res, cors) {
 }
 
 /**
+ * `POST /native/project/song/asset/remove` — body
+ *   `{ projectPath, songFolder, subpath }`.
+ *
+ * Delete a file OR directory under a song folder (recursive, force). Used by
+ * "Replace audio" to wipe stale derived artifacts (`stems/`, `cue/`, the old
+ * audio file) so they don't get re-discovered for the new audio. No-op if the
+ * target doesn't exist. Same `subpath` validation as asset-write — confined
+ * to the song folder, no `..` traversal.
+ */
+async function handleProjectSongAssetRemove(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const subpath = validateAssetSubpath(body.subpath)
+    const targetAbs = path.join(projectPath, songFolder, subpath)
+    await rm(targetAbs, { recursive: true, force: true })
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
  * `POST /native/project/song/audio/relink` — open an OS file picker, copy
  * the user-chosen file to `<song>/audio/<filename>`, compute its SHA-256,
  * and return the relative path + hash. Used by the relink banner when the
@@ -4829,6 +4859,10 @@ function startBeaconServer() {
     }
     if (req.method === 'POST' && req.url === '/native/project/song/asset/write') {
       void handleProjectSongAssetWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/song/asset/remove') {
+      void handleProjectSongAssetRemove(req, res, cors)
       return
     }
     if (req.method === 'GET' && req.url?.startsWith('/native/project/song/asset/read')) {
