@@ -372,6 +372,28 @@ function parseManifestAutoStems(raw) {
 }
 
 /**
+ * Parse the optional `cloud` collab-link block, mirroring the cloud parse in
+ * src/lib/project/parse.ts. Returns undefined when absent/malformed.
+ * CRUCIAL: without this, every sidecar manifest write strips the cloud link,
+ * silently "un-sharing" the project — "Enable cloud sync" appears to work in
+ * memory, then breaks after the store reloads from disk.
+ */
+function parseManifestCloud(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  if (typeof raw.projectId !== 'string' || raw.projectId.length === 0) return undefined
+  if (typeof raw.lastSyncedRevision !== 'number' || !Number.isFinite(raw.lastSyncedRevision)) {
+    return undefined
+  }
+  const cloud = { projectId: raw.projectId, lastSyncedRevision: raw.lastSyncedRevision }
+  if (typeof raw.pendingChanges === 'number' && Number.isFinite(raw.pendingChanges)) {
+    cloud.pendingChanges = raw.pendingChanges
+  }
+  if (typeof raw.lastPushedAt === 'string') cloud.lastPushedAt = raw.lastPushedAt
+  if (typeof raw.lastPulledAt === 'string') cloud.lastPulledAt = raw.lastPulledAt
+  return cloud
+}
+
+/**
  * Validate + parse a manifest object (after JSON.parse). Throws on schema
  * violation. Mirrors the parser in src/lib/project/parse.ts.
  */
@@ -407,9 +429,19 @@ function parseManifestObject(raw) {
     const folder = validateRelSongFolder(e.folder, `songs[${i}].folder`)
     const entry = { id: e.id, folder }
     if (typeof e.hidden === 'boolean' && e.hidden) entry.hidden = true
+    // Preserve cloud-collab linkage on round-trip — without this, a manifest
+    // write through the sidecar would strip the cloud link and the project
+    // would silently "un-share". Mirrors src/lib/project/parse.ts.
+    if (typeof e.cloudSongId === 'string' && e.cloudSongId.length > 0) {
+      entry.cloudSongId = e.cloudSongId
+    }
+    if (typeof e.lastSyncedRevision === 'number' && Number.isFinite(e.lastSyncedRevision)) {
+      entry.lastSyncedRevision = e.lastSyncedRevision
+    }
     songs.push(entry)
   }
   const autoStems = parseManifestAutoStems(raw.autoStems)
+  const cloud = parseManifestCloud(raw.cloud)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -418,6 +450,7 @@ function parseManifestObject(raw) {
     updatedAt: raw.updatedAt,
     songs,
     ...(autoStems ? { autoStems } : {}),
+    ...(cloud ? { cloud } : {}),
   }
 }
 
