@@ -100,6 +100,16 @@ export async function getProjectInfo(projectPath: string): Promise<ProjectInfoRe
   return await postJson<ProjectInfoResult>(`${BASE_URL}/native/project/info`, { projectPath })
 }
 
+/**
+ * Register a project with the sidecar's background auto-stems daemon. The
+ * daemon reads the `autoStems` policy from the project manifest itself, so
+ * this only needs the path. Idempotent + persisted sidecar-side; safe to call
+ * on every project open.
+ */
+export async function watchProjectForAutoStems(projectPath: string): Promise<ProjectOkResult> {
+  return await postJson<ProjectOkResult>(`${BASE_URL}/native/auto-stems/watch`, { projectPath })
+}
+
 export async function writeProjectManifest(
   projectPath: string,
   manifest: ProjectFile,

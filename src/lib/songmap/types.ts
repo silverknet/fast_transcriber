@@ -332,6 +332,12 @@ export type ChordHints = {
   generatedAt: string
   /** Bump when `chord_chroma.py` algorithm changes to force re-analysis. */
   analyzerVersion: number
+  /**
+   * Which audio source produced this cache. Lets the debug UI tell at a
+   * glance whether the cached chroma came from a clean harmonic stem or
+   * the muddy full mix. Absent on legacy v2 caches.
+   */
+  analyzerSource?: 'stems-other' | 'mix'
 }
 
 export type SongMapV1 = {

@@ -88,3 +88,126 @@ echo "INSERT INTO public.schema_migrations (name) VALUES ('<NNN>_xxx.sql') ON CO
 ```
 
 Migration 012 (`cloud_pending_invites`) was applied this way + back-filled. Future migrations targeting hosted Supabase should follow the same pattern unless someone fixes the DNS path.
+
+## 2026-06-29 — claude (improved-analyze-state) — auto-stems + analyze/trim stability
+
+Worked across several stability fixes this session (branch has intermingled
+Codex YouTube work + earlier chord work — **stage only files you touched**):
+
+- **Analyzing flow:** existing project songs were duplicated by the analyze
+  flow (`commitNewSongToProject` always allocates a new folder). Added
+  `updateActiveProjectSong` (in-place write) and route existing vs new in
+  `analyzing/+page.svelte`. Also fixed a bounce-to-/project (open → no audio
+  file → `/analyzing` → `/` → layout redirect): `onEditSong` now only enters
+  `/analyzing` when a decoded file is actually present.
+- **Editor trim persists:** `WaveformPlayer` gained `onSelectionCommit`
+  (fires once on drag-release); `edit/+page.svelte` writes it to
+  `sm.audio.trim` — gated to pre-analysis (`bars.length === 0`) so it can't
+  desync an analyzed grid (re-trim of analyzed songs stays the job of
+  Re-analyze).
+- **Auto stem prep (new):** project-wide `autoStems` policy in the manifest
+  (`ProjectSettingsDialog`, gear in project header, OFF by default). Scheduler
+  `src/lib/client/autoStems.ts` (started in layout). Stability invariants:
+  renders the FULL untrimmed file (trim-independent); only analyzed
+  non-hidden songs with audio; WAV-health check re-renders partial files;
+  per-song attempt cap (3); orphaned-job reaper `syncStemJobsWithSidecar`
+  (uses new `listJobsResult` that distinguishes unreachable from zero-jobs)
+  so a companion restart can't wedge a song; caps reset on
+  reconnect/policy-change/project-switch; mid-tick project-switch guard;
+  gave-up songs surface via `autoStemsAttention` → amber note in the card;
+  in-progress stems glow amber.
+
+**All green:** `npm run check` 0 errors, `npm test` 383 passing (pure cores +
+reaper + parse round-trip covered). **NOT browser-verified** — the
+sidecar/demucs background loop, a real mid-render kill, and trim drag need a
+`npm run dev` + companion click-through. Known gap: replacing a song's audio
+later won't invalidate stale stems (no replace-audio UI exists yet).
+
+## 2026-06-29 (later) — claude — auto-stems: architecture pivot to sidecar + critical fix
+
+Review feedback exposed two things:
+1. **Orchestration was in the frontend** (`src/lib/client/autoStems.ts`, started
+   from the layout) — so it stops when the tab closes. Not真 background.
+   Decision: move orchestration into the **sidecar** (runs whenever the desktop
+   app is up; watches ALL opened projects; persists across restarts). Web app
+   shrinks to: write policy + register project path + view jobs.
+2. **CRITICAL BUG (fixed):** `parseManifestObject` in `desktop/electron/main.mjs`
+   stripped `autoStems`, and `handleProjectManifestWrite` round-trips through it
+   — so saving the policy via the sidecar silently dropped it. The feature's
+   config never persisted. Added `parseManifestAutoStems` passthrough.
+
+Done this pass (all verified): UI dots now amber only for the stems a job is
+actually rendering (`StemJobEntry.stems`); progress bar removed from project
+list (quiet background); manifest passthrough fix; new sidecar daemon module
+`desktop/electron/autoStems.mjs` (ported pure logic + DI daemon shell) with
+`autoStems.test.mjs` (6/6 via `node --test`). `node --check` clean on both
+.mjs; web `npm run check` 0 errors, 384 tests.
+
+**REMAINING WIRING (not done — needs a desktop run to verify):**
+- `main.mjs`: extract `createStemsJob(...)` core from `handleSeparateStems`
+  (so daemon + HTTP share enqueue — refactor of working code, verify manual
+  stems still work); instantiate `createAutoStemsDaemon` in `app.whenReady`
+  with DI (`readManifest`, `readSmapHeader`, `listStemSets`, a `wavInfo`
+  reader [reuse the /wav-info/batch internals], `enqueueJob`→createStemsJob,
+  `hasInflightJobForSong`, persistence via `app.getPath('userData')`); add
+  `POST /native/auto-stems/watch {projectPath}` route.
+- Web: bridge `registerAutoStemsProject(projectPath)`, call on project open;
+  then **remove the frontend orchestration** in `autoStems.ts` (keep only the
+  viewing layer) and drop `startAutoStems` from the layout — otherwise both
+  schedulers double-drive. `autoStemsAttention` (give-up UI) becomes
+  sidecar-owned; needs an endpoint to surface, or drop the card note for now.
+
+Until the cutover, the FRONTEND scheduler is still the active one (works while
+a tab is open). NOT pushable as "background" until the sidecar wiring + a
+desktop test pass land.
+
+## 2026-06-29 (cutover) — claude — auto-stems orchestration moved to sidecar
+
+Completed the architecture pivot. Orchestration now lives in the sidecar
+daemon; the web app only writes policy + registers projects + views jobs.
+
+Sidecar (`desktop/electron/`):
+- `autoStems.mjs` daemon: DI shell + ported pure logic; persists watched
+  projects to `userData/auto-stems-watch.json`; resumes on boot; per-song
+  attempt cap; corruption re-render; single-flight per song; `stopped` guard so
+  a tick in-flight during quit can't resurrect the timer. 6 node tests pass.
+- `main.mjs`: extracted `createStemsJob` (shared by HTTP handler + daemon —
+  manual stems path behaviour preserved); `hasInflightStemJobForSong`;
+  `parseManifestAutoStems` passthrough (the critical persistence fix);
+  daemon wired in `app.whenReady` with DI adapters (readProjectManifest,
+  readSmapHeaderJson, listStemSets, readAudioInfo+statSync for wavInfo,
+  createStemsJob for enqueue); `POST /native/auto-stems/watch` route;
+  `autoStemsDaemon.stop()` on before-quit.
+
+Web:
+- `watchProjectForAutoStems` bridge; called (best-effort) from
+  `openProjectByPath` + `createProjectOnDisk` so opening a project registers it.
+- Project page polls `syncStemJobsWithSidecar` every 8s while open + reachable
+  → daemon-spawned jobs show their amber in-progress dots live.
+- **Removed** `src/lib/client/autoStems.ts` (+ its test) and the layout
+  start/stop calls — no more frontend orchestration (no double-drive). Card no
+  longer references `autoStemsAttention`; job failures still surface via the
+  existing terminal-error row.
+
+Verified: web `npm run check` 0 errors, 366 tests; both .mjs `node --check`;
+6 daemon node tests. **STILL NOT desktop-runtime-verified** — needs a real run:
+enable autoStems in Project Settings → confirm sidecar log "now watching" +
+"queued" → stems land in `<song>/stems/<quality>/` → kill desktop app
+mid-render, relaunch → confirm it resumes from the persisted watch list and
+re-renders the partial. Known minor: `wavInfo` only parses wav/mp3, so a
+non-wav stem (flac/aif) would read as unhealthy and get re-rendered as wav
+(demucs emits wav, so unlikely).
+
+## 2026-06-29 (daemon tests) — claude — behavioural coverage for the daemon
+
+Added `desktop/electron/autoStems.daemon.test.mjs` — drives the daemon SHELL
+through its DI seams (fake manifest/smap/stem-scan/wav-info/enqueue), since the
+live sidecar can't run here. 10 tests, all green; covers: enqueues correct
+stems for analyzed+audio song; disabled policy no-op; skips un-analyzed /
+no-audio / hidden / in-flight songs; satisfied song no-op; corrupt stem
+re-render; attempt cap stops at 3; missing-folder dropped from watch list;
+multi-project pass. Sidecar test total now 16 (6 pure + 10 behavioural).
+Web unchanged: 0 check errors, 366 tests.
+
+This is as far as static verification goes — the only thing left is the live
+desktop run described in the earlier note.

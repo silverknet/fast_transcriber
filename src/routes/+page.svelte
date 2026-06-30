@@ -4,24 +4,30 @@
   import { goto } from '$app/navigation'
   import { page } from '$app/stores'
   import { get } from 'svelte/store'
+  import AddAudioDialog from '$lib/components/AddAudioDialog.svelte'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import { Button } from '$lib/components/ui/button'
   import { MAX_AUDIO_DURATION_SEC } from '$lib/constants'
-  import { sha256HexOfBlob } from '$lib/songmap/persist'
+  import {
+    audioReferenceFromImportedArtifact,
+    prepareImportedAudio,
+    type ImportedAudioArtifact,
+  } from '$lib/audio/importedAudio'
   import { createEmptySongMap, createSongMapFromAudioSession } from '$lib/songmap/factory'
   import { analyzingState } from '$lib/stores/analyzingState'
   import { audioSession } from '$lib/stores/audioSession'
   import { setSongMap, patchSongMap, songMap } from '$lib/stores/songMap'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { Music, Upload, ArrowRight, ArrowLeft } from '@lucide/svelte'
   import {
     project,
     markEditingStandalone,
+    clearActiveSong,
   } from '$lib/stores/project'
   import { tryRestoreLastProject } from '$lib/project/commit'
 
-  const accept = 'audio/mpeg,audio/wav,audio/x-wav,audio/wave,audio/flac,.mp3,.wav,.flac'
-
-  let fileInput = $state<HTMLInputElement>()
+  const accept = '.wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff,audio/*'
+  let addAudioDialogOpen = $state(false)
 
   /** Original HQ file — kept in memory for analysis. Never stored in .smap. */
   let originalFile = $state<File | null>(null)
@@ -92,15 +98,17 @@
   let projectName = $state('')
 
   function openPicker() {
-    fileInput?.click()
+    addAudioDialogOpen = true
   }
 
-  async function onFileSelected(e: Event) {
-    const input = e.currentTarget as HTMLInputElement
-    const file = input.files?.[0]
-    input.value = ''
-    if (!file) return
+  async function onLocalAudioPicked(file: File) {
+    const artifact = await prepareImportedAudio(file, { source: 'upload' })
+    await onImportedAudioReady(artifact)
+  }
 
+  async function onImportedAudioReady(artifact: ImportedAudioArtifact) {
+    if (!artifact.file) throw new Error('Imported audio did not include playable bytes.')
+    const file = artifact.file
     originalFile = file
     referenceFile = null
     encoding = false
@@ -111,13 +119,13 @@
 
     // Auto-fill project name from filename if user hasn't typed their own
     if (!nameEdited) {
-      projectName = file.name.replace(/\.[^.]+$/, '') || 'Untitled'
+      projectName = artifact.titleHint || artifact.fileName.replace(/\.[^.]+$/, '') || 'Untitled'
     }
 
     // Create the initial SongMap shell immediately
     const now = new Date().toISOString()
     const initialMap = createSongMapFromAudioSession(
-      { file: null, name: file.name, startSec: 0, endSec: 0 },
+      { file: null, name: artifact.fileName, startSec: 0, endSec: 0 },
       { title: projectName || 'Untitled', now: () => now },
     )
     initialMap.metadata.analyzed = false
@@ -129,27 +137,22 @@
     // canonical location.
     encoding = true
     try {
-      referenceFile = new File([file], file.name, { type: file.type })
-      const origSha = await sha256HexOfBlob(file).catch(() => null)
+      referenceFile = file
 
       audioSession.set({
         file: referenceFile,
-        name: file.name,
+        name: artifact.fileName,
         startSec: rangeStart,
-        endSec: rangeEnd || 0,
+        endSec: rangeEnd || artifact.durationSec,
       })
 
       patchSongMap((m) => ({
         ...m,
         metadata: { ...m.metadata, title: projectName || 'Untitled' },
-        audio: {
-          fileName: file.name,
-          mimeType: referenceFile!.type,
-          durationSec: m.audio?.durationSec,
-          trim: { startSec: rangeStart, endSec: rangeEnd || 0 },
-          source: 'upload',
-          originalSha256: origSha ?? undefined,
-        },
+        audio: audioReferenceFromImportedArtifact(artifact, {
+          startSec: rangeStart,
+          endSec: rangeEnd || artifact.durationSec,
+        }),
       }))
     } catch (e) {
       useError = e instanceof Error ? e.message : 'Could not load audio. Please try again.'
@@ -194,6 +197,12 @@
     if (!inProjectMode) {
       // Plain (standalone) song flow — clear any stale project-song context.
       markEditingStandalone()
+    } else {
+      // New-song import into a project: there is no on-disk song yet. Clear
+      // any previously-active project song so the analyze flow doesn't mistake
+      // it for the analyze target and overwrite it — commitNewSongToProject
+      // allocates a fresh folder and sets the active song after analysis.
+      clearActiveSong()
     }
 
     // Force-write the trim AT click time. The reactive $effect above
@@ -254,7 +263,13 @@
     </p>
   </div>
 
-  <input bind:this={fileInput} type="file" class="sr-only" {accept} onchange={onFileSelected} />
+  <AddAudioDialog
+    bind:open={addAudioDialogOpen}
+    {accept}
+    desktopReachable={$desktopCompanionStatus.reachable}
+    onFile={onLocalAudioPicked}
+    onImported={onImportedAudioReady}
+  />
 
   <div class="brutalist-shadow border-foreground bg-background w-full max-w-xl border-2 p-6 md:p-8">
     <div class="flex flex-col items-stretch gap-6">
@@ -283,10 +298,10 @@
         onclick={openPicker}
       >
         <Upload class="size-4" aria-hidden="true" />
-        {originalFile ? 'Replace audio' : 'Upload audio'}
+        {originalFile ? 'Replace audio' : 'Add audio'}
       </Button>
       <p class="text-muted-foreground text-center text-xs">
-        MP3 or WAV · max length {Math.floor(MAX_AUDIO_DURATION_SEC / 60)} minutes
+        Audio file or YouTube URL · max length {Math.floor(MAX_AUDIO_DURATION_SEC / 60)} minutes
       </p>
 
       {#if useError}

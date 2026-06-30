@@ -29,13 +29,26 @@ Any doc or handover mentioning `desktop/electron/preload.cjs`,
 | `GET` | `/native/health` | Python venv health. |
 | `GET` | `/native/setup/status` | Auto-setup progress. |
 | `POST` | `/native/analyze-downbeats` | WAV bytes -> beat JSON. |
-| `POST` | `/native/separate-stems` | Audio bytes -> NDJSON Demucs progress/job. |
+| `POST` | `/native/separate-stems` | Project audio path -> queued Demucs progress/job. |
 | `GET` | `/native/stems/:jobId/:filename` | Fetch generated stem WAV. |
+| `GET` | `/native/setup/youtube-import/status` | YouTube audio import readiness. |
+| `POST` | `/native/setup/youtube-import` | Prepare managed YouTube audio import tools. |
+| `POST` | `/native/import/youtube` | Queue YouTube URL -> PCM WAV import job. |
+| `GET` | `/native/import/youtube/artifact/:jobId` | Fetch temp WAV artifact for main import flow. |
 | `POST` | `/native/tts/synthesize` | JSON text -> WAV speech. |
 | `POST` | `/native/project/hydration/export` | Create hydration package. |
 | `POST` | `/native/project/hydration/import` | Import hydration package. |
 
 Check [`../../desktop/README.md`](../../desktop/README.md) for the fuller table.
+
+## Auto stem preparation (background client)
+
+[`autoStems.ts`](../../src/lib/client/autoStems.ts) is a web-side scheduler — **no new endpoints**. When `barbro.project.json` has `autoStems.enabled`, it drives the existing stem queue for every analyzed, non-hidden song with audio:
+
+- Reads fresh disk truth each tick via `getProjectInfo` (`stemsByPreset`) and decodes each candidate `.smap` for the analyzed flag + source path; enqueues missing/below-target stems via `POST /native/separate-stems` (`outputDir = <song>/stems/<quality>/`, full untrimmed file as input).
+- **Health-checks** existing stems with `POST /native/project/wav-info/batch` — files with implausible size-for-duration (a render killed mid-write) are re-rendered.
+- **Reaps orphaned jobs**: `GET /native/jobs` is read through `listJobsResult` (which, unlike `listJobsViaDesktop`, distinguishes "zero jobs" from "unreachable"); web-side `running`/`queued`/`paused` jobs the sidecar no longer reports are dropped so a companion restart can't wedge a song forever.
+- Per-song attempt cap prevents render loops; caps + the gave-up set reset on companion reconnect, policy change, and project switch. Gave-up songs surface via `autoStemsAttention`.
 
 ## Development
 

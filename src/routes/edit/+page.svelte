@@ -60,9 +60,11 @@
     setupSectionsDeps,
     suggestSectionBordersViaDesktop,
     analyzeChordChromaViaDesktop,
+    analyzeChordChromaViaDesktopWithStem,
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
   import { proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
+  import { selectBestStemSet } from '$lib/project/commit'
   import {
     applyBarGridAction,
     resetTimelineToOriginal,
@@ -477,7 +479,10 @@
    */
   // v1: cosine similarity (margin too tight, almost everything fell below floor).
   // v2: Pearson correlation + lower floor + 1/f weighting + bass cut.
-  const CHORD_ANALYZER_VERSION = 2
+  // v3: stem-aware input — when demucs "other" stem is on disk, the
+  //     analyzer reads the harmonic stem instead of the full mix.
+  //     Strips drum + vocal bleed; biggest single accuracy unlock.
+  const CHORD_ANALYZER_VERSION = 3
 
   let chordChromaStatus = $state<
     'idle' | 'installing' | 'analyzing' | 'ready' | 'cached' | 'error' | 'unavailable'
@@ -492,6 +497,26 @@
     if (h.beatChroma.length !== sm.timeline.beats.length) return false
     const fp = currentAudioFingerprint(sm)
     return !fp || h.audioFingerprint === fp
+  }
+
+  /**
+   * Absolute on-disk path to this song's harmonic stem (demucs "other"),
+   * or null when no project context / no stems / no "other" file. Used
+   * by the chord-chroma analyzer to skip the full-mix path when a clean
+   * harmonic signal is available.
+   *
+   * Matches `other.wav` or `other.mp3` from the best stem preset on
+   * disk. Demucs always names the melodic-harmonic stem "other".
+   */
+  function resolveOtherStemAbsPath(): string | null {
+    const ps = get(projectStore)
+    if (!ps.osPath || !ps.activeSongFolder) return null
+    const meta = ps.metadataByFolder[ps.activeSongFolder]
+    const best = selectBestStemSet(meta)
+    if (!best) return null
+    const otherFile = best.files.find((f) => /^other\.(wav|mp3)$/i.test(f))
+    if (!otherFile) return null
+    return `${ps.osPath}/${ps.activeSongFolder}/${best.pathPrefix}${otherFile}`
   }
 
   async function runChordChromaAnalysis(force = false) {
@@ -531,14 +556,21 @@
     chordChromaStatus = 'analyzing'
     chordChromaError = null
     try {
-      // `beat.timeSec` is song-relative (post-trim); the sidecar reads the
-      // full untrimmed reference audio file. Add the trim offset so beat
-      // times align with the actual audio frames.
+      // `beat.timeSec` is song-relative (post-trim); the analyzer reads
+      // the untrimmed audio file, so add trim offset to align beat
+      // timestamps with file frames.
       const trimOffset = sm.audio?.trim?.startSec ?? 0
       const beats = sortBeatsByTime(sm.timeline.beats).map((b) => ({
         startSec: b.timeSec + trimOffset,
       }))
-      const out = await analyzeChordChromaViaDesktop(file, beats)
+
+      // Prefer the demucs "other" stem if it's on disk for this song.
+      // Strips drum/vocal/bass bleed → much cleaner chroma. Falls back
+      // to the full-mix WAV when no project context or no stems exist.
+      const otherStemPath = resolveOtherStemAbsPath()
+      const out = otherStemPath
+        ? await analyzeChordChromaViaDesktopWithStem(otherStemPath, beats)
+        : await analyzeChordChromaViaDesktop(file, beats)
       if (out.ok) {
         const fp = currentAudioFingerprint(sm) ?? 'unknown'
         const detected = out.detectedKey
@@ -560,6 +592,7 @@
             audioFingerprint: fp,
             generatedAt: new Date().toISOString(),
             analyzerVersion: CHORD_ANALYZER_VERSION,
+            analyzerSource: otherStemPath ? 'stems-other' : 'mix',
           },
         }))
         chordChromaStatus = 'ready'
@@ -858,6 +891,28 @@
   let rangeStart = $state($audioSession.startSec ?? 0)
   let rangeEnd = $state($audioSession.endSec ?? 0)
   let waveformReady = $state(false)
+
+  /**
+   * Persist a trim-handle drag from the waveform into the SongMap (the root
+   * of truth) + audio session. Fired once on drag-release via
+   * `WaveformPlayer.onSelectionCommit`, so it makes one undo entry, not one
+   * per pixel.
+   *
+   * Scoped to the pre-analysis state (`bars.length === 0`). Once a grid
+   * exists, bars/beats are stored in song-relative (post-trim) time; moving
+   * the trim window would shift the audio under a fixed grid and desync them.
+   * Re-trimming an analyzed song is the job of "Re-analyze grid", which
+   * re-detects beats against the new trim — not a silent handle drag.
+   */
+  function handleTrimCommit(start: number, end: number) {
+    const sm = get(songMap)
+    if (!sm?.audio || !(end > start)) return
+    if (sm.timeline.bars.length > 0) return
+    patchSongMap((m) =>
+      m.audio ? { ...m, audio: { ...m.audio, trim: { startSec: start, endSec: end } } } : m,
+    )
+    audioSession.update((s) => ({ ...s, startSec: start, endSec: end }))
+  }
 
   /** Main workspace mode. */
   let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix' | 'leadsheet'>('grid')
@@ -2063,6 +2118,7 @@
           file={$audioSession.file}
           bind:rangeStart
           bind:rangeEnd
+          onSelectionCommit={handleTrimCommit}
           bind:ready={waveformReady}
           variant="editor"
           beatGrid={{ bars: sm.timeline.bars, beats: sm.timeline.beats }}

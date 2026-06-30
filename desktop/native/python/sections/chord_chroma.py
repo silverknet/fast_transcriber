@@ -75,7 +75,11 @@ KEY_CONFIDENCE_FLOOR = 0.02
 #   v1: cosine similarity. Too flat — almost everything fell below the floor.
 #   v2: Pearson correlation (the original K-S formulation) + lower floor +
 #       aggressive bass cut + harmonic weighting; diagnostic logging.
-ANALYZER_VERSION = 2
+#   v3: input change only — analyzer now receives a clean harmonic stem
+#       (typically demucs "other") when one is on disk, instead of the
+#       full mix. No algorithm change. Invalidates the v2 cache so songs
+#       with stems on disk re-analyze against the cleaner signal.
+ANALYZER_VERSION = 3
 
 
 # Krumhansl–Kessler probe-tone profiles (Kostka–Payne corrected). Indexed

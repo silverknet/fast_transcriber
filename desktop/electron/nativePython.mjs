@@ -3,7 +3,6 @@
  * and the standardized stems venv under Electron's userData dir.
  */
 
-import { app } from 'electron'
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -11,6 +10,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { app } from 'electron'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -27,6 +27,11 @@ export function beatsScriptPath() {
 
 export function stemsScriptPath() {
   return path.join(getNativePythonRoot(), 'stems', 'demucs_separate.py')
+}
+
+/** YouTube audio importer (`desktop/native/python/youtube/import_audio.py`). */
+export function youtubeImportScriptPath() {
+  return path.join(getNativePythonRoot(), 'youtube', 'import_audio.py')
 }
 
 /** Section-border suggester (`desktop/native/python/sections/border_suggest.py`). */
@@ -177,6 +182,33 @@ export function getStemsVenvPythonExe() {
 /** True iff the stems venv exists on disk (cheap exec check). */
 export function stemsVenvIsReady() {
   return existsSync(getStemsVenvPythonExe())
+}
+
+/**
+ * Dedicated YouTube import environment. Kept separate from stems/sections so
+ * yt-dlp and the managed ffmpeg wheel can be updated independently.
+ */
+export function getYoutubeImportVenvDir() {
+  return path.join(app.getPath('userData'), 'python', 'youtube-import-venv')
+}
+
+export function getYoutubeImportVenvPythonExe() {
+  const venv = getYoutubeImportVenvDir()
+  if (process.platform === 'win32') {
+    return path.join(venv, 'Scripts', 'python.exe')
+  }
+  return path.join(venv, 'bin', 'python3')
+}
+
+export function youtubeImportVenvIsReady() {
+  return existsSync(getYoutubeImportVenvPythonExe())
+}
+
+export function pythonYoutubeImportExe() {
+  const override = process.env.BARBRO_PYTHON_YOUTUBE_IMPORT?.trim()
+  if (override) return override
+  if (youtubeImportVenvIsReady()) return getYoutubeImportVenvPythonExe()
+  return process.env.BARBRO_PYTHON?.trim() || 'python3'
 }
 
 /**

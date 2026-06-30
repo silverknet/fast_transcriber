@@ -190,7 +190,7 @@
     }
     // No need to remember the jobId locally — `jobEntry` derives from the
     // global store keyed by songId, so the UI picks it up automatically.
-    registerStemJob({ jobId: r.jobId, songId, onDone: finalizeJob })
+    registerStemJob({ jobId: r.jobId, songId, stems, onDone: finalizeJob })
   }
 
   async function cancelCurrent() {

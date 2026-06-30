@@ -67,6 +67,38 @@
     return relatedChordsForDegree(songKey, drilledDegreeIndex)
   })
 
+  /**
+   * 7th-chord variants of the suggested chord's root. Triad-only chroma
+   * matching can't tell C major from Cmaj7 — surfacing both lets the
+   * user pick the right one in a single click, pushing the radial's
+   * "right chord in here somewhere" coverage well past 95%.
+   *
+   * Variants are always: maj7 (if the primary is major) and dom7,
+   * OR m7 (if minor). Selection is intentionally narrow — wider
+   * coverage lives in the search panel for the rare edge cases.
+   */
+  const suggestionVariants = $derived.by<ChordSymbol[]>(() => {
+    if (!suggestion) return []
+    const base = chordWithoutBass(suggestion.primary.chord, preferFlats)
+    const isMinor = (base.quality ?? '').toLowerCase().startsWith('min') || base.quality === 'minor'
+    const out: ChordSymbol[] = []
+    const push = (quality: string) => {
+      const c: ChordSymbol = { ...base, quality, displayRaw: '' }
+      c.displayRaw = formatChordSymbol(c, { preferFlats })
+      // Skip if identical to the primary or already in alternates.
+      if (c.displayRaw === labelFor(suggestion.primary.chord)) return
+      if (suggestion.alternatives.some((a) => labelFor(a) === c.displayRaw)) return
+      out.push(c)
+    }
+    if (isMinor) {
+      push('min7')
+    } else {
+      push('maj7')
+      push('7')
+    }
+    return out
+  })
+
   type HomeSlot =
     | { kind: 'clear'; label: string; subtitle: string }
     | { kind: 'search'; label: string; subtitle: string }
@@ -352,11 +384,13 @@
             </button>
             {#if suggestion.alternatives.length > 0}
               <div class="text-muted-foreground text-[8px] leading-tight">Alternates:</div>
-              <div class="flex gap-1">
+              <!-- Chip strip: up to 4 alternates (top-5 minus primary). When
+                   space allows it wraps so all chips stay readable. -->
+              <div class="flex flex-wrap gap-1">
                 {#each suggestion.alternatives as alt, ai (`alt-${ai}`)}
                   <button
                     type="button"
-                    class="bg-background border-foreground hover:bg-foreground/10 flex-1 cursor-pointer border-2 px-1 py-1 text-center font-mono text-[11px]"
+                    class="bg-background border-foreground hover:bg-foreground/10 min-w-[44px] flex-1 cursor-pointer border-2 px-1 py-1 text-center font-mono text-[11px]"
                     onpointerdown={(e) => onCommitPointerDown(e, alt)}
                     onpointerup={(e) => onCommitPointerUp(e, alt)}
                     onpointerleave={onCommitPointerLeave}
@@ -373,6 +407,37 @@
                     title={`Use alternate: ${labelFor(alt)}`}
                   >
                     {labelFor(alt)}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+            {#if suggestionVariants.length > 0}
+              <!-- 7th variants: maj7 / 7 (if major), m7 (if minor). Lets the
+                   user pick the right quality in one click without bouncing
+                   to the search panel. Triad-only chroma matching can't
+                   tell C from Cmaj7 — this row closes that gap. -->
+              <div class="text-muted-foreground text-[8px] leading-tight">7th variants:</div>
+              <div class="flex flex-wrap gap-1">
+                {#each suggestionVariants as variant, vi (`var-${vi}`)}
+                  <button
+                    type="button"
+                    class="bg-background border-foreground hover:bg-foreground/10 min-w-[44px] flex-1 cursor-pointer border-2 px-1 py-1 text-center font-mono text-[11px]"
+                    onpointerdown={(e) => onCommitPointerDown(e, variant)}
+                    onpointerup={(e) => onCommitPointerUp(e, variant)}
+                    onpointerleave={onCommitPointerLeave}
+                    onpointercancel={(e) => {
+                      try {
+                        ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+                      } catch {
+                        /* ignore */
+                      }
+                      onCommitPointerLeave()
+                      longPressDidFire = false
+                    }}
+                    oncontextmenu={(e) => e.preventDefault()}
+                    title={`Use 7th variant: ${labelFor(variant)}`}
+                  >
+                    {labelFor(variant)}
                   </button>
                 {/each}
               </div>

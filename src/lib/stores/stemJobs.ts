@@ -20,10 +20,12 @@ import {
   pauseJob as pauseJobOnSidecar,
   resumeJob as resumeJobOnSidecar,
   releaseStemsJob,
+  listJobsResult,
   subscribeToJobEvents,
   type DesktopJobView,
   type JobControlResult,
   type StemJobState,
+  type StemName,
   type StemSeparationEvent,
 } from '$lib/client/desktopBridge'
 
@@ -34,6 +36,8 @@ export interface StemJobEntry {
   state: StemJobState
   /** Last-known step label from a `progress` event. */
   label: string
+  /** Demucs stems this job is rendering. Drives per-stem "in progress" dots. */
+  stems: StemName[]
   currentPct: number
   overallPct: number
   /** Trailing log lines (capped) for the in-card log box. */
@@ -49,6 +53,17 @@ export interface StemJobEntry {
 }
 
 const LOG_TAIL = 80
+
+const VALID_STEMS: readonly StemName[] = ['vocals', 'drums', 'bass', 'other']
+
+/** Parse the sidecar's comma-joined `options.stems` back into typed names. */
+function parseStemsOption(raw: string | undefined): StemName[] {
+  if (!raw) return []
+  return raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s): s is StemName => (VALID_STEMS as readonly string[]).includes(s))
+}
 
 export const stemJobs = writable<Map<string, StemJobEntry>>(new Map())
 
@@ -141,16 +156,19 @@ function handleEvent(jobId: string, ev: StemSeparationEvent) {
 export function registerStemJob(args: {
   jobId: string
   songId: string | null
+  /** Demucs stems this job targets — surfaced as per-stem dots. */
+  stems?: StemName[]
   /** Optional: invoked once when state becomes `done`. */
   onDone?: FinalizerFn
 }): void {
-  const { jobId, songId, onDone } = args
+  const { jobId, songId, stems, onDone } = args
   if (get(stemJobs).has(jobId)) return
   const entry: StemJobEntry = {
     jobId,
     songId,
     state: 'queued',
     label: 'Queued',
+    stems: stems ?? [],
     currentPct: 0,
     overallPct: 0,
     log: [],
@@ -182,6 +200,7 @@ export function registerStemJob(args: {
  */
 export function hydrateFromSidecar(jobs: DesktopJobView[]): void {
   for (const j of jobs) {
+    if (j.kind && j.kind !== 'stems') continue
     if (get(stemJobs).has(j.jobId)) continue
     const entry: StemJobEntry = {
       jobId: j.jobId,
@@ -189,6 +208,7 @@ export function hydrateFromSidecar(jobs: DesktopJobView[]): void {
       songId: j.songId,
       state: j.state,
       label: j.state === 'running' ? 'Running' : j.state === 'queued' ? 'Queued' : j.state,
+      stems: parseStemsOption(j.options?.stems),
       currentPct: 0,
       overallPct: 0,
       log: [],
@@ -215,6 +235,33 @@ export function hydrateFromSidecar(jobs: DesktopJobView[]): void {
       patchEntry(j.jobId, { unsubscribe: unsub })
     }
   }
+}
+
+/**
+ * Drop web-side jobs the sidecar no longer knows about. A job left in a
+ * non-terminal state (`queued` / `running` / `paused`) after the companion
+ * restarted would otherwise block its song forever — `activeJobForSong`
+ * keeps returning it and the auto-stems scheduler skips that song. `liveJobIds`
+ * MUST come from a successful sidecar response (see `listJobsResult`); never
+ * reap on an unreachable blip.
+ */
+export function reapOrphanedJobs(liveJobIds: Set<string>): void {
+  for (const [jobId, e] of get(stemJobs)) {
+    const nonTerminal = e.state === 'queued' || e.state === 'running' || e.state === 'paused'
+    if (nonTerminal && !liveJobIds.has(jobId)) removeJob(jobId)
+  }
+}
+
+/**
+ * One-shot reconcile against the sidecar: add jobs we don't track yet and
+ * reap orphaned non-terminal ones. No-op when the sidecar can't be reached
+ * (so a transient failure can't wipe live jobs).
+ */
+export async function syncStemJobsWithSidecar(): Promise<void> {
+  const res = await listJobsResult()
+  if (!res.ok) return
+  hydrateFromSidecar(res.jobs)
+  reapOrphanedJobs(new Set(res.jobs.map((j) => j.jobId)))
 }
 
 /** Drop a job from the store (and abort its subscription if any). */

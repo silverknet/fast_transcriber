@@ -110,6 +110,21 @@
     }
     return best
   })
+
+  /**
+   * Demucs stem names the active job is currently rendering (e.g. `drums`,
+   * `bass`). Used to glow ONLY those stem dots amber — not every empty slot.
+   */
+  let inProgressStems = $derived<Set<string>>(new Set(activeJob?.stems ?? []))
+
+  /** Map an Ableton stem-track slot to its demucs source stem (FX has none). */
+  const SLOT_TO_DEMUCS: Record<string, string | null> = {
+    Drums: 'drums',
+    Bass: 'bass',
+    Guitar: 'other',
+    Vocals: 'vocals',
+    FX: null,
+  }
 </script>
 
 <!--
@@ -200,15 +215,27 @@
       ></span>
     </span>
 
-    <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). -->
+    <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). While a
+         stem job is in flight for this song, not-yet-present stems glow amber
+         ("in progress") instead of grey ("not generated"). -->
     {#each stemPresence as s (s.name)}
+      {@const demucs = SLOT_TO_DEMUCS[s.name]}
+      {@const stemInProgress = !s.present && !!demucs && inProgressStems.has(demucs)}
       <span
         class="flex min-w-0 justify-center"
-        title={s.present ? `${s.name}: ready` : `${s.name}: not generated`}
+        title={s.present
+          ? `${s.name}: ready`
+          : stemInProgress
+            ? `${s.name}: in progress…`
+            : `${s.name}: not generated`}
       >
         <span
-          class="size-2 shrink-0 rounded-full {s.present ? 'bg-emerald-500' : 'bg-foreground/20'}"
-          aria-label={`${s.name}: ${s.present ? 'ready' : 'not generated'}`}
+          class="size-2 shrink-0 rounded-full {s.present
+            ? 'bg-emerald-500'
+            : stemInProgress
+              ? 'animate-pulse bg-amber-400'
+              : 'bg-foreground/20'}"
+          aria-label={`${s.name}: ${s.present ? 'ready' : stemInProgress ? 'in progress' : 'not generated'}`}
         ></span>
       </span>
     {/each}
@@ -284,55 +311,12 @@
   </div>
 
   <!--
-    Active / recent stem-job status (below the row when present). Includes a
-    visible progress bar so the user can scan the song list and tell at a
-    glance which song the queue is currently chewing on.
+    Stem work is intentionally quiet in the list: in-progress stems glow amber
+    on their per-stem dots above (background activity). We only drop a row
+    below for things that need the user's eye — a failed/cancelled job, or
+    auto-stems giving up. Live progress lives in the Stems dialog.
   -->
-  {#if activeJob}
-    <div
-      class="border-foreground/40 mx-2 mb-2 flex items-center gap-3 border px-2 py-1 text-xs"
-      role="status"
-      aria-label="Stem splitting progress"
-    >
-      <span
-        class="size-1.5 shrink-0 rounded-full {activeJob.state === 'running'
-          ? 'animate-pulse bg-amber-500'
-          : activeJob.state === 'paused'
-            ? 'bg-sky-500'
-            : 'bg-foreground/40'}"
-        aria-hidden="true"
-      ></span>
-      <span class="shrink-0 font-mono">
-        {#if activeJob.state === 'queued'}Queued
-        {:else if activeJob.state === 'paused'}Paused
-        {:else}Stems{/if}
-      </span>
-      <span class="text-muted-foreground min-w-0 flex-1 truncate font-mono text-[11px]">
-        {activeJob.label || (activeJob.state === 'queued' ? 'Waiting for slot…' : 'Starting…')}
-      </span>
-      <!--
-        Progress bar shown for both running AND paused: the paused bar freezes
-        at its last %, signalling "we're partway through, just suspended".
-      -->
-      {#if activeJob.state === 'running' || activeJob.state === 'paused'}
-        <div
-          class="border-foreground/30 bg-background relative h-2 w-32 shrink-0 border"
-          aria-hidden="true"
-        >
-          <div
-            class="absolute inset-y-0 left-0 transition-[width] duration-200 {activeJob.state ===
-            'paused'
-              ? 'bg-foreground/40'
-              : 'bg-foreground'}"
-            style="width: {activeJob.overallPct}%"
-          ></div>
-        </div>
-        <span class="text-muted-foreground w-9 shrink-0 text-right font-mono tabular-nums">
-          {activeJob.overallPct}%
-        </span>
-      {/if}
-    </div>
-  {:else if recentTerminalJob && recentTerminalJob.state !== 'done'}
+  {#if !activeJob && recentTerminalJob && recentTerminalJob.state !== 'done'}
     <div
       class="border-destructive/40 text-destructive mx-2 mb-2 flex flex-wrap items-center gap-2 border px-2 py-1 text-xs"
       role="status"

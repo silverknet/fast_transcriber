@@ -61,6 +61,15 @@
     file = null,
     rangeStart = $bindable(0),
     rangeEnd = $bindable(0),
+    /**
+     * Fired once when the user finishes changing the trim selection (handle
+     * resize, body move, or fresh drag-create) — NOT on seek taps and NOT on
+     * every move frame. The `bind:rangeStart/rangeEnd` already track the live
+     * drag; this is the explicit "commit it" signal so the host can persist
+     * the trim into the SongMap without a per-pixel `$effect` bridge. The home
+     * trim flow leaves it unset and reads the bound values at Analyze time.
+     */
+    onSelectionCommit = undefined as ((start: number, end: number) => void) | undefined,
     ready = $bindable(false),
     variant = 'trim',
     beatGrid = null as BeatGridModel | null,
@@ -1363,6 +1372,12 @@
     const seekTap =
       detailMode === 'maybe-seek' &&
       detailSession.pointerTravelMax <= TAP_VS_SELECT_PX
+    // The selection only moved in these modes; a seek tap leaves it untouched.
+    const changedSelection =
+      detailMode === 'create-selection' ||
+      detailMode === 'resize-selection-left' ||
+      detailMode === 'resize-selection-right' ||
+      detailMode === 'move-selection'
     if (seekTap) {
       controller.seek(timeAtClientX(e.clientX))
     }
@@ -1377,6 +1392,7 @@
       pendingMainPeaksRecompute = false
       flushMainPeaksUpdate()
     }
+    if (changedSelection) onSelectionCommit?.(rangeStart, rangeEnd)
   }
 
   function onWavePointerDown(e) {

@@ -45,6 +45,31 @@ export interface ProjectFile {
    * describe this device's view of sync state.
    */
   cloud?: ProjectCloudLink
+  /**
+   * Project-wide auto stem-separation policy. When `enabled`, the desktop
+   * companion renders the listed `stems` at `quality` for every non-hidden
+   * song with audio, in the background. Absent on projects that never
+   * configured it (treated as disabled).
+   */
+  autoStems?: ProjectAutoStems
+}
+
+/** Demucs stem slots the auto-splitter can target. Matches `StemName` in desktopBridge. */
+export type AutoStemName = 'vocals' | 'drums' | 'bass' | 'other'
+
+/** Quality preset slugs. Matches the `slug` field of `STEM_QUALITY_PRESETS`. */
+export type AutoStemQuality = 'best' | 'balanced' | 'preview'
+
+export const AUTO_STEM_NAMES: readonly AutoStemName[] = ['vocals', 'drums', 'bass', 'other']
+export const AUTO_STEM_QUALITIES: readonly AutoStemQuality[] = ['best', 'balanced', 'preview']
+
+export interface ProjectAutoStems {
+  /** Master switch. When false the scheduler does nothing for this project. */
+  enabled: boolean
+  /** Which stems every song should end up with. Empty = nothing to do. */
+  stems: AutoStemName[]
+  /** Target render quality. Stems below this tier get re-rendered up to it. */
+  quality: AutoStemQuality
 }
 
 export interface ProjectCloudLink {

@@ -15,13 +15,15 @@
   import ExportBackingTrackDialog from '$lib/components/ExportBackingTrackDialog.svelte'
   import SetlistExportDialog from '$lib/components/SetlistExportDialog.svelte'
   import StemsDialog from '$lib/components/StemsDialog.svelte'
+  import ProjectSettingsDialog from '$lib/components/ProjectSettingsDialog.svelte'
+  import AddAudioDialog from '$lib/components/AddAudioDialog.svelte'
   import CloudCollabSection from '$lib/components/CloudCollabSection.svelte'
   import ShareProjectDialog from '$lib/components/ShareProjectDialog.svelte'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
   import NewSongDialog from '$lib/components/NewSongDialog.svelte'
   import RenameSongDialog from '$lib/components/RenameSongDialog.svelte'
   import JoinCloudProjectDialog from '$lib/components/JoinCloudProjectDialog.svelte'
-  import { Cloud, FolderOpen, FolderPlus, ListPlus, MailOpen, Plus, RefreshCw, Music4, Share2 } from '@lucide/svelte'
+  import { Cloud, FolderOpen, FolderPlus, ListPlus, MailOpen, Plus, RefreshCw, Music4, Settings, Share2 } from '@lucide/svelte'
   import {
     acceptPendingInvite,
     listCloudProjects,
@@ -37,6 +39,7 @@
   import { safeExportBasename } from '$lib/songmap/persist'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import {
+    attachImportedAudioToSong,
     attachAudioToSong,
     dropRecentProjectPath,
     importSmapToProject,
@@ -51,15 +54,17 @@
     setSongOrder,
     tryRestoreLastProject,
   } from '$lib/project/commit'
-  import { pickFolderViaDesktop } from '$lib/client/desktopBridge'
+  import { pickFolderViaDesktop, type YoutubeImportOutput } from '$lib/client/desktopBridge'
   import { dndzone } from 'svelte-dnd-action'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
-  import { listJobsViaDesktop } from '$lib/client/desktopBridge'
-  import { hydrateFromSidecar } from '$lib/stores/stemJobs'
+  import { syncStemJobsWithSidecar } from '$lib/stores/stemJobs'
   import { project } from '$lib/stores/project'
+  import { audioSession } from '$lib/stores/audioSession'
+  import { analyzingState } from '$lib/stores/analyzingState'
   import { readSmapJsonOnly } from '$lib/songmap/persist'
   import { songMap } from '$lib/stores/songMap'
   import type { ProjectSongEntry } from '$lib/project/types'
+  import type { ImportedAudioArtifact } from '$lib/audio/importedAudio'
 
   let restoring = $state(true)
   let restoreError = $state('')
@@ -183,6 +188,8 @@
   let stemsDialogOpen = $state(false)
   let stemsTarget = $state<ProjectSongEntry | null>(null)
 
+  let settingsDialogOpen = $state(false)
+
   let smapImportInput = $state<HTMLInputElement | undefined>()
 
   /** Refresh button state. */
@@ -294,11 +301,20 @@
         restoring = false
       }
     })()
+
+    // Background stem prep is driven by the sidecar daemon — poll its job
+    // state while this page is open so the per-stem "in progress" dots reflect
+    // work happening even when nothing in the UI kicked it off.
+    const jobPoll = setInterval(() => {
+      if ($desktopCompanionStatus.reachable) void syncStemJobsWithSidecar()
+    }, 8000)
+    return () => clearInterval(jobPoll)
   })
 
   async function hydrateSidecarJobs() {
-    const sidecarJobs = await listJobsViaDesktop()
-    if (sidecarJobs.length > 0) hydrateFromSidecar(sidecarJobs)
+    // Adds new jobs AND reaps web-side jobs the sidecar forgot (restart),
+    // so a dead "running" entry can't linger on a card forever.
+    await syncStemJobsWithSidecar()
   }
 
   function commitNameRename() {
@@ -319,11 +335,20 @@
       // editor. Stub songs without audio still route to /edit; the editor
       // surfaces a "no audio" empty state for them.
       const sm = get(songMap)
-      const needsAnalyze =
+      const file = get(audioSession).file
+      // Only enter the analyze flow when there's actually a decoded file to
+      // analyze. Routing to /analyzing without a file bounces straight back
+      // out (no hqFile → /analyzing redirects to /, which the layout sends
+      // to /project) — so a missing/unreadable audio file would look like a
+      // dead "open" button. Fall through to /edit, which shows the relink
+      // banner instead.
+      const canAnalyze =
         !!sm?.audio &&
         sm.metadata.analyzed === false &&
-        sm.timeline.bars.length === 0
-      await goto(needsAnalyze ? '/analyzing?project=1' : '/edit')
+        sm.timeline.bars.length === 0 &&
+        !!file
+      if (canAnalyze) analyzingState.set({ hqFile: file })
+      await goto(canAnalyze ? '/analyzing?project=1' : '/edit')
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'Could not open song'
     }
@@ -443,37 +468,63 @@
   }
 
   // ── Attach-audio flow ────────────────────────────────────────────────
-  // One hidden file input shared by every row. The card's "Add audio"
-  // button calls onAttachAudio(entry) which stores the target song id and
-  // fires .click() on the input. The input's change handler reads the
-  // file, attaches it via attachAudioToSong, then refreshes the cache.
-  let attachAudioInput = $state<HTMLInputElement | undefined>()
+  // One shared dialog handles both local files and YouTube URL imports.
+  // The target song id is captured before the dialog opens so direct
+  // project-audio YouTube jobs can write straight into that song folder.
+  let attachAudioDialogOpen = $state(false)
   let attachAudioTargetId = $state<string | null>(null)
   let attachAudioBusyId = $state<string | null>(null)
 
   function onAttachAudio(entry: ProjectSongEntry) {
     actionError = ''
     attachAudioTargetId = entry.id
-    attachAudioInput?.click()
+    attachAudioDialogOpen = true
   }
 
-  async function onAttachAudioPicked(e: Event) {
-    const input = e.currentTarget as HTMLInputElement
-    const file = input.files?.[0]
-    input.value = ''
+  const attachAudioYoutubeOutput = $derived.by<YoutubeImportOutput>(() => {
     const songId = attachAudioTargetId
-    attachAudioTargetId = null
+    const entry = $project.data?.songs.find((s) => s.id === songId)
+    if ($project.osPath && entry) {
+      return { kind: 'project-audio', projectPath: $project.osPath, songFolder: entry.folder }
+    }
+    return { kind: 'temp' }
+  })
+
+  async function onAttachLocalAudio(file: File) {
+    const songId = attachAudioTargetId
     if (!file || !songId) return
     attachAudioBusyId = songId
     actionError = ''
     try {
       await attachAudioToSong(songId, file)
+      await refreshProjectInfo().catch(() => {})
     } catch (err) {
       actionError = err instanceof Error ? err.message : 'Could not attach audio'
     } finally {
       attachAudioBusyId = null
     }
   }
+
+  async function onAttachImportedAudio(artifact: ImportedAudioArtifact) {
+    const songId = attachAudioTargetId
+    if (!songId) return
+    attachAudioBusyId = songId
+    actionError = ''
+    try {
+      await attachImportedAudioToSong(songId, artifact)
+      await refreshProjectInfo().catch(() => {})
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : 'Could not attach audio'
+    } finally {
+      attachAudioBusyId = null
+    }
+  }
+
+  $effect(() => {
+    if (!attachAudioDialogOpen && !attachAudioBusyId) {
+      attachAudioTargetId = null
+    }
+  })
 
   async function onSongAdded() {
     // After "Add empty" commits, refresh project info so the new card
@@ -669,6 +720,16 @@
           variant="outline"
           size="sm"
           class="ml-auto gap-1"
+          onclick={() => (settingsDialogOpen = true)}
+          title="Project settings — automatic stem preparation"
+        >
+          <Settings class="size-3.5" aria-hidden="true" />
+          Settings
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          class="gap-1"
           onclick={() => (shareDialogOpen = true)}
           title="Invite collaborators or manage cloud sync for this project"
         >
@@ -817,13 +878,16 @@
       onchange={onSmapPicked}
     />
 
-    <input
-      bind:this={attachAudioInput}
-      type="file"
-      class="sr-only"
+    <AddAudioDialog
+      bind:open={attachAudioDialogOpen}
       accept=".wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff,audio/*"
-      onchange={onAttachAudioPicked}
+      youtubeOutput={attachAudioYoutubeOutput}
+      desktopReachable={$desktopCompanionStatus.reachable}
+      onFile={onAttachLocalAudio}
+      onImported={onAttachImportedAudio}
     />
+
+    <ProjectSettingsDialog bind:open={settingsDialogOpen} />
   {/if}
 </main>
 
