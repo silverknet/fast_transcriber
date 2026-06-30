@@ -33,7 +33,9 @@
     MoreVertical,
     Pencil,
     Sliders,
+    TextCursorInput,
     Trash2,
+    Upload,
   } from '@lucide/svelte'
 
   let {
@@ -44,6 +46,8 @@
     onOpenStems,
     onToggleHidden,
     onRemove,
+    onRename,
+    onAttachAudio,
     onExport,
   } = $props<{
     entry: ProjectSongEntry
@@ -55,6 +59,9 @@
     onOpenStems: () => void
     onToggleHidden: () => void
     onRemove: () => void
+    onRename: () => void
+    /** Trigger the project-level hidden file input + attach the audio bytes here. */
+    onAttachAudio: () => void
     onExport: () => void
   }>()
 
@@ -80,6 +87,7 @@
     STEM_TRACKS.map((t) => ({ name: t.name, present: !!metadata?.stemRefs?.[t.name] })),
   )
   let hasCueTrack = $derived(!!metadata?.hasCueTrack)
+  let hasAudio = $derived(!!metadata?.hasAudio)
 
   /** Active stem job for this song (queued / running / paused) — drives the row pill. */
   let activeJob = $derived.by<StemJobEntry | null>(() => {
@@ -102,6 +110,21 @@
     }
     return best
   })
+
+  /**
+   * Demucs stem names the active job is currently rendering (e.g. `drums`,
+   * `bass`). Used to glow ONLY those stem dots amber — not every empty slot.
+   */
+  let inProgressStems = $derived<Set<string>>(new Set(activeJob?.stems ?? []))
+
+  /** Map an Ableton stem-track slot to its demucs source stem (FX has none). */
+  const SLOT_TO_DEMUCS: Record<string, string | null> = {
+    Drums: 'drums',
+    Bass: 'bass',
+    Guitar: 'other',
+    Vocals: 'vocals',
+    FX: null,
+  }
 </script>
 
 <!--
@@ -111,7 +134,7 @@
 -->
 <li
   data-song-id={entry.id}
-  class="border-foreground bg-background border-2 {entry.hidden ? 'opacity-60' : ''}"
+  class="border-foreground border-b-2 last:border-b-0 py-1.5 {entry.hidden ? 'opacity-60' : ''}"
 >
   <!-- ── Thin row aligned to the column header ──────────────────────────── -->
   <!--
@@ -144,13 +167,27 @@
 
     <!-- Title (+ artist + hidden tag). min-w-0 lets the cell shrink so
          the next column doesn't overflow into it. -->
-    <div class="flex min-w-0 items-baseline gap-1.5 overflow-hidden">
+    <div class="flex min-w-0 items-center gap-1.5 overflow-hidden">
       <span class="truncate font-semibold">{title}</span>
       {#if artist}
         <span class="text-muted-foreground truncate text-xs">— {artist}</span>
       {/if}
       {#if entry.hidden}
         <span class="border-foreground/40 text-muted-foreground shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider">hidden</span>
+      {/if}
+      {#if !hasAudio}
+        <!-- Inline upload affordance for stub songs. Triggers the project-level
+             hidden file input via `onAttachAudio`; one click → file picker →
+             attach. Hides itself the moment audio lands on disk. -->
+        <button
+          type="button"
+          class="border-foreground/40 hover:border-foreground hover:bg-muted text-muted-foreground hover:text-foreground inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+          onclick={onAttachAudio}
+          title="Upload an audio file for this song"
+        >
+          <Upload class="size-2.5" aria-hidden="true" />
+          Add audio
+        </button>
       {/if}
     </div>
 
@@ -166,15 +203,39 @@
       {bpmText}
     </div>
 
-    <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). -->
+    <!-- Audio file dot — matches the stem/cue badge pattern; header icon
+         carries the column label. -->
+    <span
+      class="flex min-w-0 justify-center"
+      title={hasAudio ? 'Audio file: ready' : 'Audio file: not added yet'}
+    >
+      <span
+        class="size-2 shrink-0 rounded-full {hasAudio ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        aria-label={`audio: ${hasAudio ? 'ready' : 'not added yet'}`}
+      ></span>
+    </span>
+
+    <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). While a
+         stem job is in flight for this song, not-yet-present stems glow amber
+         ("in progress") instead of grey ("not generated"). -->
     {#each stemPresence as s (s.name)}
+      {@const demucs = SLOT_TO_DEMUCS[s.name]}
+      {@const stemInProgress = !s.present && !!demucs && inProgressStems.has(demucs)}
       <span
         class="flex min-w-0 justify-center"
-        title={s.present ? `${s.name}: ready` : `${s.name}: not generated`}
+        title={s.present
+          ? `${s.name}: ready`
+          : stemInProgress
+            ? `${s.name}: in progress…`
+            : `${s.name}: not generated`}
       >
         <span
-          class="size-2 shrink-0 rounded-full {s.present ? 'bg-emerald-500' : 'bg-foreground/20'}"
-          aria-label={`${s.name}: ${s.present ? 'ready' : 'not generated'}`}
+          class="size-2 shrink-0 rounded-full {s.present
+            ? 'bg-emerald-500'
+            : stemInProgress
+              ? 'animate-pulse bg-amber-400'
+              : 'bg-foreground/20'}"
+          aria-label={`${s.name}: ${s.present ? 'ready' : stemInProgress ? 'in progress' : 'not generated'}`}
         ></span>
       </span>
     {/each}
@@ -219,6 +280,10 @@
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" class="min-w-44">
+        <DropdownMenuItem class="" onclick={onRename}>
+          <TextCursorInput class="size-3.5" aria-hidden="true" />
+          Rename…
+        </DropdownMenuItem>
         <DropdownMenuItem class="" onclick={onOpenStems}>
           <Sliders class="size-3.5" aria-hidden="true" />
           Stems…
@@ -246,55 +311,12 @@
   </div>
 
   <!--
-    Active / recent stem-job status (below the row when present). Includes a
-    visible progress bar so the user can scan the song list and tell at a
-    glance which song the queue is currently chewing on.
+    Stem work is intentionally quiet in the list: in-progress stems glow amber
+    on their per-stem dots above (background activity). We only drop a row
+    below for things that need the user's eye — a failed/cancelled job, or
+    auto-stems giving up. Live progress lives in the Stems dialog.
   -->
-  {#if activeJob}
-    <div
-      class="border-foreground/40 mx-2 mb-2 flex items-center gap-3 border px-2 py-1 text-xs"
-      role="status"
-      aria-label="Stem splitting progress"
-    >
-      <span
-        class="size-1.5 shrink-0 rounded-full {activeJob.state === 'running'
-          ? 'animate-pulse bg-amber-500'
-          : activeJob.state === 'paused'
-            ? 'bg-sky-500'
-            : 'bg-foreground/40'}"
-        aria-hidden="true"
-      ></span>
-      <span class="shrink-0 font-mono">
-        {#if activeJob.state === 'queued'}Queued
-        {:else if activeJob.state === 'paused'}Paused
-        {:else}Stems{/if}
-      </span>
-      <span class="text-muted-foreground min-w-0 flex-1 truncate font-mono text-[11px]">
-        {activeJob.label || (activeJob.state === 'queued' ? 'Waiting for slot…' : 'Starting…')}
-      </span>
-      <!--
-        Progress bar shown for both running AND paused: the paused bar freezes
-        at its last %, signalling "we're partway through, just suspended".
-      -->
-      {#if activeJob.state === 'running' || activeJob.state === 'paused'}
-        <div
-          class="border-foreground/30 bg-background relative h-2 w-32 shrink-0 border"
-          aria-hidden="true"
-        >
-          <div
-            class="absolute inset-y-0 left-0 transition-[width] duration-200 {activeJob.state ===
-            'paused'
-              ? 'bg-foreground/40'
-              : 'bg-foreground'}"
-            style="width: {activeJob.overallPct}%"
-          ></div>
-        </div>
-        <span class="text-muted-foreground w-9 shrink-0 text-right font-mono tabular-nums">
-          {activeJob.overallPct}%
-        </span>
-      {/if}
-    </div>
-  {:else if recentTerminalJob && recentTerminalJob.state !== 'done'}
+  {#if !activeJob && recentTerminalJob && recentTerminalJob.state !== 'done'}
     <div
       class="border-destructive/40 text-destructive mx-2 mb-2 flex flex-wrap items-center gap-2 border px-2 py-1 text-xs"
       role="status"

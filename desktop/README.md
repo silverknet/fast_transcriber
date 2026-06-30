@@ -126,8 +126,9 @@ For now: ship the Safari warning and revisit this when the Mac user base big eno
 |------|------|
 | `electron/main.mjs` | Headless main process: loopback HTTP server + Python spawning. No window. |
 | `electron/nativePython.mjs` | Resolve `native/python` paths (packaged `asar.unpacked`), spawn helpers |
-| `native/python/beats/` | `analyze_downbeats.py` (madmom) — twin of server script |
+| `native/python/beats/` | `analyze_downbeats.py` (madmom) — desktop-sidecar beat analyzer |
 | `native/python/stems/` | `demucs_separate.py` — headless Demucs (derived from **frequency_domain** workflow) |
+| `native/python/youtube/` | `import_audio.py` — YouTube best-audio import to PCM WAV via managed tools |
 | `native/python/piper_tts/` | Piper TTS — `synthesize_wav.py` + `requirements.txt` (separate venv from stems) |
 
 ## Loopback HTTP
@@ -138,9 +139,13 @@ The main process listens on **`127.0.0.1:47842`** with `Access-Control-Allow-Ori
 |--------|------|---------|
 | `GET` | `/ping` | Health check — returns `{ ok, name: 'barbro-desktop', version }`. Drives the **Monitor** chip in the web header. |
 | `POST` | `/native/analyze-downbeats` | Body = WAV bytes; returns `{ ok, data: { beats: [...] } }`. |
-| `POST` | `/native/separate-stems?model=…&shifts=…&overlap=…&stems=…` | Body = audio bytes; response is **NDJSON** event stream (`log` / `progress` / `done` / `job` / `error` lines). Stems live in a temp dir for 30 min after `done`. |
+| `POST` | `/native/separate-stems` | Queue path-based Demucs stem separation; progress streams through `/native/jobs/:jobId/events`. |
 | `GET` | `/native/stems/:jobId/:filename` | Stream one exported stem WAV. |
-| `DELETE` | `/native/stems/:jobId` | Wipe the temp dir for a finished job. |
+| `DELETE` | `/native/jobs/:jobId` | Cancel or release a queued/native job. |
+| `GET` | `/native/setup/youtube-import/status` | YouTube audio import readiness. |
+| `POST` | `/native/setup/youtube-import` | NDJSON stream: prepare managed audio import tools. |
+| `POST` | `/native/import/youtube` | Queue YouTube URL -> PCM WAV import. |
+| `GET` | `/native/import/youtube/artifact/:jobId` | Stream the temp WAV artifact for browser import. |
 | `GET` | `/native/setup/piper-tts/status` | `{ ready, venvDir, modelPath, modelPresent, … }` — Piper venv + default voice. |
 | `POST` | `/native/setup/piper-tts` | NDJSON stream: create venv, `pip install -r piper_tts/requirements.txt`, download **en_US-lessac-medium**. |
 | `GET` | `/native/tts/hello-world` | Returns `audio/wav` saying “Hello world.” (web debug: `/texttospeech`). |

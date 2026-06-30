@@ -13,7 +13,8 @@
   let { data, form } = $props<{
     data: {
       rows: Array<{
-        id: string
+        id: string | null
+        key: string
         email: string
         user_id: string | null
         status: 'pending' | 'granted' | 'denied'
@@ -21,6 +22,7 @@
         decided_at: string | null
         decided_by: string | null
         note: string | null
+        source: 'grant' | 'auth'
       }>
       error: string | null
     }
@@ -51,6 +53,9 @@
 
   {#if form?.error}
     <p class="text-destructive text-sm" role="status">{form.error}</p>
+  {/if}
+  {#if data.error}
+    <p class="text-destructive text-sm" role="status">{data.error}</p>
   {/if}
   {#if form?.ok}
     <p class="text-emerald-600 dark:text-emerald-400 text-sm" role="status">
@@ -111,13 +116,14 @@
         </p>
       {:else}
         <ul class="flex flex-col gap-2">
-          {#each rows as row (row.id)}
+          {#each rows as row (row.key)}
             <li class="border-foreground border-2 p-3">
               <div class="flex flex-wrap items-center gap-3">
                 <div class="min-w-0 flex-1">
                   <p class="truncate font-mono text-sm">{row.email}</p>
                   <p class="text-muted-foreground mt-0.5 text-[11px] font-mono">
                     {row.user_id ? 'linked · ' : 'unlinked · '}
+                    {row.source === 'auth' ? 'auth-only · ' : ''}
                     {new Date(row.requested_at).toLocaleString()}
                   </p>
                   {#if row.note}
@@ -128,7 +134,9 @@
                 <div class="flex shrink-0 gap-2">
                   {#if row.status !== 'granted'}
                     <form method="POST" action="?/approve" use:enhance>
-                      <input type="hidden" name="id" value={row.id} />
+                      <input type="hidden" name="id" value={row.id ?? ''} />
+                      <input type="hidden" name="email" value={row.email} />
+                      <input type="hidden" name="user_id" value={row.user_id ?? ''} />
                       <Button type="submit" size="sm" class="gap-1">
                         <Check class="size-3.5" aria-hidden="true" />
                         Approve
@@ -137,7 +145,9 @@
                   {/if}
                   {#if row.status !== 'denied'}
                     <form method="POST" action="?/deny" use:enhance>
-                      <input type="hidden" name="id" value={row.id} />
+                      <input type="hidden" name="id" value={row.id ?? ''} />
+                      <input type="hidden" name="email" value={row.email} />
+                      <input type="hidden" name="user_id" value={row.user_id ?? ''} />
                       <Button type="submit" variant="outline" size="sm" class="gap-1">
                         <X class="size-3.5" aria-hidden="true" />
                         Deny

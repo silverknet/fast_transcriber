@@ -77,6 +77,38 @@ describe('fingerprintCueTrackInputs', () => {
   it('payload is JSON-stable for bar order', () => {
     const m = minimalMap()
     const p = cueTrackFingerprintPayload(m)
-    expect(JSON.stringify(p)).toContain('"v":3')
+    expect(JSON.stringify(p)).toContain('"v":4')
+  })
+
+  it('changes when cues.spokenIntroText changes', () => {
+    const a = minimalMap()
+    const b = minimalMap({
+      cues: { ...defaultCueSettings(), spokenIntroText: 'Valerie' },
+    })
+    expect(fingerprintCueTrackInputs(a)).not.toBe(fingerprintCueTrackInputs(b))
+  })
+
+  it('changes when title changes (no override set — fallback path)', () => {
+    const a = minimalMap()
+    const b = minimalMap({
+      metadata: { ...a.metadata, title: 'Different title' },
+    })
+    expect(fingerprintCueTrackInputs(a)).not.toBe(fingerprintCueTrackInputs(b))
+  })
+
+  it('stays the same when title changes BUT an override pins the announcement', () => {
+    const overrideCues = { ...defaultCueSettings(), spokenIntroText: 'Valerie' }
+    const a = minimalMap({ cues: overrideCues })
+    const b = minimalMap({
+      cues: overrideCues,
+      // title-length-bucketed `titlePreludeSec` is computed from the
+      // override, not the title — so a same-length title swap should
+      // produce an identical fingerprint.
+      metadata: { ...a.metadata, title: 'Different name same length' },
+    })
+    // Both maps point at "Valerie" for the announcement; the title is
+    // unused by the speech path, so it shouldn't perturb the fingerprint
+    // via either spokenIntroText or titlePreludeSec.
+    expect(fingerprintCueTrackInputs(a)).toBe(fingerprintCueTrackInputs(b))
   })
 })

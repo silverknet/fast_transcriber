@@ -15,7 +15,8 @@
  */
 import { env } from '$env/dynamic/private'
 import { getSupabaseServiceClient } from '$lib/server/supabase/serverClient'
-import type { User } from '@supabase/supabase-js'
+import { consumePendingInvitesForCurrentUser } from '$lib/server/db/cloudRepo'
+import type { SupabaseClient, User } from '@supabase/supabase-js'
 
 export type AccessStatus = 'granted' | 'pending' | 'denied' | 'none'
 
@@ -129,6 +130,24 @@ const PENDING_OR_DENIED_ROUTE_IDS = new Set<string>([
   '/pending',
   '/account', // so they can sign out
 ])
+
+/**
+ * After a user's access flips to `granted` (or is granted on first
+ * sign-in), drain any pending cloud-project invites that were addressed
+ * to their email. This is cheap (one RPC, usually returns 0) and runs
+ * per request — keep it idempotent. Errors are swallowed; the
+ * invitee can also accept invites manually from the no-project landing.
+ *
+ * Must be called with the per-request SSR client (auth.uid() needs to
+ * resolve to the signed-in user inside the RPC).
+ */
+export async function consumePendingInvitesIfGranted(
+  supa: SupabaseClient,
+  status: AccessStatus,
+): Promise<void> {
+  if (status !== 'granted') return
+  await consumePendingInvitesForCurrentUser(supa)
+}
 
 export type RouteGateDecision =
   | { allow: true }

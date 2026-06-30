@@ -61,7 +61,6 @@
   import LogIn from '@lucide/svelte/icons/log-in'
   import Monitor from '@lucide/svelte/icons/monitor'
   import Moon from '@lucide/svelte/icons/moon'
-  import Music from '@lucide/svelte/icons/music'
   import Shield from '@lucide/svelte/icons/shield'
   import Sun from '@lucide/svelte/icons/sun'
   import { page } from '$app/stores'
@@ -400,10 +399,31 @@
     clearLastProjectPath()
     await goto('/', { replaceState: true })
   }
+
+  /**
+   * POST to /logout (the endpoint at `src/routes/logout/+server.ts` that
+   * clears the Supabase session cookies) then full-reload to /welcome so
+   * the root layout's user-store + access gate re-evaluate from scratch.
+   */
+  async function onSignOut() {
+    menuError = ''
+    try {
+      const res = await fetch('/logout', { method: 'POST' })
+      if (!res.ok) {
+        menuError = `Sign out failed (HTTP ${res.status}).`
+        return
+      }
+    } catch (e) {
+      menuError = e instanceof Error ? e.message : 'Sign out failed.'
+      return
+    }
+    // Hard navigation so SSR re-runs with no session.
+    window.location.assign('/welcome')
+  }
 </script>
 
 <header
-  class="bg-background border-foreground fixed top-0 right-0 left-0 z-50 flex flex-wrap items-center gap-2 border-b-2 px-3 py-1.5 text-sm"
+  class="bg-background border-foreground flex flex-wrap items-center gap-2 border-b-2 px-3 py-1.5 text-sm"
   aria-label="Application"
   data-app-menu
 >
@@ -412,13 +432,12 @@
     class="text-foreground hover:text-foreground flex shrink-0 items-center gap-2 py-1 pr-2 transition-colors"
     aria-label={logoAria}
   >
-    <span
-      class="bg-muted text-foreground inline-flex size-8 items-center justify-center border-2 border-foreground"
-      aria-hidden="true"
-    >
-      <Music class="size-4" strokeWidth={2} />
+    <!-- BAR / BRO wordmark — same offset / gradient as the welcome-page hero,
+         shrunk to chrome scale. Doubles as the home / project link. -->
+    <span class="logo-mark inline-flex" aria-label="BarBro">
+      <span class="logo-mark-bar">BAR</span>
+      <span class="logo-mark-bro">BRO</span>
     </span>
-    <span class="hidden font-semibold tracking-tight sm:inline">BarBro</span>
   </a>
 
   <div class="flex flex-1 flex-wrap items-center gap-1.5">
@@ -569,18 +588,44 @@
     -->
     {#if $userStore}
       {@const initial = ($userStore.name?.[0] ?? $userStore.email?.[0] ?? '?').toUpperCase()}
-      <a
-        href="/account"
-        class="border-foreground inline-flex size-8 shrink-0 items-center justify-center border-2 no-underline"
-        title={$userStore.name ?? $userStore.email ?? 'Account'}
-        aria-label="Account"
-      >
-        {#if $userStore.avatarUrl}
-          <img src={$userStore.avatarUrl} alt="" class="size-full object-cover" referrerpolicy="no-referrer" />
-        {:else}
-          <span class="text-xs font-black">{initial}</span>
-        {/if}
-      </a>
+      <!-- Account menu: avatar trigger + dropdown with the account link
+           plus a Sign out item that POSTs to /logout. Lets users sign out
+           without hunting for it inside /account. -->
+      <DropdownMenu>
+        <DropdownMenuTrigger>
+          {#snippet child({ props })}
+            <button
+              type="button"
+              class="border-foreground bg-background hover:bg-muted inline-flex size-8 shrink-0 items-center justify-center overflow-hidden border-2"
+              title={$userStore.name ?? $userStore.email ?? 'Account'}
+              aria-label="Account menu"
+              {...props}
+            >
+              {#if $userStore.avatarUrl}
+                <img src={$userStore.avatarUrl} alt="" class="size-full object-cover" referrerpolicy="no-referrer" />
+              {:else}
+                <span class="text-xs font-black">{initial}</span>
+              {/if}
+            </button>
+          {/snippet}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="min-w-[12rem]">
+          <div class="px-2 pt-1 pb-1.5 text-[11px] leading-tight">
+            <div class="truncate font-semibold">
+              {$userStore.name ?? $userStore.email ?? 'Signed in'}
+            </div>
+            {#if $userStore.name && $userStore.email}
+              <div class="text-muted-foreground truncate">{$userStore.email}</div>
+            {/if}
+          </div>
+          <DropdownMenuItem class="cursor-pointer" onclick={() => goto('/account')}>
+            Account settings
+          </DropdownMenuItem>
+          <DropdownMenuItem class="cursor-pointer" onclick={() => void onSignOut()}>
+            Sign out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     {:else}
       <a
         href="/login"
@@ -716,3 +761,35 @@
     {/if}
   </DialogContent>
 </Dialog>
+
+<style>
+  /*
+   * BAR / BRO wordmark — small chrome-scale variant of the welcome-page
+   * logo. Same Space Grotesk weight, same offset trick, same peach gradient
+   * on BRO. Kept here (not in a shared component) so the menubar stays a
+   * single file you can scan top-to-bottom.
+   */
+  .logo-mark {
+    align-items: baseline;
+    gap: 0.04em;
+    font-weight: 700;
+    font-size: 1.25rem;
+    line-height: 1;
+    letter-spacing: -0.04em;
+    color: var(--foreground);
+  }
+  .logo-mark-bar,
+  .logo-mark-bro {
+    display: inline-block;
+  }
+  .logo-mark-bar {
+    transform: translateY(0.1em);
+  }
+  .logo-mark-bro {
+    transform: translateY(-0.1em);
+    background: linear-gradient(135deg, #ffcec2, #f08a76);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+</style>

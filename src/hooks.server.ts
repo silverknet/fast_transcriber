@@ -16,7 +16,7 @@
  * header probing can break SvelteKit's response serialization.
  */
 import { createSupabaseServerClient } from '$lib/server/supabase/serverClient'
-import { loadAccessForUser } from '$lib/server/access'
+import { consumePendingInvitesIfGranted, loadAccessForUser } from '$lib/server/access'
 import { env as publicEnv } from '$env/dynamic/public'
 import type { Handle } from '@sveltejs/kit'
 
@@ -66,6 +66,12 @@ export const handle: Handle = async ({ event, resolve }) => {
       const access = await loadAccessForUser(user)
       event.locals.accessStatus = access.status
       event.locals.isAdmin = access.isAdmin
+      // Drain pending cloud-project invites addressed to this user's
+      // email. No-op when nothing's queued; idempotent if it runs twice.
+      // Best-effort — failures don't block the request.
+      void consumePendingInvitesIfGranted(event.locals.supabase, access.status).catch((e) => {
+        console.warn('[cloud] consumePendingInvitesIfGranted failed:', e)
+      })
     } catch (e) {
       // DB unavailable or service-role env missing — fall back to
       // "no access" so route gate redirects to /pending or /welcome

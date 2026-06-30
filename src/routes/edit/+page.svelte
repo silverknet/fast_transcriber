@@ -24,11 +24,15 @@
     serializeChordClipboard,
     songKeyPreferFlats,
   } from '$lib/chords'
-  import { beatsToClickPoints, playMetronomeClick, type BeatClickPoint } from '$lib/audio/debugClickTrack'
   import { computeCountIn } from '$lib/audio/computeCountIn'
-  import { countInSpeechOutputTimes, songStartBeat } from '$lib/audio/cueTrackSpeechSchedule'
+  import {
+    countInSpeechOutputTimes,
+    resolvedSpokenIntroText,
+    songStartBeat,
+  } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
-  import { buildSongCueMixWavBlob, mixTimelineClickPoints } from '$lib/audio/mixSongCuePreview'
+  import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
+  import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
   import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
@@ -56,15 +60,33 @@
     setupSectionsDeps,
     suggestSectionBordersViaDesktop,
     analyzeChordChromaViaDesktop,
+    analyzeChordChromaViaDesktopWithStem,
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
   import { proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
-  import { applyBarGridAction, type BarGridAction } from '$lib/songmap/timelineEdit'
+  import { selectBestStemSet } from '$lib/project/commit'
+  import {
+    applyBarGridAction,
+    resetTimelineToOriginal,
+    timelineMatchesOriginal,
+    type BarGridAction,
+  } from '$lib/songmap/timelineEdit'
   import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey, SongMap } from '$lib/songmap/types'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
-  import { patchSongMap, songMap } from '$lib/stores/songMap'
+  import {
+    canRedo,
+    canUndo,
+    patchSongMap,
+    redoSongMap,
+    songMap,
+    undoSongMap,
+  } from '$lib/stores/songMap'
   import { ArrowLeft, Music, Pause, Pencil, Play } from '@lucide/svelte'
+  import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
+  import { trimAudioFileToWav } from '$lib/audio/trimAudio'
+  import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
+  import { reanalyzeShape, reanalyzeWithHarmony } from '$lib/songmap/reanalyze'
 
   /** Half-open bar interval [start, end) — match `audioTransport` end clamp */
   const END_EPS = 0.028
@@ -72,6 +94,38 @@
   const previewBars = 5
 
   let beatEditError = $state('')
+
+  /**
+   * Global Cmd/Ctrl+Z undo + Cmd/Ctrl+Shift+Z (or Cmd/Ctrl+Y) redo.
+   * Registered once via `onMount`; teardown runs in `onDestroy`. The
+   * handler ignores key events that originated in an editable field
+   * (text inputs, contentEditable, the chord picker) so we don't fight
+   * native browser undo while the user is typing.
+   */
+  function isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false
+    if (target.isContentEditable) return true
+    const tag = target.tagName
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+  }
+
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod) return
+      if (isEditableTarget(e.target)) return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undoSongMap()
+      } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+        e.preventDefault()
+        redoSongMap()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
 
   function confirmBackToImport() {
     const ok = confirm(
@@ -94,6 +148,121 @@
     const p = patchSongMap(() => out.map)
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
+  }
+
+  // Two-step confirm for the grid-reset action — first click arms it,
+  // second commits. Avoids a modal for a destructive-but-recoverable
+  // change (the snapshot itself isn't deleted; user can re-edit and
+  // reset again). When full undo/redo lands, this becomes a snackbar
+  // with an Undo action.
+  let resetGridConfirming = $state(false)
+  let resetGridTimeoutId: ReturnType<typeof setTimeout> | null = null
+
+  function startResetGridConfirm() {
+    resetGridConfirming = true
+    if (resetGridTimeoutId) clearTimeout(resetGridTimeoutId)
+    // Auto-cancel after 4s so a stray click doesn't leave the UI armed.
+    resetGridTimeoutId = setTimeout(() => {
+      resetGridConfirming = false
+      resetGridTimeoutId = null
+    }, 4000)
+  }
+
+  function cancelResetGridConfirm() {
+    resetGridConfirming = false
+    if (resetGridTimeoutId) {
+      clearTimeout(resetGridTimeoutId)
+      resetGridTimeoutId = null
+    }
+  }
+
+  function commitResetGrid() {
+    cancelResetGridConfirm()
+    const sm = get(songMap)
+    if (!sm) return
+    const out = resetTimelineToOriginal(sm)
+    if (!out.ok) {
+      beatEditError = out.error
+      return
+    }
+    const p = patchSongMap(() => out.map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  // Reactive — when the live timeline differs from the snapshot, the
+  // Reset button activates. Tracks `$songMap.timeline` because that's
+  // what resetting actually changes.
+  let resetGridDisabled = $derived(
+    !$songMap || !$songMap.timeline.original || timelineMatchesOriginal($songMap),
+  )
+
+  /**
+   * Re-run beat detection on the current audio + trim. When the new
+   * grid has the same beat AND bar count as the old one, chords and
+   * sections survive (chord beatIds are re-anchored by sorted-time
+   * position; sections are bar.index-positional). When the counts
+   * differ, the user is warned before chords + sections are dropped.
+   *
+   * Available even when `timeline.original` is absent (legacy projects)
+   * — re-analyzing populates it as a side effect, which is the
+   * intended way to enable "Reset to analyzed" for those projects.
+   */
+  let reanalyzeBusy = $state(false)
+  let reanalyzeError = $state('')
+
+  async function reanalyzeGrid(): Promise<void> {
+    if (reanalyzeBusy) return
+    const sm = get(songMap)
+    const file = get(audioSession).file
+    if (!sm || !file) {
+      reanalyzeError = 'No audio loaded.'
+      return
+    }
+    const trim = sm.audio?.trim
+    if (!trim || !(trim.endSec > trim.startSec)) {
+      reanalyzeError = 'Trim is missing or empty. Set it in the Grid tab first.'
+      return
+    }
+    reanalyzeBusy = true
+    reanalyzeError = ''
+    try {
+      const { file: trimmedWav } = await trimAudioFileToWav(file, trim.startSec, trim.endSec)
+      const r = await analyzeDownbeatsViaDesktop(trimmedWav)
+      if (!r.ok) {
+        throw new Error(r.error ?? 'Analyzer returned no beats.')
+      }
+      const fresh = beatsToSongMap({
+        filename: trimmedWav.name,
+        durationSec: Math.max(0, trim.endSec - trim.startSec),
+        mimeType: trimmedWav.type || 'audio/wav',
+        beats: r.beats,
+      })
+      const shape = reanalyzeShape(sm, fresh.timeline.bars, fresh.timeline.beats)
+      if (shape === 'mismatch') {
+        const oldB = sm.timeline.beats.length
+        const newB = fresh.timeline.beats.length
+        const oldBars = sm.timeline.bars.length
+        const newBars = fresh.timeline.bars.length
+        const lostChords = sm.harmony.length
+        const lostSections = sm.sections.length
+        const proceed = confirm(
+          `Re-analysis returned a different grid (${newB} beats / ${newBars} bars; you had ${oldB} / ${oldBars}).\n\n` +
+            `${lostChords} chord${lostChords === 1 ? '' : 's'} and ${lostSections} section${lostSections === 1 ? '' : 's'} ` +
+            `can't be matched and will be removed.\n\nContinue?`,
+        )
+        if (!proceed) return
+      }
+      const out = reanalyzeWithHarmony(sm, fresh.timeline.bars, fresh.timeline.beats)
+      const p = patchSongMap(() => out.map)
+      if (!p.ok) {
+        reanalyzeError = p.errors.join('; ')
+      }
+    } catch (e) {
+      reanalyzeError = e instanceof Error ? e.message : String(e)
+    } finally {
+      reanalyzeBusy = false
+    }
   }
 
   let sectionsSelectionBarIds = $state<string[]>([])
@@ -310,7 +479,10 @@
    */
   // v1: cosine similarity (margin too tight, almost everything fell below floor).
   // v2: Pearson correlation + lower floor + 1/f weighting + bass cut.
-  const CHORD_ANALYZER_VERSION = 2
+  // v3: stem-aware input — when demucs "other" stem is on disk, the
+  //     analyzer reads the harmonic stem instead of the full mix.
+  //     Strips drum + vocal bleed; biggest single accuracy unlock.
+  const CHORD_ANALYZER_VERSION = 3
 
   let chordChromaStatus = $state<
     'idle' | 'installing' | 'analyzing' | 'ready' | 'cached' | 'error' | 'unavailable'
@@ -325,6 +497,26 @@
     if (h.beatChroma.length !== sm.timeline.beats.length) return false
     const fp = currentAudioFingerprint(sm)
     return !fp || h.audioFingerprint === fp
+  }
+
+  /**
+   * Absolute on-disk path to this song's harmonic stem (demucs "other"),
+   * or null when no project context / no stems / no "other" file. Used
+   * by the chord-chroma analyzer to skip the full-mix path when a clean
+   * harmonic signal is available.
+   *
+   * Matches `other.wav` or `other.mp3` from the best stem preset on
+   * disk. Demucs always names the melodic-harmonic stem "other".
+   */
+  function resolveOtherStemAbsPath(): string | null {
+    const ps = get(projectStore)
+    if (!ps.osPath || !ps.activeSongFolder) return null
+    const meta = ps.metadataByFolder[ps.activeSongFolder]
+    const best = selectBestStemSet(meta)
+    if (!best) return null
+    const otherFile = best.files.find((f) => /^other\.(wav|mp3)$/i.test(f))
+    if (!otherFile) return null
+    return `${ps.osPath}/${ps.activeSongFolder}/${best.pathPrefix}${otherFile}`
   }
 
   async function runChordChromaAnalysis(force = false) {
@@ -364,14 +556,21 @@
     chordChromaStatus = 'analyzing'
     chordChromaError = null
     try {
-      // `beat.timeSec` is song-relative (post-trim); the sidecar reads the
-      // full untrimmed reference audio file. Add the trim offset so beat
-      // times align with the actual audio frames.
+      // `beat.timeSec` is song-relative (post-trim); the analyzer reads
+      // the untrimmed audio file, so add trim offset to align beat
+      // timestamps with file frames.
       const trimOffset = sm.audio?.trim?.startSec ?? 0
       const beats = sortBeatsByTime(sm.timeline.beats).map((b) => ({
         startSec: b.timeSec + trimOffset,
       }))
-      const out = await analyzeChordChromaViaDesktop(file, beats)
+
+      // Prefer the demucs "other" stem if it's on disk for this song.
+      // Strips drum/vocal/bass bleed → much cleaner chroma. Falls back
+      // to the full-mix WAV when no project context or no stems exist.
+      const otherStemPath = resolveOtherStemAbsPath()
+      const out = otherStemPath
+        ? await analyzeChordChromaViaDesktopWithStem(otherStemPath, beats)
+        : await analyzeChordChromaViaDesktop(file, beats)
       if (out.ok) {
         const fp = currentAudioFingerprint(sm) ?? 'unknown'
         const detected = out.detectedKey
@@ -393,6 +592,7 @@
             audioFingerprint: fp,
             generatedAt: new Date().toISOString(),
             analyzerVersion: CHORD_ANALYZER_VERSION,
+            analyzerSource: otherStemPath ? 'stems-other' : 'mix',
           },
         }))
         chordChromaStatus = 'ready'
@@ -692,6 +892,28 @@
   let rangeEnd = $state($audioSession.endSec ?? 0)
   let waveformReady = $state(false)
 
+  /**
+   * Persist a trim-handle drag from the waveform into the SongMap (the root
+   * of truth) + audio session. Fired once on drag-release via
+   * `WaveformPlayer.onSelectionCommit`, so it makes one undo entry, not one
+   * per pixel.
+   *
+   * Scoped to the pre-analysis state (`bars.length === 0`). Once a grid
+   * exists, bars/beats are stored in song-relative (post-trim) time; moving
+   * the trim window would shift the audio under a fixed grid and desync them.
+   * Re-trimming an analyzed song is the job of "Re-analyze grid", which
+   * re-detects beats against the new trim — not a silent handle drag.
+   */
+  function handleTrimCommit(start: number, end: number) {
+    const sm = get(songMap)
+    if (!sm?.audio || !(end > start)) return
+    if (sm.timeline.bars.length > 0) return
+    patchSongMap((m) =>
+      m.audio ? { ...m, audio: { ...m.audio, trim: { startSec: start, endSec: end } } } : m,
+    )
+    audioSession.update((s) => ({ ...s, startSec: start, endSec: end }))
+  }
+
   /** Main workspace mode. */
   let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix' | 'leadsheet'>('grid')
 
@@ -979,64 +1201,74 @@
 
   let objectUrl = $state<string | null>(null)
   let audioEl = $state<HTMLAudioElement | null>(null)
-  /** Offline-rendered song + cue WAV for Cue-tab preview (separate from main reference player). */
-  let mixPreviewUrl = $state<string | null>(null)
-  let mixPreviewBusy = $state(false)
-  let mixPreviewErr = $state('')
-  let mixPreviewAudioEl = $state<HTMLAudioElement | null>(null)
-  let mixPreviewClickOverlay = $state(false)
-  let mixClickRaf = 0
-  let mixNextClickIdx = 0
-  let mixClickPoints: BeatClickPoint[] = []
   let playingBarId = $state<string | null>(null)
   let preview = $state<{ start: number; end: number; barId: string } | null>(null)
   let rafId = 0
 
-  /** When true, the existing WaveformPlayer play button also fires metronome clicks
-   * (and a count-in pre-roll if configured). When false, audio plays without clicks. */
-  let playWithClick = $state(false)
-  let clickPoints = $state<{ timeSec: number; downbeat: boolean }[]>([])
-  let clickLoopRaf = 0
-  let nextClickIdx = 0
-  let clickCtx: AudioContext | undefined
-  let clickMaster: GainNode | undefined
-  /** Click gain. >1 boosts; the metronome's internal kernel peaks at ~0.62 so a
-   *  value up to ~2.0 stays well below clip. */
-  let clickVolume = $state(1.5)
-  /** Master volume for the audio element (the song). 0 = mute, 1 = unity. */
-  let songVolume = $state(1)
+  /**
+   * Centralised playback engine for the grid editor — single owner of
+   * the `<audio>` element, click loop, count-in pre-roll, transport,
+   * range-end auto-stop, AND the click/volume UI state. The toolbar
+   * inside `WaveformPlayer` binds directly to `playbackController.playWithClick`
+   * / `.clickVolume` / `.songVolume` — no intermediate parent state,
+   * no $effect bridge. WaveformPlayer reads `currentTime` / `isPlaying`
+   * via `$derived` from the controller and dispatches `play() / pause()
+   * / stop() / seek()`.
+   */
+  const playbackController = new PlaybackController()
 
+  // Restore the per-device click sync calibration from localStorage —
+  // it's a property of the audio output chain (speakers / Bluetooth /
+  // USB interface), not the song, so it persists across reloads.
+  const CLICK_OFFSET_STORAGE_KEY = 'barbro:clickOffsetSec'
+  if (browser) {
+    try {
+      const raw = localStorage.getItem(CLICK_OFFSET_STORAGE_KEY)
+      if (raw !== null) {
+        const v = Number(raw)
+        if (Number.isFinite(v) && Math.abs(v) <= 0.5) {
+          playbackController.clickOffsetSec = v
+        }
+      }
+    } catch {
+      /* ignore localStorage errors (Safari private mode, etc.) */
+    }
+  }
   $effect(() => {
-    if (clickMaster) clickMaster.gain.value = clickVolume
-  })
-  $effect(() => {
-    if (audioEl) audioEl.volume = songVolume
-  })
-
-  $effect(() => {
-    const u = mixPreviewUrl
-    return () => {
-      if (u) queueMicrotask(() => URL.revokeObjectURL(u))
+    if (!browser) return
+    const v = playbackController.clickOffsetSec
+    try {
+      localStorage.setItem(CLICK_OFFSET_STORAGE_KEY, String(v))
+    } catch {
+      /* ignore */
     }
   })
 
-  function stopMixClickLoop() {
-    if (mixClickRaf) cancelAnimationFrame(mixClickRaf)
-    mixClickRaf = 0
-  }
-
-  function pauseMixPreview() {
-    stopMixClickLoop()
-    mixPreviewAudioEl?.pause()
-  }
+  $effect(() => {
+    playbackController.setSongMap($songMap ?? null)
+  })
 
   $effect(() => {
-    if (!mixPreviewClickOverlay) stopMixClickLoop()
+    const sm = $songMap
+    // Grid editor's audio src = full uploaded file → currentTime is
+    // original-time → offset = `plan.trimStartSec`.
+    playbackController.mediaTimeOffsetSec = sm
+      ? songPlaybackPlan(sm)?.trimStartSec ?? 0
+      : 0
+  })
+
+  $effect(() => {
+    playbackController.rangeStart = rangeStart
+    playbackController.rangeEnd = rangeEnd
+  })
+
+  onDestroy(() => {
+    playbackController.destroy()
   })
 
   /**
    * Main `<audio>` blob URL. `$derived($audioSession.file)` still re-fired when the session *object*
-   * was replaced on trim sync, revoking URLs and breaking the cue mix player — so we key off the
+   * was replaced on trim sync, revoking URLs and breaking the audio element — so we key off the
    * `File` reference via an explicit store subscription instead.
    */
   let lastMainFileForObjectUrl: File | null = null
@@ -1049,12 +1281,7 @@
       objectUrl = null
       playingBarId = null
       preview = null
-      mixPreviewUrl = null
       stopPreviewLoop()
-      stopClickLoop()
-      stopMixClickLoop()
-      cancelPendingAudioStart()
-      mixPreviewAudioEl?.pause()
       audioEl?.pause()
       return
     }
@@ -1064,9 +1291,6 @@
     audioEl?.pause()
     lastMainFileForObjectUrl = f
     objectUrl = URL.createObjectURL(f)
-    mixPreviewUrl = null
-    stopMixClickLoop()
-    mixPreviewAudioEl?.pause()
   }
 
   if (browser) applyMainAudioFromSession()
@@ -1084,202 +1308,10 @@
     rafId = 0
   }
 
-  function ensureClickGraph() {
-    if (clickCtx && clickMaster) return
-    const ctx = new AudioContext()
-    const g = ctx.createGain()
-    g.gain.value = clickVolume
-    g.connect(ctx.destination)
-    clickCtx = ctx
-    clickMaster = g
-  }
-
-  function stopClickLoop() {
-    if (clickLoopRaf) cancelAnimationFrame(clickLoopRaf)
-    clickLoopRaf = 0
-  }
-
-  function syncNextClickIndex(t: number) {
-    nextClickIdx = clickPoints.findIndex((b) => b.timeSec >= t - 0.018)
-    if (nextClickIdx < 0) nextClickIdx = clickPoints.length
-  }
-
-  function runClickLoop() {
-    const el = audioEl
-    const ctx = clickCtx
-    const dest = clickMaster
-    if (!el || !ctx || !dest || !playWithClick || el.paused) {
-      stopClickLoop()
-      return
-    }
-
-    const t = el.currentTime
-    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0
-
-    while (nextClickIdx < clickPoints.length && clickPoints[nextClickIdx]!.timeSec <= t + 0.025) {
-      const pt = clickPoints[nextClickIdx]!
-      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
-      nextClickIdx++
-    }
-
-    if (dur > 0 && t >= dur - 0.04) {
-      el.pause()
-      stopClickLoop()
-      return
-    }
-
-    clickLoopRaf = requestAnimationFrame(runClickLoop)
-  }
-
-  function startClickLoopFromCurrentTime() {
-    if (!playWithClick || !audioEl) return
-    ensureClickGraph()
-    void clickCtx?.resume()
-    syncNextClickIndex(audioEl.currentTime)
-    stopClickLoop()
-    clickLoopRaf = requestAnimationFrame(runClickLoop)
-  }
-
-  function syncMixNextClickIdx(t: number) {
-    mixNextClickIdx = mixClickPoints.findIndex((b) => b.timeSec >= t - 0.018)
-    if (mixNextClickIdx < 0) mixNextClickIdx = mixClickPoints.length
-  }
-
-  function runMixClickLoop() {
-    const el = mixPreviewAudioEl
-    const ctx = clickCtx
-    const dest = clickMaster
-    if (!el || !ctx || !dest || !mixPreviewClickOverlay || el.paused) {
-      stopMixClickLoop()
-      return
-    }
-
-    const t = el.currentTime
-    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0
-
-    while (mixNextClickIdx < mixClickPoints.length && mixClickPoints[mixNextClickIdx]!.timeSec <= t + 0.025) {
-      const pt = mixClickPoints[mixNextClickIdx]!
-      playMetronomeClick(ctx, dest, ctx.currentTime + 0.002, pt.downbeat)
-      mixNextClickIdx++
-    }
-
-    if (dur > 0 && t >= dur - 0.04) {
-      el.pause()
-      stopMixClickLoop()
-      return
-    }
-
-    mixClickRaf = requestAnimationFrame(runMixClickLoop)
-  }
-
-  function startMixClickLoopFromCurrentTime() {
-    if (!mixPreviewClickOverlay || !mixPreviewAudioEl) return
-    ensureClickGraph()
-    void clickCtx?.resume()
-    syncMixNextClickIdx(mixPreviewAudioEl.currentTime)
-    stopMixClickLoop()
-    mixClickRaf = requestAnimationFrame(runMixClickLoop)
-  }
-
-  function onMixPreviewPlay() {
-    stopClickLoop()
-    audioEl?.pause()
-    if (!mixPreviewClickOverlay) return
-    startMixClickLoopFromCurrentTime()
-  }
-
-  function onMixPreviewPause() {
-    stopMixClickLoop()
-  }
-
-  function onMixPreviewEnded() {
-    stopMixClickLoop()
-  }
-
-  /** setTimeout handle for the count-in pre-roll resume. */
-  let pendingAudioStartTimer: ReturnType<typeof setTimeout> | null = null
-  function cancelPendingAudioStart() {
-    if (pendingAudioStartTimer !== null) {
-      clearTimeout(pendingAudioStartTimer)
-      pendingAudioStartTimer = null
-    }
-  }
-  /** Marker that the next onAudioPlay event is the system resuming after a count-in,
-   *  not a fresh user-initiated play (so we don't re-trigger the count-in pre-roll). */
-  let resumingAfterCountIn = false
-
-  function onAudioPlay() {
-    if (!playWithClick || !audioEl) return
-
-    const sm = get(songMap)
-    if (!sm) return
-
-    // Fresh user-initiated play (currentTime ≈ 0) with a count-in configured:
-    // pause, schedule count-in clicks, then resume audio.
-    const countInBeats = effectiveCountInBeats(sm)
-    const start = songStartBeat(sm)
-    const songStartSec = start?.timeSec ?? 0
-    const ci = countInBeats > 0 ? computeCountIn(sm, countInBeats) : null
-    const isFreshStart = audioEl.currentTime < 0.05
-
-    if (!resumingAfterCountIn && countInBeats > 0 && ci && isFreshStart) {
-      const countInDuration = countInBeats * ci.beatDurationSec
-      const audioDelaySec = Math.max(0, countInDuration - songStartSec)
-
-      // Pause immediately so audio doesn't bleed into the count-in.
-      audioEl.pause()
-      audioEl.currentTime = 0
-
-      // Filter song clicks: pre-anchor beats are covered by the count-in.
-      const allBeats = beatsToClickPoints(sm.timeline.beats)
-      clickPoints = allBeats.filter((b) => b.timeSec >= songStartSec - 1e-9)
-
-      ensureClickGraph()
-      void clickCtx?.resume()
-
-      if (clickCtx && clickMaster) {
-        const trim = sm.audio?.trim ?? { startSec: 0, endSec: 0 }
-        const songStartNoPrelude = ci.prependSec + (songStartSec - trim.startSec)
-        const grid = countInSpeechOutputTimes(sm, trim, ci.prependSec, countInBeats)
-        const nowCtx = clickCtx.currentTime
-        for (const t of grid) {
-          const wallClock = countInDuration - (songStartNoPrelude - t)
-          if (wallClock < -1e-9) continue
-          playMetronomeClick(clickCtx, clickMaster, nowCtx + Math.max(0, wallClock), false)
-        }
-      }
-
-      cancelPendingAudioStart()
-      pendingAudioStartTimer = setTimeout(() => {
-        pendingAudioStartTimer = null
-        if (!playWithClick || !audioEl) return
-        resumingAfterCountIn = true
-        audioEl.play().catch(() => {
-          /* ignore */
-        })
-      }, audioDelaySec * 1000)
-      return
-    }
-
-    // No count-in pre-roll — just start the click loop on the existing audio.
-    resumingAfterCountIn = false
-    ensureClickGraph()
-    void clickCtx?.resume()
-    clickPoints = beatsToClickPoints(sm.timeline.beats)
-    startClickLoopFromCurrentTime()
-  }
-
-  function onAudioPause() {
-    if (!preview) stopPreviewLoop()
-    cancelPendingAudioStart()
-    stopClickLoop()
-  }
-
-  function onAudioEnded() {
-    if (playWithClick) {
-      stopClickLoop()
-    }
-  }
+  // The Debug-tools "Play bar X" preview uses `audioEl` (bound to
+  // WaveformPlayer's <audio>) and self-stops via `previewTick`'s
+  // own paused-check on each rAF. WaveformPlayer drives its own click
+  // loop internally; no play/pause listener wiring needed here.
 
   function previewTick() {
     const el = audioEl
@@ -1317,9 +1349,6 @@
       stopPreviewLoop()
       return
     }
-
-    stopClickLoop()
-    pauseMixPreview()
 
     el.pause()
     stopPreviewLoop()
@@ -1370,6 +1399,37 @@
     else beatEditError = ''
   }
 
+  /**
+   * Live preview of what the spoken cue will announce — fallback chain
+   * is `cues.spokenIntroText.trim() ?? metadata.title.trim() ?? 'Untitled song'`.
+   * Same helper the cue WAV renderer uses, so the user always sees the
+   * exact text Piper will say.
+   */
+  let cueSpokenIntroPreview = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return 'Untitled song'
+    return resolvedSpokenIntroText(sm)
+  })
+
+  /** Current override (empty when the user hasn't set one — falls back to title). */
+  let cueSpokenIntroOverride = $derived($songMap?.cues.spokenIntroText ?? '')
+
+  function applyCueSpokenIntroText(text: string) {
+    const trimmed = text.trim()
+    const p = patchSongMap((m) => ({
+      ...m,
+      cues: {
+        ...m.cues,
+        // Clear the field when the user empties it — that re-enables the
+        // title fallback. Storing an empty string would not equal "use
+        // default" semantically.
+        spokenIntroText: trimmed.length > 0 ? trimmed : undefined,
+      },
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
   // Start-beat override: a 1-indexed position into `sortBeatsByTime(beats)`.
   // 1 = bar 1 beat 1 (default, no override stored). Higher values store
   // `startBeatId` so the song-start anchor moves N-1 beats into the song.
@@ -1402,6 +1462,51 @@
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
   }
+
+  /**
+   * Set the song-start anchor to the first beat (downbeat) of the
+   * given bar. Called from the per-bar anchor icon in the grid strip.
+   * Equivalent to `applyStartBeat(<position of bar.beat[0] in sorted
+   * beats>)` — same one writer, same .smap field, same reactive
+   * downstream (cue tab, count-in ghost ticks, click loop, Ableton
+   * export).
+   */
+  function setStartBar(barIndex: number) {
+    const sm = get(songMap)
+    if (!sm) return
+    const bar = sm.timeline.bars.find((b) => b.index === barIndex)
+    if (!bar) return
+    const sorted = sortBeatsByTime(sm.timeline.beats)
+    const firstBeatOfBar = sorted.find((b) => b.barId === bar.id && b.indexInBar === 0)
+    if (!firstBeatOfBar) return
+    const oneIndexed = sorted.indexOf(firstBeatOfBar) + 1
+    applyStartBeat(oneIndexed)
+  }
+
+  /**
+   * Count-in ghost ticks rendered in the grid strip — derived from
+   * `songPlaybackPlan(sm)` so the user instantly SEES count-in change
+   * 4 → 8 as 4 new ticks appearing. Original-time so the strip can
+   * paint them directly into the bar viewport.
+   */
+  let countInTicksForGrid = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return [] as { timeSec: number; downbeat: boolean }[]
+    const plan = songPlaybackPlan(sm)
+    if (!plan || plan.countInBeats === 0) return []
+    // plan.clickPoints[].timeSec is trim-shifted; shift back to original-
+    // time for the strip's viewport coords.
+    return plan.clickPoints
+      .filter((c) => c.isCountIn)
+      .map((c) => ({
+        timeSec: c.timeSec + plan.trimStartSec,
+        downbeat: c.downbeat,
+      }))
+  })
+
+  /** Current song-start bar index (0-based) for the per-bar anchor icon. */
+  let songStartBarIndex = $derived(cueStartBeatInfo?.barIndex ?? 0)
+
 
   const CUE_TRACK_REL = 'cue/cue-track.wav'
   const CLICK_TRACK_REL = 'cue/click-track.wav'
@@ -1550,7 +1655,6 @@
   function downloadCueTrackFile() {
     const sm = get(songMap)
     if (!lastCueDownloadBlob || !sm) return
-    pauseMixPreview()
     audioEl?.pause()
     const url = URL.createObjectURL(lastCueDownloadBlob)
     const a = document.createElement('a')
@@ -1563,7 +1667,6 @@
   function downloadClickTrackFile() {
     const sm = get(songMap)
     if (!lastClickDownloadBlob || !sm) return
-    pauseMixPreview()
     audioEl?.pause()
     const url = URL.createObjectURL(lastClickDownloadBlob)
     const a = document.createElement('a')
@@ -1585,67 +1688,9 @@
     return { ok: true, reason: '' }
   })
 
-  /** Song+cue preview / mix — only this tab’s generated WAV blob (reload clears it). */
-  let mixPreviewGate = $derived.by((): { ok: boolean; reason: string } => {
-    const sm = $songMap
-    if (!sm) return { ok: false, reason: 'No song.' }
-    if (!sm.timeline.beats.length) return { ok: false, reason: 'Need beats (Grid).' }
-    if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) {
-      return { ok: false, reason: 'Need trim (Grid).' }
-    }
-    if (!lastCueDownloadBlob) return { ok: false, reason: 'Generate cue track first (preview uses this tab’s WAV).' }
-    return { ok: true, reason: '' }
-  })
-
-  async function prepareMixPreview() {
-    const sm = get(songMap)
-    const file = get(audioSession).file
-    if (!sm || !file) {
-      mixPreviewErr = 'No audio.'
-      return
-    }
-    if (!mixPreviewGate.ok) {
-      mixPreviewErr = mixPreviewGate.reason
-      return
-    }
-    const trim = sm.audio?.trim
-    if (!trim || !(trim.endSec > trim.startSec)) {
-      mixPreviewErr = 'Need trim.'
-      return
-    }
-    mixPreviewBusy = true
-    mixPreviewErr = ''
-    try {
-      const cue = lastCueDownloadBlob
-      if (!cue) {
-        mixPreviewErr = 'Generate cue track first.'
-        return
-      }
-      const blob = await buildSongCueMixWavBlob(sm, file, cue)
-      mixPreviewUrl = URL.createObjectURL(blob)
-      let prependSec = 0
-      const countInBeats = effectiveCountInBeats(sm)
-      if (countInBeats > 0) {
-        const ci = computeCountIn(sm, countInBeats)
-        if (ci) prependSec = ci.prependSec
-      }
-      mixClickPoints = mixTimelineClickPoints(sm, trim.startSec, trim.endSec, prependSec)
-    } catch (e) {
-      mixPreviewErr = e instanceof Error ? e.message : String(e)
-    } finally {
-      mixPreviewBusy = false
-    }
-  }
-
   onDestroy(() => {
     stopPreviewLoop()
-    stopClickLoop()
-    stopMixClickLoop()
     audioEl?.pause()
-    mixPreviewAudioEl?.pause()
-    void clickCtx?.close()
-    clickCtx = undefined
-    clickMaster = undefined
   })
 </script>
 
@@ -1859,9 +1904,40 @@
             <p class="text-muted-foreground text-xs italic">No count-in. Pick one in the Grid tab to see timing details.</p>
           {/if}
 
+          <fieldset class="border-foreground border-2 px-3 py-3">
+            <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
+              Spoken intro
+            </legend>
+            <div class="flex flex-wrap items-center gap-3 pt-1">
+              <input
+                type="text"
+                value={cueSpokenIntroOverride}
+                placeholder={$songMap?.metadata.title ?? 'Untitled song'}
+                onchange={(e) => applyCueSpokenIntroText((e.currentTarget as HTMLInputElement).value)}
+                class="border-foreground bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm"
+                aria-label="Spoken intro text"
+                maxlength="120"
+              />
+            </div>
+            <!-- Live readout so users know exactly what Piper will say. Pulls
+                 from `resolvedSpokenIntroText(sm)` — the same helper the cue
+                 WAV renderer uses, so what you see here matches what you'll
+                 hear. -->
+            <p class="text-muted-foreground mt-2 font-mono text-xs leading-relaxed" role="status">
+              Will announce: <span class="text-foreground">"{cueSpokenIntroPreview}"</span>
+              {#if !cueSpokenIntroOverride}
+                <span class="text-muted-foreground/70"> (from song title)</span>
+              {/if}
+            </p>
+            <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
+              Leave empty to use the song title. Set this when the title's punctuation /
+              parentheses make Piper trip up, or when you want a shorter cue
+              (e.g. "Valerie" while the title is "Valerie (Amy Winehouse cover)").
+            </p>
+          </fieldset>
+
           <p class="text-muted-foreground text-xs leading-relaxed">
-            Spoken cues (title, count-in numbers, section callouts) are a follow-up. Use the
-            <strong>Mix</strong> tab for full multi-track playback with click + stems.
+            Use the <strong>Mix</strong> tab for full multi-track playback with click + stems.
           </p>
         </div>
       </section>
@@ -2042,6 +2118,7 @@
           file={$audioSession.file}
           bind:rangeStart
           bind:rangeEnd
+          onSelectionCommit={handleTrimCommit}
           bind:ready={waveformReady}
           variant="editor"
           beatGrid={{ bars: sm.timeline.bars, beats: sm.timeline.beats }}
@@ -2071,6 +2148,11 @@
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
+          bind:audioElement={audioEl}
+          countInTicks={editMode === 'grid' ? countInTicksForGrid : []}
+          songStartBarIndex={songStartBarIndex}
+          onSetStartBar={editMode === 'grid' ? setStartBar : undefined}
+          controller={playbackController}
         />
         {#if beatEditError}
           <p class="text-destructive mt-2 text-xs" role="status">{beatEditError}</p>
@@ -2089,6 +2171,87 @@
           onClearChord={clearChordAtBeat}
         />
       {/if}
+    {/if}
+
+    {#if editMode === 'grid' && sm.timeline.beats.length > 0}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Edit history"
+      >
+        <h2 class="text-muted-foreground mb-3 text-xs font-medium uppercase tracking-wide">History</h2>
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onclick={undoSongMap}
+            disabled={!$canUndo}
+            title="Undo (⌘Z / Ctrl+Z)"
+            class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
+          >
+            ↶ Undo
+          </button>
+          <button
+            type="button"
+            onclick={redoSongMap}
+            disabled={!$canRedo}
+            title="Redo (⌘⇧Z / Ctrl+Shift+Z)"
+            class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
+          >
+            Redo ↷
+          </button>
+          <span class="text-muted-foreground mx-2 text-xs">·</span>
+          {#if resetGridConfirming}
+            <button
+              type="button"
+              onclick={commitResetGrid}
+              class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+            >
+              Yes, reset
+            </button>
+            <button
+              type="button"
+              onclick={cancelResetGridConfirm}
+              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+            >
+              Cancel
+            </button>
+            <span class="text-muted-foreground text-xs">
+              Erases ALL bar and beat edits.
+            </span>
+          {:else}
+            <button
+              type="button"
+              onclick={startResetGridConfirm}
+              disabled={resetGridDisabled}
+              title={sm.timeline.original
+                ? 'Restore to the originally analyzed grid'
+                : 'Re-analyze the song to enable. Old projects don’t have a snapshot of the analyzed grid.'}
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+            >
+              Reset to analyzed
+            </button>
+            <button
+              type="button"
+              onclick={reanalyzeGrid}
+              disabled={reanalyzeBusy || !$audioSession.file}
+              title="Re-run beat detection. Chords + sections survive when the new grid has the same beat count; otherwise you'll get a warning before they're cleared."
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+            >
+              {reanalyzeBusy ? 'Re-analyzing…' : 'Re-analyze grid'}
+            </button>
+          {/if}
+        </div>
+        {#if reanalyzeError}
+          <p class="text-destructive mt-2 text-xs" role="status">{reanalyzeError}</p>
+        {/if}
+        <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
+          ⌘Z / Ctrl+Z undoes the last edit. Hold ⇧ to redo. Drag-edits
+          coalesce into one undo step. "Reset to analyzed" jumps
+          straight back to the analyzed baseline. "Re-analyze grid"
+          re-runs beat detection — chords + sections survive when the
+          new grid has the same beat count, otherwise you'll be warned
+          before they're cleared.
+        </p>
+      </section>
     {/if}
 
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
@@ -2166,53 +2329,10 @@
           </p>
         </fieldset>
 
-        <label class="flex cursor-pointer items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            bind:checked={playWithClick}
-            class="accent-foreground shrink-0"
-          />
-          <span>Play with click</span>
-          <span class="text-muted-foreground text-xs leading-relaxed">
-            — when on, the waveform's play button fires the metronome (count-in pre-roll, then a click on every beat).
-          </span>
-        </label>
-
-        <fieldset class="border-foreground border-2 px-3 py-3">
-          <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Volume</legend>
-          <div class="grid gap-3 pt-1 sm:grid-cols-2">
-            <label class="flex flex-col gap-1 text-xs">
-              <span class="flex justify-between">
-                <span>Click</span>
-                <span class="text-muted-foreground font-mono tabular-nums">{clickVolume.toFixed(2)}×</span>
-              </span>
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.05"
-                bind:value={clickVolume}
-                class="accent-foreground"
-                aria-label="Click volume"
-              />
-            </label>
-            <label class="flex flex-col gap-1 text-xs">
-              <span class="flex justify-between">
-                <span>Song</span>
-                <span class="text-muted-foreground font-mono tabular-nums">{Math.round(songVolume * 100)}%</span>
-              </span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                bind:value={songVolume}
-                class="accent-foreground"
-                aria-label="Song volume"
-              />
-            </label>
-          </div>
-        </fieldset>
+        <!-- "Play with click" toggle + Click / Song volume sliders
+             moved to a compact strip directly under the WaveformPlayer
+             where the play button lives. See the grid-mode toolbar
+             block above. -->
       </section>
     {/if}
 
@@ -2291,17 +2411,11 @@
           </span>
         </p>
 
-        {#if objectUrl}
-          <audio
-            bind:this={audioEl}
-            src={objectUrl}
-            class="sr-only"
-            preload="auto"
-            onplay={onAudioPlay}
-            onpause={onAudioPause}
-            onended={onAudioEnded}
-          ></audio>
-        {/if}
+        <!-- The previously-rendered orphan <audio> here was the bug:
+             two audio elements, two event sources, two volume targets.
+             Removed. `audioEl` now binds to the WaveformPlayer's real
+             <audio> via bind:audioElement above. -->
+
       </div>
     </details>
 

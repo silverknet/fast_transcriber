@@ -4,6 +4,7 @@ import {
   applyChordAutoFill,
   beatsInSection,
   proposeChordAutoFillCandidates,
+  sameKindChordAtMatchingBeat,
 } from './autoFill'
 import type {
   Bar,
@@ -288,5 +289,85 @@ describe('applyChordAutoFill', () => {
     expect(proposalsAfter).toEqual([])
     // And harmony count is exactly source (1) + target (1).
     expect(map.harmony).toHaveLength(2)
+  })
+})
+
+describe('sameKindChordAtMatchingBeat', () => {
+  it('returns the matching-beat chord from an earlier same-kind section', () => {
+    // Verse 1 (bars 0..3) has C placed on beat 0 of bar 1.
+    // Verse 2 (bars 4..7): query beat 0 of bar 5 (== same offset+indexInBar) → C.
+    const map = buildMap({
+      barCount: 8,
+      sections: [section('v1', 'verse', 0, 3), section('v2', 'verse', 4, 7)],
+      harmony: [harmony('b1_0', 'bar1', chord('C'))],
+    })
+    expect(sameKindChordAtMatchingBeat(map, 'b5_0')?.root).toBe('C')
+  })
+
+  it('respects indexInBar — beat 2 in v2 maps to beat 2 in v1', () => {
+    const map = buildMap({
+      barCount: 8,
+      sections: [section('v1', 'verse', 0, 3), section('v2', 'verse', 4, 7)],
+      harmony: [
+        harmony('b0_0', 'bar0', chord('C')),
+        harmony('b0_2', 'bar0', chord('G')),
+      ],
+    })
+    expect(sameKindChordAtMatchingBeat(map, 'b4_0')?.root).toBe('C')
+    expect(sameKindChordAtMatchingBeat(map, 'b4_2')?.root).toBe('G')
+    // beat 1 of bar 4 — source beat 1 of bar 0 has no chord → null.
+    expect(sameKindChordAtMatchingBeat(map, 'b4_1')).toBe(null)
+  })
+
+  it('returns null when no earlier same-kind section exists', () => {
+    const map = buildMap({
+      barCount: 8,
+      sections: [section('v1', 'verse', 0, 3), section('c1', 'chorus', 4, 7)],
+      harmony: [harmony('b0_0', 'bar0', chord('C'))],
+    })
+    // Querying inside verse 1 (the earliest verse) — no earlier verse exists.
+    expect(sameKindChordAtMatchingBeat(map, 'b0_0')).toBe(null)
+    // Querying inside chorus 1 — no earlier chorus, and we don't cross kinds.
+    expect(sameKindChordAtMatchingBeat(map, 'b4_0')).toBe(null)
+  })
+
+  it('uses the earliest same-kind section when several exist', () => {
+    // 3 verses; query inside v3, expect v1's chord (not v2's).
+    const map = buildMap({
+      barCount: 12,
+      sections: [
+        section('v1', 'verse', 0, 3),
+        section('v2', 'verse', 4, 7),
+        section('v3', 'verse', 8, 11),
+      ],
+      harmony: [
+        harmony('b0_0', 'bar0', chord('C')),
+        harmony('b4_0', 'bar4', chord('A')),
+      ],
+    })
+    expect(sameKindChordAtMatchingBeat(map, 'b8_0')?.root).toBe('C')
+  })
+
+  it('returns null when the target bar is beyond the earlier section length', () => {
+    // Earlier section is only 2 bars; query bar 6 → barOffset = 2,
+    // which exceeds v1's endBarIndex. No mapping possible.
+    const map = buildMap({
+      barCount: 8,
+      sections: [section('v1', 'verse', 0, 1), section('v2', 'verse', 4, 7)],
+      harmony: [harmony('b0_0', 'bar0', chord('C'))],
+    })
+    // Bar 4 maps to bar 0 (offset 0) → C.
+    expect(sameKindChordAtMatchingBeat(map, 'b4_0')?.root).toBe('C')
+    // Bar 6 maps to bar 2 (offset 2) → outside v1's range → null.
+    expect(sameKindChordAtMatchingBeat(map, 'b6_0')).toBe(null)
+  })
+
+  it('returns null when the beat isn’t inside any section', () => {
+    const map = buildMap({
+      barCount: 8,
+      sections: [section('v1', 'verse', 0, 3)],
+      harmony: [harmony('b0_0', 'bar0', chord('C'))],
+    })
+    expect(sameKindChordAtMatchingBeat(map, 'b4_0')).toBe(null)
   })
 })

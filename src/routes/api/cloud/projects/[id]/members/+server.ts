@@ -13,13 +13,14 @@
  * Membership writes go through the service-role client (`addMember` /
  * `removeMember`) because the user-facing `cloud_project_members` RLS
  * policies forbid the recursion-prone "owner inserts/removes" via the
- * normal client. Owner-check is performed in JS against the cloud
- * project's owner_user_id before delegating.
+ * normal client. Owner-check is performed in JS against membership role
+ * before delegating.
  */
 import { error, json } from '@sveltejs/kit'
 import { getSupabaseServiceClient } from '$lib/server/supabase/serverClient'
 import {
   addMember,
+  createPendingInvite,
   findUserIdByEmail,
   getCloudProject,
   listCloudMembers,
@@ -51,7 +52,9 @@ async function requireProjectOwner(
 ): Promise<void> {
   const proj = await getCloudProject(locals.supabase, projectId)
   if (!proj) throw error(404, 'Project not found.')
-  if (proj.owner_user_id !== locals.user!.id) {
+  const members = await listCloudMembers(locals.supabase, projectId)
+  const isOwner = members.some((m) => m.user_id === locals.user!.id && m.role === 'owner')
+  if (!isOwner) {
     throw error(403, 'Owner only.')
   }
 }
@@ -70,14 +73,17 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
   const service = getSupabaseServiceClient()
   const userId = await findUserIdByEmail(service, email)
   if (!userId) {
-    // Closed-fail: invitee hasn't signed up to Supabase yet. The plan
-    // earmarks "magic-link invites for non-signups" as a Phase 8.5
-    // follow-up.
-    throw error(404, `No user found for ${email}. Have them sign in once first.`)
+    // Invitee hasn't signed up yet — create a pending invite. The
+    // access-gate hook calls `cloud_consume_pending_invites_for_email`
+    // on their first sign-in, which promotes this row into a real
+    // membership atomically.
+    const r = await createPendingInvite(service, projectId, email, role, locals.user!.id)
+    if (!r.ok) throw error(500, r.error)
+    return json({ ok: true, pending: true, email, role })
   }
   const r = await addMember(service, projectId, userId, role)
   if (!r.ok) throw error(500, r.error)
-  return json({ ok: true, userId, role })
+  return json({ ok: true, pending: false, userId, role })
 }
 
 export const DELETE: RequestHandler = async ({ locals, params, url }) => {

@@ -6,7 +6,21 @@
 @theme inline {
 	--color-background: var(--background);
 	--color-foreground: var(--foreground);
+	/*
+	 * Platform fonts.
+	 *
+	 *   --font-sans     — body / UI / chrome. Space Grotesk's geometric
+	 *                     character gives the app its quirky personality
+	 *                     without being heavy.
+	 *   --font-display  — big display headings ("Edit", welcome marquee,
+	 *                     anywhere we want Arial Black's typographic
+	 *                     punch). Surfaced via the `font-display` utility.
+	 *   --font-mono     — bar/beat counters, debug strings, timing values.
+	 */
 	--font-sans:
+		"Space Grotesk", "Helvetica Neue", "Inter", "Segoe UI", "Roboto", ui-sans-serif, system-ui,
+		sans-serif;
+	--font-display:
 		"Arial Black", "Helvetica Neue", "Inter", "Segoe UI", "Roboto", ui-sans-serif, system-ui,
 		sans-serif;
 	--font-mono: ui-monospace, monospace;
@@ -46,7 +60,12 @@
 }
 
 :root {
-	--radius: 0rem;
+	/* Slight rounding on primitives (buttons / dialogs / dropdown items /
+	   popovers). Hard brutalist shadow still wins the look; the corners
+	   are only just soft enough to feel intentional. Drive everything via
+	   this token so the four `rounded-[var(--radius)]` call-sites stay
+	   the only knob. */
+	--radius: 4px;
 	--background: oklch(0.95 0.01 80);
 	--foreground: oklch(0.2 0.01 80);
 	--card: oklch(0.95 0.01 80);
@@ -123,6 +142,22 @@
 
 .brutalist-shadow-sm {
 	box-shadow: 2px 2px 0 var(--brutalist-shadow-color);
+}
+
+/*
+ * Platform rule: any element styled as a card-like box (Tailwind's
+ * `border-2`) picks up the platform radius by default. Lets us keep the
+ * brutalist vocabulary (`border-2 border-foreground`) at every call-site
+ * while the corners stay consistent globally.
+ *
+ * Opt out at a call-site with Tailwind's `rounded-none`, which keeps its
+ * stronger specificity via the `:not(...)` guard. The chrome top bar,
+ * the app frame, header strips, and other intentionally-square borders
+ * already use `rounded-none` or pin sides individually (border-b-2,
+ * border-x-2, …), so they're unaffected.
+ */
+.border-2:not(.rounded-none):not([class*="rounded-"]) {
+	border-radius: var(--radius);
 }
 
 @layer base {

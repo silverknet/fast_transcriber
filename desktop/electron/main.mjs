@@ -11,9 +11,8 @@
  * Port must stay in sync with `src/lib/client/desktopBeacon.ts`.
  */
 
-import { app, BrowserWindow, dialog } from 'electron'
-import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs'
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import archiver from 'archiver'
 import yauzl from 'yauzl'
 import http from 'node:http'
@@ -22,6 +21,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { app, BrowserWindow, dialog } from 'electron'
 import {
   beatsScriptPath,
   bootstrapPythonExe,
@@ -38,6 +38,7 @@ import {
   pythonPiperTtsExe,
   pythonSectionsExe,
   pythonStemsExe,
+  pythonYoutubeImportExe,
   runPythonCapture,
   sectionsScriptPath,
   chordChromaScriptPath,
@@ -53,6 +54,10 @@ import {
   UV_PINNED_VERSION,
   stemsScriptPath,
   stemsVenvIsReady,
+  getYoutubeImportVenvDir,
+  getYoutubeImportVenvPythonExe,
+  youtubeImportScriptPath,
+  youtubeImportVenvIsReady,
   getBeatsVenvDir,
   getBeatsVenvPythonExe,
   beatsVenvIsReady,
@@ -60,6 +65,7 @@ import {
   invalidateBeatsMadmomCache,
   writeBeatsVenvMarker,
 } from './nativePython.mjs'
+import { createAutoStemsDaemon } from './autoStems.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -150,10 +156,12 @@ function emitJobEvent(job, ev) {
 function publicJobView(job) {
   return {
     jobId: job.jobId,
+    kind: job.kind ?? 'stems',
     songId: job.songId,
     state: job.state,
     files: job.files,
     options: job.options,
+    artifact: job.artifact ?? null,
     createdAt: new Date(job.createdAt).toISOString(),
     startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
@@ -185,7 +193,7 @@ async function destroyStemsJob(jobId) {
   job.subscribers.clear()
   try {
     await rm(job.tempRoot, { recursive: true, force: true })
-    logInfo(`stems: job ${jobId.slice(0, 8)} cleaned up`)
+    logInfo(`${job.kind ?? 'stems'}: job ${jobId.slice(0, 8)} cleaned up`)
   } catch {
     /* ignore */
   }
@@ -341,6 +349,28 @@ function serializeProject(manifest) {
   return JSON.stringify(sortKeysDeep(manifest), null, 2)
 }
 
+const AUTO_STEM_NAMES = ['vocals', 'drums', 'bass', 'other']
+const AUTO_STEM_QUALITIES = ['best', 'balanced', 'preview']
+
+/**
+ * Parse the optional `autoStems` policy block, mirroring `parseAutoStems` in
+ * src/lib/project/parse.ts. Returns undefined for absent/malformed blocks.
+ * CRUCIAL: without this, a manifest round-trip through `parseManifestObject`
+ * (every sidecar manifest write) would strip the policy the web app saved.
+ */
+function parseManifestAutoStems(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const enabled = raw.enabled === true
+  const stems = []
+  if (Array.isArray(raw.stems)) {
+    for (const s of raw.stems) {
+      if (typeof s === 'string' && AUTO_STEM_NAMES.includes(s) && !stems.includes(s)) stems.push(s)
+    }
+  }
+  const quality = AUTO_STEM_QUALITIES.includes(raw.quality) ? raw.quality : 'balanced'
+  return { enabled, stems, quality }
+}
+
 /**
  * Validate + parse a manifest object (after JSON.parse). Throws on schema
  * violation. Mirrors the parser in src/lib/project/parse.ts.
@@ -379,6 +409,7 @@ function parseManifestObject(raw) {
     if (typeof e.hidden === 'boolean' && e.hidden) entry.hidden = true
     songs.push(entry)
   }
+  const autoStems = parseManifestAutoStems(raw.autoStems)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -386,6 +417,7 @@ function parseManifestObject(raw) {
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     songs,
+    ...(autoStems ? { autoStems } : {}),
   }
 }
 
@@ -468,6 +500,13 @@ function extractSongMetadataLite(songProject) {
   const cues = map.cues
   if (cues && cues.mode === 'countIn' && typeof cues.countInBeats === 'number' && cues.countInBeats > 0) {
     out.countInBeats = cues.countInBeats
+  }
+  // True when the SongMap names an audio source — covers both v1 baked
+  // audio (`fileName` set) and v2 disk-stored audio (`originalPath` set).
+  // Stub songs added via "Add empty" have no `audio` block at all.
+  const a = map.audio
+  if (a && typeof a === 'object' && (typeof a.fileName === 'string' || typeof a.originalPath === 'string')) {
+    out.hasAudio = true
   }
   if (map.stemRefs && typeof map.stemRefs === 'object') out.stemRefs = { ...map.stemRefs }
   return out
@@ -649,7 +688,7 @@ async function handleProjectCreate(req, res, cors) {
  * `POST /native/project/info` — body `{ projectPath }`. Reads the manifest,
  * for each entry scans the song folder for `song.smap` header (title, etc),
  * `song.als` presence, and stems WAVs. Returns
- * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, countInBeats?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
+ * `{ ok, manifest, songsMetadata: Record<folder, { title, artist?, keyDetail?, bpm?, countInBeats?, hasAudio?, hasSmap, hasAls, hasCueTrack, hasClickTrack, stemsByPreset: Record<presetSlug, sortedWavBasenames>, stemRefs? }> }`.
  *
  * `stemsByPreset` groups stem WAVs by quality preset (`best`/`balanced`/
  * `preview`) corresponding to `<song>/stems/<preset>/<file>.wav`. Flat-
@@ -840,6 +879,88 @@ function validateAssetSubpath(p, label = 'subpath') {
     }
   }
   return p
+}
+
+function safeYoutubeTitleFragment(title) {
+  const raw = String(title ?? '').normalize('NFKC')
+  const withoutPathChars = raw.replace(/[\/\\\x00-\x1f]/g, ' ')
+  const cleaned = withoutPathChars
+    .replace(/[^\p{L}\p{N}\s_.-]/gu, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[-_.]{2,}/g, '-')
+    .slice(0, 60)
+    .replace(/^[-_.]+|[-_.]+$/g, '')
+  return cleaned || 'audio'
+}
+
+function safeYoutubeAudioFilename(meta, jobId) {
+  const videoId = typeof meta?.videoId === 'string' && meta.videoId.trim()
+    ? meta.videoId.trim().replace(/[^\w-]/g, '').slice(0, 32)
+    : jobId.slice(0, 8)
+  const title = safeYoutubeTitleFragment(meta?.titleHint)
+  return `yt-${videoId}-${title}.wav`
+}
+
+function uniqueAudioSubpath(projectPath, songFolder, preferredFileName) {
+  const dot = preferredFileName.toLowerCase().endsWith('.wav') ? preferredFileName.slice(0, -4) : preferredFileName
+  for (let i = 0; i < 100; i++) {
+    const suffix = i === 0 ? '' : `-${i + 1}`
+    const fileName = `${dot}${suffix}.wav`
+    const subpath = validateAssetSubpath(`audio/${fileName}`)
+    const abs = path.join(projectPath, songFolder, subpath)
+    if (!existsSync(abs)) return { fileName, subpath, abs }
+  }
+  throw new Error('Could not find a free audio filename')
+}
+
+async function atomicCopyFile(srcAbs, targetAbs) {
+  const dir = path.dirname(targetAbs)
+  await mkdir(dir, { recursive: true })
+  const tmp = path.join(dir, `.${path.basename(targetAbs)}.${randomUUID().slice(0, 8)}.tmp`)
+  try {
+    await copyFile(srcAbs, tmp)
+    await rename(tmp, targetAbs)
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw e
+  }
+}
+
+function normalizeYoutubeVideoUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
+    return { ok: false, code: 'INVALID_URL', error: 'Enter a YouTube URL.' }
+  }
+  let u
+  try {
+    u = new URL(rawUrl.trim())
+  } catch {
+    return { ok: false, code: 'INVALID_URL', error: 'That does not look like a valid URL.' }
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+    return { ok: false, code: 'INVALID_URL', error: 'Use an http or https YouTube URL.' }
+  }
+  const host = u.hostname.toLowerCase().replace(/^www\./, '')
+  let videoId = ''
+  if (host === 'youtu.be') {
+    videoId = u.pathname.split('/').filter(Boolean)[0] ?? ''
+  } else if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com') {
+    if (u.pathname === '/watch') {
+      videoId = u.searchParams.get('v') ?? ''
+    } else {
+      const parts = u.pathname.split('/').filter(Boolean)
+      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+        videoId = parts[1]
+      }
+    }
+  } else {
+    return { ok: false, code: 'UNSUPPORTED_URL', error: 'Use a YouTube video URL.' }
+  }
+  videoId = videoId.trim()
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+    return { ok: false, code: 'UNSUPPORTED_URL', error: 'Use a single YouTube video URL.' }
+  }
+  return { ok: true, url: `https://www.youtube.com/watch?v=${videoId}`, videoId }
 }
 
 /**
@@ -2222,11 +2343,24 @@ async function handleSuggestSectionBorders(req, res, cors) {
  *
  * The body is length-prefixed binary:
  *   [uint32 LE = N]  // beats-JSON byte length
- *   [N bytes      ]  // UTF-8 JSON: `{ "beats": [{ "startSec": number }, ...] }`
- *   [rest of body ]  // raw WAV bytes
+ *   [N bytes      ]  // UTF-8 JSON: see shapes below
+ *   [rest of body ]  // raw WAV bytes (optional; see stemAbsPath path)
  *
  * Headers won't fit the beats list — 1000+ beats blows past Node's 8 KB
  * header cap with HTTP 431 — so we pack them into the body.
+ *
+ * Two input shapes are supported:
+ *
+ *   1. Full-mix path (legacy): `{ beats: [...] }` plus a raw WAV body.
+ *      Used when stems aren't on disk.
+ *
+ *   2. Stem-source path (preferred): `{ beats: [...], stemAbsPath: "..." }`
+ *      with an empty audio body. The sidecar reads the file directly off
+ *      disk instead of round-tripping bytes through HTTP. Used when the
+ *      caller has identified an isolated harmonic stem
+ *      (`<song>/stems/best/other.wav` from demucs) — eliminates
+ *      drum/vocal bleed and is the single biggest chord-detection
+ *      accuracy unlock. Path is validated to be absolute + readable.
  *
  * Response: `{ ok: true, data: { beatChroma: number[][], detectedKey: { tonic, mode, confidence } | null } }`.
  *
@@ -2247,10 +2381,14 @@ async function handleAnalyzeChordChroma(req, res, cors) {
       return
     }
     const beatsPayload = buf.slice(4, 4 + jsonLen).toString('utf8')
+    let stemAbsPath = null
     try {
       const parsed = JSON.parse(beatsPayload)
       if (!parsed || !Array.isArray(parsed.beats)) {
         throw new Error('expected { beats: [...] }')
+      }
+      if (typeof parsed.stemAbsPath === 'string' && parsed.stemAbsPath.length > 0) {
+        stemAbsPath = parsed.stemAbsPath
       }
     } catch (e) {
       sendJson(
@@ -2263,13 +2401,6 @@ async function handleAnalyzeChordChroma(req, res, cors) {
     }
 
     const audioBuf = buf.slice(4 + jsonLen)
-    logInfo(
-      `analyze-chord-chroma: received ${(audioBuf.byteLength / (1024 * 1024)).toFixed(1)} MB audio + ${jsonLen}B beats JSON`,
-    )
-    if (audioBuf.byteLength === 0) {
-      sendJson(res, 400, { ok: false, error: 'Empty audio body' }, cors)
-      return
-    }
 
     const script = chordChromaScriptPath()
     if (!existsSync(script)) {
@@ -2278,14 +2409,43 @@ async function handleAnalyzeChordChroma(req, res, cors) {
       return
     }
 
-    workDir = await mkdtemp(path.join(tmpdir(), 'barbro-chord-chroma-'))
-    const wavPath = path.join(workDir, 'clip.wav')
-    await writeFile(wavPath, audioBuf)
+    // Resolve the audio path the analyzer will read.
+    //
+    //   - stemAbsPath set: use the on-disk file directly. Validates it's
+    //     absolute and readable so a malformed caller can't trick us
+    //     into pointing at /etc/passwd or similar.
+    //   - else: write the WAV body to a temp file (legacy full-mix path).
+    let audioPath
+    if (stemAbsPath !== null) {
+      if (!path.isAbsolute(stemAbsPath)) {
+        sendJson(res, 400, { ok: false, error: `stemAbsPath must be absolute: ${stemAbsPath}` }, cors)
+        return
+      }
+      if (!existsSync(stemAbsPath)) {
+        sendJson(res, 404, { ok: false, error: `Stem file not found: ${stemAbsPath}` }, cors)
+        return
+      }
+      audioPath = stemAbsPath
+      logInfo(
+        `analyze-chord-chroma: using stem ${stemAbsPath} + ${jsonLen}B beats JSON`,
+      )
+    } else {
+      if (audioBuf.byteLength === 0) {
+        sendJson(res, 400, { ok: false, error: 'Empty audio body and no stemAbsPath supplied' }, cors)
+        return
+      }
+      logInfo(
+        `analyze-chord-chroma: received ${(audioBuf.byteLength / (1024 * 1024)).toFixed(1)} MB audio + ${jsonLen}B beats JSON`,
+      )
+      workDir = await mkdtemp(path.join(tmpdir(), 'barbro-chord-chroma-'))
+      audioPath = path.join(workDir, 'clip.wav')
+      await writeFile(audioPath, audioBuf)
+    }
 
     const { code, signal, stdout, stderr } = await runPythonCapture(
       pythonSectionsExe(),
       script,
-      [wavPath],
+      [audioPath],
       180_000,
       beatsPayload,
     )
@@ -2492,6 +2652,172 @@ async function runQueuedJob(job) {
   scheduleJobCleanup(job.jobId)
 }
 
+async function runQueuedYoutubeImportJob(job) {
+  job.state = 'running'
+  job.startedAt = Date.now()
+  activeJobId = job.jobId
+  emitJobEvent(job, { type: 'state', state: 'running' })
+  logInfo(`youtube-import: job ${job.jobId.slice(0, 8)} started`)
+
+  const script = youtubeImportScriptPath()
+  if (!existsSync(script)) {
+    job.state = 'error'
+    job.lastErrorMsg = `Missing script: ${script}`
+    job.finishedAt = Date.now()
+    emitJobEvent(job, { type: 'error', code: 'YTDLP_MISSING', msg: job.lastErrorMsg })
+    emitJobEvent(job, { type: 'state', state: 'error' })
+    activeJobId = null
+    scheduleJobCleanup(job.jobId)
+    return
+  }
+  if (!youtubeImportVenvIsReady()) {
+    job.state = 'error'
+    job.lastErrorMsg = 'Audio import tools are not prepared yet.'
+    job.finishedAt = Date.now()
+    emitJobEvent(job, { type: 'error', code: 'YTDLP_MISSING', msg: job.lastErrorMsg })
+    emitJobEvent(job, { type: 'state', state: 'error' })
+    activeJobId = null
+    scheduleJobCleanup(job.jobId)
+    return
+  }
+
+  const outWav = path.join(job.tempRoot, 'artifact.wav')
+  const child = spawn(pythonYoutubeImportExe(), [
+    script,
+    job.url,
+    '--work-dir',
+    job.tempRoot,
+    '--output-wav',
+    outWav,
+  ], { env: process.env })
+  job.child = child
+
+  let buffer = ''
+  let lastDone = null
+  let lastError = null
+
+  const handleLine = (line) => {
+    if (!line) return
+    let obj
+    try {
+      obj = JSON.parse(line)
+    } catch {
+      emitJobEvent(job, { type: 'log', msg: line })
+      return
+    }
+    if (obj && typeof obj === 'object') {
+      if (obj.type === 'done') {
+        lastDone = obj
+        return
+      } else if (obj.type === 'error') lastError = obj
+      emitJobEvent(job, obj)
+    }
+  }
+
+  child.stdout.setEncoding('utf-8')
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk
+    let idx = buffer.indexOf('\n')
+    while (idx !== -1) {
+      const line = buffer.slice(0, idx).trim()
+      buffer = buffer.slice(idx + 1)
+      idx = buffer.indexOf('\n')
+      handleLine(line)
+    }
+  })
+  child.stderr.setEncoding('utf-8')
+  child.stderr.on('data', (chunk) => {
+    for (const raw of String(chunk).split('\n')) {
+      const line = raw.trim()
+      if (line) {
+        emitJobEvent(job, { type: 'log', msg: line })
+        logWarn(`youtube-import[${job.jobId.slice(0, 8)}] ${line}`)
+      }
+    }
+  })
+
+  await new Promise((resolve) => {
+    child.on('error', (err) => {
+      lastError = { code: 'YTDLP_MISSING', msg: err instanceof Error ? err.message : String(err) }
+      emitJobEvent(job, { type: 'error', code: lastError.code, msg: lastError.msg })
+      resolve()
+    })
+    child.on('close', async (code) => {
+      const tail = buffer.trim()
+      if (tail) handleLine(tail)
+      if (job.state === 'cancelled') {
+        // Cancellation already emitted state.
+      } else if (lastError) {
+        job.state = 'error'
+        job.lastErrorMsg = lastError.msg ?? 'YouTube import failed.'
+      } else if (code !== 0) {
+        job.state = 'error'
+        job.lastErrorMsg = `Audio import exited ${code}`
+        emitJobEvent(job, { type: 'error', code: 'NETWORK_FAILURE', msg: job.lastErrorMsg })
+      } else if (!existsSync(outWav) || !lastDone?.artifact) {
+        job.state = 'error'
+        job.lastErrorMsg = 'Audio import did not create an artifact.'
+        emitJobEvent(job, { type: 'error', code: 'CONVERSION_FAILED', msg: job.lastErrorMsg })
+      } else {
+        try {
+          const baseArtifact = lastDone.artifact
+          const preferredFileName = safeYoutubeAudioFilename(baseArtifact, job.jobId)
+          let fileName = preferredFileName
+          let projectSubpath = null
+          let tempArtifactUrl = `/native/import/youtube/artifact/${encodeURIComponent(job.jobId)}`
+          let artifactPath = outWav
+
+          if (job.output?.kind === 'project-audio') {
+            const { projectPath, songFolder } = job.output
+            const target = uniqueAudioSubpath(projectPath, songFolder, preferredFileName)
+            await atomicCopyFile(outWav, target.abs)
+            fileName = target.fileName
+            projectSubpath = target.subpath
+            tempArtifactUrl = null
+            artifactPath = target.abs
+          }
+
+          const st = statSync(artifactPath)
+          job.artifactPath = artifactPath
+          job.artifact = {
+            fileName,
+            mimeType: 'audio/wav',
+            durationSec: Number(baseArtifact.durationSec),
+            sampleRate: Number(baseArtifact.sampleRate),
+            channels: Number(baseArtifact.channels),
+            fileSize: st.size,
+            sha256: String(baseArtifact.sha256 ?? ''),
+            originalSha256: String(baseArtifact.sha256 ?? ''),
+            source: 'import',
+            titleHint: typeof baseArtifact.titleHint === 'string' ? baseArtifact.titleHint : undefined,
+            ...(tempArtifactUrl ? { tempArtifactUrl } : {}),
+            ...(projectSubpath ? { projectSubpath } : {}),
+          }
+          job.state = 'done'
+          emitJobEvent(job, { type: 'done', artifact: job.artifact })
+        } catch (e) {
+          job.state = 'error'
+          job.lastErrorMsg = e instanceof Error ? e.message : String(e)
+          emitJobEvent(job, { type: 'error', code: 'PROJECT_WRITE_FAILED', msg: job.lastErrorMsg })
+        }
+      }
+      job.finishedAt = Date.now()
+      job.child = null
+      emitJobEvent(job, { type: 'state', state: job.state })
+      resolve()
+    })
+  })
+
+  if (job.state === 'done') {
+    logInfo(`youtube-import: job ${job.jobId.slice(0, 8)} done — ${job.artifact?.fileName ?? 'audio.wav'}`)
+  } else {
+    logWarn(`youtube-import: job ${job.jobId.slice(0, 8)} finished as ${job.state}${job.lastErrorMsg ? ' — ' + job.lastErrorMsg : ''}`)
+  }
+
+  activeJobId = null
+  scheduleJobCleanup(job.jobId)
+}
+
 /**
  * Drain the queue serially. Safe to call concurrently — only the first
  * caller actually runs jobs; subsequent calls are no-ops while busy.
@@ -2500,7 +2826,8 @@ function tryRunNext() {
   if (activeJobId !== null) return
   for (const job of stemsJobs.values()) {
     if (job.state === 'queued') {
-      void runQueuedJob(job)
+      if (job.kind === 'youtube-import') void runQueuedYoutubeImportJob(job)
+      else void runQueuedJob(job)
       return
     }
   }
@@ -2665,9 +2992,72 @@ async function handleHealth(res, cors) {
  * the HTTP boundary — the desktop owns the filesystem for both input and
  * output.
  */
+/**
+ * Build + enqueue a stems job into the shared serial queue. Used by BOTH the
+ * HTTP handler and the auto-stems daemon, so the two never diverge. Caller is
+ * responsible for having validated `inputPath` exists. Returns
+ * `{ jobId, queuePosition }`; throws only on filesystem failure (mkdir /
+ * mkdtemp). Behaviour is identical to the pre-refactor inline body.
+ *
+ * @param {{ inputPath: string, outputDir: string, model?: string, shifts?: number,
+ *           overlap?: number, stems?: string, songId?: string | null }} args
+ */
+async function createStemsJob(args) {
+  const inputPath = args.inputPath
+  const outputDir = args.outputDir
+  const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : 'htdemucs_ft'
+  const shifts = Math.max(1, Math.min(20, Number.parseInt(String(args.shifts ?? 5), 10) || 5))
+  const overlap = Math.max(0, Math.min(0.95, Number.parseFloat(String(args.overlap ?? 0.25)) || 0.25))
+  const stems = (typeof args.stems === 'string' && args.stems.trim()) ? args.stems.trim() : 'vocals,drums,bass,other'
+  const songId = typeof args.songId === 'string' && args.songId.trim() ? args.songId.trim() : null
+
+  await mkdir(outputDir, { recursive: true })
+  // tempRoot holds only intermediate Demucs artifacts; final stems land in
+  // the caller-provided outputDir.
+  const tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-stems-'))
+
+  const jobId = randomUUID()
+  /** @type {StemsJob} */
+  const job = {
+    jobId,
+    songId,
+    state: 'queued',
+    tempRoot,
+    inputPath,
+    outDir: outputDir,
+    files: [],
+    options: { model, shifts, overlap, stems },
+    createdAt: Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    events: [],
+    subscribers: new Set(),
+    lastErrorMsg: null,
+    child: null,
+    cleanupTimer: null,
+  }
+  stemsJobs.set(jobId, job)
+  emitJobEvent(job, { type: 'state', state: 'queued' })
+
+  const queuedAhead = [...stemsJobs.values()].filter(
+    (j) => j.state === 'queued' && j.jobId !== jobId,
+  ).length
+  const runningAhead = activeJobId !== null ? 1 : 0
+  tryRunNext()
+  return { jobId, queuePosition: queuedAhead + runningAhead }
+}
+
+/** True when a song already has a non-terminal stems job (avoid double-queue). */
+function hasInflightStemJobForSong(songId) {
+  if (!songId) return false
+  for (const j of stemsJobs.values()) {
+    if (j.songId !== songId) continue
+    if (j.state === 'queued' || j.state === 'running' || j.state === 'paused') return true
+  }
+  return false
+}
+
 async function handleSeparateStems(req, res, cors) {
-  /** @type {string | null} */
-  let tempRoot = null
   try {
     const body = await readRequestJson(req)
     if (!body) {
@@ -2684,36 +3074,97 @@ async function handleSeparateStems(req, res, cors) {
       sendJson(res, 404, { ok: false, error: `inputPath not found: ${inputPath}` }, cors)
       return
     }
-    const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : 'htdemucs_ft'
-    const shifts = Math.max(1, Math.min(20, Number.parseInt(String(body.shifts ?? 5), 10) || 5))
-    const overlap = Math.max(0, Math.min(0.95, Number.parseFloat(String(body.overlap ?? 0.25)) || 0.25))
-    const stems = (typeof body.stems === 'string' && body.stems.trim()) ? body.stems.trim() : 'vocals,drums,bass,other'
-    const songId = typeof body.songId === 'string' && body.songId.trim() ? body.songId.trim() : null
 
-    // Ensure outputDir exists.
+    let result
     try {
-      await mkdir(outputDir, { recursive: true })
+      result = await createStemsJob({
+        inputPath,
+        outputDir,
+        model: body.model,
+        shifts: body.shifts,
+        overlap: body.overlap,
+        stems: body.stems,
+        songId: body.songId,
+      })
     } catch (e) {
-      sendJson(res, 500, { ok: false, error: `Could not create outputDir: ${e instanceof Error ? e.message : String(e)}` }, cors)
+      sendJson(res, 500, { ok: false, error: `Could not start stems job: ${e instanceof Error ? e.message : String(e)}` }, cors)
       return
     }
 
-    // Job's tempRoot only holds intermediate Demucs artifacts (model
-    // download cache, extracted .smap audio, etc.) — final stems land in
-    // the user-provided outputDir.
-    tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-stems-'))
+    logInfo(
+      `separate-stems: enqueued ${result.jobId.slice(0, 8)} input=${path.basename(inputPath)} out=${outputDir}; position ${result.queuePosition}`,
+    )
+    sendJson(
+      res,
+      202,
+      { ok: true, jobId: result.jobId, state: 'queued', queuePosition: result.queuePosition },
+      cors,
+    )
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  }
+}
 
+async function handleYoutubeImport(req, res, cors) {
+  let tempRoot = null
+  try {
+    const body = await readRequestJson(req)
+    if (!body) {
+      sendJson(res, 400, { ok: false, code: 'INVALID_URL', error: 'Body must be JSON' }, cors)
+      return
+    }
+    const normalized = normalizeYoutubeVideoUrl(body.url)
+    if (!normalized.ok) {
+      sendJson(res, 400, { ok: false, code: normalized.code, error: normalized.error }, cors)
+      return
+    }
+
+    const outputRaw = body.output
+    let output = { kind: 'temp' }
+    if (outputRaw && typeof outputRaw === 'object' && outputRaw.kind === 'project-audio') {
+      const projectPath = typeof outputRaw.projectPath === 'string' ? outputRaw.projectPath.trim() : ''
+      ensureAbsolutePath(projectPath, 'projectPath')
+      if (!existsSync(projectPath)) {
+        sendJson(res, 404, { ok: false, code: 'PROJECT_WRITE_FAILED', error: `projectPath not found: ${projectPath}` }, cors)
+        return
+      }
+      const songFolder = validateRelSongFolder(outputRaw.songFolder)
+      const songFolderAbs = path.join(projectPath, songFolder)
+      if (!existsSync(songFolderAbs)) {
+        sendJson(res, 404, { ok: false, code: 'PROJECT_WRITE_FAILED', error: `song folder not found: ${songFolder}` }, cors)
+        return
+      }
+      output = { kind: 'project-audio', projectPath, songFolder }
+    }
+
+    const status = await probeYoutubeImportTools()
+    if (!status.ready) {
+      sendJson(res, 409, {
+        ok: false,
+        code: 'YTDLP_MISSING',
+        error: status.reason ?? 'Audio import tools are not prepared yet.',
+      }, cors)
+      return
+    }
+
+    tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-youtube-import-'))
     const jobId = randomUUID()
-    /** @type {StemsJob} */
     const job = {
+      kind: 'youtube-import',
       jobId,
-      songId,
+      songId: null,
       state: 'queued',
       tempRoot,
-      inputPath,
-      outDir: outputDir,
+      inputPath: normalized.url,
+      outDir: tempRoot,
       files: [],
-      options: { model, shifts, overlap, stems },
+      options: { url: normalized.url, outputKind: output.kind },
+      output,
+      url: normalized.url,
+      videoId: normalized.videoId,
+      artifact: null,
+      artifactPath: null,
       createdAt: Date.now(),
       startedAt: null,
       finishedAt: null,
@@ -2730,10 +3181,6 @@ async function handleSeparateStems(req, res, cors) {
       (j) => j.state === 'queued' && j.jobId !== jobId,
     ).length
     const runningAhead = activeJobId !== null ? 1 : 0
-    logInfo(
-      `separate-stems: enqueued ${jobId.slice(0, 8)} input=${path.basename(inputPath)} out=${outputDir}; position ${queuedAhead + runningAhead}`,
-    )
-
     sendJson(
       res,
       202,
@@ -2748,11 +3195,35 @@ async function handleSeparateStems(req, res, cors) {
     tryRunNext()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    sendJson(res, 500, { ok: false, error: msg }, cors)
+    sendJson(res, 500, { ok: false, code: 'NETWORK_FAILURE', error: msg }, cors)
     if (tempRoot) {
       await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
     }
   }
+}
+
+function handleGetYoutubeImportArtifact(req, res, cors, jobId) {
+  const job = stemsJobs.get(jobId)
+  if (!job || job.kind !== 'youtube-import') {
+    sendJson(res, 404, { ok: false, error: 'Unknown jobId' }, cors)
+    return
+  }
+  if (job.state !== 'done' || !job.artifactPath || !existsSync(job.artifactPath)) {
+    sendJson(res, 404, { ok: false, error: 'Imported audio is not available' }, cors)
+    return
+  }
+  let size = 0
+  try {
+    size = statSync(job.artifactPath).size
+  } catch {
+    /* ignore */
+  }
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': 'audio/wav',
+    ...(size > 0 ? { 'Content-Length': String(size) } : {}),
+  })
+  createReadStream(job.artifactPath).pipe(res)
 }
 
 /** `GET /native/jobs` — snapshot of all known stems jobs. */
@@ -2838,7 +3309,7 @@ async function handleCancelJob(res, cors, jobId) {
     job.lastErrorMsg = 'Cancelled before start'
     emitJobEvent(job, { type: 'state', state: 'cancelled' })
     scheduleJobCleanup(jobId)
-    logInfo(`stems: job ${jobId.slice(0, 8)} cancelled (was queued)`)
+    logInfo(`${job.kind ?? 'stems'}: job ${jobId.slice(0, 8)} cancelled (was queued)`)
     sendJson(res, 200, { ok: true, state: 'cancelled' }, cors)
     return
   }
@@ -2856,7 +3327,7 @@ async function handleCancelJob(res, cors, jobId) {
     } catch {
       /* ignore */
     }
-    logInfo(`stems: job ${jobId.slice(0, 8)} cancellation signal sent (${wasPaused ? 'was paused' : 'running'})`)
+    logInfo(`${job.kind ?? 'stems'}: job ${jobId.slice(0, 8)} cancellation signal sent (${wasPaused ? 'was paused' : 'running'})`)
     sendJson(res, 200, { ok: true, state: 'cancelled' }, cors)
     return
   }
@@ -3089,6 +3560,167 @@ async function handleSetupStems(req, res, cors) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     logError(`setup/stems: ${msg}`)
+    emit({ type: 'error', msg })
+    emit({ type: 'state', state: 'error' })
+    res.end()
+  }
+}
+
+async function probeYoutubeImportTools() {
+  const exe = youtubeImportVenvIsReady() ? getYoutubeImportVenvPythonExe() : null
+  if (!exe) return { ready: false, reason: 'Audio import tools are not prepared yet.' }
+  const code = [
+    'import json',
+    'import yt_dlp',
+    'import yt_dlp.version',
+    'import imageio_ffmpeg',
+    'ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()',
+    'print(json.dumps({"ytDlpVersion": yt_dlp.version.__version__, "ffmpeg": ffmpeg}))',
+  ].join('; ')
+  return await new Promise((resolve) => {
+    let proc
+    try {
+      proc = spawn(exe, ['-c', code], { stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      resolve({ ready: false, reason: e instanceof Error ? e.message : String(e) })
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => {
+      try { proc?.kill() } catch { /* ignore */ }
+      resolve({ ready: false, reason: 'Audio import readiness check timed out.' })
+    }, 10_000)
+    proc.stdout?.on('data', (b) => { stdout += b.toString('utf-8') })
+    proc.stderr?.on('data', (b) => { stderr += b.toString('utf-8') })
+    proc.on('error', (e) => {
+      clearTimeout(timer)
+      resolve({ ready: false, reason: e.message })
+    })
+    proc.on('close', (rc) => {
+      clearTimeout(timer)
+      if (rc !== 0) {
+        resolve({ ready: false, reason: stderr.trim() || `Audio import readiness check exited ${rc}` })
+        return
+      }
+      try {
+        const parsed = JSON.parse(stdout.trim())
+        const ffmpegReady = typeof parsed.ffmpeg === 'string' && parsed.ffmpeg.length > 0
+        if (!ffmpegReady) {
+          resolve({ ready: false, reason: 'Audio conversion tool is missing.' })
+          return
+        }
+        resolve({
+          ready: true,
+          ytDlpVersion: typeof parsed.ytDlpVersion === 'string' ? parsed.ytDlpVersion : undefined,
+          ffmpegReady,
+        })
+      } catch {
+        resolve({ ready: false, reason: 'Audio import readiness check returned invalid data.' })
+      }
+    })
+  })
+}
+
+async function handleYoutubeImportSetupStatus(res, cors) {
+  const status = await probeYoutubeImportTools()
+  sendJson(
+    res,
+    200,
+    status.ready
+      ? {
+          ok: true,
+          ready: true,
+          venvDir: getYoutubeImportVenvDir(),
+          venvPython: getYoutubeImportVenvPythonExe(),
+          ytDlpVersion: status.ytDlpVersion,
+          ffmpegReady: status.ffmpegReady === true,
+        }
+      : {
+          ok: true,
+          ready: false,
+          venvDir: getYoutubeImportVenvDir(),
+          venvPython: youtubeImportVenvIsReady() ? getYoutubeImportVenvPythonExe() : null,
+          reason: status.reason,
+        },
+    cors,
+  )
+}
+
+async function handleSetupYoutubeImport(req, res, cors) {
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  })
+  const emit = (ev) => {
+    try {
+      res.write(JSON.stringify(ev) + '\n')
+    } catch {
+      /* socket closed */
+    }
+  }
+
+  const venvDir = getYoutubeImportVenvDir()
+  const venvPython = getYoutubeImportVenvPythonExe()
+  const reqPath = path.join(getNativePythonRoot(), 'youtube', 'requirements.txt')
+
+  try {
+    if (!existsSync(venvPython)) {
+      const seed = bootstrapPythonExe()
+      emit({ type: 'progress', label: 'Preparing audio import', current: 0, overall: 10 })
+      const { code } = await runPipelineNdjson(seed, ['-m', 'venv', venvDir], emit)
+      if (code !== 0 || !existsSync(venvPython)) {
+        emit({ type: 'error', msg: `Could not prepare audio import tools (exit ${code}).` })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+
+    emit({ type: 'progress', label: 'Updating audio import tools', current: 0, overall: 30 })
+    const pipUp = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-U', 'pip'], emit)
+    if (pipUp.code !== 0) {
+      emit({ type: 'error', msg: `Could not update audio import tools (exit ${pipUp.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    if (!existsSync(reqPath)) {
+      emit({ type: 'error', msg: `Missing audio import requirements at ${reqPath}` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Installing audio import tools', current: 0, overall: 45 })
+    const inst = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-r', reqPath], emit)
+    if (inst.code !== 0) {
+      emit({ type: 'error', msg: `Could not install audio import tools (exit ${inst.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    emit({ type: 'progress', label: 'Checking audio import tools', current: 0, overall: 90 })
+    const ready = await probeYoutubeImportTools()
+    if (!ready.ready) {
+      emit({ type: 'error', msg: ready.reason ?? 'Audio import tools are not ready.' })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    emit({ type: 'progress', label: 'Audio import ready', current: 100, overall: 100 })
+    emit({ type: 'done', venvPython })
+    emit({ type: 'state', state: 'done' })
+    logInfo(`setup/youtube-import: ready at ${venvPython}`)
+    res.end()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`setup/youtube-import: ${msg}`)
     emit({ type: 'error', msg })
     emit({ type: 'state', state: 'error' })
     res.end()
@@ -4046,6 +4678,24 @@ function startBeaconServer() {
       return
     }
 
+    if (req.method === 'POST' && req.url === '/native/auto-stems/watch') {
+      void handleAutoStemsWatch(req, res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/import/youtube') {
+      void handleYoutubeImport(req, res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url?.startsWith('/native/import/youtube/artifact/')) {
+      const m = req.url.match(/^\/native\/import\/youtube\/artifact\/([^/?]+)(?:\?.*)?$/)
+      if (m?.[1]) {
+        handleGetYoutubeImportArtifact(req, res, cors, decodeURIComponent(m[1]))
+        return
+      }
+    }
+
     if (req.method === 'GET' && req.url === '/native/setup/sections/status') {
       handleSectionsSetupStatus(res, cors)
       return
@@ -4063,6 +4713,16 @@ function startBeaconServer() {
 
     if (req.method === 'POST' && req.url === '/native/setup/stems') {
       void handleSetupStems(req, res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/native/setup/youtube-import/status') {
+      void handleYoutubeImportSetupStatus(res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/setup/youtube-import') {
+      void handleSetupYoutubeImport(req, res, cors)
       return
     }
 
@@ -4264,6 +4924,105 @@ function stopBeaconServer() {
 // `window-all-closed` is intentionally NOT handled — there are no windows
 // to close, so it never fires; the process keeps running indefinitely.
 
+// ── Auto stem-separation daemon ─────────────────────────────────────────────
+//
+// The BACKGROUND brain for the project-wide "prepare stems automatically"
+// policy. Lives here (not the web app) so it keeps working while the desktop
+// app runs, regardless of whether a browser tab is open. Off unless a watched
+// project's manifest has `autoStems.enabled`. See autoStems.mjs.
+
+/** @type {ReturnType<typeof createAutoStemsDaemon> | null} */
+let autoStemsDaemon = null
+
+/** Maps the project's quality slug → demucs args (mirrors STEM_QUALITY_PRESETS). */
+const AUTO_STEM_PRESET_ARGS = {
+  best: { model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
+  balanced: { model: 'htdemucs_ft', shifts: 5, overlap: 0.25 },
+  preview: { model: 'htdemucs', shifts: 1, overlap: 0.25 },
+}
+
+function autoStemsWatchFilePath() {
+  return path.join(app.getPath('userData'), 'auto-stems-watch.json')
+}
+
+function setupAutoStemsDaemon() {
+  if (autoStemsDaemon) return
+  autoStemsDaemon = createAutoStemsDaemon({
+    readManifest: (projectPath) => readProjectManifest(projectPath),
+    readSmapHeader: (smapPath) => readSmapHeaderJson(smapPath),
+    listStemSets: (folderAbs) => listStemSets(folderAbs),
+    wavInfo: (abs) => {
+      try {
+        if (!existsSync(abs)) return null
+        const info = readAudioInfo(abs)
+        return { ...info, fileSize: statSync(abs).size }
+      } catch {
+        return null
+      }
+    },
+    enqueueJob: async ({ inputPath, outputDir, stems, quality, songId }) => {
+      const preset = AUTO_STEM_PRESET_ARGS[quality] ?? AUTO_STEM_PRESET_ARGS.balanced
+      try {
+        const { jobId } = await createStemsJob({
+          inputPath,
+          outputDir,
+          model: preset.model,
+          shifts: preset.shifts,
+          overlap: preset.overlap,
+          stems: stems.join(','),
+          songId: songId ?? null,
+        })
+        return jobId
+      } catch (e) {
+        logWarn(`auto-stems: enqueue failed: ${e instanceof Error ? e.message : String(e)}`)
+        return null
+      }
+    },
+    hasInflightJobForSong: (songId) => hasInflightStemJobForSong(songId),
+    loadWatched: () => {
+      try {
+        const raw = JSON.parse(readFileSync(autoStemsWatchFilePath(), 'utf8'))
+        return Array.isArray(raw) ? raw.filter((p) => typeof p === 'string') : []
+      } catch {
+        return []
+      }
+    },
+    saveWatched: (paths) => {
+      try {
+        writeFileSync(autoStemsWatchFilePath(), JSON.stringify(paths, null, 2))
+      } catch (e) {
+        logWarn(`auto-stems: could not persist watch list: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    existsSync,
+    log: logInfo,
+  })
+  autoStemsDaemon.start()
+}
+
+/**
+ * `POST /native/auto-stems/watch` — body `{ projectPath }`. Registers a
+ * project for background stem preparation. The daemon reads the project's
+ * `autoStems` policy from its manifest each pass, so enabling/disabling is a
+ * manifest write (no separate call). Idempotent; persisted across restarts.
+ */
+async function handleAutoStemsWatch(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    if (!autoStemsDaemon) setupAutoStemsDaemon()
+    autoStemsDaemon.watchProject(projectPath)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
 app.whenReady().then(() => {
   const version = readDesktopVersion()
   logInfo(`BarBro desktop sidecar v${version} starting`)
@@ -4301,16 +5060,25 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/project/asset/write     (write file at project root, e.g. setlist .als)`)
   logInfo(`  POST   /native/project/wav-info/batch  (batched WAV header info — duration/sr/channels)`)
   logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
+  logInfo(`  GET    /native/setup/youtube-import/status`)
+  logInfo(`  POST   /native/setup/youtube-import (prepare YouTube audio import)`)
+  logInfo(`  POST   /native/import/youtube       (queued YouTube audio import)`)
+  logInfo(`  GET    /native/import/youtube/artifact/:jobId`)
   logInfo(`  GET    /native/setup/piper-tts/status`)
   logInfo(`  POST   /native/setup/piper-tts       (venv + piper-tts + default voice)`)
   logInfo(`  GET    /native/tts/hello-world         (debug WAV: "Hello world.")`)
   logInfo(`  POST   /native/tts/synthesize          (JSON {text} → WAV)`)
+  logInfo(`  POST   /native/auto-stems/watch      (register a project for background stem prep)`)
   logInfo(`Stems venv ${stemsVenvIsReady() ? 'READY' : 'NOT INSTALLED'}: ${getStemsVenvDir()}`)
+  logInfo(`YouTube import ${youtubeImportVenvIsReady() ? 'READY' : 'NOT INSTALLED'}: ${getYoutubeImportVenvDir()}`)
   logInfo(`Piper TTS ${piperTtsVenvIsReady() ? 'venv OK' : 'venv missing'} · ${getPiperTtsVenvDir()}`)
+  // Resume background stem prep for projects watched in a previous session.
+  setupAutoStemsDaemon()
 })
 
 app.on('before-quit', () => {
   logInfo('Shutting down')
+  if (autoStemsDaemon) autoStemsDaemon.stop()
   stopBeaconServer()
   // Wipe any pending stems temp dirs synchronously-ish — fire-and-forget,
   // but at least clear the map so timers don't fire after quit.

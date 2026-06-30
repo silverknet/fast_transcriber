@@ -29,11 +29,19 @@ Two phases shipped, both gated behind chords mode in the editor.
 
 - [`suggestFromChroma.ts`](./suggestFromChroma.ts) — pure, client-side.
   Averages each bar's beat chromas, fits against 24 **triad-only**
-  templates (12 major + 12 minor) with Pearson + a **1.15× diatonic
-  bonus** when a song key is set.
-- `proposeChordSuggestions(songMap) → Map<downbeatId, ChordSuggestion>`
+  templates (12 major + 12 minor) with Pearson, then applies up to two
+  multiplicative biases:
+  - **1.15× diatonic bonus** when a song key is set;
+  - **1.40× same-kind-section bonus** — copies the chord the user
+    placed at the matching beat of an *earlier* same-kind section
+    (`sameKindChordAtMatchingBeat` in [`autoFill.ts`](./autoFill.ts)).
+    Exploits the pop convention that Verse 2 reuses Verse 1's pattern.
+- `proposeChordSuggestions(songMap, opts?) → Map<downbeatId, ChordSuggestion>`
   is `$derived` in `+page.svelte` (no caching — recomputes on songMap
-  changes). Returns primary + 2 alternates per bar.
+  changes). Returns primary + up to 4 alternates per bar
+  (`SUGGESTION_TOP_N = 5`). The optional `SuggestOptions`
+  (`useDiatonicBias` / `useSectionBias`) toggle each bias for the A/B
+  harness; production passes none → both on.
 - Ghost chord text in
   [`TimelineBeatGrid.svelte`](../components/TimelineBeatGrid.svelte) at
   each bar's downbeat where confidence ≥ `MIN_SUGGESTION_CONFIDENCE`
@@ -41,8 +49,27 @@ Two phases shipped, both gated behind chords mode in the editor.
   italic/40%, low italic/30%+"?".
 - [`ChordRadialQuickSelect.svelte`](../components/ChordRadialQuickSelect.svelte)
   shows a "✨ Suggested" panel above the clock when the selected beat
-  has a suggestion: prominent primary commit button + 2 alternates.
-  Reuses the existing `commitChord` path (no new writer).
+  has a suggestion: prominent primary commit button + up to 4 alternates
+  + a **7th-variants row** (maj7/7 for a major root, m7 for a minor
+  root) so the right quality is one click away despite triad-only
+  matching. Reuses the existing `commitChord` path (no new writer).
+
+### Phase 2.5 — stem-aware chroma + bias A/B harness (shipped)
+
+- **Stem-aware input.** When a demucs "other" (harmonic) stem is on
+  disk for the song, the analyzer reads that clean stem instead of the
+  full mix — the biggest single accuracy unlock. `resolveOtherStemAbsPath`
+  in `+page.svelte` resolves it via `selectBestStemSet`; the sidecar
+  validates the path (absolute + readable) and feeds it to the
+  *unchanged* Python. `chord_chroma.py` `ANALYZER_VERSION` bumped 2→3
+  (input-only, no algorithm change) to invalidate v2 caches; the cache
+  records `chordHints.analyzerSource: 'stems-other' | 'mix'`.
+- **A/B harness.** [`/debug/chord-bias`](../../routes/debug/chord-bias/+page.svelte)
+  scores each bias config (chroma-only → +diatonic → +section →
+  production) against the user's hand-placed chords on the loaded song.
+  Caveat baked into the page: the section column is partly
+  self-referential (it reads user chords), so read it as "how much does
+  pattern-reuse help", not acoustic-model quality.
 
 ## Known weaknesses (the "pretty bad" part)
 
@@ -55,12 +82,16 @@ Several stacked weaknesses, not yet diagnosed in isolation:
   `librosa.feature.chroma_stft` and `chroma_cqt` both SIGKILL'd
   natively on Apple Silicon. A real CQT or HPSS-preprocessed chroma
   would likely be much sharper.
-- **Triads only.** Real pop / R&B leans on maj7, min7, dom7, sus4.
-  Right now `Cmaj7` audio fits "C major triad" best — correct *root*,
-  often wrong *quality*.
-- **No harmonic separation.** Drums + vocals dominate the chroma in
-  most mixes. HPSS or stem-aware analysis (we already have htdemucs
-  stems!) would isolate the harmonic content first.
+- **Triads only (matcher).** The chroma matcher still ranks 24
+  triad templates, so `Cmaj7` audio fits "C major triad" best — correct
+  *root*, often wrong *quality*. **Partially mitigated** by the radial's
+  7th-variants row (one-click maj7/7/m7 of the suggested root), but the
+  *acoustic model* still can't detect a 7th. Real 7th/sus templates in
+  the matcher remain open.
+- **Harmonic separation — addressed (Phase 2.5).** When a demucs
+  "other" stem is on disk the analyzer reads it instead of the full mix,
+  isolating harmonic content. Songs without stems still fall back to the
+  muddy full-mix path.
 - **Per-bar only.** Songs with two chords per bar (very common —
   "F | G | Am C | …") get the wrong second chord guaranteed because
   the bar-averaged chroma blends them.
@@ -127,8 +158,11 @@ manually before working on that section.
 
 | File | What it does |
 |---|---|
-| [`suggestFromChroma.ts`](./suggestFromChroma.ts) | Per-bar chord matching, diatonic bias, Map output |
-| [`suggestFromChroma.test.ts`](./suggestFromChroma.test.ts) | 12 unit tests (bias direction, aggregation, floor, flats) |
+| [`suggestFromChroma.ts`](./suggestFromChroma.ts) | Per-bar chord matching, diatonic + section bias, `SuggestOptions`, Map output |
+| [`suggestFromChroma.test.ts`](./suggestFromChroma.test.ts) | Unit tests (bias direction + section bias, aggregation, floor, flats) |
+| [`autoFill.ts`](./autoFill.ts) | `sameKindChordAtMatchingBeat` (section-bias source) + auto-fill proposals |
+| [`autoFill.test.ts`](./autoFill.test.ts) | Unit tests for section-match lookup + auto-fill |
+| [`../../routes/debug/chord-bias/+page.svelte`](../../routes/debug/chord-bias/+page.svelte) | Bias A/B harness — scores each config vs user-placed chords |
 | [`keyDetect.ts`](./keyDetect.ts) | K-K key fit + tonic→note spelling. `pearson()` lives here |
 | [`pitchClass.ts`](./pitchClass.ts) | `NoteName + Accidental` ↔ 0–11 pitch class |
 | [`diatonic.ts`](./diatonic.ts) | `MAJOR_SCALE` / `MINOR_SCALE`, `songKeyPreferFlats` |
@@ -140,33 +174,34 @@ manually before working on that section.
 
 ## Suggested next moves (by impact ÷ effort)
 
-1. **HPSS or stem-aware chroma** — we already separate stems via
-   demucs in mix mode. Feeding only the harmonic stems (or the "other"
-   stem, which is usually guitar/piano) to the chroma analyzer should
-   give a dramatically cleaner signal with no library risk. Probably
-   the single biggest accuracy win available.
-2. **Half-bar slicing for high-confidence "this bar has 2 chords"
+> Done since the last revision: stem-aware chroma (was #1), 7th
+> *variants* in the radial (a partial take on the old #4), the
+> same-kind-section bias, and the `/debug/chord-bias` A/B harness.
+> The four below are what genuinely remains.
+
+1. **Half-bar slicing for high-confidence "this bar has 2 chords"
    detection** — split each bar into two windows, fit both, only emit
    the half-bar pair if both halves are confident *and* clearly
    different. Falls back to bar-level otherwise. Doubles the
    2-chord-per-bar coverage without doubling noise.
-3. **1-click ghost commit affordance** — small ✓ badge next to each
+2. **1-click ghost commit affordance** — small ✓ badge next to each
    ghost; click commits without opening the radial. The user has
    flagged the current pace as too slow. Cheapest UX win.
-4. **maj7 / min7 / dom7 templates** — +24 templates (~36 total with
-   weights). Detect when chroma supports a 7th. Worth it for any
-   song with even mild jazz / R&B leanings.
-5. **Reconsider section accept with preview** — bring back to the
+3. **maj7 / min7 / dom7 / sus templates in the matcher** — +templates
+   so the *acoustic model* can detect a 7th, not just offer it as a
+   variant. The radial variant-row mitigates this for the suggested
+   root but can't surface a 7th the chroma actually implies elsewhere.
+4. **Reconsider section accept with preview** — bring back to the
    user with the ghosts in place as the preview surface. The original
    objection ("auto-fill") doesn't apply when the user can see exactly
    what would land before clicking.
-6. **Per-section key fit / modulation detection** — Phase 3 in the
-   plan file. Needed for any song that doesn't stay in one key.
+5. **Per-section key fit / modulation detection** — Phase 3 in the
+   plan file. Needed for any song that doesn't stay in one key. The
+   same-kind-section bias helps reuse but does not detect modulation.
 
-## Plan-file reference
+## Documentation entrypoint
 
-The full design history is in
-`~/.claude/plans/ok-next-up-is-iridescent-hummingbird.md`. It's been
-overwritten as planning has progressed; current contents are the
-Phase 2 plan. Earlier phases (Phase 1 + chord auto-fill from earlier
-sessions) live only in git history.
+The stable agent-facing entrypoint is
+[`docs/domains/chord-suggestions.md`](../../../docs/domains/chord-suggestions.md).
+Keep any future decision history in tracked docs rather than private local
+planning files.

@@ -2,93 +2,83 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What this is
+## Required reading
 
-BarBro — a browser-based music transcription editor. Import audio, run server-side beat/downbeat detection, then edit bars, beats, sections, and chord harmony on a zoomable waveform. Export the project as a single `.smap` file.
+- **[AGENTS.md](AGENTS.md)** — operational on-ramp. Commands, current shape, Svelte 5 style rules, high-risk areas. Don't skip it.
+- **[docs/index.md](docs/index.md)** — documentation map; the domain docs there are how you avoid wasting a session on stale assumptions.
+- **[docs/goal-plan.md](docs/goal-plan.md)** — roadmap + feature-maturity ledger. Read BEFORE changing feature maturity or architecture; update WHEN you do.
+- **[HANDOFF_FOR_CODEX.md](HANDOFF_FOR_CODEX.md)** — playback-engine architectural rules + the three sync bugs documented as load-bearing tests. Read before touching `src/lib/audio/playbackController.svelte.ts`, `src/lib/songmap/playbackPlan.ts`, or `src/lib/components/WaveformPlayer.svelte`.
+- **[AGENT_NOTES.md](AGENT_NOTES.md)** — running scratchpad. Append your own notes; don't delete others' unless explicitly stale.
 
-## Common commands
+Domain deep-dives (consult the one that matches what you're touching):
 
-```bash
-npm run dev          # Vite dev server on http://localhost:5173
-npm run dev:clean    # same, after wiping Vite's cache (use when HMR misbehaves)
-npm run build        # production build
-npm run preview      # preview built output
-npm run check        # svelte-check (TypeScript + Svelte diagnostics)
-npm run check:watch
-npm run test         # vitest run (one-shot)
-npm run test:watch
-npx vitest run path/to/file.test.ts   # run a single test file
-```
+- [docs/domains/ableton-als.md](docs/domains/ableton-als.md) — `.als` XML structure, setlist export, alignment math.
+- [docs/domains/desktop-sidecar.md](docs/domains/desktop-sidecar.md) — sidecar boundary, endpoints, project I/O.
+- [docs/domains/chord-suggestions.md](docs/domains/chord-suggestions.md) — chroma analysis + per-bar chord suggestions.
+- [docs/domains/cloud-auth-sync.md](docs/domains/cloud-auth-sync.md) — Supabase auth, project sync, share links.
+- [docs/smap-format.md](docs/smap-format.md) — `.smap` binary container + JSON envelope.
 
-Postgres autosave (optional, only needed if exercising server autosave):
+## Commands
 
 ```bash
-npm run db:up        # docker compose: Postgres on host port 5433
-npm run db:migrate   # apply db/migrations/*.sql to existing volume
-npm run db:down
+npm run dev                          # http://localhost:5173 (web app)
+npm run dev --prefix desktop         # 127.0.0.1:47842 (Electron sidecar; required for analyze + stems)
+npm run check                        # svelte-check; expect 0 errors at HEAD
+
+npm test                             # unit project only (~2s, ~350 tests)
+npm run test:watch                   # unit project, watch
+npm run test:browser                 # browser project — real Chromium via Playwright
+npm run test:all                     # both projects
+npx vitest run path/to/spec.test.ts  # single file
+
+npm run db:up && npm run db:migrate  # local Postgres (port 5433) for editor_sessions
+npm run desktop:dist-mac-sync        # build mac-arm64 DMG + sync into static/releases
 ```
 
-Python beat detection (required for `/api/analyze`):
+Vitest is split into two projects in [vite.config.js](vite.config.js):
 
-```bash
-bash src/lib/server/analysis/python/install-deps.sh   # creates .venv with madmom
-# then put PYTHON=.venv/bin/python3 in .env at repo root, restart dev server
-```
+- **unit** (Node env) — includes `*.test.ts` and excludes `*.browser.test.ts`. Fast, mocked `AudioContext`, used for algebra + helpers + property-based tests (`*.property.test.ts` via `fast-check`).
+- **browser** (real Chromium via `vitest-browser-svelte` + Playwright) — runs `*.browser.test.ts`. Chromium is launched with `--autoplay-policy=no-user-gesture-required` so `audio.play()` resolves without a synthetic gesture. `bits-ui` and `@lucide/svelte` are excluded from the optimizer because they ship unbundled `.svelte` files esbuild can't load.
 
-The analyze endpoint reads `PYTHON` / `BARBRO_PYTHON` from SvelteKit's `$env/dynamic/private` (i.e. the `.env` file) **and** `process.env`. If you change `.env`, restart `npm run dev`.
+The browser suite is the regression catcher for everything mocks can't see: real `$effect` graph ordering, real `AudioBufferSourceNode` scheduling, real `audio.play()` lifecycle.
 
-## High-level architecture
+## Architecture invariants (don't break these)
 
-### One canonical model: `SongMap`
+1. **`.smap` is the root of truth.** Every observable in the editor — bars, beats, chords, sections, count-in, song-start anchor, spoken intro, click positions, Ableton play-ranges — is **derived** from `.smap` fields. The runtime layer is a thin lens. If you find yourself adding a "bridge" between two pieces of state, you've drifted from the architecture.
+2. **`$derived` everywhere, `$effect` almost nowhere.** Use `$effect` ONLY to sync reactive state into non-reactive sinks (DOM elements, Web Audio nodes, rAF loops, event listeners). Anything computable from other reactive state must be `$derived`. Bridging two `$state`s via `$effect` is the anti-pattern; it's been the source of several historical bugs.
+3. **One timing function: `songPlaybackPlan(sm)`** in [src/lib/songmap/playbackPlan.ts](src/lib/songmap/playbackPlan.ts). Every consumer — live `PlaybackController` click loop, offline cue/click WAV renderers, Ableton orchestrator, mix builder — projects from this single source. Don't add a second derivation of "where do clicks land". The Ableton parity property test (`playbackPlan.property.test.ts > "Ableton parity"`) locks `songTimings(sm)` as a projection of `songPlaybackPlan(sm)` — if it fails you've drifted them.
+4. **Editor and Ableton stay in lockstep.** What you hear in grid IS what the exported `.als` plays. `songTimings(sm)` in `src/lib/export/setlist/timings.ts` must remain a projection of `songPlaybackPlan`; do not reimplement it.
 
-The single source of truth for the musical document is `SongMap` (`src/lib/songmap/types.ts`, currently `SongMapV1`). It contains: `metadata`, `timeline.bars[]` + `timeline.beats[]` (flat list, each beat has a `barId`), `harmony[]` (`HarmonyEvent` per beat with an absolute `ChordSymbol` — Roman numerals are derived, never stored), `sections[]`, `cues`, and an `audio` reference (file metadata only, never bytes).
+## Playback engine specifics
 
-Every UI element reads from and writes to this one object. There is no shadow state — serialize the JSON and you have exactly what the editor shows; load it back and the editor is restored. Public API is re-exported from `src/lib/songmap/index.ts`; prefer importing from there.
+The grid editor's audio is **buffer-based**, mirroring `MixerEngine`: the song plays as `AudioBufferSourceNode.start(ctxTime, offset)` against the same `AudioContext` that hosts the click oscillators. There is one clock (`ctx.currentTime`) and one output latency. By construction, song and clicks cannot disagree.
 
-Mutations go through `patchSongMap(updater)` in `src/lib/stores/songMap.ts`. It runs the immutable updater, merges audio-session info into `audio`, validates with `validateSongMap`, and on failure leaves the store unchanged. It also bumps `metadata.updatedAt`. Edit primitives live in `timelineEdit.ts`, `harmonyEdit.ts`, `sectionEdit.ts`.
+- `PlaybackController.setAudioBuffer(buf)` is REQUIRED before `play()`. The host (`WaveformPlayer`) decodes once for waveform peaks and passes the same `AudioBuffer` to the controller via `$effect`.
+- `setAudioElement(el)` is kept as a back-compat shim only; the controller does NOT use the audio element for playback.
+- Playback position derives purely from `playStartPositionSec + (ctx.currentTime - playStartCtxTime)`. Never read `audioEl.currentTime` from the play path — that's how dual-clock drift gets reintroduced.
+- Count-in: pre-schedule N oscillators at `ctxStart + c.timeSec` (negative offsets) and start the source at `ctxStart`. No `setTimeout`-deferred `play()`, no pause-and-resume race.
+- `mediaTimeOffsetSec` translates buffer time ↔ plan-time. For grid editor, `offset = plan.trimStartSec` (buffer is the full uploaded file).
 
-### `.smap` container format
+## Pitfalls that have burned previous sessions
 
-A `.smap` is a binary file: 28-byte header (`SMAP` magic, container version, flags, jsonLength, audioLength) + UTF-8 JSON `SongProject` (`{ projectFormatVersion, songMap }`) + optional raw audio bytes (typically 64 kbps MP3 made by `lamejs` from the analyzed WAV). No zip, no base64. See `src/lib/songmap/smapFile.ts` and `docs/smap-format.md`. Encode/decode/parse helpers live in `src/lib/songmap/persist.ts` (`parseImportedProjectFile`, `exportRestorableStateAsSmapBlob`, etc.).
+- **Mixing original-time and trim-shifted time.** Always declare which time base a number is in and convert at the boundary. `plan.clickPoints[].timeSec` is trim-shifted; `firstDownbeatOriginalSec` is original-time. Don't pass one where the other is expected.
+- **User-facing copy mentioning internals.** No "Python", "venv", "downloads N MB", "one-time install", "snapshot", "baseline" in any UI string. Use concrete user-language: "analyzed grid", "your bar and beat edits", "the song title".
+- **`$effect` as a state bridge.** If a Svelte 5 `bind:` already gives you two-way reactivity to a `$state` field, do NOT add a `$effect` to also sync it. The combination has caused "play does nothing" bugs because the effect tracked the wrong dependency.
+- **Big atomic rewrites of working code.** Migrations land in incremental phases that each leave the app functional. Add the new path as optional first, verify in browser, then delete the old one. There's a track record of "Phase A, B, C, D" commits for a reason.
+- **Skipping browser verification.** Unit tests are mocked. For UI/audio changes, run `npm run dev` and click through. If you can't verify in your environment, say so explicitly — don't claim done.
+- **Committing unrelated working-tree changes.** The repo often has changes from other branches/sessions sitting uncommitted (admin routes, docs, `.gitignore`, `AGENTS.md` tweaks). Stage only the files you actually touched.
 
-JSON serialization is deterministic: keys follow object-literal construction order, and `serializeSongMap` strips `undefined`. Save → load → save with no edits should produce byte-identical output.
+## Repo structure (high-level)
 
-### Audio pipeline
+- [src/lib/songmap/](src/lib/songmap/) — `.smap` schema, validation, merge, plan derivation, edit helpers, undo/redo store.
+- [src/lib/audio/](src/lib/audio/) — `PlaybackController` (buffer-based), `MixerEngine`, click track rendering, cue/speech scheduling, waveform peaks, time geometry.
+- [src/lib/components/](src/lib/components/) — `WaveformPlayer.svelte` (the editor surface), `TimelineBeatGrid.svelte` (bar strip), `MixerView.svelte`, shadcn primitives.
+- [src/lib/export/](src/lib/export/) — Ableton `.als` writer + setlist orchestrator. The setlist subdir splits into [`timings.ts`](src/lib/export/setlist/timings.ts) (pure clip-range math), [`clickRender.ts`](src/lib/export/setlist/clickRender.ts) (shared with the mixer), [`preflight.ts`](src/lib/export/setlist/preflight.ts) (read-only readiness check), and [`orchestrator.ts`](src/lib/export/setlist/orchestrator.ts) (end-to-end pipeline). Cross-module alignment is locked by [`sync.test.ts`](src/lib/export/setlist/sync.test.ts) and `playbackPlan.property.test.ts > "Ableton parity"` — both must stay green.
+- [src/routes/edit/+page.svelte](src/routes/edit/+page.svelte) — the editor page (~2k lines). Hosts the `PlaybackController` and the grid/sections/chords/cue tabs.
+- [src/routes/analyzing/+page.svelte](src/routes/analyzing/+page.svelte) — beat-detection flow via desktop sidecar.
+- [desktop/](desktop/) — Electron sidecar (loopback HTTP `127.0.0.1:47842`). Headless. **No imports between `src/` and `desktop/` in either direction.** Read [docs/domains/desktop-sidecar.md](docs/domains/desktop-sidecar.md) before touching.
+- [db/migrations/](db/migrations/) — Supabase/Postgres schema; run via `npm run db:migrate`.
 
-`src/routes/+page.svelte` (the import landing page) trims the user's upload to a WAV with `trimAudio.ts`, posts it to `POST /api/analyze`, then re-encodes the trimmed clip to a small reference MP3 via `encodeReferenceAudio.ts` (`lamejs`). The server analyze route writes the WAV to a temp dir, spawns the Python script, parses its JSON, and converts beats into a partial `SongMap` via `beatsToSongMap.ts`. Analysis runs on full-quality WAV; the editor plays from the reference MP3 after analysis succeeds.
+## Roadmap discipline
 
-`src/lib/stores/audioSession.ts` holds the in-memory blob (`File`) and trim window. `src/lib/stores/restorableSong.ts` is the bridge: `hydrateRestorableSong({ songMap, audioBlob })` populates both stores, and `clearFullAppSongState()` resets them.
-
-### Server autosave (optional)
-
-When `DATABASE_URL` is set, `src/lib/client/serverAutosave.ts` autosaves the project every 30 s (and on tab hide) to Postgres, keyed by an anonymous browser fingerprint hash (`SHA-256` over a small set of stable browser features). Schema is `editor_sessions` (one row per fingerprint). When `DATABASE_URL` is missing, `/api/sessions/*` endpoints return 503 and the client treats autosave as off — the app still works in-memory only. The `barbro_session` cookie carries the session id for restore-on-reload via `src/routes/+layout.server.ts`.
-
-### Routing & layout
-
-SvelteKit 2 + Svelte 5 (runes — `$state`, `$props`, `$derived`). Two main pages: `/` (import landing — upload, trim, analyze) and `/edit` (the timeline editor). `+layout.svelte` starts/stops autosave, restores from server on first mount, and **blocks navigations from `/edit` back to `/`** while a song is loaded (via `beforeNavigate`) — the import page would otherwise wipe in-memory work. Honor that invariant when adding new navigation flows.
-
-### UI stack
-
-Tailwind CSS 4 (loaded via `@tailwindcss/vite` in `vite.config.js`, not PostCSS). UI primitives are shadcn-svelte (`bits-ui` + `tailwind-variants`); generated components live in `src/lib/components/ui/<primitive>/`. Icons are `@lucide/svelte`. The shadcn config is in `components.json` (style `nova`, base color `zinc`, typescript primitives are JS-only). The `$lib` alias points to `src/lib`.
-
-### Chord domain
-
-`src/lib/chords/` is the chord vocabulary: parsing (`parseChordText`), formatting (`formatChordSymbol`), transposition, diatonic suggestions, secondary dominants, slash bass, the marking-menu radial picker geometry, and chord-clipboard serialization. `resolveChordAtEachBeat` carries chords forward across beats (a chord stays in effect until the next `HarmonyEvent`). Numerals are *derived* from `metadata.keyDetail` + chord, never stored. PDF/MusicXML export lives in `src/lib/export/`.
-
-### Tests
-
-Vitest, `environment: 'node'`, `include: ['src/**/*.{test,spec}.ts']`. Tests are colocated next to the unit they cover (e.g. `parseChordText.test.ts`, `smapFile.test.ts`). No browser/DOM tests yet — pure-logic only.
-
-## Conventions worth knowing
-
-- **No shadow state.** If you add UI that depends on song data, read it from `songMap` (or a derived `$derived` over it) — don't cache copies in component state across mutations.
-- **Bar/beat times use half-open intervals** `[startSec, endSec)` on the master timeline. The transport uses `END_EPS = 0.028` to clamp playback at bar ends.
-- **Roman numerals are derived, never stored.** When you need one, call `deriveNumeral` against `metadata.keyDetail`.
-- **Bump `SONGMAP_FORMAT_VERSION` only for breaking shape changes** (`src/lib/songmap/version.ts`). Extend `SONGMAP_VERSION_CHANGELOG`. Same for `SMAP_FILE_VERSION` if the binary container layout changes.
-- **`patchSongMap` is the only sanctioned mutation path** — don't bypass it; validation failures must leave the store untouched.
-- **Editor-only state (viewport, selection, tabs) stays out of `SongMap`.** It's transient and belongs in component `$state` or in `src/lib/stores/`.
-- **`src/lib/timeline/{model,transforms}/` are placeholders** for the future Song Master Model; they currently contain only README stubs.
-
-## Regression checklist
-
-Before declaring an editor change done, walk through `docs/regression-checklist.md` (upload, playback, selection, minimap, "Use Song" trim flow). UI correctness is not covered by the test suite.
+When work meaningfully advances or completes a listed roadmap item, update [docs/goal-plan.md](docs/goal-plan.md) — bump `Lvl`, tighten `Notes`, adjust detail bullets. Future agents depend on this being honest. Per [AGENTS.md](AGENTS.md), read `docs/goal-plan.md` BEFORE changing feature maturity or architecture.

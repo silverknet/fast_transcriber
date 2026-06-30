@@ -20,6 +20,7 @@ import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { chordRootToPitchClass, pitchClassToRootAcc } from './pitchClass'
 import { songKeyPreferFlats } from './diatonic'
 import { formatChordSymbol } from './formatChordSymbol'
+import { sameKindChordAtMatchingBeat } from './autoFill'
 
 /** Pitch-class offsets from the root for a major triad. */
 export const MAJOR_TRIAD = [0, 4, 7] as const
@@ -30,11 +31,23 @@ export const MINOR_TRIAD = [0, 3, 7] as const
 const DIATONIC_BIAS = 1.15
 
 /**
+ * Multiplicative score bonus when the matching beat in an EARLIER
+ * same-kind section has a user-placed chord that matches the candidate.
+ * Strong enough to flip most chroma noise (especially when the harmonic
+ * stem is muddy) but small enough that a clearly-different chroma
+ * (e.g. user modulated the bridge) still wins.
+ */
+const SECTION_BIAS = 1.4
+
+/**
  * Minimum confidence (top-vs-runner-up Pearson margin) at which we'll
  * surface a suggestion at all. Below this the chroma is too ambiguous
  * to recommend anything.
  */
 export const MIN_SUGGESTION_CONFIDENCE = 0.02
+
+/** Number of total candidates (primary + alternates) surfaced per bar. */
+export const SUGGESTION_TOP_N = 5
 
 export type ChordSuggestion = {
   /** The bar's downbeat (where the suggested chord would be placed). */
@@ -45,8 +58,20 @@ export type ChordSuggestion = {
   chord: ChordSymbol
   /** Pearson margin (top - secondBest). 0…~0.3 in practice. */
   confidence: number
-  /** Next-best candidates, ranked. Capped at 2 entries. */
+  /** Next-best candidates, ranked. Up to SUGGESTION_TOP_N - 1 entries. */
   alternatives: ChordSymbol[]
+}
+
+/**
+ * Toggles for the three biases that shape suggestions. Used by the
+ * debug A/B harness to measure each one's contribution; default
+ * production behavior has all three on.
+ */
+export type SuggestOptions = {
+  /** Use the song-key diatonic 1.15× bonus. Default true. */
+  useDiatonicBias?: boolean
+  /** Use the same-kind-section 1.40× bonus. Default true. */
+  useSectionBias?: boolean
 }
 
 /** Major-key diatonic scale degrees (semitone offsets from tonic). */
@@ -118,14 +143,27 @@ type ScoredCandidate = {
 
 /**
  * Match a chroma vector against the 24 triad templates and rank by
- * (Pearson correlation × optional diatonic bonus). Returns descending
- * list of all 24 with scores.
+ * `Pearson × optional diatonic bonus × optional same-kind-section bonus`.
+ * Returns descending list of all 24 with scores.
+ *
+ * `sameKindMatch`: when set, candidates matching its `(pc, quality)`
+ * get the SECTION_BIAS multiplier — the strongest of the three biases.
+ * Reflects the convention that in pop songs Verse 2 reuses Verse 1's
+ * chord pattern.
  */
 export function rankTriadFitsForChroma(
   chroma: readonly number[],
   songKey: SongKey | undefined,
+  opts: {
+    useDiatonicBias?: boolean
+    useSectionBias?: boolean
+    sameKindMatch?: { pc: number; quality: 'major' | 'minor' } | null
+  } = {},
 ): ScoredCandidate[] {
-  const inKey = diatonicPitchClasses(songKey)
+  const useDiatonicBias = opts.useDiatonicBias !== false
+  const useSectionBias = opts.useSectionBias !== false
+  const inKey = useDiatonicBias ? diatonicPitchClasses(songKey) : null
+  const section = useSectionBias ? opts.sameKindMatch ?? null : null
   const scored: ScoredCandidate[] = []
   for (let pc = 0; pc < 12; pc++) {
     for (const quality of ['major', 'minor'] as const) {
@@ -133,11 +171,32 @@ export function rankTriadFitsForChroma(
       const template = buildTemplate(pc, intervals)
       let score = pearson(chroma, template)
       if (inKey && inKey.has(pc)) score *= DIATONIC_BIAS
+      if (section && section.pc === pc && section.quality === quality) {
+        score *= SECTION_BIAS
+      }
       scored.push({ pc, quality, score })
     }
   }
   scored.sort((a, b) => b.score - a.score)
   return scored
+}
+
+/** Convert a ChordSymbol to the `(pc, quality)` shape used by the matcher. */
+function chordSymbolToTriadKey(c: ChordSymbol): { pc: number; quality: 'major' | 'minor' } | null {
+  const pc = chordRootToPitchClass(c.root, c.accidental)
+  // We only consider major/minor for the section bias since the matcher
+  // only ranks those two qualities. 7ths / sus / etc. of a major triad
+  // still map to the major-triad slot (root + 3rd dominates the chroma
+  // for triad fitting).
+  const q = c.quality ?? 'major'
+  const quality: 'major' | 'minor' | null =
+    q === 'minor' || q === 'min7' || q === 'm7' || q === 'm' || q === 'min'
+      ? 'minor'
+      : q === 'dim' || q === 'm7b5' || q === 'min7b5'
+        ? null // diminished doesn't map cleanly to major/minor; skip the bias
+        : 'major'
+  if (quality === null) return null
+  return { pc, quality }
 }
 
 /**
@@ -169,8 +228,15 @@ export function aggregateBarChroma(
  * Build a map of `downbeatId → ChordSuggestion` for every bar that has
  * usable chroma. Bars without chroma, or whose top fit is below
  * `MIN_SUGGESTION_CONFIDENCE`, are omitted from the result.
+ *
+ * Production callers pass no `opts` and get all three biases on (chroma
+ * + diatonic + same-kind section). The debug A/B harness disables one
+ * at a time to measure each one's contribution.
  */
-export function proposeChordSuggestions(songMap: SongMap | null): Map<string, ChordSuggestion> {
+export function proposeChordSuggestions(
+  songMap: SongMap | null,
+  opts: SuggestOptions = {},
+): Map<string, ChordSuggestion> {
   const out = new Map<string, ChordSuggestion>()
   if (!songMap) return out
   const hints = songMap.chordHints
@@ -199,21 +265,32 @@ export function proposeChordSuggestions(songMap: SongMap | null): Map<string, Ch
     const barChroma = aggregateBarChroma(indices, hints.beatChroma)
     if (!barChroma) continue
 
-    const ranked = rankTriadFitsForChroma(barChroma, songKey)
+    const downbeatId = bar.beatIds[0]
+
+    // Section-bias hint: look up the chord the user placed at the
+    // matching beat of an earlier same-kind section, if any.
+    const sameKindChord = sameKindChordAtMatchingBeat(songMap, downbeatId)
+    const sameKindMatch = sameKindChord ? chordSymbolToTriadKey(sameKindChord) : null
+
+    const ranked = rankTriadFitsForChroma(barChroma, songKey, {
+      useDiatonicBias: opts.useDiatonicBias,
+      useSectionBias: opts.useSectionBias,
+      sameKindMatch,
+    })
     if (ranked.length < 2) continue
     const top = ranked[0]
     const second = ranked[1]
     const confidence = top.score - second.score
     if (confidence < MIN_SUGGESTION_CONFIDENCE) continue
 
-    const downbeatId = bar.beatIds[0]
     out.set(downbeatId, {
       beatId: downbeatId,
       barIndex: bar.index,
       chord: buildChord(top.pc, top.quality, preferFlats),
       confidence,
+      // Top-5 total → 4 alternates. Wider safety net for the radial.
       alternatives: ranked
-        .slice(1, 3)
+        .slice(1, SUGGESTION_TOP_N)
         .map((c) => buildChord(c.pc, c.quality, preferFlats)),
     })
   }

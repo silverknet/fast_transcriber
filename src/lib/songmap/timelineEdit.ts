@@ -17,6 +17,59 @@ const T_EPS = 1e-4
 export const MIN_BEATS_PER_BAR = 1
 export const MAX_BEATS_PER_BAR = 32
 
+/**
+ * Cheap, allocation-free check: does the live timeline already match
+ * the snapshot? Used by the UI to disable the Reset button when there's
+ * nothing to revert.
+ */
+export function timelineMatchesOriginal(map: SongMap): boolean {
+  const orig = map.timeline.original
+  if (!orig) return true // No snapshot → nothing to revert to, treat as "in sync"
+  const bars = map.timeline.bars
+  const beats = map.timeline.beats
+  if (bars.length !== orig.bars.length || beats.length !== orig.beats.length) return false
+  for (let i = 0; i < bars.length; i++) {
+    const a = bars[i]!
+    const b = orig.bars[i]!
+    if (
+      a.id !== b.id ||
+      a.startSec !== b.startSec ||
+      a.endSec !== b.endSec ||
+      a.beatCount !== b.beatCount
+    ) {
+      return false
+    }
+  }
+  for (let i = 0; i < beats.length; i++) {
+    const a = beats[i]!
+    const b = orig.beats[i]!
+    if (a.id !== b.id || a.barId !== b.barId || a.timeSec !== b.timeSec || a.indexInBar !== b.indexInBar) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Replace `timeline.bars` and `timeline.beats` with `timeline.original`
+ * (deep-copied so future edits don't mutate the snapshot). Leaves the
+ * snapshot itself untouched so the user can revert again later.
+ * No-ops when there's no snapshot.
+ */
+export function resetTimelineToOriginal(map: SongMap): TimelineEditResult {
+  const orig = map.timeline.original
+  if (!orig) return fail('No analyzed baseline to reset to.')
+  const next: SongMap = {
+    ...map,
+    timeline: {
+      ...map.timeline,
+      bars: orig.bars.map((b) => ({ ...b, beatIds: [...b.beatIds] })),
+      beats: orig.beats.map((b) => ({ ...b })),
+    },
+  }
+  return ok(next)
+}
+
 function ok(map: SongMap): TimelineEditOk {
   return { ok: true, map }
 }

@@ -7,6 +7,7 @@
   import type { BarGridAction } from '$lib/songmap/timelineEdit'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
+  import { beginPatchBatch, endPatchBatch } from '$lib/stores/songMap'
 
   /** Inline preview of an unaccepted suggested next section. */
   export type SuggestionPreview = {
@@ -90,6 +91,26 @@
       | undefined,
     /** Sections mode: audio-derived candidate borders shown as ghost ticks. */
     audioBorderTicks = [] as AudioBorderTick[],
+    /**
+     * Grid mode: count-in beats rendered as dim ghost ticks BEFORE bar 1.
+     * Each entry is one pre-song click in original-time. The bar strip
+     * renders them at the corresponding pixel positions inside the
+     * viewport (so they're visible whenever there's lead-in space to
+     * the left of bar 1). Empty = no count-in.
+     */
+    countInTicks = [] as { timeSec: number; downbeat: boolean }[],
+    /**
+     * Grid mode: the bar that currently anchors the song start. That
+     * bar gets a persistent anchor icon; others show one only on
+     * hover. `null` = no beats analyzed yet.
+     */
+    songStartBarIndex = null as number | null,
+    /**
+     * Grid mode: handler for clicking the "Set as start" anchor icon
+     * on any bar. Receives the bar's 0-based `index`. Undefined
+     * disables the affordance.
+     */
+    onSetStartBar = undefined as ((barIndex: number) => void) | undefined,
   }: {
     viewStart: number
     viewEnd: number
@@ -121,6 +142,9 @@
       newBoundaryBarIndex: number,
     ) => void
     audioBorderTicks?: AudioBorderTick[]
+    countInTicks?: { timeSec: number; downbeat: boolean }[]
+    songStartBarIndex?: number | null
+    onSetStartBar?: (barIndex: number) => void
   } = $props()
 
   let gridEl = $state<HTMLDivElement | undefined>()
@@ -389,6 +413,33 @@
     return out
   })
 
+  /**
+   * Pixel positions of count-in ghost ticks (grid mode). Each tick is
+   * a pre-song click in original-time; ticks whose original-time falls
+   * outside the visible viewport are dropped (so e.g. zooming into the
+   * middle of the song hides them naturally). Single source of truth:
+   * the parent computes positions from `songPlaybackPlan(sm)`, the
+   * strip just paints them.
+   */
+  let countInTickPx = $derived.by(() => {
+    if (
+      stripMode !== 'grid' ||
+      !(widthPx > 0) ||
+      viewEnd <= viewStart ||
+      countInTicks.length === 0
+    ) {
+      return [] as Array<{ key: string; x: number; downbeat: boolean }>
+    }
+    const out: Array<{ key: string; x: number; downbeat: boolean }> = []
+    for (let i = 0; i < countInTicks.length; i++) {
+      const t = countInTicks[i]!
+      if (t.timeSec < viewStart || t.timeSec > viewEnd) continue
+      const x = timeToPxInView(t.timeSec, viewStart, viewEnd, widthPx)
+      out.push({ key: `ci-${i}`, x, downbeat: t.downbeat })
+    }
+    return out
+  })
+
   /** Pixel positions of audio-derived border ticks (sections mode). */
   let audioBorderTickPx = $derived.by(() => {
     if (
@@ -591,6 +642,11 @@
     let raf = 0
     let pending: number | null = null
 
+    // Coalesce the whole drag into ONE undo step. Each pointermove
+    // emits a patchSongMap inside the batch; `endPatchBatch()` pushes
+    // exactly one history entry on pointerup.
+    beginPatchBatch()
+
     const emit = (t: number) => {
       onAction({
         type: 'setBarBoundary',
@@ -624,6 +680,7 @@
         emit(pending)
         pending = null
       }
+      endPatchBatch()
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
@@ -1121,6 +1178,26 @@
     {/each}
   {/if}
 
+  <!-- Count-in ghost ticks (grid mode). One per pre-song click in
+       original-time, painted as a short dashed vertical line. They sit
+       before bar 1 (or wherever the song-start anchor is) and rerender
+       reactively when the user changes count-in 4 → 8: 4 new ticks
+       appear instantly because `countInTicks` is a $derived in the
+       parent. Pointer-events disabled so they don't interfere with
+       bar edits. -->
+  {#if stripMode === 'grid'}
+    {#each countInTickPx as tick (tick.key)}
+      <div
+        class="pointer-events-none absolute top-0 bottom-0 z-[27] w-[2px] -translate-x-1/2"
+        style:left="{tick.x}px"
+        style:background="repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.42) 0 4px, transparent 4px 7px)"
+        style:opacity={tick.downbeat ? 0.85 : 0.6}
+        aria-hidden="true"
+        title="Count-in click"
+      ></div>
+    {/each}
+  {/if}
+
   <!-- Section edge-drag handles (sections mode): drag left/right boundary to resize. -->
   {#if editing && stripMode === 'sections'}
     {#each sectionFillSpans as span (span.key)}
@@ -1277,6 +1354,37 @@
       {/each}
     {/if}
   </div>
+
+  <!-- Per-bar "Set as song start" affordance (grid mode). Every bar
+       gets a small anchor button at its left edge: dim by default,
+       full opacity on hover, and full opacity + amber tint on the
+       currently-anchored bar (so the user always sees where the song
+       starts from). Click → parent's `onSetStartBar(barIndex)` updates
+       `startBeatId`; the plan reactively re-derives, count-in ghost
+       ticks shift, click loop respects the new anchor on next play.
+       One write, every consumer follows. -->
+  {#if editing && stripMode === 'grid' && onSetStartBar}
+    {#each barSlices as slice (slice.bar.id)}
+      {@const isStart = slice.bar.index === songStartBarIndex}
+      <button
+        type="button"
+        class="absolute top-0 z-[30] flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm leading-none transition-opacity hover:bg-foreground/15 {isStart
+          ? 'text-amber-400 opacity-100'
+          : 'text-foreground opacity-15 hover:opacity-95'}"
+        style:left="{slice.x0 + 2}px"
+        onclick={(ev) => {
+          ev.stopPropagation()
+          onSetStartBar?.(slice.bar.index)
+        }}
+        title={isStart
+          ? `Bar ${slice.bar.index + 1} is the song start`
+          : `Set bar ${slice.bar.index + 1} as song start`}
+        aria-label={`Set bar ${slice.bar.index + 1} as song start`}
+      >
+        <span class="text-[10px] font-bold tabular-nums leading-none">▼</span>
+      </button>
+    {/each}
+  {/if}
 
   <!-- Selection range overlays: outside the hideBarChrome opacity wrapper so they stay visible at every zoom. -->
   {#if stripMode === 'sections' && selectionRangePx}

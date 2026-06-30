@@ -10,7 +10,6 @@
    */
   import { goto } from '$app/navigation'
   import { page } from '$app/stores'
-  import { Button } from '$lib/components/ui/button'
   import { project as projectStore } from '$lib/stores/project'
   import { songMap } from '$lib/stores/songMap'
   import ArrowLeft from '@lucide/svelte/icons/arrow-left'
@@ -35,26 +34,38 @@
 
 {#if visible}
   <div
-    class="border-foreground bg-foreground text-background fixed top-12 right-0 left-0 z-40 flex h-11 items-center gap-3 border-b-2 px-3 text-sm"
+    class="bg-foreground text-background flex h-11 items-center gap-3 px-3 text-sm"
     role="navigation"
     aria-label="Project context"
   >
-    <Button
-      variant="secondary"
-      class="shrink-0 gap-1.5 shadow-none [&_svg]:translate-y-0.5"
+    <!--
+      Plain anchor-style button: no border, no shadow, no shape baggage from
+      the brutalist `<Button>` component. Every child is centered by the bar's
+      `items-center`, so the icon + label sit on the bar's optical midline by
+      default — no per-element translate tweaks.
+    -->
+    <button
+      type="button"
+      class="text-background hover:bg-background/10 -my-1 inline-flex shrink-0 items-center gap-1.5 px-2 py-1 text-sm font-semibold transition-colors"
       onclick={() => void backToProject()}
       aria-label="Back to project {projectName}"
     >
       <ArrowLeft class="size-4 shrink-0" aria-hidden="true" />
-      <span class="translate-y-0.5">Back to project</span>
-    </Button>
+      <span>Back to project</span>
+    </button>
+
+    <!-- Vertical divider — inset top/bottom so it doesn't touch the bar edges. -->
+    <span
+      class="bg-background/30 h-5 w-px shrink-0"
+      aria-hidden="true"
+    ></span>
 
     <div class="flex min-w-0 flex-1 items-center gap-2">
-      <FolderOpen class="size-4 shrink-0 translate-y-0.5 opacity-70" aria-hidden="true" />
-      <span class="truncate translate-y-0.5 font-semibold tracking-tight">{projectName}</span>
+      <FolderOpen class="size-4 shrink-0 opacity-70" aria-hidden="true" />
+      <span class="truncate font-semibold tracking-tight">{projectName}</span>
       {#if songTitle}
-        <span class="translate-y-0.5 opacity-50" aria-hidden="true">/</span>
-        <span class="text-background/80 truncate translate-y-0.5 font-mono text-xs">{songTitle}</span>
+        <span class="opacity-50" aria-hidden="true">/</span>
+        <span class="text-background/80 truncate font-mono text-xs">{songTitle}</span>
       {/if}
     </div>
   </div>

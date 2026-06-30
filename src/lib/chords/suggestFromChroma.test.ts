@@ -108,6 +108,8 @@ function buildSongMap(opts: {
   beats: Beat[]
   hints?: ChordHints | undefined
   songKey?: SongKey
+  sections?: import('$lib/songmap/types').Section[]
+  harmony?: import('$lib/songmap/types').HarmonyEvent[]
 }): SongMap {
   return {
     formatVersion: SONGMAP_FORMAT_VERSION,
@@ -118,8 +120,8 @@ function buildSongMap(opts: {
       ...(opts.songKey ? { keyDetail: opts.songKey } : {}),
     },
     timeline: { bars: opts.bars, beats: opts.beats },
-    sections: [],
-    harmony: [],
+    sections: opts.sections ?? [],
+    harmony: opts.harmony ?? [],
     cues: { mode: 'off', countInBeats: 0, useSectionLabels: false },
     ...(opts.hints ? { chordHints: opts.hints } : {}),
   } as unknown as SongMap
@@ -193,7 +195,10 @@ describe('proposeChordSuggestions', () => {
     const map = buildSongMap({ bars, beats, hints })
     const s = proposeChordSuggestions(map).get('b0_0')
     expect(s).toBeDefined()
-    expect(s!.alternatives.length).toBe(2)
+    // SUGGESTION_TOP_N = 5 → primary + 4 alternates. Wider safety net
+    // so the radial can offer ~95% in-radial coverage even when top-1
+    // misses (e.g. true chord is Cmaj7, model says C major).
+    expect(s!.alternatives.length).toBe(4)
     // Alternatives should be different from the primary.
     for (const alt of s!.alternatives) {
       expect(alt.root === s!.chord.root && alt.quality === s!.chord.quality).toBe(false)
@@ -221,5 +226,82 @@ describe('proposeChordSuggestions', () => {
     const s = proposeChordSuggestions(map).get('b0_0')
     expect(s?.chord.root).toBe('B')
     expect(s?.chord.accidental).toBe('flat')
+  })
+})
+
+describe('proposeChordSuggestions — section bias', () => {
+  // Build a 2-verse song where verse 1 (bars 0..1) has F placed on
+  // beat 0 of bar 0, and verse 2 (bars 2..3) has chroma ambiguous
+  // between C and F. Section bias should resolve verse 2's bar 0
+  // (== bar 2) to F because the matching beat of verse 1 is F.
+  function buildTwoVerseMap(opts?: { withSectionHarmony?: boolean }) {
+    const bars: Bar[] = [
+      { ...bar(0, ['b0_0', 'b0_1', 'b0_2', 'b0_3']) },
+      { ...bar(1, ['b1_0', 'b1_1', 'b1_2', 'b1_3']) },
+      { ...bar(2, ['b2_0', 'b2_1', 'b2_2', 'b2_3']) },
+      { ...bar(3, ['b3_0', 'b3_1', 'b3_2', 'b3_3']) },
+    ]
+    const beats: Beat[] = []
+    for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 4; j++) beats.push(beat(i, j))
+    }
+    // Chroma: bars 0..1 strong F major (verse 1); bars 2..3 ambiguous
+    // between C and F. Without section bias, bar 2 would lean C; with
+    // bias, it should reflect F (matching verse 1 bar 0).
+    const fMaj = chromaFor([5, 9, 0]) // F, A, C
+    const ambiguous = chromaFor([0, 4, 7, 5, 9, 0]) // C-major + F-major mix
+    const beatChroma = [
+      ...Array(4).fill(fMaj),
+      ...Array(4).fill(fMaj),
+      ...Array(4).fill(ambiguous),
+      ...Array(4).fill(ambiguous),
+    ]
+    const hints: ChordHints = {
+      beatChroma,
+      detectedKey: null,
+      audioFingerprint: 'fake',
+      generatedAt: '',
+      analyzerVersion: 3,
+    }
+    const sections: import('$lib/songmap/types').Section[] = [
+      { id: 'v1', kind: 'verse', label: 'verse', barRange: { startBarIndex: 0, endBarIndex: 1 } },
+      { id: 'v2', kind: 'verse', label: 'verse', barRange: { startBarIndex: 2, endBarIndex: 3 } },
+    ]
+    const harmony: import('$lib/songmap/types').HarmonyEvent[] = opts?.withSectionHarmony
+      ? [
+          {
+            id: 'h1',
+            barId: 'bar0',
+            beatId: 'b0_0',
+            startSec: 0,
+            endSec: 1,
+            chord: { root: 'F', quality: 'major', displayRaw: 'F' },
+          },
+        ]
+      : []
+    return buildSongMap({ bars, beats, hints, sections, harmony })
+  }
+
+  it('flips ambiguous bar to the same-kind earlier section chord when bias is on', () => {
+    const map = buildTwoVerseMap({ withSectionHarmony: true })
+    const withBias = proposeChordSuggestions(map).get('b2_0')
+    expect(withBias?.chord.root).toBe('F')
+  })
+
+  it('respects useSectionBias=false (debug A/B mode)', () => {
+    const map = buildTwoVerseMap({ withSectionHarmony: true })
+    const noBias = proposeChordSuggestions(map, { useSectionBias: false }).get('b2_0')
+    // Without the section bias, ambiguous chroma falls to its chroma-only winner.
+    // Just assert that the result differs from the section-biased one.
+    expect(noBias?.chord.root).not.toBe('F')
+  })
+
+  it('no-op when there is no matching earlier-section chord', () => {
+    const map = buildTwoVerseMap({ withSectionHarmony: false })
+    const s = proposeChordSuggestions(map).get('b2_0')
+    // Same result with or without bias since there's no anchor chord
+    // to bias toward.
+    const sNoBias = proposeChordSuggestions(map, { useSectionBias: false }).get('b2_0')
+    expect(s?.chord.root).toBe(sNoBias?.chord.root)
   })
 })

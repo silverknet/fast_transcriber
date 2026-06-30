@@ -171,6 +171,16 @@ export function validateSongMap(map: SongMap): ValidationResult {
     }
   }
 
+  if (map.timeline?.original !== undefined) {
+    const orig = map.timeline.original
+    if (!orig || !Array.isArray(orig.bars) || !Array.isArray(orig.beats)) {
+      errors.push('timeline.original must have bars[] and beats[]')
+    } else {
+      orig.bars.forEach((bar, i) => validateBar(bar, `timeline.original.bars[${i}]`, errors))
+      orig.beats.forEach((b, i) => validateBeat(b, `timeline.original.beats[${i}]`, errors))
+    }
+  }
+
   if (!map.cues || typeof map.cues.mode !== 'string') errors.push('cues invalid')
   else {
     if (!Number.isInteger(map.cues.countInBeats) || map.cues.countInBeats < 0) {
@@ -179,6 +189,9 @@ export function validateSongMap(map: SongMap): ValidationResult {
     if (typeof map.cues.useSectionLabels !== 'boolean') errors.push('cues.useSectionLabels invalid')
     if (map.cues.prependSec !== undefined && (!Number.isFinite(map.cues.prependSec) || map.cues.prependSec < 0)) {
       errors.push('cues.prependSec invalid')
+    }
+    if (map.cues.spokenIntroText !== undefined && typeof map.cues.spokenIntroText !== 'string') {
+      errors.push('cues.spokenIntroText invalid')
     }
   }
 

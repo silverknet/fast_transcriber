@@ -17,6 +17,7 @@ dist
 dist-ssr
 build
 .svelte-kit
+.netlify
 desktop/release
 desktop/.venv-beats/
 desktop/.venv-stems/
@@ -31,6 +32,12 @@ static/releases/*.blockmap
 .svelte-kit/output/client/releases/*.zip
 .svelte-kit/output/client/releases/*.blockmap
 *.local
+supabase/.temp/
+
+# Agent scratch files — coordination notes only, never commit or deploy.
+AGENT_BRIDGE.md
+CLOUD_SHARING_SMOKE_TEST.md
+answer.md
 
 # Editor directories and files
 .vscode/*

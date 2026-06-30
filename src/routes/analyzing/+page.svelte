@@ -104,7 +104,7 @@
   import { restorableSongState } from '$lib/songmap/session'
   import { audioSession } from '$lib/stores/audioSession'
   import { project as projectStore } from '$lib/stores/project'
-  import { commitNewSongToProject } from '$lib/project/commit'
+  import { commitNewSongToProject, updateActiveProjectSong } from '$lib/project/commit'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
@@ -120,8 +120,9 @@
   async function run() {
     const state = get(analyzingState)
     const sm = get(songMap)
+    const hqFile = state?.hqFile ?? get(audioSession).file
 
-    if (!state || !sm?.audio) {
+    if (!hqFile || !sm?.audio) {
       await goto('/')
       return
     }
@@ -130,11 +131,26 @@
     setAnalyzingSpin(true)
 
     try {
+      // Diagnostic — every "no beats detected" report we've gotten has
+      // boiled down to one of: zero-length trim, missing hqFile, or a
+      // sidecar problem. Log all three so we can read the cause off
+      // the browser console without guessing.
+      console.info('[analyze] trim:', trim, 'hqFile:', {
+        name: hqFile.name,
+        size: hqFile.size,
+        type: hqFile.type,
+      })
       const { file: trimmedWav } = await trimAudioFileToWav(
-        state.hqFile,
+        hqFile,
         trim.startSec,
         trim.endSec,
       )
+      console.info('[analyze] trimmed WAV bytes:', trimmedWav.size, 'duration:', trim.endSec - trim.startSec, 's')
+      if (trimmedWav.size < 50_000) {
+        throw new Error(
+          `The trimmed audio is only ${trimmedWav.size} bytes — the trim range may be empty (start ${trim.startSec.toFixed(1)}s → end ${trim.endSec.toFixed(1)}s). Go back, drag the trim handles to cover at least 10 seconds of audible audio, and try again.`,
+        )
+      }
 
       // Analysis runs exclusively through the desktop sidecar — the
       // root layout redirects unreachable-sidecar sessions to /download
@@ -174,15 +190,34 @@
 
       if (!patched.ok) throw new Error(patched.errors.join('; '))
 
-      // Project-flow commit: materialize this song into the active project's
-      // folder before navigating to /edit, so autosave has a valid target.
+      // Project-flow persist before navigating to /edit, so the analyzed map
+      // is on disk regardless of autosave timing.
       if (isProjectFlow && get(projectStore).data) {
+        const ps = get(projectStore)
         const sm2 = get(songMap)
         if (!sm2) throw new Error('Internal: songMap missing after analysis')
         const sess = get(audioSession)
         const state = restorableSongState(sm2, sess.file ?? null)
+        // An existing project song (audio attached via the row's "Add audio")
+        // already owns a folder + manifest entry — update it in place.
+        // Calling commitNewSongToProject here would duplicate the song and
+        // leave the original unanalyzed, so re-opening it re-triggers analysis
+        // forever. Only a brand-new song (from the import flow, no active
+        // project song) needs a fresh folder allocated.
+        const isExistingSong =
+          ps.editingMode === 'project-song' &&
+          !!ps.activeSongFolder &&
+          !!ps.activeSongId &&
+          (ps.data?.songs.some(
+            (e) => e.folder === ps.activeSongFolder && e.id === ps.activeSongId,
+          ) ??
+            false)
         try {
-          await commitNewSongToProject(state)
+          if (isExistingSong) {
+            await updateActiveProjectSong(state)
+          } else {
+            await commitNewSongToProject(state)
+          }
         } catch (e) {
           throw new Error(e instanceof Error ? e.message : 'Could not save song into project')
         }

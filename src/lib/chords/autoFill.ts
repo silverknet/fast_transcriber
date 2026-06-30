@@ -145,6 +145,70 @@ function buildProposal(
   }
 }
 
+/**
+ * For a given beat in the song, look up the chord placed at the
+ * matching `(barOffsetWithinSection, indexInBar)` of an EARLIER same-kind
+ * section. Returns null when:
+ *   - the beat isn't inside any section
+ *   - no earlier same-kind section exists
+ *   - the earliest match's matching beat has no chord placed
+ *
+ * Used by the per-bar chord suggester to bias predictions toward
+ * "what the user already established for this section type." Pop
+ * songs reuse section chord patterns almost universally; this hook
+ * lets the suggestion engine consult that convention.
+ *
+ * The "EARLIER" choice (chronologically by `startBarIndex`) is
+ * deliberate: songs are typically built front-to-back, so by the time
+ * the user is in Verse 2, Verse 1 is fully chorded — that's the
+ * natural reference. Once Verse 2 also has chords, queries from
+ * Verse 3 still see Verse 1 first.
+ */
+export function sameKindChordAtMatchingBeat(
+  songMap: SongMap,
+  beatId: string,
+): ChordSymbol | null {
+  const beat = songMap.timeline.beats.find((b) => b.id === beatId)
+  if (!beat) return null
+  const currentBar = songMap.timeline.bars.find((b) => b.id === beat.barId)
+  if (!currentBar) return null
+  const currentSection = songMap.sections.find(
+    (s) =>
+      currentBar.index >= s.barRange.startBarIndex &&
+      currentBar.index <= s.barRange.endBarIndex,
+  )
+  if (!currentSection) return null
+
+  // Pick the earliest same-kind section that starts strictly before this one.
+  const earlierSameKind = songMap.sections
+    .filter(
+      (s) =>
+        s.kind === currentSection.kind &&
+        s.id !== currentSection.id &&
+        s.barRange.startBarIndex < currentSection.barRange.startBarIndex,
+    )
+    .sort((a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex)[0]
+  if (!earlierSameKind) return null
+
+  // Map current bar's position-within-section to the earlier section's bar.
+  const barOffset = currentBar.index - currentSection.barRange.startBarIndex
+  const sourceBarIndex = earlierSameKind.barRange.startBarIndex + barOffset
+  if (sourceBarIndex > earlierSameKind.barRange.endBarIndex) return null
+  const sourceBar = songMap.timeline.bars.find((b) => b.index === sourceBarIndex)
+  if (!sourceBar) return null
+
+  // Find the same-indexInBar beat in the source bar.
+  const sourceBeatId = sourceBar.beatIds.find((bid) => {
+    const b = songMap.timeline.beats.find((x) => x.id === bid)
+    return b && b.indexInBar === beat.indexInBar
+  })
+  if (!sourceBeatId) return null
+
+  // Look up the chord placed at that beat, if any.
+  const ev = songMap.harmony.find((h) => h.beatId === sourceBeatId)
+  return ev?.chord ?? null
+}
+
 /** Cap on number of proposals returned — keeps the cycle UI manageable. */
 export const MAX_AUTOFILL_CANDIDATES = 5
 

@@ -13,7 +13,8 @@
  * manifest, with rollback if anything in between fails.
  */
 import { get } from 'svelte/store'
-import type { ProjectFile, ProjectSongEntry } from './types'
+import type { ProjectAutoStems, ProjectFile, ProjectSongEntry } from './types'
+import { AUTO_STEM_NAMES } from './types'
 import {
   PROJECT_FILE_VERSION,
   PROJECT_SONGS_DIR,
@@ -28,12 +29,19 @@ import {
   SONG_PROJECT_FORMAT_VERSION,
 } from '$lib/songmap/persist'
 import type { RestorableSongState, SongMap } from '$lib/songmap'
+import {
+  audioReferenceFromImportedArtifact,
+  prepareImportedAudio,
+  type ImportedAudioArtifact,
+} from '$lib/audio/importedAudio'
+import { createEmptySongMap } from '$lib/songmap/factory'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
 import {
   createProject,
   createProjectSong,
   getProjectInfo,
   getProjectWavInfoBatch,
+  watchProjectForAutoStems,
   readProjectSong,
   readProjectSongAsset,
   removeProjectSong,
@@ -151,6 +159,7 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   }
   if (map.audio?.sha256) out.audioSha256 = map.audio.sha256
   if (map.audio?.durationSec !== undefined) out.audioDurationSec = map.audio.durationSec
+  if (map.audio?.fileName || map.audio?.originalPath) out.hasAudio = true
   return out
 }
 
@@ -167,6 +176,7 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   if (info.hasAls) out.hasAls = true
   if (info.hasCueTrack) out.hasCueTrack = true
   if (info.hasClickTrack) out.hasClickTrack = true
+  if (info.hasAudio) out.hasAudio = true
   if (typeof info.countInBeats === 'number' && info.countInBeats > 0) {
     out.countInBeats = info.countInBeats
   }
@@ -228,6 +238,7 @@ export async function createProjectOnDisk(parentPath: string, name: string): Pro
   setActiveProject(r.projectPath, r.manifest, {})
   writeLastProjectPath(r.projectPath)
   recordRecentProjectPath(r.projectPath)
+  void watchProjectForAutoStems(r.projectPath).catch(() => {})
   return r.manifest
 }
 
@@ -251,6 +262,10 @@ export async function openProjectByPath(projectPath: string): Promise<ProjectFil
   setActiveProject(projectPath, r.manifest, meta)
   writeLastProjectPath(projectPath)
   recordRecentProjectPath(projectPath)
+  // Hand the project to the sidecar's background stem daemon. Best-effort:
+  // the daemon only acts if the manifest opts in (`autoStems.enabled`), and a
+  // failure here must never block opening the project.
+  void watchProjectForAutoStems(projectPath).catch(() => {})
 
   const migrated = await migrateProjectSongsToV2(projectPath, r.manifest).catch((e) => {
     console.warn('[project] migration sweep failed:', e)
@@ -666,10 +681,82 @@ export async function commitNewSongToProject(state: RestorableSongState): Promis
   return { entry }
 }
 
+/**
+ * Persist the in-memory state of the **already-active** project song back to
+ * its existing folder. Unlike `commitNewSongToProject`, this allocates no new
+ * folder or manifest entry — it overwrites the active song's `song.smap` in
+ * place.
+ *
+ * Used by the analyze flow when the song already lives in the project (audio
+ * was attached via the project row's "Add audio"). Calling
+ * `commitNewSongToProject` there would duplicate the song; this updates it.
+ * Same write the debounced autosave performs, but synchronous and immediate
+ * so a fast navigation/reload right after analysis can't drop the result.
+ *
+ * Audio bytes are NOT rewritten — they already live on disk under
+ * `<song>/audio/` and `audio.originalPath` survives in the SongMap.
+ */
+export async function updateActiveProjectSong(state: RestorableSongState): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  if (
+    snap.editingMode !== 'project-song' ||
+    !snap.activeSongFolder ||
+    !snap.activeSongId
+  ) {
+    throw new Error('No active project song to update')
+  }
+  const entry = snap.data.songs.find(
+    (e) => e.folder === snap.activeSongFolder && e.id === snap.activeSongId,
+  )
+  if (!entry) throw new Error('Active song is no longer in the project manifest')
+
+  const blob = await exportRestorableStateAsSmapBlob(state)
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  const w = await writeProjectSong(snap.osPath, entry.folder, bytes)
+  if (!w.ok) throw new Error(`Could not write song.smap: ${w.error}`)
+
+  patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(state.songMap))
+}
+
 /** Strip path separators / control chars so a filename is safe inside `audio/`. */
 function sanitizeAudioFilename(name: string): string {
-  const cleaned = name.replace(/[/\\ -]/g, '_').trim()
+  const cleaned = name.replace(/[\/\\\x00-\x1f]/g, '_').trim()
   return cleaned.length > 0 ? cleaned : 'audio.bin'
+}
+
+/**
+ * Add a stub song (title only, no audio, empty timeline) to the active
+ * project. Lets the user pre-populate a setlist and come back later to
+ * drop the audio in via the analyze flow / "Open in editor" path.
+ *
+ * The .smap that lands on disk is the minimum the validator accepts:
+ * format version + metadata (title + timestamps) + empty timeline +
+ * empty sections + empty harmony + default cues. Once the user opens
+ * the song in the editor and uploads audio, the analyze flow fills in
+ * the timeline and stamps `audio.originalPath`.
+ */
+export async function createEmptySongInProject(
+  title: string,
+): Promise<{ entry: ProjectSongEntry }> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+
+  const map = createEmptySongMap()
+  map.metadata = { ...map.metadata, title: title.trim() || 'Untitled' }
+  const stateForPersist: RestorableSongState = { songMap: map, audioBlob: null }
+  const meta = metadataLiteFromSongMap(map)
+  const blob = await exportRestorableStateAsSmapBlob(stateForPersist)
+  const smapBytes = new Uint8Array(await blob.arrayBuffer())
+  const { entry, nextManifest } = await writeSongIntoProject(
+    snap.osPath,
+    snap.data,
+    smapBytes,
+    meta,
+  )
+  setProjectData(nextManifest)
+  patchMetadataForFolder(entry.folder, meta)
+  return { entry }
 }
 
 /**
@@ -877,12 +964,170 @@ export async function setSongHidden(songId: string, hidden: boolean): Promise<vo
   setProjectData(next)
 }
 
+/**
+ * Attach an audio file to an existing song that has no audio yet (typically
+ * a stub song from "Add empty"). One-shot: copies the bytes into
+ * `<song>/audio/<sanitized fileName>`, stamps the SongMap's `audio` block
+ * (fileName, mimeType, originalPath, source, trim covering the full clip),
+ * forces `metadata.analyzed = false` so the next "Open in editor" routes
+ * to `/analyzing`, and refreshes the project's lite-metadata cache so the
+ * row immediately shows the audio dot.
+ *
+ * Doesn't trigger analysis itself — that happens when the user opens the
+ * song. Lets the user attach to many songs in a row without spinning up
+ * the sidecar repeatedly.
+ */
+export async function attachImportedAudioToSong(
+  songId: string,
+  artifact: ImportedAudioArtifact,
+): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const entry = snap.data.songs.find((s) => s.id === songId)
+  if (!entry) throw new Error('Song not found in project')
+
+  const fileName = sanitizeAudioFilename(artifact.fileName || artifact.file?.name || 'audio.bin')
+  const subpath = artifact.alreadyWrittenSubpath ?? `audio/${fileName}`
+
+  if (!artifact.alreadyWrittenSubpath) {
+    if (!artifact.file) throw new Error('No audio bytes available to attach.')
+    const bytes = new Uint8Array(await artifact.file.arrayBuffer())
+    const w = await writeProjectSongAsset(snap.osPath, entry.folder, subpath, bytes)
+    if (!w.ok) throw new Error(`Could not write audio file: ${w.error}`)
+  }
+
+  // Read the existing .smap, stamp the audio block + analyzed=false, write back.
+  const r = await readProjectSong(snap.osPath, entry.folder)
+  if (!r.ok) throw new Error(`Could not read song.smap: ${r.error}`)
+  const smapBlob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+  const data = await decodeSmapFile(smapBlob)
+  const map = data.project.songMap
+  const updatedMap: SongMap = {
+    ...map,
+    metadata: {
+      ...map.metadata,
+      analyzed: false,
+      updatedAt: nowIso(),
+    },
+    audio: {
+      ...audioReferenceFromImportedArtifact(
+        {
+          ...artifact,
+          fileName,
+          mimeType: artifact.mimeType || artifact.file?.type || map.audio?.mimeType,
+          alreadyWrittenSubpath: subpath,
+        },
+        { startSec: 0, endSec: artifact.durationSec },
+      ),
+      originalPath: subpath,
+    },
+  }
+  const updatedProject = { ...data.project, songMap: updatedMap }
+  const reEncoded = await encodeSmapFile({ project: updatedProject })
+  const reEncodedBytes = new Uint8Array(await reEncoded.arrayBuffer())
+  const ww = await writeProjectSong(snap.osPath, entry.folder, reEncodedBytes)
+  if (!ww.ok) throw new Error(`Could not write song.smap: ${ww.error}`)
+
+  // Refresh the in-memory lite metadata so the project card flips its
+  // audio dot to ready immediately.
+  patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(updatedMap))
+}
+
+export async function attachAudioToSong(
+  songId: string,
+  audioFile: File,
+): Promise<void> {
+  let artifact: ImportedAudioArtifact
+  try {
+    artifact = await prepareImportedAudio(audioFile, { source: 'upload' })
+  } catch (e) {
+    throw new Error(
+      `Could not decode audio file: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+  await attachImportedAudioToSong(songId, artifact)
+}
+
+/**
+ * Rename a song in the active project. Rewrites `metadata.title` inside
+ * the song's `.smap` and refreshes the in-memory lite-metadata cache so
+ * the project view updates immediately.
+ *
+ * The folder name is intentionally NOT touched — it's also used as a
+ * stable id for stem refs, cloud links, and audio-asset paths, so
+ * mutating it would break a lot of resolution surfaces. Display title
+ * lives in the .smap; folder name stays a stable slug.
+ */
+export async function renameSongInProject(songId: string, newTitle: string): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const entry = snap.data.songs.find((s) => s.id === songId)
+  if (!entry) throw new Error('Song not found in project')
+
+  const trimmed = newTitle.trim() || 'Untitled'
+
+  // Read → mutate title → re-encode → write. Audio bytes (if any) survive
+  // because the encoder preserves the original SongProject shape.
+  const r = await readProjectSong(snap.osPath, entry.folder)
+  if (!r.ok) throw new Error(`Could not read song.smap: ${r.error}`)
+  const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+  const data = await decodeSmapFile(blob)
+  const oldTitle = data.project.songMap.metadata.title
+  if (oldTitle === trimmed) return // no-op
+
+  const updatedMap: SongMap = {
+    ...data.project.songMap,
+    metadata: {
+      ...data.project.songMap.metadata,
+      title: trimmed,
+      updatedAt: nowIso(),
+    },
+  }
+  const updatedProject = { ...data.project, songMap: updatedMap }
+  // v2 encoder never embeds audio (bytes live in `<song>/audio/<file>` on
+  // disk). Any audioBlob from legacy decode is dropped here; the on-disk
+  // audio file already covers v1→v2 carry-over.
+  const reEncoded = await encodeSmapFile({ project: updatedProject })
+  const bytes = new Uint8Array(await reEncoded.arrayBuffer())
+  const w = await writeProjectSong(snap.osPath, entry.folder, bytes)
+  if (!w.ok) throw new Error(`Could not write song.smap: ${w.error}`)
+
+  // Refresh the lite-metadata cache so the project list shows the new
+  // title without needing a full Refresh.
+  const lite = metadataLiteFromSongMap(updatedMap)
+  patchMetadataForFolder(entry.folder, lite)
+}
+
 export async function renameProject(newName: string): Promise<void> {
   const snap = get(project)
   if (!snap.osPath || !snap.data) throw new Error('No active project')
   const next: ProjectFile = {
     ...snap.data,
     name: newName.trim() || 'Untitled Project',
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/**
+ * Persist the project-wide auto stem-separation policy into the manifest.
+ * The background scheduler ([autoStems.ts]) reacts to the resulting
+ * `projectStore` change. Writing the manifest (not a song .smap) is correct
+ * — this is project-level config, like rename / reorder.
+ */
+export async function setProjectAutoStems(config: ProjectAutoStems): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    autoStems: {
+      enabled: config.enabled,
+      // De-dupe + drop anything not a known stem name; keep a stable order.
+      stems: AUTO_STEM_NAMES.filter((n) => config.stems.includes(n)),
+      quality: config.quality,
+    },
     updatedAt: nowIso(),
   }
   const w = await writeProjectManifest(snap.osPath, next)

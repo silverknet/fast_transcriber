@@ -7,11 +7,43 @@
  */
 
 import {
+  AUTO_STEM_NAMES,
+  AUTO_STEM_QUALITIES,
   PROJECT_FILE_VERSION,
   validateProjectFolderPath,
+  type AutoStemName,
+  type AutoStemQuality,
+  type ProjectAutoStems,
   type ProjectFile,
   type ProjectSongEntry,
 } from './types'
+
+/**
+ * Parse the optional `autoStems` block defensively. Unknown / malformed
+ * shapes return `undefined` (treated as "not configured") rather than
+ * failing the whole manifest — a future schema bump must not refuse to open
+ * the project. `stems` is filtered to known names + de-duplicated; an
+ * unknown `quality` falls back to `'balanced'`.
+ */
+function parseAutoStems(raw: unknown): ProjectAutoStems | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const enabled = o.enabled === true
+  const stems: AutoStemName[] = []
+  if (Array.isArray(o.stems)) {
+    for (const s of o.stems) {
+      if (typeof s === 'string' && (AUTO_STEM_NAMES as readonly string[]).includes(s)) {
+        const name = s as AutoStemName
+        if (!stems.includes(name)) stems.push(name)
+      }
+    }
+  }
+  const quality: AutoStemQuality =
+    typeof o.quality === 'string' && (AUTO_STEM_QUALITIES as readonly string[]).includes(o.quality)
+      ? (o.quality as AutoStemQuality)
+      : 'balanced'
+  return { enabled, stems, quality }
+}
 
 export class ProjectParseError extends Error {
   constructor(message: string) {
@@ -101,6 +133,8 @@ export function parseProjectJson(text: string): ProjectFile {
     }
   }
 
+  const autoStems = parseAutoStems(o.autoStems)
+
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: o.id,
@@ -109,5 +143,6 @@ export function parseProjectJson(text: string): ProjectFile {
     updatedAt: o.updatedAt,
     songs,
     ...(cloud ? { cloud } : {}),
+    ...(autoStems ? { autoStems } : {}),
   }
 }

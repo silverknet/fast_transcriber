@@ -77,6 +77,21 @@ export type CueSettings = {
   prependSec?: number
   template?: string
   language?: string
+  /**
+   * Optional override for the spoken pre-song announcement. When the cue
+   * mode is `'spoken'` (or a count-in is active and a spoken title plays),
+   * this string is what the TTS says. An empty / missing value falls back
+   * to `metadata.title`, preserving today's behaviour.
+   *
+   * Use case: the song's display title is `"Valerie (Amy Winehouse cover) — live"`
+   * but the announcement should just be `"Valerie."`. Independent field so
+   * editing the announcement doesn't rename the song everywhere else (project
+   * list, lead sheet, Ableton track names, etc.).
+   *
+   * Single source of truth for the speech text the user hears. Resolved at
+   * read time via `resolvedSpokenIntroText(sm)` in `cueTrackSpeechSchedule.ts`.
+   */
+  spokenIntroText?: string
 }
 
 /**
@@ -219,6 +234,21 @@ export type SongMapAppInfo = {
 export type SongMapTimeline = {
   bars: Bar[]
   beats: Beat[]
+  /**
+   * Snapshot of `{ bars, beats }` captured the last time a full
+   * analysis fragment was merged into this song. Provides a "Reset
+   * grid" affordance for users who edit the timeline and want to undo
+   * back to the analyzed baseline. Survives reloads (lives in `.smap`).
+   * Absent on legacy files that pre-date this field; the UI hides the
+   * Reset action when no snapshot is present.
+   *
+   * Intentionally NOT a full undo history — that lands later. For now
+   * this is a single revert point per song.
+   */
+  original?: {
+    bars: Bar[]
+    beats: Beat[]
+  }
 }
 
 /**
@@ -302,6 +332,12 @@ export type ChordHints = {
   generatedAt: string
   /** Bump when `chord_chroma.py` algorithm changes to force re-analysis. */
   analyzerVersion: number
+  /**
+   * Which audio source produced this cache. Lets the debug UI tell at a
+   * glance whether the cached chroma came from a clean harmonic stem or
+   * the muddy full mix. Absent on legacy v2 caches.
+   */
+  analyzerSource?: 'stems-other' | 'mix'
 }
 
 export type SongMapV1 = {

@@ -13,7 +13,7 @@
     ZoomIn,
     ZoomOut,
   } from '@lucide/svelte'
-  import { createAudioTransport, type TransportBindings } from '$lib/audio/audioTransport'
+  import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
   import {
@@ -61,6 +61,15 @@
     file = null,
     rangeStart = $bindable(0),
     rangeEnd = $bindable(0),
+    /**
+     * Fired once when the user finishes changing the trim selection (handle
+     * resize, body move, or fresh drag-create) — NOT on seek taps and NOT on
+     * every move frame. The `bind:rangeStart/rangeEnd` already track the live
+     * drag; this is the explicit "commit it" signal so the host can persist
+     * the trim into the SongMap without a per-pixel `$effect` bridge. The home
+     * trim flow leaves it unset and reads the bound values at Analyze time.
+     */
+    onSelectionCommit = undefined as ((start: number, end: number) => void) | undefined,
     ready = $bindable(false),
     variant = 'trim',
     beatGrid = null as BeatGridModel | null,
@@ -122,7 +131,58 @@
     onChordBeatInteract = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
+    /**
+     * Two-way bind: lets the parent reach the underlying <audio>
+     * element so volume slider / click-overlay scheduling can target
+     * the one element that actually plays. Parent just does
+     * `bind:audioElement={localAudioEl}` and uses it like a normal ref
+     * (attach event listeners via $effect, set .volume, read .currentTime).
+     * Single source of truth — no duplicate audio.
+     */
+    audioElement = $bindable<HTMLAudioElement | null>(null),
+    /**
+     * Centralised playback engine. Owns play / pause / click loop /
+     * count-in pre-roll / range-end auto-stop / volumes. The toolbar
+     * binds DIRECTLY to its fields (`bind:checked={controller.playWithClick}`,
+     * `bind:value={controller.clickVolume}`, etc.) — no parent-side
+     * $bindable bridge, no $effect sync, no race. When no controller
+     * is passed (the trim variant on the home page), we instantiate a
+     * local fallback so the binding still has a target.
+     */
+    controller: passedController = null as PlaybackController | null,
+    /**
+     * Grid mode: ghost ticks for the song's count-in beats, in
+     * original-time. Each tick = one pre-song click. When the user
+     * changes `countInBeats` 4 → 8 in the SongMap, this list rerenders
+     * and the user SEES 4 new ticks appear before bar 1. Empty array
+     * = no count-in or count-in not visible in the current viewport.
+     */
+    countInTicks = [] as { timeSec: number; downbeat: boolean }[],
+    /**
+     * Grid mode: index of the bar that currently anchors the song
+     * start. The bar with this index gets a persistent anchor icon;
+     * other bars show one only on hover. `null` when nothing is
+     * anchored yet (no beats analyzed).
+     */
+    songStartBarIndex = null as number | null,
+    /**
+     * Grid mode: click handler for the per-bar "Set as start" icon.
+     * Receives the bar's `index` (0-based). Undefined disables the
+     * affordance (e.g. in non-editable contexts).
+     */
+    onSetStartBar = undefined as ((barIndex: number) => void) | undefined,
   } = $props()
+
+  /**
+   * Local fallback controller so callers that don't pass one (the
+   * trim variant on the home page) keep working without forcing every
+   * caller to know the controller exists. With no songMap, the
+   * fallback's click loop and count-in pre-roll never fire, so
+   * behavior matches the pre-controller days for that surface.
+   */
+  const fallbackController = new PlaybackController()
+  const controller = $derived(passedController ?? fallbackController)
+  onDestroy(() => fallbackController.destroy())
 
   let isEditorVariant = $derived(variant === 'editor')
   let beatGridEditing = $derived(
@@ -205,9 +265,9 @@
   // —— Canonical transport state (single source of truth for UI + head) ——
   /** Authoritative editor duration consumed by selection / viewport / transport / geometry. */
   let timelineSec = $state(0)
-  /** Seconds; ONLY updated from `HTMLAudioElement.currentTime` (rAF while playing, sync when paused). */
-  let currentTime = $state(0)
-  let isPlaying = $state(false)
+  /** Mirrored from the controller's rAF-driven `currentTime` (or 0 before mount). */
+  let currentTime = $derived(controller.currentTime)
+  let isPlaying = $derived(controller.isPlaying)
   let mediaReady = $state(false)
 
   // —— Waveform assets ——
@@ -243,7 +303,25 @@
 
   const displayH = 144
   const minimapH = 52
-  const transport = createAudioTransport()
+
+  // Mirror our internal <audio> ref out to the parent via $bindable.
+  // Parent does its own bind:this gymnastics through audioElement
+  // and we stay free of "click bridge" / "volume bridge" props.
+  $effect(() => {
+    audioElement = audioEl ?? null
+  })
+
+  // Hand the audio element (back-compat) AND the decoded `AudioBuffer`
+  // to the controller. The buffer is what actually drives playback
+  // (buffer-based, single Web Audio context — same architecture as
+  // `MixerEngine`); the element is kept around purely for the blob URL
+  // lifetime and any host that wants to inspect it.
+  $effect(() => {
+    controller?.setAudioElement(audioEl ?? null)
+  })
+  $effect(() => {
+    controller?.setAudioBuffer(decodedAudioBuffer)
+  })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */
   let detailMode = $state('idle')
@@ -307,25 +385,6 @@
   let minimapHoverTarget = $state('outside')
   let pendingMainPeaksRecompute = false
 
-  /**
-   * Transport bindings. `currentTime` is only written here (via setCurrentTime), in
-   * commitMediaTiming when paused, load/reset — not from timeupdate while playing (see onTimeUpdateSparse).
-   */
-  function tbind(): TransportBindings {
-    return {
-      getAudio: () => audioEl,
-      getDuration: () => timelineSec,
-      getRange: () => ({ start: rangeStart, end: rangeEnd }),
-      setCurrentTime: (t) => {
-        currentTime = t
-      },
-      getIsPlaying: () => isPlaying,
-      setIsPlaying: (v) => {
-        isPlaying = v
-      },
-    }
-  }
-
   /** Grid mode: seek to selected bar start when selection changes (same as before). */
   $effect(() => {
     if (timelineStripMode !== 'grid' || !beatGridEditing || !selectedBarId || !beatGrid) return
@@ -334,7 +393,7 @@
     const d = timelineSec
     if (!(d > 0) || !mediaReady) return
     const t = Math.min(Math.max(0, bar.startSec), d)
-    transport.seek(tbind(), t)
+    controller.seek(t)
   })
 
   /** Sections mode: seek after pointer-up (selection commit), not on every drag frame. */
@@ -342,7 +401,7 @@
     if (!beatGridEditing || !mediaReady) return
     const d = timelineSec
     if (!(d > 0)) return
-    transport.seek(tbind(), Math.min(Math.max(0, timeSec), d))
+    controller.seek(Math.min(Math.max(0, timeSec), d))
   }
 
   // —— Pure layout: time ↔ x uses the visible window [layoutViewStart, layoutViewEnd] ——
@@ -839,11 +898,15 @@
     const v = clampViewportToTimeline(d, viewStart, viewEnd, MIN_VIEW_SPAN_SEC)
     viewStart = v.start
     viewEnd = v.end
-    // While playing, only rAF reads the element clock — avoid a stray metadata callback resetting UI time.
+    // While playing, only rAF reads the element clock — avoid a stray
+    // metadata callback resetting UI time. When paused, sync the
+    // controller's mirrored `currentTime` to the actual element
+    // currentTime via `seek()` so the playhead doesn't drift after a
+    // load / resize / range commit.
     if (!isPlaying && audioEl) {
       let t = audioEl.currentTime
       if (Number.isFinite(d) && d > 0) t = Math.min(Math.max(0, t), d)
-      currentTime = t
+      controller.seek(t)
     }
   }
 
@@ -878,7 +941,6 @@
     decodedAudioBuffer = null
     timelineSec = 0
     decodedDuration = 0
-    transport.stopRaf()
 
     if (objectUrl) {
       URL.revokeObjectURL(objectUrl)
@@ -886,8 +948,7 @@
     }
     if (audioEl) {
       audioEl.pause()
-      isPlaying = false
-      currentTime = 0
+      controller.seek(0)
     }
 
     const ac = new AudioContext()
@@ -963,7 +1024,6 @@
       viewEnd = 0
       timelineSec = 0
       decodedDuration = 0
-      transport.stopRaf()
       loadGeneration += 1
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl)
@@ -1153,13 +1213,11 @@
 
   $effect(() => {
     return () => {
-      transport.destroy()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   })
 
   onDestroy(() => {
-    transport.destroy()
     if (mainPeaksRafId) cancelAnimationFrame(mainPeaksRafId)
   })
 
@@ -1247,7 +1305,7 @@
     detailMode = 'maybe-seek'
     scrubPreviewTime = t
     resumePlaybackAfterWaveGesture = isPlaying
-    if (isPlaying) transport.pause(tbind())
+    if (isPlaying) controller.pause()
     attachPointerTracking(e, { capture: false, preventDefault: false })
   }
 
@@ -1314,12 +1372,18 @@
     const seekTap =
       detailMode === 'maybe-seek' &&
       detailSession.pointerTravelMax <= TAP_VS_SELECT_PX
+    // The selection only moved in these modes; a seek tap leaves it untouched.
+    const changedSelection =
+      detailMode === 'create-selection' ||
+      detailMode === 'resize-selection-left' ||
+      detailMode === 'resize-selection-right' ||
+      detailMode === 'move-selection'
     if (seekTap) {
-      transport.seek(tbind(), timeAtClientX(e.clientX))
+      controller.seek(timeAtClientX(e.clientX))
     }
     scrubPreviewTime = null
     if (resumePlaybackAfterWaveGesture) {
-      transport.play(tbind())
+      controller.play()
     }
     resumePlaybackAfterWaveGesture = false
     detailSession.onSelectionBody = false
@@ -1328,6 +1392,7 @@
       pendingMainPeaksRecompute = false
       flushMainPeaksUpdate()
     }
+    if (changedSelection) onSelectionCommit?.(rangeStart, rangeEnd)
   }
 
   function onWavePointerDown(e) {
@@ -1390,15 +1455,26 @@
     }
   }
 
-  /** Pause: stay at current time. Play: from current head (clamped into selection if needed). */
+  /**
+   * Pause: stay at current time. Play: from current head (clamped into
+   * selection if needed). Click loop + count-in pre-roll lives in the
+   * `PlaybackController`; we just dispatch intents.
+   */
   function togglePlay() {
     if (!audioEl || !mediaReady || !(timelineSec > 0)) return
     if (isPlaying) {
-      transport.pause(tbind())
+      controller.pause()
       return
     }
-    transport.ensurePlayheadInRange(tbind())
-    transport.play(tbind())
+    // Clamp the playhead into the [rangeStart, rangeEnd] selection
+    // before calling play(); without this, hitting Play with the head
+    // outside the selection auto-stops at `rangeEnd - 0.02` on the
+    // very next frame (the controller's transport rAF) and looks like
+    // "play does nothing".
+    if (controller.currentTime < rangeStart || controller.currentTime >= rangeEnd - 0.02) {
+      controller.seek(rangeStart)
+    }
+    controller.play()
   }
 
   function keyTargetIsEditable(target: EventTarget | null): boolean {
@@ -1423,22 +1499,7 @@
   /** Stop: pause and jump to the start of the selection (purple). Next Play begins there. */
   function stopPlayback() {
     if (!audioEl || !mediaReady || !(timelineSec > 0)) return
-    transport.pause(tbind())
-    transport.seek(tbind(), rangeStart)
-  }
-
-  function onAudioPlay() {
-    transport.onPlay(tbind())
-  }
-
-  function onAudioPause() {
-    transport.onPause(tbind())
-  }
-
-  /** Sparse `timeupdate` — only when paused (rAF owns the clock during playback). */
-  function onTimeUpdateSparse() {
-    if (isPlaying) return
-    transport.syncPausedFromElement(tbind())
+    controller.stop()
   }
 
   function onLoadedMetadata() {
@@ -1487,10 +1548,6 @@
     onerror={onAudioError}
     onloadedmetadata={onLoadedMetadata}
     oncanplay={onCanPlay}
-    ontimeupdate={onTimeUpdateSparse}
-    onplay={onAudioPlay}
-    onpause={onAudioPause}
-    onended={onAudioPause}
   ></audio>
 
   <div class="flex w-full min-w-0 flex-col gap-3">
@@ -1523,6 +1580,121 @@
         <Square class="size-4" aria-hidden="true" />
         Stop
       </Button>
+      {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0}
+        <!-- Toolbar-level click toggle + volume popover. State is
+             $bindable, parent owns the click-loop logic. -->
+        <label
+          class="border-foreground/40 hover:bg-foreground/5 ml-1 flex shrink-0 cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs"
+          title="Play clicks alongside the audio (and count-in if configured)"
+        >
+          <input
+            type="checkbox"
+            bind:checked={controller.playWithClick}
+            class="accent-foreground size-3.5"
+          />
+          <span class="font-bold uppercase tracking-wider">Click</span>
+        </label>
+        <details class="relative">
+          <summary
+            class="border-foreground/40 hover:bg-foreground/5 inline-flex h-7 cursor-pointer list-none items-center gap-1 border-2 px-2 text-xs font-bold uppercase tracking-wider marker:content-none [&::-webkit-details-marker]:hidden"
+            title="Volume"
+          >
+            Vol
+          </summary>
+          <div
+            class="border-foreground bg-background absolute right-0 top-9 z-20 flex w-64 flex-col gap-4 border-2 px-4 py-3 shadow-lg"
+            role="dialog"
+            aria-label="Volume and click sync"
+          >
+            <div class="flex items-end justify-around gap-4">
+              <div class="flex flex-col items-center gap-1">
+                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
+                <div class="relative h-24 w-6">
+                  <input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.05"
+                    bind:value={controller.clickVolume}
+                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                    aria-label="Click volume"
+                  />
+                </div>
+                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{controller.clickVolume.toFixed(1)}×</span>
+              </div>
+              <div class="flex flex-col items-center gap-1">
+                <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
+                <div class="relative h-24 w-6">
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    bind:value={controller.songVolume}
+                    class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
+                    aria-label="Song volume"
+                  />
+                </div>
+                <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(controller.songVolume * 100)}%</span>
+              </div>
+            </div>
+            <!-- Click sync calibration. Default 0 is what the engine
+                 considers correct after routing audio + clicks through
+                 the same Web Audio context. The slider is a fine-tune
+                 escape hatch for unusual output chains (Bluetooth
+                 latency, USB interfaces, etc.) — IF clicks ever feel
+                 off relative to the waveform. Snaps to zero in the
+                 ±2 ms detent so it’s easy to recenter. Saved per
+                 device (it’s an output-chain property, not a song
+                 property). The "Log timing" toggle prints scheduling
+                 numbers to DevTools so we can verify drift instead of
+                 ear-balling it. -->
+            <div class="border-foreground/10 flex flex-col gap-2 border-t pt-3">
+              <div class="flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wider">
+                <span class="text-muted-foreground">Click sync</span>
+                <span
+                  class="font-mono tabular-nums {controller.clickOffsetSec === 0 ? 'text-muted-foreground' : 'text-foreground'}"
+                >
+                  {controller.clickOffsetSec === 0 ? '0 ms' : `${controller.clickOffsetSec > 0 ? '+' : ''}${(controller.clickOffsetSec * 1000).toFixed(0)} ms`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="-0.05"
+                max="0.05"
+                step="0.001"
+                value={controller.clickOffsetSec}
+                oninput={(e) => {
+                  const raw = Number((e.currentTarget as HTMLInputElement).value)
+                  controller.clickOffsetSec = Math.abs(raw) < 0.002 ? 0 : raw
+                }}
+                ondblclick={() => (controller.clickOffsetSec = 0)}
+                class="accent-foreground w-full cursor-pointer"
+                aria-label="Click offset (seconds, ±50ms; snaps to zero inside ±2 ms; double-click to reset)"
+              />
+              <div class="flex items-center justify-between gap-2 text-[10px]">
+                <button
+                  type="button"
+                  onclick={() => (controller.clickOffsetSec = 0)}
+                  disabled={controller.clickOffsetSec === 0}
+                  class="border-foreground/40 hover:bg-foreground/5 disabled:opacity-40 border px-1.5 py-0.5 uppercase tracking-wider"
+                >
+                  Reset
+                </button>
+                <label class="flex cursor-pointer items-center gap-1.5 uppercase tracking-wider">
+                  <input type="checkbox" bind:checked={controller.debugClickTiming} class="size-3" />
+                  <span class="text-muted-foreground">Log to console</span>
+                </label>
+              </div>
+              <p class="text-muted-foreground text-[10px] leading-snug">
+                Leave at 0 — engine targets perfect sync with the waveform.
+                Only nudge if clicks feel off through specific headphones /
+                speakers; the value is saved per device.
+              </p>
+            </div>
+          </div>
+        </details>
+      {/if}
       <span class="text-muted-foreground font-mono text-xs tabular-nums">
         {formatTime(currentTime)} / {formatTime(timelineSec)}
       </span>
@@ -1661,6 +1833,9 @@
           onResizeSection={onResizeSection}
           onResizeBoundary={onResizeBoundary}
           audioBorderTicks={audioBorderTicks}
+          countInTicks={countInTicks}
+          songStartBarIndex={songStartBarIndex}
+          onSetStartBar={onSetStartBar}
         />
         {#if beatGridEditing && timelineStripMode === 'grid' && onBarGridAction}
           <div

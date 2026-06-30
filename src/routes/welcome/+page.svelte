@@ -48,19 +48,19 @@
       bg, BANNER_COLOR text floats over the page.
     -->
     <div class="text-background flex-1 overflow-hidden" style="background-color: var(--banner);">
-      <div class="marquee-up flex flex-col items-center font-black italic uppercase leading-none text-[2.25rem] md:text-[3.7rem]">
+      <div class="marquee-up font-display flex flex-col items-center font-black italic uppercase leading-none text-[2.25rem] md:text-[3.7rem]">
         {#each WORDS as _, i (i)}<span class="rotate-text">BarBro</span>{/each}
         {#each WORDS as _, i (i)}<span class="rotate-text">BarBro</span>{/each}
       </div>
     </div>
     <div class="flex-1 overflow-hidden">
-      <div class="marquee-down flex flex-col items-center font-black italic uppercase leading-none text-[2.25rem] md:text-[3.7rem]" style="color: var(--banner);">
+      <div class="marquee-down font-display flex flex-col items-center font-black italic uppercase leading-none text-[2.25rem] md:text-[3.7rem]" style="color: var(--banner);">
         {#each WORDS as _, i (i)}<span class="rotate-text">BarBro</span>{/each}
         {#each WORDS as _, i (i)}<span class="rotate-text">BarBro</span>{/each}
       </div>
     </div>
     <div class="text-background flex-1 overflow-hidden" style="background-color: var(--banner);">
-      <div class="marquee-up flex flex-col items-center font-black italic uppercase leading-none text-[2.25rem] md:text-[3.7rem]">
+      <div class="marquee-up font-display flex flex-col items-center font-black italic uppercase leading-none text-[2.25rem] md:text-[3.7rem]">
         {#each WORDS as _, i (i)}<span class="rotate-text">BarBro</span>{/each}
         {#each WORDS as _, i (i)}<span class="rotate-text">BarBro</span>{/each}
       </div>
@@ -71,12 +71,18 @@
     class="mx-auto flex w-full max-w-5xl flex-col gap-10 px-6 py-16 sm:mx-0 sm:ml-[calc(12%+12rem)] sm:w-[40vw] sm:py-24 md:ml-[calc(20%+14rem)]"
   >
     <div class="flex items-center gap-3 text-xs font-bold uppercase tracking-[0.2em]">
-      <span class="border-foreground border-2 px-2 py-1">BarBro</span>
+      <!-- BAR / BRO mark — same baseline-offset + peach gradient as the
+           menubar and debug-route hero. Sits in the chip slot above the
+           welcome headline. -->
+      <span class="welcome-logo inline-flex border-foreground border-2 rounded-[var(--radius)] px-2 py-1">
+        <span class="welcome-logo-bar">BAR</span>
+        <span class="welcome-logo-bro">BRO</span>
+      </span>
       <span class="text-muted-foreground">invite-only beta</span>
     </div>
 
     <div class="space-y-6">
-      <h1 class="text-[clamp(2.5rem,8vw,5.5rem)] font-black leading-[0.95] tracking-tight">
+      <h1 class="font-display text-[clamp(2.5rem,8vw,5.5rem)] font-black leading-[0.95] tracking-tight">
         Your set in one place.
       </h1>
       <p class="text-muted-foreground max-w-xl text-lg sm:text-xl">
@@ -123,6 +129,33 @@
 </main>
 
 <style>
+  /* BAR / BRO mark — same offset + peach gradient as the menubar and
+     debug-route hero, scaled down for the chip slot. */
+  .welcome-logo {
+    align-items: baseline;
+    gap: 0.04em;
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.04em;
+    color: var(--foreground);
+  }
+  .welcome-logo-bar,
+  .welcome-logo-bro {
+    display: inline-block;
+  }
+  .welcome-logo-bar {
+    transform: translateY(0.1em);
+  }
+  .welcome-logo-bro {
+    transform: translateY(-0.1em);
+    background: linear-gradient(135deg, #ffcec2, #f08a76);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
   /*
     Marquee loop pattern: render the repeated content TWICE inside the
     scrolling div (40 + 40 = 80 spans). A 50% translate brings the second

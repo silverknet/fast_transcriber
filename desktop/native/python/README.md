@@ -4,8 +4,9 @@ These scripts live **only** under `desktop/native/python/`. They are **not** imp
 
 | Folder | Role | Origin |
 |--------|------|--------|
-| `beats/` | Downbeat JSON (`madmom`) | Logic aligned with BarBro server [`analyze_downbeats.py`](../../../src/lib/server/analysis/python/analyze_downbeats.py) — maintained here for desktop spawn |
+| `beats/` | Downbeat JSON (`madmom`) | Desktop-sidecar analyzer used by `/native/analyze-downbeats` |
 | `stems/` | Demucs CLI wrapper | Derived from the sibling **frequency_domain** repo (`stem_splitter.py`) separation logic (no Tk UI) |
+| `youtube/` | YouTube audio import | `yt-dlp` + managed ffmpeg wrapper; downloads best audio and converts it to PCM WAV |
 | `piper_tts/` | Piper ONNX TTS (`piper-tts` wheel) | Isolated venv + `synthesize_wav.py`; voice files downloaded to userData by the sidecar — see [`piper_tts/README.md`](piper_tts/README.md) |
 
 ## Virtual environments (recommended)
@@ -40,4 +41,6 @@ desktop/.venv-stems/bin/pip install -r desktop/native/python/stems/requirements.
 ./desktop/.venv-beats/bin/python3 desktop/native/python/beats/analyze_downbeats.py /path/to/audio.wav
 
 ./desktop/.venv-stems/bin/python3 desktop/native/python/stems/demucs_separate.py /path/to/song.wav --out-dir /tmp/stems-out
+
+python3 desktop/native/python/youtube/import_audio.py 'https://www.youtube.com/watch?v=VIDEO_ID' --work-dir /tmp/barbro-youtube --output-wav /tmp/barbro-youtube/audio.wav
 ```

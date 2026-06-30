@@ -18,6 +18,9 @@ const ANALYZE_DOWNBEATS_URL = `${BASE_URL}/native/analyze-downbeats`
 const SUGGEST_SECTION_BORDERS_URL = `${BASE_URL}/native/suggest-section-borders`
 const ANALYZE_CHORD_CHROMA_URL = `${BASE_URL}/native/analyze-chord-chroma`
 const SEPARATE_STEMS_URL = `${BASE_URL}/native/separate-stems`
+const YOUTUBE_IMPORT_SETUP_STATUS_URL = `${BASE_URL}/native/setup/youtube-import/status`
+const YOUTUBE_IMPORT_SETUP_URL = `${BASE_URL}/native/setup/youtube-import`
+const YOUTUBE_IMPORT_URL = `${BASE_URL}/native/import/youtube`
 const PIPER_TTS_SETUP_STATUS_URL = `${BASE_URL}/native/setup/piper-tts/status`
 const PIPER_TTS_SETUP_URL = `${BASE_URL}/native/setup/piper-tts`
 const TTS_HELLO_WORLD_URL = `${BASE_URL}/native/tts/hello-world`
@@ -195,9 +198,44 @@ export async function analyzeChordChromaViaDesktop(
   // Beats can be 1000+ entries on a long song — JSON-as-header would blow
   // past Node's 8 KB header cap (HTTP 431). Body is unlimited.
   const beatsJson = new TextEncoder().encode(JSON.stringify({ beats }))
+  return await postAnalyzeChordChroma(beatsJson, wavBlob, signal)
+}
+
+/**
+ * Stem-source variant: ask the sidecar to read a specific audio file off
+ * disk (typically the demucs "other" stem) instead of round-tripping the
+ * full mix WAV through HTTP.
+ *
+ * Big accuracy win: feeding only the harmonic stem strips out drums +
+ * vocals that otherwise dominate the chroma. The sidecar enforces that
+ * `stemAbsPath` is absolute + readable; the caller is responsible for
+ * making sure it points at a sane file (typically resolved from
+ * `<projectPath>/<songFolder>/stems/best/other.{wav,mp3}` via the
+ * project store's `stemRefs`).
+ */
+export async function analyzeChordChromaViaDesktopWithStem(
+  stemAbsPath: string,
+  beats: ChordChromaBeatInput[],
+  signal?: AbortSignal,
+): Promise<AnalyzeChordChromaResult> {
+  const beatsJson = new TextEncoder().encode(JSON.stringify({ beats, stemAbsPath }))
+  // Empty audio body — sidecar reads the file off disk.
+  return await postAnalyzeChordChroma(beatsJson, new Blob([]), signal)
+}
+
+async function postAnalyzeChordChroma(
+  beatsJson: Uint8Array,
+  audioBlob: Blob,
+  signal?: AbortSignal,
+): Promise<AnalyzeChordChromaResult> {
+  const blobPartFromBytes = (bytes: Uint8Array): ArrayBuffer => {
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    return copy.buffer as ArrayBuffer
+  }
   const lenPrefix = new Uint8Array(4)
   new DataView(lenPrefix.buffer).setUint32(0, beatsJson.byteLength, true)
-  const body = new Blob([lenPrefix, beatsJson, wavBlob], {
+  const body = new Blob([blobPartFromBytes(lenPrefix), blobPartFromBytes(beatsJson), audioBlob], {
     type: 'application/octet-stream',
   })
 
@@ -319,6 +357,45 @@ export type StemSeparationEvent =
   | { type: 'state'; state: StemJobState }
   | { type: 'cleanup'; jobId: string }
 
+export type YoutubeImportArtifactMetadata = {
+  fileName: string
+  mimeType: 'audio/wav'
+  durationSec: number
+  sampleRate: number
+  channels: number
+  fileSize: number
+  sha256: string
+  originalSha256: string
+  source: 'import'
+  tempArtifactUrl?: string
+  projectSubpath?: string
+  titleHint?: string
+}
+
+export type YoutubeImportEvent =
+  | { type: 'log'; msg: string }
+  | {
+      type: 'progress'
+      phase?: 'metadata' | 'download' | 'convert' | 'finalize'
+      label: string
+      current: number
+      overall: number
+    }
+  | { type: 'done'; artifact: YoutubeImportArtifactMetadata }
+  | { type: 'error'; code?: string; msg: string }
+  | { type: 'state'; state: StemJobState }
+  | { type: 'cleanup'; jobId: string }
+
+export type DesktopJobEvent = StemSeparationEvent | YoutubeImportEvent
+
+export type YoutubeImportOutput =
+  | { kind: 'temp' }
+  | { kind: 'project-audio'; projectPath: string; songFolder: string }
+
+export type EnqueueYoutubeImportResult =
+  | { ok: true; jobId: string; queuePosition: number }
+  | { ok: false; code?: string; error: string }
+
 export type EnqueueStemsOptions = {
   /**
    * Absolute OS path the sidecar reads. Either a regular audio file or a
@@ -387,6 +464,63 @@ export async function enqueueStemSeparation(opts: EnqueueStemsOptions): Promise<
   return { ok: true, jobId: o.jobId, queuePosition: o.queuePosition ?? 0 }
 }
 
+export async function enqueueYoutubeImport(args: {
+  url: string
+  output: YoutubeImportOutput
+}): Promise<EnqueueYoutubeImportResult> {
+  let res: Response
+  try {
+    res = await fetch(YOUTUBE_IMPORT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+      cache: 'no-store',
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+  let data: unknown
+  try {
+    data = await res.json()
+  } catch {
+    return { ok: false, error: `Desktop sidecar returned non-JSON (HTTP ${res.status})` }
+  }
+  const o = data as { ok?: boolean; jobId?: string; queuePosition?: number; code?: string; error?: string }
+  if (!res.ok || o.ok !== true || !o.jobId) {
+    return { ok: false, code: o.code, error: o.error ?? `YouTube import failed (HTTP ${res.status})` }
+  }
+  return { ok: true, jobId: o.jobId, queuePosition: o.queuePosition ?? 0 }
+}
+
+export async function fetchYoutubeImportArtifact(
+  artifact: YoutubeImportArtifactMetadata,
+): Promise<{ ok: true; file: File } | { ok: false; error: string }> {
+  if (!artifact.tempArtifactUrl) return { ok: false, error: 'Imported audio has no fetch URL' }
+  const url = new URL(artifact.tempArtifactUrl, BASE_URL)
+  let res: Response
+  try {
+    res = await fetch(url.toString(), { cache: 'no-store' })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  if (!res.ok) {
+    let err = `Could not fetch imported audio (HTTP ${res.status})`
+    try {
+      const j = (await res.json()) as { error?: string }
+      if (j.error) err = j.error
+    } catch {
+      /* keep default */
+    }
+    return { ok: false, error: err }
+  }
+  const blob = await res.blob()
+  return {
+    ok: true,
+    file: new File([blob], artifact.fileName, { type: artifact.mimeType }),
+  }
+}
+
 /**
  * Subscribe to the NDJSON progress stream for a job. The desktop sidecar
  * replays the full event buffer first, then streams new events live; the
@@ -394,9 +528,9 @@ export async function enqueueStemSeparation(opts: EnqueueStemsOptions): Promise<
  *
  * Returns a `disconnect()` function the caller can invoke to abort early.
  */
-export function subscribeToJobEvents(
+export function subscribeToJobEvents<TEvent extends DesktopJobEvent = StemSeparationEvent>(
   jobId: string,
-  onEvent: (ev: StemSeparationEvent) => void,
+  onEvent: (ev: TEvent) => void,
   onError?: (err: Error) => void,
 ): () => void {
   const ctrl = new AbortController()
@@ -422,11 +556,11 @@ export function subscribeToJobEvents(
     const handle = (line: string) => {
       const trimmed = line.trim()
       if (!trimmed) return
-      let ev: StemSeparationEvent
+      let ev: TEvent
       try {
-        ev = JSON.parse(trimmed) as StemSeparationEvent
+        ev = JSON.parse(trimmed) as TEvent
       } catch {
-        ev = { type: 'log', msg: trimmed }
+        ev = { type: 'log', msg: trimmed } as TEvent
       }
       onEvent(ev)
     }
@@ -453,11 +587,13 @@ export function subscribeToJobEvents(
 
 export type DesktopJobView = {
   jobId: string
+  kind?: 'stems' | 'youtube-import'
   /** Optional songId the web client passed at enqueue time. */
   songId: string | null
   state: StemJobState
   files: string[]
   options: { model: string; shifts: number; overlap: number; stems: string }
+  artifact?: YoutubeImportArtifactMetadata | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -622,18 +758,31 @@ export async function importHydrationPackViaDesktop(args: {
 
 /** Snapshot of all known jobs on the sidecar. Useful on reload. */
 export async function listJobsViaDesktop(): Promise<DesktopJobView[]> {
+  const r = await listJobsResult()
+  return r.ok ? r.jobs : []
+}
+
+/**
+ * Like `listJobsViaDesktop` but distinguishes "sidecar said zero jobs" from
+ * "couldn't reach the sidecar". Callers that REAP state on absence (e.g. the
+ * orphaned-job reaper) must use this — treating an unreachable blip as "no
+ * jobs" would wrongly kill live jobs.
+ */
+export async function listJobsResult(): Promise<
+  { ok: true; jobs: DesktopJobView[] } | { ok: false }
+> {
   let res: Response
   try {
     res = await fetch(`${BASE_URL}/native/jobs`, { cache: 'no-store' })
   } catch {
-    return []
+    return { ok: false }
   }
-  if (!res.ok) return []
+  if (!res.ok) return { ok: false }
   try {
     const data = (await res.json()) as { ok?: boolean; jobs?: DesktopJobView[] }
-    return Array.isArray(data.jobs) ? data.jobs : []
+    return { ok: true, jobs: Array.isArray(data.jobs) ? data.jobs : [] }
   } catch {
-    return []
+    return { ok: false }
   }
 }
 
@@ -799,6 +948,98 @@ export async function setupStemsDeps(
 
   if (errorMsg) return { ok: false, error: errorMsg }
   if (!venvPython) return { ok: false, error: 'Setup did not report a venv path' }
+  return { ok: true, venvPython }
+}
+
+export type YoutubeImportSetupStatus =
+  | {
+      ok: true
+      ready: true
+      venvDir: string
+      venvPython: string
+      ytDlpVersion?: string
+      ffmpegReady: true
+    }
+  | {
+      ok: true
+      ready: false
+      venvDir: string
+      venvPython: string | null
+      reason?: string
+    }
+
+export async function getYoutubeImportSetupStatus(): Promise<YoutubeImportSetupStatus | null> {
+  try {
+    const res = await fetch(YOUTUBE_IMPORT_SETUP_STATUS_URL, { cache: 'no-store' })
+    if (!res.ok) return null
+    return (await res.json()) as YoutubeImportSetupStatus
+  } catch {
+    return null
+  }
+}
+
+export type SetupYoutubeImportResult =
+  | { ok: true; venvPython: string }
+  | { ok: false; error: string }
+
+export async function setupYoutubeImportDeps(
+  onEvent: (ev: StemsSetupEvent) => void,
+  signal?: AbortSignal,
+): Promise<SetupYoutubeImportResult> {
+  let res: Response
+  try {
+    res = await fetch(YOUTUBE_IMPORT_SETUP_URL, {
+      method: 'POST',
+      cache: 'no-store',
+      signal,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+  if (!res.ok || !res.body) {
+    return { ok: false, error: `Audio import setup failed (HTTP ${res.status})` }
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let venvPython: string | null = null
+  let errorMsg: string | null = null
+
+  const handle = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let ev: StemsSetupEvent
+    try {
+      ev = JSON.parse(trimmed) as StemsSetupEvent
+    } catch {
+      ev = { type: 'log', msg: trimmed }
+    }
+    if (ev.type === 'done') venvPython = ev.venvPython
+    else if (ev.type === 'error') errorMsg = ev.msg
+    onEvent(ev)
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx = buffer.indexOf('\n')
+      while (idx !== -1) {
+        handle(buffer.slice(0, idx))
+        buffer = buffer.slice(idx + 1)
+        idx = buffer.indexOf('\n')
+      }
+    }
+    if (buffer.trim()) handle(buffer)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Audio import setup interrupted: ${msg}` }
+  }
+
+  if (errorMsg) return { ok: false, error: errorMsg }
+  if (!venvPython) return { ok: false, error: 'Audio import setup did not report readiness' }
   return { ok: true, venvPython }
 }
 

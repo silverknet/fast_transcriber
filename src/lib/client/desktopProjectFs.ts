@@ -26,6 +26,12 @@ export interface ProjectSongMetadataInfo {
   bpm?: number
   /** Count-in beats when `cues.mode === 'countIn'`; 0/absent otherwise. */
   countInBeats?: number
+  /**
+   * True when the song's `.smap` names an audio source (`audio.fileName`
+   * or `audio.originalPath`). Stub songs added via "Add empty" have no
+   * `audio` block at all — these report `hasAudio !== true`.
+   */
+  hasAudio?: boolean
   stemRefs?: StemRefs
   hasSmap: boolean
   hasAls: boolean
@@ -92,6 +98,16 @@ export async function createProject(parentPath: string, name: string): Promise<C
 
 export async function getProjectInfo(projectPath: string): Promise<ProjectInfoResult> {
   return await postJson<ProjectInfoResult>(`${BASE_URL}/native/project/info`, { projectPath })
+}
+
+/**
+ * Register a project with the sidecar's background auto-stems daemon. The
+ * daemon reads the `autoStems` policy from the project manifest itself, so
+ * this only needs the path. Idempotent + persisted sidecar-side; safe to call
+ * on every project open.
+ */
+export async function watchProjectForAutoStems(projectPath: string): Promise<ProjectOkResult> {
+  return await postJson<ProjectOkResult>(`${BASE_URL}/native/auto-stems/watch`, { projectPath })
 }
 
 export async function writeProjectManifest(

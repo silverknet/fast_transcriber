@@ -280,6 +280,62 @@ function parseCueTrackExport(raw: unknown, path: string): CueTrackExport | undef
   return { fingerprint, durationSec, sampleRate, generatedAt, preludeOffsetSec, relativePath }
 }
 
+function parseChordHints(raw: unknown, path: string): import('./types').ChordHints | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  const rawChroma = o.beatChroma
+  if (!Array.isArray(rawChroma)) return undefined
+  // Coerce defensively — sidecar always emits 12 floats per row, but
+  // historic caches or partial writes could surface garbage. Anything
+  // that doesn't look like a 12-d vector gets dropped silently.
+  const beatChroma: number[][] = []
+  for (const row of rawChroma) {
+    if (!Array.isArray(row) || row.length !== 12) continue
+    const vec: number[] = []
+    for (const v of row) {
+      const n = Number(v)
+      vec.push(Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0)
+    }
+    beatChroma.push(vec)
+  }
+
+  let detectedKey: import('./types').ChordHints['detectedKey'] = null
+  const rawKey = o.detectedKey
+  if (rawKey && typeof rawKey === 'object') {
+    const k = rawKey as Record<string, unknown>
+    const mode = k.mode === 'minor' ? 'minor' : k.mode === 'major' ? 'major' : null
+    const root = typeof k.root === 'string' ? (k.root as SongKey['root']) : null
+    const confidence = Number(k.confidence)
+    if (mode && root && Number.isFinite(confidence)) {
+      detectedKey = {
+        root,
+        ...(typeof k.accidental === 'string'
+          ? { accidental: k.accidental as SongKey['accidental'] }
+          : {}),
+        mode,
+        confidence: Math.max(0, Math.min(1, confidence)),
+      }
+    }
+  }
+
+  const audioFingerprint = reqString(o.audioFingerprint, `${path}.audioFingerprint`)
+  const generatedAt = reqString(o.generatedAt, `${path}.generatedAt`)
+  const analyzerVersion = reqNum(o.analyzerVersion, `${path}.analyzerVersion`)
+  const analyzerSource =
+    o.analyzerSource === 'stems-other' || o.analyzerSource === 'mix'
+      ? o.analyzerSource
+      : undefined
+
+  return {
+    beatChroma,
+    detectedKey,
+    audioFingerprint,
+    generatedAt,
+    analyzerVersion,
+    ...(analyzerSource ? { analyzerSource } : {}),
+  }
+}
+
 function parseMetadata(raw: unknown, path: string): SongMetadata {
   const o = expectObject(raw, path)
   const keyDetail =
@@ -363,6 +419,10 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
         : undefined,
     mixState: parseMixState(raw.mixState, 'mixState'),
     expectedAudio: parseExpectedAudio(raw.expectedAudio, 'expectedAudio'),
+    chordHints:
+      raw.chordHints !== undefined && raw.chordHints !== null
+        ? parseChordHints(raw.chordHints, 'chordHints')
+        : undefined,
   }
 }
 

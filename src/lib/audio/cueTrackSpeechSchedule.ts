@@ -94,19 +94,41 @@ function pushSectionCountInPack(
 }
 
 /**
+ * Single source of truth for the spoken pre-song announcement text.
+ *
+ * Resolves in this priority:
+ *  1. `sm.cues.spokenIntroText` — the explicit author override.
+ *  2. `sm.metadata.title` — historical default; what the announcement
+ *     was always derived from before the override field existed.
+ *  3. `'Untitled song'` — last-resort fallback for songs with neither.
+ *
+ * Whitespace is trimmed; empty strings count as "not set" so the user
+ * can clear the field to revert to title-based behaviour.
+ */
+export function resolvedSpokenIntroText(sm: SongMap): string {
+  const override = sm.cues.spokenIntroText?.trim()
+  if (override) return override
+  const title = sm.metadata.title?.trim()
+  if (title) return title
+  return 'Untitled song'
+}
+
+/**
  * Seconds of **cue-file** timeline reserved at t=0 before the first count-in click, so the
  * spoken title can finish without overlapping count numbers (desktop TTS).
  *
  * Needed whenever there's speech to fit at the head of the cue WAV — that is,
  * when the cue mode is `'spoken'` OR a count-in is active (both create content
  * the title would otherwise step on).
+ *
+ * Length math uses `resolvedSpokenIntroText(sm)` so the override shrinks /
+ * grows the prelude just like a different title would.
  */
 export function titleCuePreludeSec(sm: SongMap): number {
   const hasSpeech = sm.cues.mode === 'spoken'
   const hasCountIn = effectiveCountInBeats(sm) > 0
   if (!hasSpeech && !hasCountIn) return 0
-  const raw = (sm.metadata.title || 'Untitled song').trim()
-  const len = Math.min(72, raw.length)
+  const len = Math.min(72, resolvedSpokenIntroText(sm).length)
   // Conservative headroom for Piper (~13–16 chars/s) + small gap before beat 1 of the grid.
   return Math.min(2.85, Math.max(0.82, 0.34 + len * 0.055))
 }
@@ -269,7 +291,7 @@ export function buildCueSpeechEvents(sm: SongMap): CueSpeechEvent[] {
 
   const preludeSec = titleCuePreludeSec(sm)
 
-  const title = sanitizeCueSpeechText(sm.metadata.title || 'Untitled song', 72)
+  const title = sanitizeCueSpeechText(resolvedSpokenIntroText(sm), 72)
   const events: CueSpeechEvent[] = [{ kind: 'title', tSec: 0.02, text: `${title}.` }]
 
   if (countInBeats > 0) {
