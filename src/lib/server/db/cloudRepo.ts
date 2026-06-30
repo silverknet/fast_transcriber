@@ -197,28 +197,34 @@ export async function rpcPatchManifest(
 
 /**
  * Look up a user by email via the auth admin API (service-role only).
- * Returns null when no such user exists. Used by member invites — if
- * the invitee hasn't signed up yet, the route surfaces a clear error
- * instead of inserting a dangling membership row.
+ * Returns null when no such user exists. Used by member invites; if the
+ * invitee hasn't signed up yet, the route creates a pending invite instead.
  */
 export async function findUserIdByEmail(
   service: SupabaseClient,
   email: string,
 ): Promise<string | null> {
   // Supabase doesn't expose a "get user by email" — listUsers with a
-  // filter is the documented path. Reasonable for our scale (admin op,
-  // low frequency). The admin namespace is typed on supabase-js >= 2.7,
-  // which we're on, so no escape hatch is needed.
-  const { data, error } = await service.auth.admin.listUsers({
-    page: 1,
-    perPage: 200,
-  })
-  if (error || !data) return null
   const wanted = email.toLowerCase().trim()
-  const found = (data.users ?? []).find(
-    (u: { email?: string | null }) => (u.email ?? '').toLowerCase() === wanted,
-  )
-  return found?.id ?? null
+  const perPage = 200
+  let page = 1
+
+  while (true) {
+    const { data, error } = await service.auth.admin.listUsers({ page, perPage })
+    if (error || !data) return null
+
+    const users = data.users ?? []
+    const found = users.find((u) => (u.email ?? '').toLowerCase() === wanted)
+    if (found) return found.id
+
+    const pageInfo = data as typeof data & { nextPage?: number | null }
+    if (typeof pageInfo.nextPage === 'number' && pageInfo.nextPage > page) {
+      page = pageInfo.nextPage
+      continue
+    }
+    if (users.length < perPage) return null
+    page += 1
+  }
 }
 
 export async function addMember(
@@ -342,10 +348,11 @@ export async function createPendingInvite(
   role: 'owner' | 'editor',
   invitedBy: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  const normalizedEmail = email.toLowerCase().trim()
   const { error } = await service.from('cloud_pending_invites').upsert(
     {
       cloud_project_id: projectId,
-      invited_email: email,
+      invited_email: normalizedEmail,
       role,
       invited_by: invitedBy,
     },

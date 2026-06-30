@@ -13,6 +13,7 @@ import { error, json } from '@sveltejs/kit'
 import {
   deletePendingInvite,
   getCloudProject,
+  listCloudMembers,
   listPendingInvitesForProject,
 } from '$lib/server/db/cloudRepo'
 import type { RequestHandler } from './$types'
@@ -25,7 +26,9 @@ function requireGranted(locals: App.Locals) {
 async function requireProjectOwner(locals: App.Locals, projectId: string): Promise<void> {
   const proj = await getCloudProject(locals.supabase, projectId)
   if (!proj) throw error(404, 'Project not found.')
-  if (proj.owner_user_id !== locals.user!.id) throw error(403, 'Owner only.')
+  const members = await listCloudMembers(locals.supabase, projectId)
+  const isOwner = members.some((m) => m.user_id === locals.user!.id && m.role === 'owner')
+  if (!isOwner) throw error(403, 'Owner only.')
 }
 
 export const GET: RequestHandler = async ({ locals, params }) => {
