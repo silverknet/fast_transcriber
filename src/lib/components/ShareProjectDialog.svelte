@@ -52,6 +52,26 @@
   let inviteEmail = $state('')
   let inviteRole = $state<'editor' | 'owner'>('editor')
 
+  /** Accepted (access-granted) BarBro users — admin only — for invite autocomplete. */
+  let grantedEmails = $state<string[]>([])
+  const isAdmin = $derived(($page.data?.isAdmin as boolean | undefined) ?? false)
+  /** Suggest accepted users not already invited/pending on this project. */
+  const suggestEmails = $derived(
+    grantedEmails.filter((e) => !pending.some((p) => p.invited_email.toLowerCase() === e)),
+  )
+
+  async function loadGrantedEmails() {
+    if (!isAdmin) return
+    try {
+      const res = await fetch('/api/admin/granted-emails')
+      if (!res.ok) return
+      const out = (await res.json()) as { ok?: boolean; emails?: string[] }
+      grantedEmails = Array.isArray(out.emails) ? out.emails : []
+    } catch {
+      /* autocomplete is a nicety — fail silently, manual typing still works */
+    }
+  }
+
   const isOwner = $derived.by(() => {
     if (!cloud || !userId) return false
     return members.some((m) => m.user_id === userId && m.role === 'owner')
@@ -76,6 +96,7 @@
       errorMsg = ''
       infoMsg = ''
       void refresh()
+      void loadGrantedEmails()
     }
   })
 
@@ -193,8 +214,17 @@
                 type="email"
                 bind:value={inviteEmail}
                 placeholder="collaborator@example.com"
+                list={suggestEmails.length > 0 ? 'barbro-accepted-emails' : undefined}
+                autocomplete="off"
                 class="border-foreground/30 bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
               />
+              {#if suggestEmails.length > 0}
+                <datalist id="barbro-accepted-emails">
+                  {#each suggestEmails as e (e)}
+                    <option value={e}></option>
+                  {/each}
+                </datalist>
+              {/if}
               <select
                 bind:value={inviteRole}
                 class="border-foreground/30 bg-background border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
