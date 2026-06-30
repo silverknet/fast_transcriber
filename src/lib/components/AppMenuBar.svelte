@@ -390,14 +390,16 @@
   async function onCloseProject() {
     menuError = ''
     closeProject()
-    // Drop any song that was loaded via the project so the user starts
-    // fresh on / rather than ambiguously in /edit pointing at a project song.
+    // Drop any song that was loaded via the project so we don't land in /edit
+    // pointing at a now-closed project song.
     clearFullAppSongState()
     // Forget the last-opened project so a reload doesn't put the user back
     // into the project they just exited. The Recent Projects list survives
     // — re-entering is one click away.
     clearLastProjectPath()
-    await goto('/', { replaceState: true })
+    // Land on the project hub (open/create/recent), NOT the legacy single-song
+    // import page — "closing a project" should mean "back to my projects".
+    await goto('/project', { replaceState: true })
   }
 
   /**
@@ -452,12 +454,19 @@
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" class="min-w-[12rem]">
         {#if isInProjectMode}
-          <!-- In project mode: project actions are the focus; standalone-only
-               flows (Open Song, Load from cloud) would conflict with the
-               project's setlist and are hidden until the user Close Projects. -->
           <DropdownMenuItem class="cursor-pointer" onclick={() => void onBackToProject()}>
-            Back to Project
+            Back to project
           </DropdownMenuItem>
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
+          <!-- Switch projects without closing first: opening/creating another
+               project just replaces the current one. -->
+          <DropdownMenuItem class="cursor-pointer" onclick={openNewProjectDialog}>
+            New project…
+          </DropdownMenuItem>
+          <DropdownMenuItem class="cursor-pointer" onclick={() => void onOpenProject()}>
+            Open project…
+          </DropdownMenuItem>
+          <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
           <DropdownMenuItem
             class="cursor-pointer"
             onclick={() => {
@@ -501,7 +510,7 @@
           </DropdownMenuItem>
           <div class="bg-foreground/15 my-1 h-px" role="separator"></div>
           <DropdownMenuItem class="cursor-pointer" onclick={() => void onCloseProject()}>
-            Close Project
+            Close project
           </DropdownMenuItem>
         {:else}
           <!--
@@ -511,10 +520,10 @@
             entries are just the create/open project actions.
           -->
           <DropdownMenuItem class="cursor-pointer" onclick={openNewProjectDialog}>
-            New Project…
+            New project…
           </DropdownMenuItem>
           <DropdownMenuItem class="cursor-pointer" onclick={() => void onOpenProject()}>
-            Open Project…
+            Open project…
           </DropdownMenuItem>
           {#if recentProjects.length > 0}
             <div class="text-muted-foreground px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider">
