@@ -1,7 +1,7 @@
 {
   "name": "barbro-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.7",
   "type": "module",
   "description": "Orthogonal desktop shell for BarBro — not part of the SvelteKit package graph",
   "author": "BarBro",
