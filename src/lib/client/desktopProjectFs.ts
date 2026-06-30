@@ -203,6 +203,23 @@ export async function writeProjectSongAsset(
 }
 
 /**
+ * Delete a file or directory under a song folder (recursive, no-op if absent).
+ * Used by "Replace audio" to wipe stale `stems/`, `cue/`, and the old audio
+ * file so they aren't re-discovered for the new audio.
+ */
+export async function removeProjectSongAsset(
+  projectPath: string,
+  songFolder: string,
+  subpath: string,
+): Promise<ProjectOkResult> {
+  return await postJson<ProjectOkResult>(`${BASE_URL}/native/project/song/asset/remove`, {
+    projectPath,
+    songFolder,
+    subpath,
+  })
+}
+
+/**
  * Write a single file at the PROJECT ROOT (e.g. `<projectName>.als`).
  * Path is validated by the sidecar; no `..` segments allowed. Intermediate
  * directories are created.

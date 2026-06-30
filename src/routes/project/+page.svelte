@@ -41,6 +41,7 @@
   import {
     attachImportedAudioToSong,
     attachAudioToSong,
+    replaceAudioForSong,
     dropRecentProjectPath,
     importSmapToProject,
     loadProjectSongIntoEditor,
@@ -520,6 +521,41 @@
     }
   }
 
+  // ── Replace audio (hard reset of a song's derived data) ───────────────────
+  let replaceAudioInput = $state<HTMLInputElement | undefined>()
+  let replaceTargetId = $state<string | null>(null)
+
+  function onReplaceAudio(entry: ProjectSongEntry) {
+    const title = $project.metadataByFolder[entry.folder]?.title || 'this song'
+    const ok = confirm(
+      `Replace audio for "${title}"?\n\n` +
+        `This clears the analyzed grid, chords, sections, and stems for this song. ` +
+        `You'll re-analyze the new audio. (Other songs are unaffected.)`,
+    )
+    if (!ok) return
+    replaceTargetId = entry.id
+    replaceAudioInput?.click()
+  }
+
+  async function onReplaceAudioPicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = '' // allow re-picking the same file later
+    const songId = replaceTargetId
+    replaceTargetId = null
+    if (!file || !songId) return
+    attachAudioBusyId = songId
+    actionError = ''
+    try {
+      await replaceAudioForSong(songId, file)
+      await refreshProjectInfo().catch(() => {})
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : 'Could not replace audio'
+    } finally {
+      attachAudioBusyId = null
+    }
+  }
+
   $effect(() => {
     if (!attachAudioDialogOpen && !attachAudioBusyId) {
       attachAudioTargetId = null
@@ -817,6 +853,7 @@
               onRemove={() => askRemove(entry)}
               onRename={() => askRenameSong(entry)}
               onAttachAudio={() => onAttachAudio(entry)}
+              onReplaceAudio={() => onReplaceAudio(entry)}
               onExport={() => void askExport(entry)}
             />
           {/each}
@@ -876,6 +913,14 @@
       class="sr-only"
       accept=".smap"
       onchange={onSmapPicked}
+    />
+
+    <input
+      bind:this={replaceAudioInput}
+      type="file"
+      class="sr-only"
+      accept=".wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff,audio/*"
+      onchange={onReplaceAudioPicked}
     />
 
     <AddAudioDialog
