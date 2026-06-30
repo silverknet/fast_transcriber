@@ -197,7 +197,7 @@ export async function fetchCloudSongs(
  * actually exist).
  */
 export async function createCloudProject(): Promise<
-  { ok: true; cloudProjectId: string; revision: number } | { ok: false; error: string }
+  { ok: true; cloudProjectId: string; revision: number; adopted?: boolean } | { ok: false; error: string }
 > {
   const snap = get(projectStore)
   const proj = snap.data
@@ -247,15 +247,24 @@ export async function createCloudProject(): Promise<
     const text = await res.text().catch(() => '')
     return { ok: false, error: text || `HTTP ${res.status}` }
   }
-  const data = (await res.json()) as { ok: boolean; cloudProjectId: string; revision: number }
+  const data = (await res.json()) as {
+    ok: boolean
+    cloudProjectId: string
+    revision: number
+    adopted?: boolean
+  }
+  // For a re-adopted project, do not mark all local songs as already synced
+  // through the current project revision. A follow-up pull should still see
+  // any remote song rows that changed while this manifest had lost its link.
+  const syncedRevision = data.adopted ? 0 : data.revision
 
   // Stamp the cloud block onto the in-memory project + persist the
   // manifest to disk so the link survives a reload.
   const cloud: ProjectCloudLink = {
     projectId: data.cloudProjectId,
-    lastSyncedRevision: data.revision,
-    lastPushedAt: new Date().toISOString(),
-    lastPulledAt: new Date().toISOString(),
+    lastSyncedRevision: syncedRevision,
+    lastPushedAt: data.adopted ? undefined : new Date().toISOString(),
+    lastPulledAt: data.adopted ? undefined : new Date().toISOString(),
   }
   const next: ProjectFile = {
     ...proj,
@@ -264,7 +273,7 @@ export async function createCloudProject(): Promise<
       (s): ProjectSongEntry => ({
         ...s,
         cloudSongId: s.id,
-        lastSyncedRevision: data.revision,
+        lastSyncedRevision: syncedRevision,
       }),
     ),
   }

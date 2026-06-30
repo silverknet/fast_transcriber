@@ -8,6 +8,7 @@
  */
 import { error, json } from '@sveltejs/kit'
 import {
+  getCloudProject,
   listMemberProjects,
   rpcCreateCloudProject,
   type CreateCloudProjectArgs,
@@ -65,11 +66,22 @@ export const POST: RequestHandler = async ({ locals, request }) => {
     const revision = await rpcCreateCloudProject(locals.supabase, args)
     return json({ ok: true, cloudProjectId: args.projectId, revision })
   } catch (e) {
-    // Most common failure: duplicate id (caller passed an existing
-    // ProjectFile.id). Surface as 409 so the client can retry with a
-    // fresh id.
+    // Duplicate id can mean this local project was already enabled, but a
+    // manifest round-trip stripped its `cloud` block. If the caller can see
+    // that project through RLS, let the client re-adopt the existing cloud row.
     const msg = e instanceof Error ? e.message : String(e)
-    if (/duplicate|unique/i.test(msg)) throw error(409, `Project id already in use: ${msg}`)
+    if (/duplicate|unique/i.test(msg)) {
+      const existing = await getCloudProject(locals.supabase, args.projectId)
+      if (existing) {
+        return json({
+          ok: true,
+          cloudProjectId: existing.id,
+          revision: existing.revision,
+          adopted: true,
+        })
+      }
+      throw error(409, `Project id already in use: ${msg}`)
+    }
     throw error(500, msg)
   }
 }
