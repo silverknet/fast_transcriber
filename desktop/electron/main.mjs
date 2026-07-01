@@ -80,6 +80,24 @@ const logInfo = (...args) => console.info(LOG_PREFIX, ...args)
 const logWarn = (...args) => console.warn(LOG_PREFIX, ...args)
 const logError = (...args) => console.error(LOG_PREFIX, ...args)
 
+// Resilience net: this is a HEADLESS background sidecar. A crash takes down
+// the user's desktop client for every feature (analyze, stems, cloud FS), so
+// staying alive + logging beats dying on a stray error — e.g. an unhandled
+// rejection from a fire-and-forget job or the auto-stems daemon. Node's
+// default would exit the process; we log and keep serving instead.
+process.on('unhandledRejection', (reason) => {
+  logError(
+    'Unhandled promise rejection (kept alive):',
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  )
+})
+process.on('uncaughtException', (err) => {
+  logError(
+    'Uncaught exception (kept alive):',
+    err instanceof Error ? (err.stack ?? err.message) : String(err),
+  )
+})
+
 function readDesktopVersion() {
   try {
     const p = path.join(__dirname, '..', 'package.json')
@@ -5046,6 +5064,16 @@ function setupAutoStemsDaemon() {
       }
     },
     hasInflightJobForSong: (songId) => hasInflightStemJobForSong(songId),
+    // Safety filters: don't auto-run the stem engine when it isn't installed
+    // (repeated failed spawns), and never pile onto a busy queue — the daemon
+    // enqueues at most one job at a time and waits for it to drain.
+    stemsReady: () => stemsVenvIsReady(),
+    anyStemJobActive: () => {
+      for (const j of stemsJobs.values()) {
+        if (j.state === 'queued' || j.state === 'running' || j.state === 'paused') return true
+      }
+      return false
+    },
     loadWatched: () => {
       try {
         const raw = JSON.parse(readFileSync(autoStemsWatchFilePath(), 'utf8'))

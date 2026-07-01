@@ -69,6 +69,8 @@ function makeDaemon(projects, opts = {}) {
       return `job-${enqueued.length}`
     },
     hasInflightJobForSong: (songId) => inflight.has(songId),
+    stemsReady: () => opts.stemsReady ?? true,
+    anyStemJobActive: () => opts.anyStemJobActive ?? false,
     loadWatched: () => projects.map((p) => p.path),
     saveWatched: (paths) => saved.push(paths),
     existsSync: (p) => !missing.has(p),
@@ -245,4 +247,34 @@ test('processes multiple watched projects in one pass', async () => {
   assert.deepEqual(byProject.a.stems, ['drums', 'bass'])
   assert.deepEqual(byProject.b.stems, ['vocals'])
   assert.equal(byProject.b.quality, 'best')
+})
+
+test('safety: does not enqueue when the stem engine is not installed', async () => {
+  const { daemon, enqueued } = makeDaemon(
+    [
+      {
+        path: '/proj',
+        autoStems: CFG,
+        songs: [{ id: 's1', folder: 'songs/a', analyzed: true, audioPath: 'audio/a.wav', stemsByPreset: {} }],
+      },
+    ],
+    { stemsReady: false },
+  )
+  await daemon.runOnce()
+  assert.equal(enqueued.length, 0)
+})
+
+test('safety: does not pile onto a busy queue (one job at a time)', async () => {
+  const { daemon, enqueued } = makeDaemon(
+    [
+      {
+        path: '/proj',
+        autoStems: CFG,
+        songs: [{ id: 's1', folder: 'songs/a', analyzed: true, audioPath: 'audio/a.wav', stemsByPreset: {} }],
+      },
+    ],
+    { anyStemJobActive: true },
+  )
+  await daemon.runOnce()
+  assert.equal(enqueued.length, 0)
 })

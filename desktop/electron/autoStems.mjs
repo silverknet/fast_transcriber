@@ -184,6 +184,11 @@ export function createAutoStemsDaemon(deps) {
 
   /** One full pass across every watched project. Exposed for tests. */
   async function runOnce() {
+    // Don't touch anything unless the stem engine is installed — otherwise we'd
+    // spawn failing renders unattended. Also don't pile onto a busy queue: the
+    // daemon enqueues at most one job per pass and waits for it to drain.
+    if (deps.stemsReady && !deps.stemsReady()) return
+    if (deps.anyStemJobActive && deps.anyStemJobActive()) return
     for (const projectPath of [...watched]) {
       if (!deps.existsSync(projectPath)) {
         // Project folder gone (deleted / unmounted) — drop it.
@@ -243,6 +248,10 @@ export function createAutoStemsDaemon(deps) {
     }
 
     if ((attempts.get(songKey) ?? 0) >= MAX_ATTEMPTS) return
+
+    // One job at a time: once anything is queued/running (incl. a job we just
+    // enqueued earlier in this same pass), stop enqueuing more.
+    if (deps.anyStemJobActive && deps.anyStemJobActive()) return
 
     // Read the smap once: gate on analyzed + resolve the source audio path.
     const smapPath = path.join(folderAbs, 'song.smap')
