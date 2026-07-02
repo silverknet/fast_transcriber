@@ -2646,6 +2646,31 @@ async function runQueuedJob(job) {
   const child = spawn(pythonStemsExe(), args, { env: process.env })
   job.child = child
 
+  // Stall watchdog. A hung/zombie Demucs child that never exits and never
+  // emits output would block the whole queue forever (activeJobId stuck),
+  // which is exactly how auto-stems "gets stuck". Demucs streams progress
+  // steadily, so NO output for STALL_TIMEOUT_MS means it's wedged — kill it
+  // and let the job finish as an error so the queue moves on.
+  const STALL_TIMEOUT_MS = 15 * 60 * 1000
+  let stallTimer = null
+  let timedOut = false
+  const armStall = () => {
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => {
+      timedOut = true
+      logWarn(`stems[${job.jobId.slice(0, 8)}] no progress for 15 min — killing (assumed stuck)`)
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+    }, STALL_TIMEOUT_MS)
+  }
+  const disarmStall = () => {
+    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null }
+  }
+  // Any output (progress or logs) counts as "alive" and resets the timer.
+  // Extra listeners are fine — they don't interfere with the parsing ones.
+  child.stdout.on('data', armStall)
+  child.stderr.on('data', armStall)
+  armStall()
+
   let buffer = ''
   /** @type {{ files?: string[] } | null} */
   let lastDone = null
@@ -2690,11 +2715,16 @@ async function runQueuedJob(job) {
 
   await new Promise((resolve) => {
     child.on('error', (err) => {
+      disarmStall()
       lastError = { msg: err instanceof Error ? err.message : String(err) }
       emitJobEvent(job, { type: 'error', msg: lastError.msg })
       resolve()
     })
     child.on('close', (code) => {
+      disarmStall()
+      if (timedOut && !lastError) {
+        lastError = { msg: 'Stem render timed out (no progress for 15 min) — skipped this song.' }
+      }
       const tail = buffer.trim()
       if (tail) {
         try {
