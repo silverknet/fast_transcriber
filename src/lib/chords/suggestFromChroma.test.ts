@@ -122,7 +122,7 @@ function buildSongMap(opts: {
     timeline: { bars: opts.bars, beats: opts.beats },
     sections: opts.sections ?? [],
     harmony: opts.harmony ?? [],
-    cues: { mode: 'off', countInBeats: 0, useSectionLabels: false },
+    cueTracks: [],
     ...(opts.hints ? { chordHints: opts.hints } : {}),
   } as unknown as SongMap
 }

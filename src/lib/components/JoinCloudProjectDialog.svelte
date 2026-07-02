@@ -100,7 +100,7 @@
         <div class="border-foreground/20 border-2 px-3 py-2">
           <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Project</p>
           <p class="truncate font-mono text-sm">{cloudProject.name}</p>
-          <p class="text-muted-foreground font-mono text-[11px]">rev {cloudProject.revision}</p>
+          <p class="text-muted-foreground text-[11px]">Shared project</p>
         </div>
       {/if}
 
@@ -125,8 +125,8 @@
         </div>
         {#if parentPath}
           <span class="text-muted-foreground text-[11px]">
-            A subfolder will be created here. Audio files don't sync — you'll see "missing audio"
-            for each song until you relink or import an audio pack.
+            BarBro will create a project folder here. Audio files are not included;
+            relink or import them after joining.
           </span>
         {/if}
       </div>

@@ -6,7 +6,8 @@ import { buildCueSpeechEvents } from '$lib/audio/cueTrackSpeechSchedule'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
 import { fetchDesktopTtsSynthesizeWav } from '$lib/client/desktopBridge'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
-import type { SongMap } from '$lib/songmap/types'
+import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
+import type { CueTrack, SongMap } from '$lib/songmap/types'
 
 const CUE_SAMPLE_RATE = 44100
 /** How loud spoken clips are mixed vs clicks (still peak-limited at end). */
@@ -93,11 +94,11 @@ function addClipAtOffset(
 }
 
 /** Total duration in seconds, or null if trim/timeline is unusable. */
-export function cueTrackTotalDurationSec(sm: SongMap): number | null {
+export function cueTrackTotalDurationSec(sm: SongMap, cueTrack?: CueTrack): number | null {
   if (sm.timeline.beats.length === 0) return null
   const plan = songPlaybackPlan(sm)
   if (!plan) return null
-  return plan.titlePreludeSec + plan.prependSec + plan.songDurationSec
+  return titleCuePreludeSec(sm, cueTrack) + plan.prependSec + plan.songDurationSec
 }
 
 export type RenderCueTrackResult = {
@@ -128,7 +129,7 @@ export type RenderCueTrackResult = {
  */
 export async function renderCueTrackWavBlob(
   sm: SongMap,
-  opts: { includeSpeech?: boolean; includeClicks?: boolean } = {},
+  opts: { includeSpeech?: boolean; includeClicks?: boolean; cueTrack?: CueTrack } = {},
 ): Promise<RenderCueTrackResult> {
   const includeSpeech = opts.includeSpeech !== false
   const includeClicks = opts.includeClicks !== false
@@ -142,7 +143,7 @@ export async function renderCueTrackWavBlob(
   const plan = songPlaybackPlan(sm)
   if (!plan) throw new Error('Cue track needs audio.trim with end > start')
 
-  const preludeSec = plan.titlePreludeSec
+  const preludeSec = titleCuePreludeSec(sm, opts.cueTrack)
   const prependSec = plan.prependSec
   const trimLen = plan.songDurationSec
   const totalSec = preludeSec + prependSec + trimLen
@@ -174,7 +175,7 @@ export async function renderCueTrackWavBlob(
     if (!includeSpeech) {
       // Click-only mode — skip the TTS round-trips entirely.
     } else {
-      const events = buildCueSpeechEvents(sm)
+      const events = buildCueSpeechEvents(sm, opts.cueTrack)
       type SpeechMixRow = { t: number; text: string; speedup?: number; order: number }
       const speechRows: SpeechMixRow[] = []
       let mixOrder = 0

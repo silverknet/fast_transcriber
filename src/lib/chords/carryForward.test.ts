@@ -40,7 +40,7 @@ function minimalMap(): SongMap {
         beatAnchor: { indexInBar: 0 },
       },
     ],
-    cues: { mode: 'off', countInBeats: 0, useSectionLabels: false },
+    cueTracks: [],
   }
 }
 

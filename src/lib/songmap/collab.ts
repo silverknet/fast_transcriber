@@ -16,8 +16,8 @@
  *  - `audio.originalPath`         — local path (per-machine)
  *  - `stemRefs`                   — local paths (per-machine)
  *  - `projectFolder`              — display hint scoped to the local disk
- *  - `cueTrackExport.relativePath`,
- *    `clickTrackExport.relativePath` — local render outputs (the
+ *  - `cueTracks[].renderExport.relativePath`,
+ *    `clickExport.relativePath` — local render outputs (the
  *    `fingerprint/durationSec/sampleRate/preludeOffsetSec` fields next
  *    to them DO sync — that's how another device knows the render is
  *    still valid for its local audio)
@@ -29,7 +29,7 @@
  *
  * Everything else syncs.
  */
-import type { SongMap, CueTrackExport, ClickTrackExport } from './types'
+import type { CueTrack, RenderedCueExport, SongMap } from './types'
 
 /** Local-only top-level field names — never written to the cloud. */
 const LOCAL_ONLY_TOP_LEVEL = [
@@ -48,12 +48,20 @@ const LOCAL_ONLY_TOP_LEVEL = [
  * validity and SHOULD sync — that's what lets a fresh device decide
  * "no, this render doesn't match my current audio, regenerate".
  */
-function stripExport<T extends CueTrackExport | ClickTrackExport>(
+function stripExport<T extends RenderedCueExport>(
   exp: T | undefined,
 ): T | undefined {
   if (!exp) return undefined
   const { relativePath: _relativePath, ...rest } = exp
   return rest as T
+}
+
+function stripCueTrackLocalRender(track: CueTrack): CueTrack {
+  if (!track.renderExport) return track
+  return {
+    ...track,
+    renderExport: stripExport(track.renderExport),
+  }
 }
 
 /**
@@ -77,8 +85,8 @@ export function toCollabSongMap(sm: SongMap): SongMap {
     out.audio = audioRest
   }
 
-  out.cueTrackExport = stripExport(sm.cueTrackExport)
-  out.clickTrackExport = stripExport(sm.clickTrackExport)
+  out.cueTracks = sm.cueTracks.map(stripCueTrackLocalRender)
+  out.clickExport = stripExport(sm.clickExport)
 
   return out
 }
@@ -116,16 +124,22 @@ export function mergeLocalIntoCollab(local: SongMap, cloud: SongMap): SongMap {
   }
 
   // Render-output paths come back from the local copy if present.
-  if (merged.cueTrackExport && local.cueTrackExport?.relativePath) {
-    merged.cueTrackExport = {
-      ...merged.cueTrackExport,
-      relativePath: local.cueTrackExport.relativePath,
+  const localTrackById = new Map(local.cueTracks.map((track) => [track.id, track]))
+  merged.cueTracks = merged.cueTracks.map((track) => {
+    const localTrack = localTrackById.get(track.id)
+    if (!track.renderExport || !localTrack?.renderExport?.relativePath) return track
+    return {
+      ...track,
+      renderExport: {
+        ...track.renderExport,
+        relativePath: localTrack.renderExport.relativePath,
+      },
     }
-  }
-  if (merged.clickTrackExport && local.clickTrackExport?.relativePath) {
-    merged.clickTrackExport = {
-      ...merged.clickTrackExport,
-      relativePath: local.clickTrackExport.relativePath,
+  })
+  if (merged.clickExport && local.clickExport?.relativePath) {
+    merged.clickExport = {
+      ...merged.clickExport,
+      relativePath: local.clickExport.relativePath,
     }
   }
 

@@ -7,106 +7,28 @@
  */
 import { computeCountIn } from '$lib/audio/computeCountIn'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
-import { defaultSectionLabel } from '$lib/songmap/sectionEdit'
+import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
-import type { Bar, Beat, SongMap } from '$lib/songmap/types'
+import type { Bar, Beat, CueAnchor, CueEvent, CueTrack, SongMap } from '$lib/songmap/types'
 
 const END_EPS = 0.028
 
-const NUMBER_WORDS = [
-  'one',
-  'two',
-  'three',
-  'four',
-  'five',
-  'six',
-  'seven',
-  'eight',
-  'nine',
-  'ten',
-  'eleven',
-  'twelve',
-  'thirteen',
-  'fourteen',
-  'fifteen',
-  'sixteen',
-]
-
-/** Speak slightly before the click so the beat lands in the vowel. */
-const COUNT_SPEECH_ANTICIPATION_SEC = 0.048
-/** Section name clip ends ~this far before the first shortened count syllable. */
-const SECTION_NAME_BEFORE_SHORT_PICKUP_SEC = 0.52
-const MIN_SPEECH_ON_CUE_TIMELINE_SEC = 0.07
-
-type SpeechAtom = { t: number; kind: 'count' | 'section'; text: string }
-
-/**
- * Every section: **full bar** one…N (the bar before the pickup bar), **section name**, then
- * **shortened** count (first syllable = `sectionOrdinal+1` up to N; wraps to 1…N when past N) into the
- * section’s first downbeat. All times on the cue file timeline; shifted together if they start &lt; 0.
- */
-function pushSectionCountInPack(
-  events: CueSpeechEvent[],
-  opts: {
-    preludeSec: number
-    prependSec: number
-    trimStart: number
-    bar: Bar
-    sectionOrdinal: number
-    middlePhrase: string
-  },
-): void {
-  const { preludeSec, prependSec, trimStart, bar, sectionOrdinal, middlePhrase } = opts
-  const N = Math.max(1, bar.beatCount)
-  const barDur = bar.endSec - bar.startSec
-  const bd = barDur / N
-  if (!(bd > 0) || !Number.isFinite(bd)) return
-
-  const T = bar.startSec
-  const baseOnCue = preludeSec + prependSec + (T - trimStart)
-  const shortFrom = sectionOrdinal + 1 <= N ? sectionOrdinal + 1 : 1
-
-  const atoms: SpeechAtom[] = []
-
-  for (let k = 1; k <= N; k++) {
-    const hit = baseOnCue - 2 * N * bd + (k - 1) * bd
-    const w = NUMBER_WORDS[k - 1] ?? String(k)
-    atoms.push({ t: hit - COUNT_SPEECH_ANTICIPATION_SEC, kind: 'count', text: `${w}.` })
-  }
-
-  const firstShortHit = baseOnCue - (N - shortFrom + 1) * bd
-  const tSectionSpeak = firstShortHit - COUNT_SPEECH_ANTICIPATION_SEC - SECTION_NAME_BEFORE_SHORT_PICKUP_SEC
-  const mid = sanitizeCueSpeechText(middlePhrase.endsWith('.') ? middlePhrase : `${middlePhrase}.`, 120)
-  atoms.push({ t: tSectionSpeak, kind: 'section', text: mid })
-
-  for (let k = shortFrom; k <= N; k++) {
-    const hit = baseOnCue - (N - k + 1) * bd
-    const w = NUMBER_WORDS[k - 1] ?? String(k)
-    atoms.push({ t: hit - COUNT_SPEECH_ANTICIPATION_SEC, kind: 'count', text: `${w}.` })
-  }
-
-  const minT = Math.min(...atoms.map((a) => a.t))
-  const shift = minT < MIN_SPEECH_ON_CUE_TIMELINE_SEC ? MIN_SPEECH_ON_CUE_TIMELINE_SEC - minT : 0
-  atoms.sort((a, b) => a.t - b.t)
-  for (const a of atoms) {
-    events.push({ kind: a.kind, tSec: a.t + shift, text: a.text })
-  }
-}
+const MIN_SPEECH_ON_CUE_TIMELINE_SEC = 0.02
 
 /**
  * Single source of truth for the spoken pre-song announcement text.
  *
  * Resolves in this priority:
- *  1. `sm.cues.spokenIntroText` — the explicit author override.
- *  2. `sm.metadata.title` — historical default; what the announcement
- *     was always derived from before the override field existed.
+ *  1. First enabled intro event on the selected/primary cue track.
+ *  2. `sm.metadata.title` — historical default for older surfaces that still
+ *     need a label before the user creates an intro cue.
  *  3. `'Untitled song'` — last-resort fallback for songs with neither.
  *
  * Whitespace is trimmed; empty strings count as "not set" so the user
  * can clear the field to revert to title-based behaviour.
  */
-export function resolvedSpokenIntroText(sm: SongMap): string {
-  const override = sm.cues.spokenIntroText?.trim()
+export function resolvedSpokenIntroText(sm: SongMap, track: CueTrack | undefined = getPrimaryCueTrack(sm)): string {
+  const override = track?.events.find((event) => event.enabled && event.kind === 'intro')?.text?.trim()
   if (override) return override
   const title = sm.metadata.title?.trim()
   if (title) return title
@@ -124,11 +46,12 @@ export function resolvedSpokenIntroText(sm: SongMap): string {
  * Length math uses `resolvedSpokenIntroText(sm)` so the override shrinks /
  * grows the prelude just like a different title would.
  */
-export function titleCuePreludeSec(sm: SongMap): number {
-  const hasSpeech = sm.cues.mode === 'spoken'
-  const hasCountIn = effectiveCountInBeats(sm) > 0
-  if (!hasSpeech && !hasCountIn) return 0
-  const len = Math.min(72, resolvedSpokenIntroText(sm).length)
+export function titleCuePreludeSec(sm: SongMap, track: CueTrack | undefined = getPrimaryCueTrack(sm)): number {
+  const intro = track?.enabled
+    ? track.events.find((event) => event.enabled && event.kind === 'intro' && event.text?.trim())
+    : undefined
+  if (!intro) return 0
+  const len = Math.min(72, resolvedSpokenIntroText(sm, track).length)
   // Conservative headroom for Piper (~13–16 chars/s) + small gap before beat 1 of the grid.
   return Math.min(2.85, Math.max(0.82, 0.34 + len * 0.055))
 }
@@ -158,7 +81,7 @@ export function songStartBeat(sm: SongMap): Beat | undefined {
   return firstBarDownbeatBeat(sm)
 }
 
-export type CueSpeechKind = 'title' | 'count' | 'section'
+export type CueSpeechKind = 'title' | 'count' | 'section' | 'custom'
 
 export type CueSpeechEvent = {
   kind: CueSpeechKind
@@ -170,6 +93,46 @@ export type CueSpeechEvent = {
 export function sanitizeCueSpeechText(raw: string, maxLen: number): string {
   const t = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
   return t.length <= maxLen ? t : `${t.slice(0, maxLen - 1).trimEnd()}…`
+}
+
+function leadOffsetSec(anchor: CueAnchor, bar: Bar | undefined): number {
+  if (!bar) return 0
+  const barDur = bar.endSec - bar.startSec
+  const beatDur = bar.beatCount > 0 ? barDur / bar.beatCount : 0
+  const leadBars = anchor.leadBars ?? 0
+  const leadBeats = anchor.leadBeats ?? 0
+  const lead = leadBars * barDur + leadBeats * beatDur
+  return Number.isFinite(lead) ? lead : 0
+}
+
+export function resolveCueEventOriginalTimeSec(sm: SongMap, event: CueEvent): number | null {
+  const anchor = event.anchor
+  const offset = anchor.offsetSec ?? 0
+  if (anchor.kind === 'time') {
+    const leadBar = sm.timeline.bars.find(
+      (bar) => anchor.timeSec >= bar.startSec && anchor.timeSec < bar.endSec,
+    )
+    const t = anchor.timeSec - leadOffsetSec(anchor, leadBar) + offset
+    return Number.isFinite(t) ? t : null
+  }
+  if (anchor.kind === 'beat') {
+    const beat = sm.timeline.beats.find((b) => b.id === anchor.beatId)
+    if (!beat) return null
+    const bar = sm.timeline.bars.find((b) => b.id === beat.barId)
+    const t = beat.timeSec - leadOffsetSec(anchor, bar) + offset
+    return Number.isFinite(t) ? t : null
+  }
+  const bar = sm.timeline.bars.find((b) => b.id === anchor.barId)
+  if (!bar) return null
+  const t = bar.startSec - leadOffsetSec(anchor, bar) + offset
+  return Number.isFinite(t) ? t : null
+}
+
+function speechKindForEvent(event: CueEvent): CueSpeechKind {
+  if (event.kind === 'intro') return 'title'
+  if (event.kind === 'count') return 'count'
+  if (event.kind === 'section') return 'section'
+  return 'custom'
 }
 
 /**
@@ -273,14 +236,17 @@ export function countInSpeechOutputTimes(
 }
 
 /**
- * Build speech events: **title** (actual `metadata.title` once), count-in numbers if enabled, then for
- * **each section** (intro, verse, chorus, …): **full bar** one…N → **section name** → **shortened**
- * count into that section’s downbeat (2…N, 3…N, …; then wrap). Matches e.g. title + one two three four
- * + Intro + two three four before the intro downbeat.
+ * Build speech events from an explicit cue track. Section/count generation
+ * happens before this, in `generateCueTrackFromSections()`, so rendering and
+ * playback preview never synthesize hidden cue content.
  */
-export function buildCueSpeechEvents(sm: SongMap): CueSpeechEvent[] {
+export function buildCueSpeechEvents(
+  sm: SongMap,
+  track: CueTrack | undefined = getPrimaryCueTrack(sm),
+): CueSpeechEvent[] {
   const trim = sm.audio?.trim
   if (!trim || !(trim.endSec > trim.startSec)) return []
+  if (!track?.enabled) return []
 
   let prependSec = 0
   const countInBeats = effectiveCountInBeats(sm)
@@ -289,56 +255,26 @@ export function buildCueSpeechEvents(sm: SongMap): CueSpeechEvent[] {
     if (ci) prependSec = ci.prependSec
   }
 
-  const preludeSec = titleCuePreludeSec(sm)
+  const preludeSec = titleCuePreludeSec(sm, track)
+  const events: CueSpeechEvent[] = []
 
-  const title = sanitizeCueSpeechText(resolvedSpokenIntroText(sm), 72)
-  const events: CueSpeechEvent[] = [{ kind: 'title', tSec: 0.02, text: `${title}.` }]
-
-  if (countInBeats > 0) {
-    const times = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)
-    for (let i = 0; i < times.length; i++) {
-      const w = NUMBER_WORDS[i] ?? String(i + 1)
-      const tClick = times[i]!
-      /** After prelude: same grid as clicks; anticipation keeps the beat in the syllable. */
-      const tSpeak = preludeSec + tClick - COUNT_SPEECH_ANTICIPATION_SEC
-      events.push({ kind: 'count', tSec: tSpeak, text: `${w}.` })
+  for (const event of track.events) {
+    if (!event.enabled) continue
+    const raw = event.text?.trim()
+    if (!raw) continue
+    const kind = speechKindForEvent(event)
+    const maxLen = kind === 'title' ? 72 : 120
+    const text = sanitizeCueSpeechText(raw.endsWith('.') ? raw : `${raw}.`, maxLen)
+    if (kind === 'title') {
+      events.push({ kind, tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC, text })
+      continue
     }
+    const originalTime = resolveCueEventOriginalTimeSec(sm, event)
+    if (originalTime == null) continue
+    const tSec = preludeSec + prependSec + (originalTime - trim.startSec)
+    if (!Number.isFinite(tSec)) continue
+    events.push({ kind, tSec: Math.max(MIN_SPEECH_ON_CUE_TIMELINE_SEC, tSec), text })
   }
 
-  const sorted = [...sm.sections].sort((a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex)
-  const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
-
-  let sectionOrdinal = 0
-  const trimStart = trim.startSec
-
-  for (const sec of sorted) {
-    const bar = barByIndex.get(sec.barRange.startBarIndex)
-    if (!bar) continue
-
-    const tMaster = bar.startSec
-    const tCue = preludeSec + prependSec + (tMaster - trimStart) - 0.48
-    if (!Number.isFinite(tCue)) continue
-
-    const defaultLabel = defaultSectionLabel(sec.kind)
-    const label = sec.label?.trim() ?? ''
-    const isGeneric = label === '' || label === defaultLabel
-    const middle = isGeneric ? defaultLabel : label
-
-    sectionOrdinal += 1
-    const before = events.length
-    pushSectionCountInPack(events, {
-      preludeSec,
-      prependSec,
-      trimStart,
-      bar,
-      sectionOrdinal,
-      middlePhrase: middle,
-    })
-    if (events.length === before) {
-      const phrase = sanitizeCueSpeechText(middle.endsWith('.') ? middle : `${middle}.`, 120)
-      events.push({ kind: 'section', tSec: Math.max(0.06, tCue), text: phrase })
-    }
-  }
-
-  return events
+  return events.sort((a, b) => a.tSec - b.tSec)
 }

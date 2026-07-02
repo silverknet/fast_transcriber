@@ -9,9 +9,9 @@ import {
   titleCuePreludeSec,
 } from '$lib/audio/cueTrackSpeechSchedule'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
-import { defaultCueSettings } from '$lib/songmap/defaults'
+import { createDefaultCueTrack, generateCueTrackFromSections } from '$lib/songmap/cueTracks'
 import { defaultSectionLabel } from '$lib/songmap/sectionEdit'
-import type { SongMap } from '$lib/songmap/types'
+import type { CueEvent, CueTrack, SongMap } from '$lib/songmap/types'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 
 function mapWithCountIn(countInBeats: number): SongMap {
@@ -50,12 +50,31 @@ function mapWithCountIn(countInBeats: number): SongMap {
     },
     sections: [],
     harmony: [],
-    cues: {
-      ...defaultCueSettings(),
-      mode: 'countIn',
-      countInBeats,
-    },
+    cueTracks: [],
+    ...(countInBeats > 0 ? { countInBeats } : {}),
   }
+}
+
+function trackWithEvents(events: CueEvent[]): CueTrack {
+  return {
+    ...createDefaultCueTrack(),
+    events,
+  }
+}
+
+function setIntroCue(sm: SongMap, text: string): CueTrack {
+  const track = trackWithEvents([
+    {
+      id: 'intro',
+      kind: 'intro',
+      enabled: true,
+      anchor: { kind: 'time', timeSec: 0 },
+      text,
+      source: 'custom',
+    },
+  ])
+  sm.cueTracks = [track]
+  return track
 }
 
 describe('countInSpeechOutputTimes', () => {
@@ -225,27 +244,26 @@ describe('resolvedSpokenIntroText', () => {
   it('uses the override when set', () => {
     const sm = mapWithCountIn(4)
     sm.metadata.title = 'Valerie (Amy Winehouse cover) — live at Wembley'
-    sm.cues.spokenIntroText = 'Valerie'
+    setIntroCue(sm, 'Valerie')
     expect(resolvedSpokenIntroText(sm)).toBe('Valerie')
   })
 
   it('treats an empty / whitespace-only override as "not set"', () => {
     const sm = mapWithCountIn(4)
     sm.metadata.title = 'Real title'
-    sm.cues.spokenIntroText = '   '
+    setIntroCue(sm, '   ')
     expect(resolvedSpokenIntroText(sm)).toBe('Real title')
   })
 
   it('falls back to "Untitled song" when neither override nor title is usable', () => {
     const sm = mapWithCountIn(4)
     sm.metadata.title = ''
-    sm.cues.spokenIntroText = undefined
     expect(resolvedSpokenIntroText(sm)).toBe('Untitled song')
   })
 
   it('trims surrounding whitespace from the override', () => {
     const sm = mapWithCountIn(4)
-    sm.cues.spokenIntroText = '  Valerie  '
+    setIntroCue(sm, '  Valerie  ')
     expect(resolvedSpokenIntroText(sm)).toBe('Valerie')
   })
 })
@@ -254,15 +272,15 @@ describe('titleCuePreludeSec uses the resolved announcement', () => {
   it('shrinks the prelude when an override is shorter than the title', () => {
     const sm = mapWithCountIn(4)
     sm.metadata.title = 'A very long song title that takes a while to say aloud'
+    let track = setIntroCue(sm, sm.metadata.title)
     const longTitlePrelude = titleCuePreludeSec(sm)
-    sm.cues.spokenIntroText = 'Hi'
-    const shortOverridePrelude = titleCuePreludeSec(sm)
+    track = setIntroCue(sm, 'Hi')
+    const shortOverridePrelude = titleCuePreludeSec(sm, track)
     expect(shortOverridePrelude).toBeLessThan(longTitlePrelude)
   })
 
-  it('zero prelude when neither speech nor count-in is active', () => {
+  it('zero prelude when no intro cue is active', () => {
     const sm = mapWithCountIn(0)
-    sm.cues.mode = 'off'
     sm.countInBeats = undefined
     expect(titleCuePreludeSec(sm)).toBe(0)
   })
@@ -272,59 +290,58 @@ describe('buildCueSpeechEvents uses the announcement override', () => {
   it('emits the override as the title event (not metadata.title)', () => {
     const sm = mapWithCountIn(4)
     sm.metadata.title = 'Valerie (Amy Winehouse cover) — live'
-    sm.cues.spokenIntroText = 'Valerie'
+    setIntroCue(sm, 'Valerie')
     const ev = buildCueSpeechEvents(sm)
     const titleEv = ev.find((e) => e.kind === 'title')
     expect(titleEv?.text).toBe('Valerie.')
   })
 
-  it('emits metadata.title as the title event when no override is set', () => {
+  it('does not emit an implicit title event when no intro cue is set', () => {
     const sm = mapWithCountIn(4)
     sm.metadata.title = 'Dum av Dig'
-    sm.cues.spokenIntroText = undefined
     const ev = buildCueSpeechEvents(sm)
     const titleEv = ev.find((e) => e.kind === 'title')
-    expect(titleEv?.text).toBe('Dum av Dig.')
+    expect(titleEv).toBeUndefined()
   })
 })
 
-describe('effectiveCountInBeats + cues.mode coexistence', () => {
-  it('reads top-level countInBeats independently of cues.mode', () => {
-    const sm = mapWithCountIn(0) // sets cues.mode = 'countIn' with 0 beats
-    sm.cues.mode = 'spoken'
-    sm.cues.countInBeats = 0
+describe('effectiveCountInBeats', () => {
+  it('reads top-level countInBeats', () => {
+    const sm = mapWithCountIn(0)
     sm.countInBeats = 4
     expect(effectiveCountInBeats(sm)).toBe(4)
   })
 
-  it('returns 0 when both top-level and legacy fields are absent/zero', () => {
+  it('returns 0 when top-level countInBeats is absent', () => {
     const sm = mapWithCountIn(0)
-    sm.cues.mode = 'off'
-    sm.cues.countInBeats = 0
     sm.countInBeats = undefined
     expect(effectiveCountInBeats(sm)).toBe(0)
-  })
-
-  it('honors legacy cues.countInBeats during the migration window', () => {
-    const sm = mapWithCountIn(4) // cues.mode = 'countIn', cues.countInBeats = 4
-    sm.countInBeats = undefined
-    expect(effectiveCountInBeats(sm)).toBe(4)
   })
 })
 
 describe('buildCueSpeechEvents', () => {
   it('emits separate count clips on a steady grid', () => {
     const sm = mapWithCountIn(4)
-    const ev = buildCueSpeechEvents(sm)
+    const track = trackWithEvents(
+      sm.timeline.beats.map((beat, index) => ({
+        id: `count-${index}`,
+        kind: 'count',
+        enabled: true,
+        anchor: { kind: 'beat', beatId: beat.id, offsetSec: -0.048 },
+        text: String(index + 1),
+        source: 'custom',
+      })),
+    )
+    sm.cueTracks = [track]
+    const ev = buildCueSpeechEvents(sm, track)
     const counts = ev.filter((e) => e.kind === 'count')
     expect(counts).toHaveLength(4)
-    const pre = titleCuePreludeSec(sm)
-    expect(pre).toBeGreaterThan(0)
+    const ci = computeCountIn(sm, 4)!
     for (let i = 1; i < counts.length; i++) {
       const dt = counts[i]!.tSec - counts[i - 1]!.tSec
       expect(dt).toBeCloseTo(0.5, 5)
     }
-    expect(counts[0]!.tSec).toBeCloseTo(pre - 0.048, 5)
+    expect(counts[0]!.tSec).toBeCloseTo(ci.prependSec - 0.048, 5)
   })
 
   it('every generic section: full one…four, label, shortened pickup (two verses)', () => {
@@ -388,25 +405,22 @@ describe('buildCueSpeechEvents', () => {
         },
       ],
       harmony: [],
-      cues: { ...defaultCueSettings(), mode: 'off', countInBeats: 0 },
+      cueTracks: [],
     }
-    const ev = buildCueSpeechEvents(sm)
+    const track = generateCueTrackFromSections(sm, createDefaultCueTrack())
+    sm.cueTracks = [track]
+    const ev = buildCueSpeechEvents(sm, track)
     const verseLabels = ev.filter((e) => e.kind === 'section' && e.text === 'Verse.')
     expect(verseLabels).toHaveLength(2)
     const countWords = ev.filter((e) => e.kind === 'count').map((e) => e.text)
-    // Section 1: one…four + two…four; section 2: one…four + three…four
+    // One generated count bar per section.
     expect(countWords).toEqual([
       'one.',
       'two.',
       'three.',
       'four.',
-      'two.',
-      'three.',
-      'four.',
       'one.',
       'two.',
-      'three.',
-      'four.',
       'three.',
       'four.',
     ])
@@ -467,11 +481,13 @@ describe('buildCueSpeechEvents', () => {
         },
       ],
       harmony: [],
-      cues: { ...defaultCueSettings(), mode: 'off', countInBeats: 0 },
+      cueTracks: [],
     }
-    const ev = buildCueSpeechEvents(sm)
+    const track = generateCueTrackFromSections(sm, createDefaultCueTrack())
+    sm.cueTracks = [track]
+    const ev = buildCueSpeechEvents(sm, track)
     const sections = ev.filter((e) => e.kind === 'section')
     expect(sections.map((e) => e.text)).toEqual(['Chorus.', 'Chorus.'])
-    expect(ev.filter((e) => e.kind === 'count')).toHaveLength(13)
+    expect(ev.filter((e) => e.kind === 'count')).toHaveLength(8)
   })
 })

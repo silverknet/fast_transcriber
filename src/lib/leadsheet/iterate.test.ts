@@ -22,7 +22,7 @@ function mapWithBars(bars: Bar[]): SongMap {
     timeline: { bars, beats: [] },
     harmony: [],
     sections: [],
-    cues: { mode: 'off', countInBeats: 0, useSectionLabels: false },
+    cueTracks: [],
   } as unknown as SongMap
 }
 

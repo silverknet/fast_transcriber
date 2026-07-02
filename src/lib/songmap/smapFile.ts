@@ -42,6 +42,7 @@
  */
 
 import { parseSongMap } from './parse'
+import { canonicalizeSongMapForSerialize } from './serialize'
 import type { SongMap } from './types'
 import type { RestorableSongState } from './session'
 
@@ -174,7 +175,7 @@ function bigintToSafeNumber(n: bigint, label: string): number {
 export function songProjectFromRestorableState(state: RestorableSongState): SongProject {
   return {
     projectFormatVersion: SONG_PROJECT_FORMAT_VERSION,
-    songMap: state.songMap,
+    songMap: canonicalizeSongMapForSerialize(state.songMap),
   }
 }
 

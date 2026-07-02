@@ -35,7 +35,7 @@ export interface ProjectSongMetadataInfo {
   stemRefs?: StemRefs
   hasSmap: boolean
   hasAls: boolean
-  /** True iff `<song>/cue/cue-track.wav` exists on disk. */
+  /** True iff a rendered cue track exists on disk. */
   hasCueTrack: boolean
   /** True iff `<song>/cue/click-track.wav` exists on disk. */
   hasClickTrack: boolean
@@ -184,7 +184,7 @@ export async function removeProjectSong(
 }
 
 /**
- * Write an arbitrary file under a song folder (e.g. `cue/cue-track.wav`).
+ * Write an arbitrary file under a song folder (e.g. `cue/tracks/main/cue-track.wav`).
  * Path is validated by the sidecar; no `..` segments allowed. Intermediate
  * directories are created.
  */
@@ -384,7 +384,7 @@ export async function relinkProjectSongAudio(
 
 /**
  * Read an arbitrary file from under a song folder (e.g. `stems/vocals.wav`,
- * `cue/cue-track.wav`). Returns the bytes as a Blob for direct use with
+ * `cue/tracks/main/cue-track.wav`). Returns the bytes as a Blob for direct use with
  * `AudioContext.decodeAudioData`. 404 → ok:false.
  */
 export async function readProjectSongAsset(

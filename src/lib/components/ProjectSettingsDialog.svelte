@@ -96,8 +96,8 @@
           <span class="flex flex-col">
             <span class="text-sm font-semibold">Prepare stems automatically</span>
             <span class="text-muted-foreground text-xs">
-              BarBro keeps the chosen stems ready for every song with audio,
-              working in the background. Needs the desktop companion running.
+              BarBro keeps the chosen stems ready for every song with audio.
+              Needs BarBro Desktop running.
             </span>
           </span>
         </label>

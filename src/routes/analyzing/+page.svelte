@@ -157,11 +157,11 @@
       // before they can ever reach this route, so we only need a single
       // happy path. Any sidecar error throws cleanly to the user.
       if (!get(desktopCompanionStatus).reachable) {
-        throw new Error('BarBro Desktop sidecar isn’t running. Start it and reload.')
+        throw new Error('BarBro Desktop isn’t running. Start it and reload.')
       }
       const r = await analyzeDownbeatsViaDesktop(trimmedWav)
       if (!r.ok) {
-        throw new Error(`Analysis failed: ${r.error ?? 'unknown sidecar error'}`)
+        throw new Error(`Analysis failed: ${r.error ?? 'unknown error'}`)
       }
       const analyzedSongMap: SongMap = beatsToSongMap({
         filename: trimmedWav.name,

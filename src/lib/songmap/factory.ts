@@ -1,5 +1,5 @@
 import type { AudioSession } from '$lib/stores/audioSession'
-import { defaultCueSettings, emptySongMetadata } from './defaults'
+import { emptySongMetadata } from './defaults'
 import { SONGMAP_FORMAT_VERSION } from './version'
 import type { SongMap } from './types'
 
@@ -22,7 +22,7 @@ export function createEmptySongMap(options: CreateEmptySongMapOptions = {}): Son
     timeline: { bars: [], beats: [] },
     sections: [],
     harmony: [],
-    cues: defaultCueSettings(),
+    cueTracks: [],
   }
 }
 

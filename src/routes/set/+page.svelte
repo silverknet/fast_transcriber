@@ -395,7 +395,7 @@
           <Button
             class=""
             onclick={() => void pickFolder()}
-            title="Choose the folder with your audio/stems. The .als is written there when you export."
+            title="Choose the folder with your audio and stems. Exports will be saved there."
           >
             Pick project folder
           </Button>
@@ -407,7 +407,7 @@
         <section class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border-2 px-4 py-3 space-y-2">
           <p class="text-xs">
             <span class="font-semibold">Stems need a disk path.</span>
-            The desktop sidecar reads/writes the project folder directly. Locate it once.
+            BarBro Desktop needs access to the project folder before it can prepare stems. Locate it once.
           </p>
           <Button class="" variant="default" size="sm" onclick={() => void pickStandaloneOsPath()}>
             Locate folder on disk…

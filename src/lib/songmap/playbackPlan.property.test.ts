@@ -20,7 +20,6 @@
  */
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { defaultCueSettings } from './defaults'
 import { songPlaybackPlan, DEFAULT_BPM } from './playbackPlan'
 import { songTimings } from '../export/setlist/timings'
 import type { SongMap } from './types'
@@ -90,7 +89,7 @@ function makeSong(opts: {
     timeline: { bars, beats },
     sections: [],
     harmony: [],
-    cues: { ...defaultCueSettings(), mode: 'off', countInBeats: 0 },
+    cueTracks: [],
     ...(opts.countInBeats > 0 ? { countInBeats: opts.countInBeats } : {}),
     ...(startBeatId !== undefined ? { startBeatId } : {}),
   } as SongMap

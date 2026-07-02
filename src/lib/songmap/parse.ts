@@ -1,13 +1,16 @@
-import { SONGMAP_FORMAT_VERSION } from './version'
+import { SONGMAP_FORMAT_VERSION, SONGMAP_LEGACY_FORMAT_VERSION } from './version'
 import type {
   AudioReference,
   Bar,
   Beat,
   ChordSymbol,
+  CueAnchor,
+  CueEvent,
   CueSettings,
-  CueTrackExport,
+  CueTrack,
   HarmonyEvent,
   Meter,
+  RenderedCueExport,
   Section,
   SongKey,
   SongMap,
@@ -16,6 +19,7 @@ import type {
   SongMapTimeline,
 } from './types'
 import { defaultCueSettings } from './defaults'
+import { createDefaultCueTrack } from './cueTracks'
 import { validateSongMap } from './validate'
 
 export class SongMapParseError extends Error {
@@ -224,6 +228,7 @@ function parseCues(raw: unknown, path: string): CueSettings {
     prependSec: optNum(o.prependSec),
     template: optString(o.template),
     language: optString(o.language),
+    spokenIntroText: optString(o.spokenIntroText),
   }
 }
 
@@ -252,7 +257,7 @@ function parseMixState(raw: unknown, path: string): import('./types').MixState |
   return out
 }
 
-function parseCueTrackExport(raw: unknown, path: string): CueTrackExport | undefined {
+function parseCueTrackExport(raw: unknown, path: string): RenderedCueExport | undefined {
   if (raw === undefined || raw === null) return undefined
   const o = expectObject(raw, path)
   // Legacy .smap files written before `preludeOffsetSec` existed are dropped
@@ -278,6 +283,121 @@ function parseCueTrackExport(raw: unknown, path: string): CueTrackExport | undef
     )
   }
   return { fingerprint, durationSec, sampleRate, generatedAt, preludeOffsetSec, relativePath }
+}
+
+function parseCueAnchor(raw: unknown, path: string): CueAnchor {
+  const o = expectObject(raw, path)
+  const kind = reqString(o.kind, `${path}.kind`)
+  const offsetSec = optNum(o.offsetSec)
+  if (kind === 'bar') {
+    return {
+      kind,
+      barId: reqString(o.barId, `${path}.barId`),
+      leadBars: optNum(o.leadBars),
+      leadBeats: optNum(o.leadBeats),
+      offsetSec,
+    }
+  }
+  if (kind === 'beat') {
+    return {
+      kind,
+      beatId: reqString(o.beatId, `${path}.beatId`),
+      leadBars: optNum(o.leadBars),
+      leadBeats: optNum(o.leadBeats),
+      offsetSec,
+    }
+  }
+  if (kind === 'time') {
+    return {
+      kind,
+      timeSec: reqNum(o.timeSec, `${path}.timeSec`),
+      leadBars: optNum(o.leadBars),
+      leadBeats: optNum(o.leadBeats),
+      offsetSec,
+    }
+  }
+  throw new SongMapParseError('cue anchor kind must be bar, beat, or time', `${path}.kind`)
+}
+
+function parseCueEvent(raw: unknown, path: string): CueEvent {
+  const o = expectObject(raw, path)
+  const event: CueEvent = {
+    id: reqString(o.id, `${path}.id`),
+    kind: reqString(o.kind, `${path}.kind`) as CueEvent['kind'],
+    enabled: typeof o.enabled === 'boolean' ? o.enabled : true,
+    anchor: parseCueAnchor(o.anchor, `${path}.anchor`),
+  }
+  const text = optString(o.text)
+  if (text !== undefined) event.text = text
+  const generatedKey = optString(o.generatedKey)
+  if (generatedKey !== undefined) event.generatedKey = generatedKey
+  if (o.generatedSource !== undefined && o.generatedSource !== null) {
+    const src = expectObject(o.generatedSource, `${path}.generatedSource`)
+    const kind = reqString(src.kind, `${path}.generatedSource.kind`)
+    if (kind === 'section') {
+      event.generatedSource = {
+        kind,
+        sectionId: reqString(src.sectionId, `${path}.generatedSource.sectionId`),
+        leadBars: optNum(src.leadBars),
+        leadBeats: optNum(src.leadBeats),
+      }
+    }
+  }
+  const source = optString(o.source)
+  if (source !== undefined) event.source = source as CueEvent['source']
+  if (typeof o.edited === 'boolean') event.edited = o.edited
+  if (typeof o.stale === 'boolean') event.stale = o.stale
+  return event
+}
+
+function parseCueTrack(raw: unknown, path: string): CueTrack {
+  const o = expectObject(raw, path)
+  return {
+    id: reqString(o.id, `${path}.id`),
+    name: reqString(o.name, `${path}.name`),
+    enabled: typeof o.enabled === 'boolean' ? o.enabled : true,
+    voiceId: optString(o.voiceId),
+    events: Array.isArray(o.events) ? o.events.map((event, i) => parseCueEvent(event, `${path}.events[${i}]`)) : [],
+    suppressedGeneratedKeys: Array.isArray(o.suppressedGeneratedKeys)
+      ? o.suppressedGeneratedKeys.flatMap((key) => (typeof key === 'string' ? [key] : []))
+      : [],
+    renderExport:
+      o.renderExport !== undefined && o.renderExport !== null
+        ? parseCueTrackExport(o.renderExport, `${path}.renderExport`)
+        : undefined,
+  }
+}
+
+function parseCueTracks(raw: unknown): CueTrack[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((track, i) => parseCueTrack(track, `cueTracks[${i}]`))
+}
+
+function migrateLegacyCueTracks(opts: {
+  cues: CueSettings
+  cueTrackExport?: RenderedCueExport
+}): CueTrack[] {
+  const spokenIntroText = opts.cues.spokenIntroText?.trim()
+  if (!spokenIntroText && !opts.cueTrackExport) return []
+  const track = createDefaultCueTrack()
+  const events: CueEvent[] = []
+  if (spokenIntroText) {
+    events.push({
+      id: 'cue_legacy_intro',
+      kind: 'intro',
+      enabled: true,
+      anchor: { kind: 'time', timeSec: 0 },
+      text: spokenIntroText,
+      source: 'imported',
+    })
+  }
+  return [
+    {
+      ...track,
+      events,
+      renderExport: opts.cueTrackExport,
+    },
+  ]
 }
 
 function parseChordHints(raw: unknown, path: string): import('./types').ChordHints | undefined {
@@ -380,10 +500,19 @@ function parseTimeline(raw: unknown, path: string): SongMapTimeline {
   return { bars, beats }
 }
 
-function extractSongMapV1(raw: Record<string, unknown>): SongMap {
+function extractSongMap(raw: Record<string, unknown>): SongMap {
   const formatVersion = raw.formatVersion
-  if (formatVersion !== SONGMAP_FORMAT_VERSION) {
-    throw new SongMapParseError(`Unsupported formatVersion: ${String(formatVersion)}`, 'formatVersion')
+  const isLegacyV1 = formatVersion === SONGMAP_LEGACY_FORMAT_VERSION
+  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1) {
+    // A file from a NEWER build (formatVersion above what we understand) gets a
+    // user-facing "update BarBro" message wherever this error surfaces, instead
+    // of a cryptic version number. Older/unknown versions keep the raw message.
+    const n = typeof formatVersion === 'number' ? formatVersion : NaN
+    const msg =
+      Number.isFinite(n) && n > SONGMAP_FORMAT_VERSION
+        ? 'This song was saved by a newer version of BarBro. Update BarBro to open it.'
+        : `Unsupported formatVersion: ${String(formatVersion)}`
+    throw new SongMapParseError(msg, 'formatVersion')
   }
   const metadata = parseMetadata(raw.metadata, 'metadata')
   const timeline = parseTimeline(raw.timeline, 'timeline')
@@ -391,6 +520,17 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
   if (metadata.analyzed === undefined) {
     metadata.analyzed = timeline.bars.length > 0
   }
+  const legacyCues =
+    isLegacyV1 && raw.cues !== undefined && raw.cues !== null
+      ? parseCues(raw.cues, 'cues')
+      : defaultCueSettings()
+  const legacyCueTrackExport =
+    isLegacyV1 && raw.cueTrackExport !== undefined && raw.cueTrackExport !== null
+      ? parseCueTrackExport(raw.cueTrackExport, 'cueTrackExport')
+      : undefined
+  const countInBeats =
+    optNum(raw.countInBeats) ??
+    (isLegacyV1 && legacyCues.mode === 'countIn' ? legacyCues.countInBeats : undefined)
   return {
     formatVersion: SONGMAP_FORMAT_VERSION,
     app: parseApp(raw.app, 'app'),
@@ -403,19 +543,19 @@ function extractSongMapV1(raw: Record<string, unknown>): SongMap {
     harmony: Array.isArray(raw.harmony)
       ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`))
       : [],
-    cues:
-      raw.cues !== undefined && raw.cues !== null ? parseCues(raw.cues, 'cues') : defaultCueSettings(),
-    countInBeats: optNum(raw.countInBeats),
+    cueTracks: isLegacyV1
+      ? migrateLegacyCueTracks({ cues: legacyCues, cueTrackExport: legacyCueTrackExport })
+      : parseCueTracks(raw.cueTracks),
+    countInBeats,
     startBeatId: optString(raw.startBeatId),
     projectFolder: typeof raw.projectFolder === 'string' ? raw.projectFolder : undefined,
     stemRefs: parseStemRefs(raw.stemRefs),
-    cueTrackExport:
-      raw.cueTrackExport !== undefined && raw.cueTrackExport !== null
-        ? parseCueTrackExport(raw.cueTrackExport, 'cueTrackExport')
-        : undefined,
-    clickTrackExport:
-      raw.clickTrackExport !== undefined && raw.clickTrackExport !== null
+    clickExport: isLegacyV1
+      ? raw.clickTrackExport !== undefined && raw.clickTrackExport !== null
         ? parseCueTrackExport(raw.clickTrackExport, 'clickTrackExport')
+        : undefined
+      : raw.clickExport !== undefined && raw.clickExport !== null
+        ? parseCueTrackExport(raw.clickExport, 'clickExport')
         : undefined,
     mixState: parseMixState(raw.mixState, 'mixState'),
     expectedAudio: parseExpectedAudio(raw.expectedAudio, 'expectedAudio'),
@@ -441,7 +581,7 @@ export function parseSongMap(json: string, options: ParseSongMapOptions = {}): S
   if (!stripUnknown && Object.keys(root).some((k) => !KNOWN_TOP_KEYS.has(k))) {
     throw new SongMapParseError('Unknown top-level keys present (stripUnknown is false)', '')
   }
-  const map = extractSongMapV1(root)
+  const map = extractSongMap(root)
   const v = validateSongMap(map)
   if (!v.ok) {
     throw new SongMapParseError(v.errors[0] ?? 'Validation failed')
@@ -457,12 +597,17 @@ const KNOWN_TOP_KEYS = new Set([
   'timeline',
   'sections',
   'harmony',
+  'cueTracks',
   'cues',
   'countInBeats',
   'startBeatId',
   'projectFolder',
   'stemRefs',
+  'clickExport',
   'cueTrackExport',
   'clickTrackExport',
   'mixState',
+  'expectedAudio',
+  'sectionBorderHints',
+  'chordHints',
 ])

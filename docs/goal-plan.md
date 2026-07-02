@@ -48,8 +48,8 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
 | SE | Beat / bar grid editing | M | `applyBarGridAction`, strip UX, **bar-edge drag** (`setBarBoundary` + `TimelineBeatGrid` handles); errors surfaced as `beatEditError`. |
 | SE | Chord edit | M | Radial picker, multi-beat, paste pipeline; some coverage in `chordClipboard.test.ts`. |
 | SE | Section edit | M | Range select + tag + overlap replace (`sectionEdit.ts`); labels default from kind only. |
-| SE | Cue UX — count-in / prepend | M | Radio count-in, live prepend math (`computeCountIn`); **click cue WAV** generate + `cueTrackExport` fingerprint + auto-drop on drift (`renderCueTrack.ts`, `cueTrackFingerprint.ts`, `patchSongMap`); **Cue tab** offline **song + cue** headphone preview (`mixSongCuePreview.ts`, optional live click overlay). `CueSettings` still has unused fields (`spoken`, templates…). |
-| SE | Text-to-speech cue audio | M | Piper `POST /native/tts/synthesize` + mixed into [`renderCueTrack`](../src/lib/audio/renderCueTrack.ts) when BarBro desktop is running; schedule in [`cueTrackSpeechSchedule.ts`](../src/lib/audio/cueTrackSpeechSchedule.ts). Web-only sessions get clicks + on-screen note if desktop is off. |
+| SE | Cue UX — count-in / prepend | M | Top-level count-in, live prepend math (`computeCountIn`), v2 canonical `cueTracks[]`, merge-aware section generation, selected-track render metadata (`cueTracks[].renderExport`) + click metadata (`clickExport`) with fingerprint auto-drop on drift. Cue tab has track/event editing MVP; recording and polish remain. |
+| SE | Text-to-speech cue audio | M | Piper `POST /native/tts/synthesize` + explicit cue events rendered by [`renderCueTrack`](../src/lib/audio/renderCueTrack.ts) when BarBro desktop is running; schedule in [`cueTrackSpeechSchedule.ts`](../src/lib/audio/cueTrackSpeechSchedule.ts). Web-only sessions get clicks + on-screen note if desktop is off. |
 | SE | Chord / lead-sheet PDF | S | `pdfLeadSheet.ts` + menu export; slash notation / engraving quality weak vs “gig-ready chart”. |
 
 #### Detail — `SE`
@@ -71,12 +71,12 @@ Canonical single-song experience — timeline, waveform, harmony, sections, cues
   **Gap:** No UI for custom **labels** or **colors** per section (`Section.label` / `color` exist but flow is kind presets). Medleys / duplicate kinds across disjoint ranges are OK but not “musical director” grade. **→ R** with label/color editing + validation tests.
 
 - **Cue UX — count-in (`M`)**  
-  **Evidence:** `cues.mode` driven to `countIn` / `off`; prepend seconds computed for stem alignment guidance; `/edit` Cue tab can build a temporary **song + cue** WAV (`buildSongCueMixWavBlob`) from in-tab blob or project `cueTrackExport.relativePath`, with optional Web Audio metronome overlay (may double baked-in clicks).  
-  **Gap:** `CueMode` includes `click` / `spoken` but editor does not expose them; `useSectionLabels`, `template`, `language` unused. **→ R** when modes match real rehearsal flows + persisted cues sync with exports.
+  **Evidence:** `formatVersion: 2` migrates old cue fields into canonical `cueTracks[]`; `/edit` Cue tab can add/rename/duplicate/delete cue tracks, generate section/count events, edit/toggle/remove events, add custom cues, and render the selected track to `cue/tracks/<trackId>/cue-track.wav`. Click-only render remains `cue/click-track.wav`; `patchSongMap` clears stale per-track render metadata.  
+  **Gap:** Timeline markers/inspector/preview polish are still basic; no microphone recording UI yet; generated phrasing is intentionally simple. **→ R** when the editor feels musician-grade, supports recording, and has broader UI/e2e coverage.
 
 - **TTS cue audio (`M` on desktop slice; web = clicks-only + note)**  
-  **Evidence:** `POST /native/tts/synthesize` + `--text-file` in Piper; [`renderCueTrack.ts`](../src/lib/audio/renderCueTrack.ts) mixes title + count-in number words + section callouts; count-in uses a **title prelude** + synthetic grid clicks (no pickup/map double-clicks) + slightly sped-up count TTS; [`cueTrackSpeechSchedule.ts`](../src/lib/audio/cueTrackSpeechSchedule.ts); [`fetchDesktopTtsSynthesizeWav`](../src/lib/client/desktopBridge.ts); cue fingerprint includes `sections` and `titlePreludeSec`.  
-  **Gap:** No in-browser neural TTS (requires sidecar); custom per-section phrasing / languages / `CueMode.spoken` UI still thin. **→ R** when web fallback or cloud TTS exists and copy is user-editable.
+  **Evidence:** `POST /native/tts/synthesize` + `--text-file` in Piper; [`renderCueTrack.ts`](../src/lib/audio/renderCueTrack.ts) renders explicit `CueTrack` events; [`generateCueTrackFromSections`](../src/lib/songmap/cueTracks.ts) materializes section/count events with stable generated keys. Fingerprint includes the selected cue track, count-in, start beat, timeline, trim, and sections.  
+  **Gap:** No in-browser neural TTS (requires sidecar); custom phrase templates/languages and recorded-audio events are schema-ready but not fully surfaced. **→ R** when web fallback or cloud TTS exists and copy/voice/recorded assets are robustly editable.
 
 - **Lead-sheet PDF (`S`)**  
   **Evidence:** jsPDF path draws staff skeleton, chords, section labels; invoked from menu.  
@@ -101,7 +101,7 @@ Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit
 
 - **Open / save layout (`M`, not `R`)**  
   **Evidence:** Atomic commit ladder + rollback notes in [`commit.ts`](../src/lib/project/commit.ts); `song.smap` invariant enforced on add/import; folder name = `<slug>-<id.slice(0,8)>` with up to 3 retries on collision; rollback path raises a "files may remain on disk" error when even cleanup fails so the manifest invariant is never violated; `barbro.project.json` written deterministically with key sort.  
-  **Gap:** Failure UX across browsers (quota, partial writes) lands as raw thrown messages rather than a structured toast/recovery UI; no migration versioning beyond `formatVersion: 1`. **→ R** with user-visible recovery + migration tests.
+  **Gap:** Failure UX across browsers (quota, partial writes) lands as raw thrown messages rather than a structured toast/recovery UI; SongMap has `formatVersion: 2` cue migration tests, but broader project-manifest migrations are still ad hoc. **→ R** with user-visible recovery + manifest migration tests.
 
 - **Song structuring (`M`, not `R`)**  
   **Evidence:** Manifest order is canonical (`ProjectFile.songs` order); `moveProjectSong` rewrites manifest + `updatedAt`; project list rows expose move up/down; local `.smap` imports land through [`importSmapToProject`](../src/lib/project/commit.ts), and cloud/hydration import paths reuse the same project file primitives; remove dialog distinguishes "remove from manifest" from "also delete files".  
@@ -129,14 +129,14 @@ Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit
 | AB | Click tracks | M | MIDI note clip + embedded Drum Rack XML (`clickDrumRack.xml`). |
 | AB | Backing track | M | Fixed stem slots (`STEM_TRACKS`); user binds folder audio → `StemClip` refs. |
 | AB | Loopable sections | S | **Locators** from sections; Live loop brace / practice workflows not explicitly authored. |
-| AB | Loopable cues | N | Song **cues** (count-in, future TTS) do not drive Live cue markers / loop regions in export. |
+| AB | Loopable cues | N | Song `cueTracks[]` and count-in do not yet drive Live cue markers / loop regions in export. |
 | AB | Normalized audio stems | N | No loudness / peak targeting before writing WAV refs — manual prep. |
 
 #### Detail — `AB`
 
 - **Baseline export (`M`, fragile `R` barrier)**  
   **Evidence:** Large generator aligns trim (`audio.trim.startSec`) with MIDI/audio clips; `ensureAbletonProjectFolder` for relative refs.  
-  **Gap:** Live minor-version coupling & SIGSEGV risk ([`AGENTS.md`](../AGENTS.md)); verification is manual open-in-Live. Count-in **prepend** from `CueSettings` is **not** clearly folded into clip timelines — trim alignment uses audio trim only. **→ R** needs scripted golden `.als` checks + documented Live version pinning.
+  **Gap:** Live minor-version coupling & SIGSEGV risk ([`AGENTS.md`](../AGENTS.md)); verification is manual open-in-Live. Count-in **prepend** from top-level `countInBeats` is not fully represented across every Live cue/loop workflow. **→ R** needs scripted golden `.als` checks + documented Live version pinning.
 
 - **Click tracks (`M`)**  
   **Evidence:** Per-beat MIDI with drum rack device IDs isolated above generator IDs.  
@@ -151,7 +151,7 @@ Multi-song folder layout, manifest (`barbro.project.json`), open song → `/edit
   **Gap:** Locators ≠ Arrangement Loop Start/Length automation; no scene launcher loops per section. User expectation “loop this chorus” only partly met. **→ M** when loop behavior defined and encoded intentionally.
 
 - **Loopable cues (`N`)**  
-  **Evidence:** `CuePointsListWrapper` stub in template; no mapping from `cues` model.  
+  **Evidence:** `CuePointsListWrapper` stub in template; no mapping from `cueTracks[]` model.  
   **→ S** once any cue exports as marker or clip boundary.
 
 - **Normalized stems (`N`)**  
@@ -230,7 +230,7 @@ Cross-cutting: format, analysis pipeline, persistence, optional cloud/DB.
   
   **Phase 7 (status pill)**: [`CloudSyncPill.svelte`](../src/lib/components/CloudSyncPill.svelte) reads `project.data.cloud.pendingChanges` + `navigator.onLine` and renders Synced / N pending / Offline. Clicking N pending calls `requestCloudPush()` to retry; the autosave also auto-subscribes to the window `online` event so reconnecting flushes the queue without user action.
 
-  **Phase 8 (conflict modal)**: [`collabMerge.ts`](../src/lib/songmap/collabMerge.ts) classifies every field on a 409 — id-keyed list items (`harmony`, `sections`, `timeline.bars/beats`) merge per id; scalar metadata + cues + countInBeats + startBeatId surface as safe conflicts; whole-timeline regeneration / `metadata.analyzed` flip / `expectedAudio` swap surface as `dangerous`. Defaults cloud-wins; the dialog ([`ConflictResolutionDialog.svelte`](../src/lib/components/ConflictResolutionDialog.svelte)) lets the user flip individual rows back to "Keep mine" or hit "Take theirs (all)" to wholesale-accept. On Apply we push the resolved SongMap with the cloud's revision as the new `clientBaseRevision`.
+  **Phase 8 (conflict modal)**: [`collabMerge.ts`](../src/lib/songmap/collabMerge.ts) classifies every field on a 409 — id-keyed list items (`harmony`, `sections`, `timeline.bars/beats`, `cueTracks`, and `cueTracks[].events`) merge per id; scalar metadata + cue track fields + countInBeats + startBeatId surface as safe conflicts; whole-timeline regeneration / `metadata.analyzed` flip / `expectedAudio` swap surface as `dangerous`. Defaults cloud-wins; the dialog ([`ConflictResolutionDialog.svelte`](../src/lib/components/ConflictResolutionDialog.svelte)) lets the user flip individual rows back to "Keep mine" or hit "Take theirs (all)" to wholesale-accept. On Apply we push the resolved SongMap with the cloud's revision as the new `clientBaseRevision`.
 
   **Automated coverage**:
     - [`collabMerge.test.ts`](../src/lib/songmap/collabMerge.test.ts) — non-overlapping list merges, same-id collisions, scalar metadata, dangerous flags, `applyConflictDecisions`, and no-silent-data-loss invariants.

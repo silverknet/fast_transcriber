@@ -49,7 +49,7 @@ export interface ProjectSongMetadataLite {
    */
   stemsByPreset?: Record<string, string[]>
   hasAls?: boolean
-  /** True iff `<song>/cue/cue-track.wav` exists on disk. */
+  /** True iff a rendered cue track exists on disk. */
   hasCueTrack?: boolean
   /** True iff `<song>/cue/click-track.wav` exists on disk. */
   hasClickTrack?: boolean

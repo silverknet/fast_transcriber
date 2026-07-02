@@ -130,14 +130,12 @@
         <p class="text-muted-foreground text-sm">Loading song…</p>
       {:else if !projectOsPath || !$desktopCompanionStatus.reachable}
         <p class="text-amber-700 dark:text-amber-300 text-sm">
-          Stems need the BarBro desktop client to be running. Start the desktop
-          app to manage stems for this song.
+          Start BarBro Desktop to manage stems for this song.
         </p>
       {:else if !inputPath}
         <p class="text-amber-700 dark:text-amber-300 text-sm">
-          This song's <code class="font-mono">.smap</code> doesn't reference a playable
-          audio file on disk yet. Open the song in Edit and use the relink banner
-          to point it at the source, then try again.
+          This song is not linked to an audio file on disk yet. Open it in Edit,
+          relink the source audio, then try again.
         </p>
       {:else}
         <StemSplitter

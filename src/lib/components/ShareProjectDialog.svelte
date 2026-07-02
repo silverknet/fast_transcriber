@@ -19,13 +19,24 @@
   import {
     Dialog,
     DialogContent,
+    DialogDescription,
     DialogFooter,
     DialogHeader,
     DialogTitle,
   } from '$lib/components/ui/dialog'
-  import { Cloud, Trash2, UserPlus, X } from '@lucide/svelte'
+  import { Cloud, Download, Trash2, Upload, UserPlus, X } from '@lucide/svelte'
+  import { browser } from '$app/environment'
   import { page } from '$app/stores'
   import { project } from '$lib/stores/project'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { refreshProjectInfo } from '$lib/project/commit'
+  import {
+    pickSaveFileViaDesktop,
+    pickOpenFileViaDesktop,
+    exportHydrationPackViaDesktop,
+    importHydrationPackViaDesktop,
+    type HydrationImportResult,
+  } from '$lib/client/desktopBridge'
   import {
     createCloudProject,
     disableCloudProject,
@@ -39,6 +50,7 @@
   let { open = $bindable(false) }: { open?: boolean } = $props()
 
   const proj = $derived($project.data)
+  const osPath = $derived($project.osPath)
   const cloud = $derived(proj?.cloud ?? null)
   const userId = $derived(($page.data?.user as { id?: string } | undefined)?.id ?? null)
 
@@ -51,6 +63,96 @@
   let pending = $state<CloudPendingInviteView[]>([])
   let inviteEmail = $state('')
   let inviteRole = $state<'editor' | 'owner'>('editor')
+
+  // ── Audio package (hydration) ────────────────────────────────────────────
+  // Cloud sync carries the grid/chords/sections, NOT the audio (too big to
+  // upload). Collaborators fill in the sound by importing an audio package the
+  // owner exports. Lives here because it's part of getting a shared project
+  // playable on someone else's machine.
+  let hydrationBusy = $state(false)
+  let hydrationError = $state('')
+  let hydrationStatus = $state('')
+  let hydrationImportOpen = $state(false)
+  let hydrationImport = $state<Extract<HydrationImportResult, { ok: true }> | null>(null)
+
+  function projectFileBaseName(): string {
+    const name = proj?.name ?? 'project'
+    return name.replace(/[^a-zA-Z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'project'
+  }
+
+  async function onExportAudioPackage() {
+    hydrationError = ''
+    hydrationStatus = ''
+    if (!browser || !osPath || !proj) {
+      hydrationError = 'Open a project first.'
+      return
+    }
+    if (!$desktopCompanionStatus.reachable) {
+      hydrationError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
+    hydrationBusy = true
+    try {
+      const pick = await pickSaveFileViaDesktop({
+        title: 'Export audio package',
+        defaultPath: `${projectFileBaseName()}-audio.zip`,
+        filters: [{ name: 'BarBro audio package', extensions: ['zip'] }],
+      })
+      if (!pick.ok) {
+        if (!('cancelled' in pick)) hydrationError = pick.error ?? 'Could not open save dialog'
+        return
+      }
+      const result = await exportHydrationPackViaDesktop({ projectPath: osPath, outPath: pick.path })
+      if (!result.ok) {
+        hydrationError = result.error || 'Export failed.'
+        return
+      }
+      const mb = (result.packSize / 1_048_576).toFixed(1)
+      const songWord = result.songCount === 1 ? 'song' : 'songs'
+      hydrationStatus = `Exported ${result.songCount} ${songWord} (${mb} MB) — send this file to your collaborators.`
+    } finally {
+      hydrationBusy = false
+    }
+  }
+
+  async function onImportAudioPackage() {
+    hydrationError = ''
+    hydrationStatus = ''
+    if (!browser || !osPath || !proj) {
+      hydrationError = 'Open a project first.'
+      return
+    }
+    if (!$desktopCompanionStatus.reachable) {
+      hydrationError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
+    hydrationBusy = true
+    try {
+      const pick = await pickOpenFileViaDesktop({
+        title: 'Import audio package',
+        filters: [{ name: 'BarBro audio package', extensions: ['zip'] }],
+      })
+      if (!pick.ok) {
+        if (!('cancelled' in pick)) hydrationError = pick.error ?? 'Could not open file picker'
+        return
+      }
+      const result = await importHydrationPackViaDesktop({ projectPath: osPath, packPath: pick.path })
+      if (!result.ok) {
+        hydrationError = result.error || 'Import failed.'
+        return
+      }
+      // Refresh so the freshly-imported audio + stems light up on the cards.
+      try {
+        await refreshProjectInfo()
+      } catch (e) {
+        console.warn('refreshProjectInfo after audio-package import failed:', e)
+      }
+      hydrationImport = result
+      hydrationImportOpen = true
+    } finally {
+      hydrationBusy = false
+    }
+  }
 
   /** Accepted (access-granted) BarBro users — admin only — for invite autocomplete. */
   let grantedEmails = $state<string[]>([])
@@ -168,8 +270,7 @@
     {#if !cloud}
       <p class="text-sm text-muted-foreground">
         Cloud sync isn't enabled for this project yet. Enable it to invite
-        collaborators — the project syncs to Supabase so changes show up on
-        their machine.
+        collaborators and keep changes up to date on their machine.
       </p>
       <DialogFooter class="">
         <Button class="" variant="outline" onclick={() => (open = false)}>Cancel</Button>
@@ -269,6 +370,45 @@
             </ul>
           </div>
         {/if}
+
+        <!-- Audio package -->
+        <div class="border-foreground/15 space-y-2 border-t pt-3">
+          <h3 class="text-muted-foreground text-xs font-bold uppercase tracking-wider">
+            Audio files
+          </h3>
+          <p class="text-muted-foreground text-[11px]">
+            Edits sync automatically. The audio itself doesn't — send collaborators an
+            audio package so their copy has the sound and stems. They import it here too.
+          </p>
+          <div class="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              class="gap-1"
+              disabled={hydrationBusy || !$desktopCompanionStatus.reachable}
+              onclick={() => void onExportAudioPackage()}
+            >
+              <Download class="size-3.5" aria-hidden="true" />
+              Export audio package…
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              class="gap-1"
+              disabled={hydrationBusy || !$desktopCompanionStatus.reachable}
+              onclick={() => void onImportAudioPackage()}
+            >
+              <Upload class="size-3.5" aria-hidden="true" />
+              Import audio package…
+            </Button>
+          </div>
+          {#if hydrationError}
+            <p class="text-destructive text-xs" role="status">{hydrationError}</p>
+          {/if}
+          {#if hydrationStatus}
+            <p class="text-emerald-600 dark:text-emerald-400 text-xs" role="status">{hydrationStatus}</p>
+          {/if}
+        </div>
       </div>
 
       {#if errorMsg}
@@ -301,13 +441,13 @@
     </DialogHeader>
     {#if isOwner}
       <p class="text-sm">
-        You're the owner. Disabling deletes the cloud project for everyone —
-        members lose access, sync history is gone. Local files on disk are untouched.
+        You're the owner. Disabling removes the shared project for everyone.
+        Members lose access. Local files on disk are untouched.
       </p>
     {:else}
       <p class="text-sm">
-        Removes this project's cloud link on your machine. The cloud project
-        stays — other members keep using it. Local files on disk are untouched.
+        Stops syncing this project on your machine. Other members keep using
+        the shared project. Local files on disk are untouched.
       </p>
     {/if}
     <DialogFooter class="">
@@ -316,5 +456,56 @@
         Disable
       </Button>
     </DialogFooter>
+  </DialogContent>
+</Dialog>
+
+<Dialog bind:open={hydrationImportOpen}>
+  <DialogContent
+    class="flex max-h-[85vh] w-full max-w-[min(40rem,calc(100%-2rem))] flex-col gap-3 p-4 sm:max-w-[min(40rem,calc(100%-2rem))]"
+    showCloseButton={true}
+  >
+    <DialogHeader class="">
+      <DialogTitle>Audio package imported</DialogTitle>
+      <DialogDescription>
+        {#if hydrationImport}
+          {@const s = hydrationImport.summary}
+          Matched {s.matchedCount} of {s.packSongCount} songs.
+          Wrote {s.audioImported} audio file{s.audioImported === 1 ? '' : 's'}
+          and {s.stemsImported} stem file{s.stemsImported === 1 ? '' : 's'}.
+          Existing files were left untouched.
+        {/if}
+      </DialogDescription>
+    </DialogHeader>
+    {#if hydrationImport && hydrationImport.results.length > 0}
+      <ul class="border-foreground/20 divide-foreground/10 max-h-[min(60vh,32rem)] overflow-auto divide-y border-2 text-sm">
+        {#each hydrationImport.results as r (r.songId)}
+          <li class="px-3 py-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="truncate font-medium">{r.title || r.songId}</span>
+              <span
+                class="shrink-0 text-xs font-semibold uppercase tracking-wider {r.matched
+                  ? 'text-emerald-700 dark:text-emerald-400'
+                  : 'text-muted-foreground'}"
+              >
+                {r.matched ? 'matched' : 'skipped'}
+              </span>
+            </div>
+            <div class="text-muted-foreground mt-0.5 text-[11px]">
+              {#if r.matched}
+                {#if r.audioImported}+ audio{:else if r.audioSkipped}audio: kept yours{/if}
+                {#if r.audioImported && r.stemsImported > 0} · {/if}
+                {#if r.stemsImported > 0}+ {r.stemsImported} stem{r.stemsImported === 1 ? '' : 's'}{/if}
+                {#if r.stemsSkipped > 0} · {r.stemsSkipped} stem{r.stemsSkipped === 1 ? '' : 's'} kept{/if}
+                {#if !r.audioImported && r.stemsImported === 0 && !r.audioSkipped && r.stemsSkipped === 0}
+                  no new files
+                {/if}
+              {:else}
+                {r.notes ?? 'no matching song in this project'}
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </DialogContent>
 </Dialog>

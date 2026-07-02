@@ -14,7 +14,7 @@
  *  - keeps every item that exists only on one side (different `id`s);
  *  - for items with the same `id` whose contents differ, prefers cloud
  *    by default and records the disagreement so the UI can prompt;
- *  - for scalar fields (metadata.bpm, cues, countInBeats…), same rule —
+ *  - for scalar fields (metadata.bpm, countInBeats...), same rule -
  *    cloud wins by default, prompt on disagreement;
  *  - for dangerous fields (whole timeline replacement, expectedAudio
  *    swap), always lists the conflict regardless of the user picking
@@ -28,7 +28,7 @@
  * The merge is pure. `applyConflictDecisions` builds the final
  * SongMap from the conflict report + user choices.
  */
-import type { SongMap, HarmonyEvent, Section, Bar, Beat } from './types'
+import type { SongMap, HarmonyEvent, Section, Bar, Beat, CueEvent, CueTrack } from './types'
 
 /**
  * One disputed change. `path` identifies the field so the UI can label
@@ -129,6 +129,93 @@ function classifyScalar(
   return { path, label, severity: 'safe', mine, theirs }
 }
 
+function cueEventLabel(mine: CueEvent, theirs: CueEvent): string {
+  if (mine.text !== theirs.text) return 'Cue text'
+  if (!shallowEqual(mine.anchor, theirs.anchor)) return 'Cue timing'
+  if (mine.enabled !== theirs.enabled) return 'Cue enabled'
+  return 'Cue event'
+}
+
+function mergeCueEvents(
+  mine: CueEvent[] | undefined,
+  theirs: CueEvent[] | undefined,
+  trackId: string,
+): { merged: CueEvent[]; conflicts: Conflict[] } {
+  const mineMap = new Map<string, CueEvent>()
+  for (const event of mine ?? []) mineMap.set(event.id, event)
+  const conflicts: Conflict[] = []
+  const merged: CueEvent[] = []
+  const seen = new Set<string>()
+
+  for (const event of theirs ?? []) {
+    const local = mineMap.get(event.id)
+    if (local && !shallowEqual(local, event)) {
+      conflicts.push({
+        path: `cueTracks/${trackId}/events/${event.id}`,
+        label: cueEventLabel(local, event),
+        severity: 'safe',
+        mine: local,
+        theirs: event,
+      })
+    }
+    merged.push(event)
+    seen.add(event.id)
+  }
+  for (const event of mine ?? []) {
+    if (!seen.has(event.id)) merged.push(event)
+  }
+  return { merged, conflicts }
+}
+
+function mergeCueTracks(
+  mine: CueTrack[] | undefined,
+  theirs: CueTrack[] | undefined,
+): { merged: CueTrack[]; conflicts: Conflict[] } {
+  const mineMap = new Map<string, CueTrack>()
+  for (const track of mine ?? []) mineMap.set(track.id, track)
+  const conflicts: Conflict[] = []
+  const merged: CueTrack[] = []
+  const seen = new Set<string>()
+
+  for (const track of theirs ?? []) {
+    const local = mineMap.get(track.id)
+    if (!local) {
+      merged.push(track)
+      seen.add(track.id)
+      continue
+    }
+
+    const events = mergeCueEvents(local.events, track.events, track.id)
+    conflicts.push(...events.conflicts)
+    for (const field of ['name', 'enabled', 'voiceId', 'suppressedGeneratedKeys'] as const) {
+      const c = classifyScalar(
+        local[field],
+        track[field],
+        `cueTracks/${track.id}/${field}`,
+        field === 'name'
+          ? 'Cue track name'
+          : field === 'enabled'
+            ? 'Cue track enabled'
+            : field === 'voiceId'
+              ? 'Cue voice'
+              : 'Deleted generated cues',
+      )
+      if (c) conflicts.push(c)
+    }
+
+    merged.push({
+      ...track,
+      events: events.merged,
+    })
+    seen.add(track.id)
+  }
+
+  for (const track of mine ?? []) {
+    if (!seen.has(track.id)) merged.push(track)
+  }
+  return { merged, conflicts }
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 /**
@@ -148,6 +235,8 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   conflicts.push(...bars.conflicts)
   const beats = mergeByIdList<Beat>(local.timeline?.beats, cloud.timeline?.beats, 'timeline/beats', 'Beat')
   conflicts.push(...beats.conflicts)
+  const cueTracks = mergeCueTracks(local.cueTracks, cloud.cueTracks)
+  conflicts.push(...cueTracks.conflicts)
 
   // ── Wholesale timeline change (bar count differs) is dangerous ──
   if ((local.timeline?.bars?.length ?? 0) !== (cloud.timeline?.bars?.length ?? 0)) {
@@ -184,9 +273,7 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     })
   }
 
-  // ── Cues / count-in / start-beat ──
-  const cuesC = classifyScalar(local.cues, cloud.cues, 'cues', 'Cue settings')
-  if (cuesC) conflicts.push(cuesC)
+  // ── Count-in / start-beat ──
   const cibC = classifyScalar(local.countInBeats, cloud.countInBeats, 'countInBeats', 'Count-in beats')
   if (cibC) conflicts.push(cibC)
   const sbC = classifyScalar(local.startBeatId, cloud.startBeatId, 'startBeatId', 'Start beat')
@@ -212,6 +299,7 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     ...cloud,
     harmony: harmony.merged,
     sections: sections.merged,
+    cueTracks: cueTracks.merged,
     timeline: {
       bars: bars.merged,
       beats: beats.merged,
@@ -226,9 +314,11 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
  * picked "mine", swap that path's value in the merged SongMap.
  *
  * Handles list-keyed paths (`harmony/<id>`, `sections/<id>`,
- * `timeline/bars/<id>`, `timeline/beats/<id>`) and scalar paths
- * (`metadata/<field>`, `cues`, `countInBeats`, `startBeatId`,
- * `expectedAudio`, `timeline/bars-count`, `metadata/analyzed`).
+ * `timeline/bars/<id>`, `timeline/beats/<id>`,
+ * `cueTracks/<trackId>/events/<eventId>`) and scalar paths
+ * (`metadata/<field>`, `cueTracks/<trackId>/<field>`,
+ * `countInBeats`, `startBeatId`, `expectedAudio`,
+ * `timeline/bars-count`, `metadata/analyzed`).
  */
 export function applyConflictDecisions(
   report: MergeReport,
@@ -279,6 +369,35 @@ export function applyConflictDecisions(
       }
       continue
     }
+    if (c.path.startsWith('cueTracks/')) {
+      const parts = c.path.split('/')
+      const trackId = parts[1]
+      const field = parts[2]
+      if (trackId && field === 'events' && parts[3]) {
+        const eventId = parts[3]
+        result = {
+          ...result,
+          cueTracks: result.cueTracks.map((track) =>
+            track.id === trackId
+              ? {
+                  ...track,
+                  events: track.events.map((event) => (event.id === eventId ? (c.mine as CueEvent) : event)),
+                }
+              : track,
+          ),
+        }
+        continue
+      }
+      if (trackId && field) {
+        result = {
+          ...result,
+          cueTracks: result.cueTracks.map((track) =>
+            track.id === trackId ? { ...track, [field]: c.mine } : track,
+          ),
+        }
+        continue
+      }
+    }
     // Scalar / object paths.
     if (c.path.startsWith('metadata/')) {
       const f = c.path.slice('metadata/'.length)
@@ -289,8 +408,7 @@ export function applyConflictDecisions(
       }
       continue
     }
-    if (c.path === 'cues') result = { ...result, cues: c.mine as SongMap['cues'] }
-    else if (c.path === 'countInBeats') result = { ...result, countInBeats: c.mine as number | undefined }
+    if (c.path === 'countInBeats') result = { ...result, countInBeats: c.mine as number | undefined }
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
     // `timeline/bars-count` is informational — the per-id merges above

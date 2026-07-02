@@ -25,7 +25,7 @@
  *
  * The click WAV (rendered by `renderCueTrackWavBlob` and stored at
  * `cue/click-track.wav`) embeds the count-in clicks. Its `preludeOffsetSec`
- * field — recorded in `clickTrackExport` at render time — marks where the
+ * field — recorded in `clickExport` at render time — marks where the
  * song proper (= trim.startSec) lands inside the WAV. The clip's playStart
  * within the WAV is computed from this offset; see `clickPlayRange`.
  */
@@ -125,7 +125,7 @@ export function stemPlayRange(t: SongTimings, stemDurationSec: number): ClipPlay
  *   - `clickWavDurationSec` — total duration of the click WAV on disk.
  *   - `clickWavPreludeOffsetSec` — `preludeSec + prependSec` from the render;
  *     marks where `trim.startSec` lands inside the WAV. (Read this from
- *     the SongMap's `clickTrackExport.preludeOffsetSec`.)
+ *     the SongMap's `clickExport.preludeOffsetSec`.)
  *
  * Maths:
  *   - `clickWavFirstDownbeatSec = preludeOffsetSec + (firstDownbeat − trimStart)`

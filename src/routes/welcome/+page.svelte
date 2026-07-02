@@ -113,7 +113,7 @@
       <div class="border-foreground brutalist-shadow-sm border-2 p-5 space-y-2 bg-background">
         <Sparkles class="size-5" aria-hidden="true" />
         <h2 class="text-sm font-bold uppercase tracking-wider">Stems</h2>
-        <p class="text-muted-foreground text-xs">Vocals, drums, bass, other. Local Demucs.</p>
+        <p class="text-muted-foreground text-xs">Vocals, drums, bass, and more. Local stem separation.</p>
       </div>
       <div class="border-foreground brutalist-shadow-sm border-2 p-5 space-y-2 bg-background">
         <Mic2 class="size-5" aria-hidden="true" />

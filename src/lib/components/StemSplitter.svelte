@@ -36,7 +36,7 @@
   const ALL_STEMS: StemName[] = ['vocals', 'drums', 'bass', 'other']
 
   const DEMUX_SETUP_HELP =
-    'Demucs is not installed in the desktop sidecar yet. One-time setup creates a venv under the app data folder and pip-installs Demucs (~1 GB download, several minutes). Leave this tab open while installing.'
+    'Stem separation needs a one-time local setup (~1 GB download, several minutes). Leave this tab open while it finishes.'
 
   let {
     songId,
@@ -278,7 +278,7 @@
           appendSetupLog(`⛔  ${ev.msg}`)
           break
         case 'done':
-          appendSetupLog(`✓  Ready: ${ev.venvPython}`)
+          appendSetupLog('✓  Ready.')
           break
       }
     })
@@ -306,7 +306,7 @@
   }
   const hint = $derived(reasonHint())
   const splitButtonTitle = $derived(
-    canRun().ok ? 'Run Demucs stem separation in the desktop app' : hint || 'Cannot split yet',
+    canRun().ok ? 'Start stem separation' : hint || 'Cannot split yet',
   )
 
   const phase = $derived<'idle' | 'queued' | 'running' | 'paused' | 'done' | 'error' | 'cancelled'>(
@@ -454,7 +454,7 @@
         class="gap-1"
         onclick={() => void togglePause()}
         aria-label="Pause this stem job"
-        title="Suspend Demucs (SIGSTOP). Resume later to continue from where it left off."
+        title="Pause this stem job. Resume later to continue from here."
       >
         <Pause class="size-3.5" aria-hidden="true" />
         Pause
@@ -496,11 +496,11 @@
   {#if desktopReachable && (showSetupButton || setupRunning || setupError)}
     <fieldset class="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 border min-w-0 space-y-2 px-3 py-2">
       <legend class="text-[10px] font-semibold uppercase tracking-wider px-1 text-amber-700 dark:text-amber-200">
-        Python deps
+        Stem setup
       </legend>
       <p class="text-muted-foreground flex flex-wrap items-center gap-1.5 text-xs">
         {#if depsReady === false || needsSetupAfterError}
-          <span>One-time Demucs install (~1 GB).</span>
+          <span>One-time stem setup (~1 GB).</span>
         {:else if setupRunning}
           <span>Installing — keep this tab open.</span>
         {:else}
@@ -524,7 +524,7 @@
           onclick={() => void runSetup()}
         >
           <Download class="size-3.5" aria-hidden="true" />
-          {setupRunning ? 'Installing…' : depsReady ? 'Reinstall' : 'Set up dependencies'}
+          {setupRunning ? 'Installing…' : depsReady ? 'Reinstall' : 'Set up stem tools'}
         </Button>
         {#if setupRunning}
           <span class="text-muted-foreground font-mono text-xs">{setupLabel}</span>
@@ -591,7 +591,7 @@
     <summary
       class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground cursor-pointer list-none select-none marker:content-none [&::-webkit-details-marker]:hidden"
     >
-      Demucs log {#if logLines.length > 0}({logLines.length}){/if}
+      Stem split log {#if logLines.length > 0}({logLines.length}){/if}
     </summary>
     <div
       bind:this={logBox}

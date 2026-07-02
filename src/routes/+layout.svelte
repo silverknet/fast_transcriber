@@ -5,6 +5,7 @@
   import { browser } from '$app/environment'
   import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
+  import DesktopUpdateBanner from '$lib/components/DesktopUpdateBanner.svelte'
   import ProjectContextBar from '$lib/components/ProjectContextBar.svelte'
   import ConflictResolutionDialog from '$lib/components/ConflictResolutionDialog.svelte'
   import { page } from '$app/stores'
@@ -299,6 +300,7 @@
   {#if showChrome}
     <div class="shrink-0">
       <AppMenuBar />
+      <DesktopUpdateBanner />
       <ProjectContextBar />
     </div>
   {/if}

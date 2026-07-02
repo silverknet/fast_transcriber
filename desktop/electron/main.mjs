@@ -21,7 +21,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import {
   beatsScriptPath,
   bootstrapPythonExe,
@@ -79,6 +79,24 @@ const LOG_PREFIX = '[barbro-desktop]'
 const logInfo = (...args) => console.info(LOG_PREFIX, ...args)
 const logWarn = (...args) => console.warn(LOG_PREFIX, ...args)
 const logError = (...args) => console.error(LOG_PREFIX, ...args)
+
+// Resilience net: this is a HEADLESS background sidecar. A crash takes down
+// the user's desktop client for every feature (analyze, stems, cloud FS), so
+// staying alive + logging beats dying on a stray error — e.g. an unhandled
+// rejection from a fire-and-forget job or the auto-stems daemon. Node's
+// default would exit the process; we log and keep serving instead.
+process.on('unhandledRejection', (reason) => {
+  logError(
+    'Unhandled promise rejection (kept alive):',
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  )
+})
+process.on('uncaughtException', (err) => {
+  logError(
+    'Uncaught exception (kept alive):',
+    err instanceof Error ? (err.stack ?? err.message) : String(err),
+  )
+})
 
 function readDesktopVersion() {
   try {
@@ -530,10 +548,7 @@ function extractSongMetadataLite(songProject) {
   if (typeof md.artist === 'string') out.artist = md.artist
   if (md.keyDetail) out.keyDetail = md.keyDetail
   if (typeof md.bpm === 'number') out.bpm = md.bpm
-  const cues = map.cues
-  if (cues && cues.mode === 'countIn' && typeof cues.countInBeats === 'number' && cues.countInBeats > 0) {
-    out.countInBeats = cues.countInBeats
-  }
+  if (typeof map.countInBeats === 'number' && map.countInBeats > 0) out.countInBeats = map.countInBeats
   // True when the SongMap names an audio source — covers both v1 baked
   // audio (`fileName` set) and v2 disk-stored audio (`originalPath` set).
   // Stub songs added via "Add empty" have no `audio` block at all.
@@ -604,6 +619,22 @@ async function listStemSets(songFolderAbs) {
   }
   if (flatAudio.length > 0) out['legacy'] = dedupeStemsByLowerCase(flatAudio)
   return out
+}
+
+async function hasRenderedCueTrack(songFolderAbs) {
+  if (existsSync(path.join(songFolderAbs, 'cue', 'cue-track.wav'))) return true
+  const tracksDir = path.join(songFolderAbs, 'cue', 'tracks')
+  let entries
+  try {
+    entries = await readdir(tracksDir, { withFileTypes: true })
+  } catch {
+    return false
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue
+    if (existsSync(path.join(tracksDir, ent.name, 'cue-track.wav'))) return true
+  }
+  return false
 }
 
 /**
@@ -744,11 +775,10 @@ async function handleProjectInfo(req, res, cors) {
       const folderAbs = path.join(projectPath, entry.folder)
       const smapPath = path.join(folderAbs, SONG_SMAP_FILENAME)
       const alsPath = path.join(folderAbs, SONG_ALS_FILENAME)
-      const cuePath = path.join(folderAbs, 'cue', 'cue-track.wav')
       const clickPath = path.join(folderAbs, 'cue', 'click-track.wav')
       const hasSmap = existsSync(smapPath)
       const hasAls = existsSync(alsPath)
-      const hasCueTrack = existsSync(cuePath)
+      const hasCueTrack = await hasRenderedCueTrack(folderAbs)
       const hasClickTrack = existsSync(clickPath)
       const songProject = hasSmap ? await readSmapHeaderJson(smapPath) : null
       const lite = extractSongMetadataLite(songProject) ?? { title: entry.folder }
@@ -894,7 +924,7 @@ async function handleProjectSongWrite(req, res, cors) {
 /**
  * `POST /native/project/song/asset/write` — body
  * `{ projectPath, songFolder, subpath, contentBase64 }`. Writes a single
- * file under the song folder (e.g. `cue/cue-track.wav`). `subpath` is
+ * file under the song folder (e.g. `cue/tracks/main/cue-track.wav`). `subpath` is
  * validated like `songFolder` — no `..`, no leading `/`, no `\\`.
  * Intermediate directories are created on demand.
  */
@@ -2032,7 +2062,12 @@ async function buildReceiverIndex(projectPath, projectManifest) {
  */
 function openHydrationPack(packPath) {
   return new Promise((resolve, reject) => {
-    yauzl.open(packPath, { lazyEntries: true }, (err, zipFile) => {
+    // autoClose:false is REQUIRED — we read every entry to 'end' first, then
+    // stream them for extraction later in the import handler. With yauzl's
+    // default autoClose:true the zip closes as soon as the last entry is read,
+    // so the subsequent openReadStream calls throw "closed" and nothing
+    // extracts. The caller closes the zip explicitly when done.
+    yauzl.open(packPath, { lazyEntries: true, autoClose: false }, (err, zipFile) => {
       if (err || !zipFile) {
         reject(err ?? new Error('Could not open hydration pack'))
         return
@@ -2623,6 +2658,31 @@ async function runQueuedJob(job) {
   const child = spawn(pythonStemsExe(), args, { env: process.env })
   job.child = child
 
+  // Stall watchdog. A hung/zombie Demucs child that never exits and never
+  // emits output would block the whole queue forever (activeJobId stuck),
+  // which is exactly how auto-stems "gets stuck". Demucs streams progress
+  // steadily, so NO output for STALL_TIMEOUT_MS means it's wedged — kill it
+  // and let the job finish as an error so the queue moves on.
+  const STALL_TIMEOUT_MS = 15 * 60 * 1000
+  let stallTimer = null
+  let timedOut = false
+  const armStall = () => {
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => {
+      timedOut = true
+      logWarn(`stems[${job.jobId.slice(0, 8)}] no progress for 15 min — killing (assumed stuck)`)
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+    }, STALL_TIMEOUT_MS)
+  }
+  const disarmStall = () => {
+    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null }
+  }
+  // Any output (progress or logs) counts as "alive" and resets the timer.
+  // Extra listeners are fine — they don't interfere with the parsing ones.
+  child.stdout.on('data', armStall)
+  child.stderr.on('data', armStall)
+  armStall()
+
   let buffer = ''
   /** @type {{ files?: string[] } | null} */
   let lastDone = null
@@ -2667,11 +2727,16 @@ async function runQueuedJob(job) {
 
   await new Promise((resolve) => {
     child.on('error', (err) => {
+      disarmStall()
       lastError = { msg: err instanceof Error ? err.message : String(err) }
       emitJobEvent(job, { type: 'error', msg: lastError.msg })
       resolve()
     })
     child.on('close', (code) => {
+      disarmStall()
+      if (timedOut && !lastError) {
+        lastError = { msg: 'Stem render timed out (no progress for 15 min) — skipped this song.' }
+      }
       const tail = buffer.trim()
       if (tail) {
         try {
@@ -4745,6 +4810,10 @@ function startBeaconServer() {
       void handleAutoStemsWatch(req, res, cors)
       return
     }
+    if (req.method === 'POST' && req.url === '/native/update/install') {
+      void handleUpdateInstall(req, res, cors)
+      return
+    }
 
     if (req.method === 'POST' && req.url === '/native/import/youtube') {
       void handleYoutubeImport(req, res, cors)
@@ -5046,6 +5115,16 @@ function setupAutoStemsDaemon() {
       }
     },
     hasInflightJobForSong: (songId) => hasInflightStemJobForSong(songId),
+    // Safety filters: don't auto-run the stem engine when it isn't installed
+    // (repeated failed spawns), and never pile onto a busy queue — the daemon
+    // enqueues at most one job at a time and waits for it to drain.
+    stemsReady: () => stemsVenvIsReady(),
+    anyStemJobActive: () => {
+      for (const j of stemsJobs.values()) {
+        if (j.state === 'queued' || j.state === 'running' || j.state === 'paused') return true
+      }
+      return false
+    },
     loadWatched: () => {
       try {
         const raw = JSON.parse(readFileSync(autoStemsWatchFilePath(), 'utf8'))
@@ -5087,6 +5166,49 @@ async function handleAutoStemsWatch(req, res, cors) {
     sendJson(res, 200, { ok: true }, cors)
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/update/install` — body `{ artifacts }` (the web's
+ * `desktop-downloads.json` artifacts map). Downloads the DMG matching THIS
+ * machine's arch and opens it in Finder so the user can drag-install and
+ * relaunch. This is the "one-click update" — as close to auto-update as we
+ * can get without code-signing/notarization (which macOS requires for true
+ * silent updates).
+ */
+async function handleUpdateInstall(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const artifacts = body && typeof body.artifacts === 'object' && body.artifacts ? body.artifacts : {}
+    const key = `darwin-${process.arch}` // darwin-arm64 or darwin-x64
+    const entry = artifacts[key]
+    const url = entry && typeof entry.url === 'string' ? entry.url.trim() : ''
+    if (!/^https:\/\//i.test(url)) {
+      return sendJson(res, 400, { ok: false, error: `No download available for ${key}` }, cors)
+    }
+    logInfo(`update: downloading ${url}`)
+    let dl
+    try {
+      dl = await fetch(url, { redirect: 'follow' })
+    } catch (e) {
+      return sendJson(res, 502, { ok: false, error: `Download failed: ${e instanceof Error ? e.message : String(e)}` }, cors)
+    }
+    if (!dl.ok) {
+      return sendJson(res, 502, { ok: false, error: `Download failed: HTTP ${dl.status}` }, cors)
+    }
+    const bytes = Buffer.from(await dl.arrayBuffer())
+    const dir = await mkdtemp(path.join(tmpdir(), 'barbro-update-'))
+    const dmgPath = path.join(dir, 'BarBro-Desktop-update.dmg')
+    await writeFile(dmgPath, bytes)
+    logInfo(`update: opening installer ${dmgPath} (${(bytes.length / 1_048_576).toFixed(1)} MB)`)
+    const openErr = await shell.openPath(dmgPath)
+    if (openErr) {
+      return sendJson(res, 500, { ok: false, error: `Could not open installer: ${openErr}` }, cors)
+    }
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
   }
 }
 

@@ -187,7 +187,7 @@
                 {:else if s.status === 'error'}
                   ⛔ {s.error ?? 'failed'}
                 {:else if s.status === 'skipped'}
-                  skipped (heavy — install on demand)
+                  available when needed
                 {:else if s.status === 'running'}
                   {s.label ?? 'working…'} ({s.progress ?? 0}%)
                 {:else}
@@ -265,11 +265,11 @@
     -->
     <h1 class="mb-3 flex items-center gap-3 text-3xl font-black tracking-tight sm:text-4xl">
       <AlertTriangle class="text-amber-600 dark:text-amber-400 size-8 shrink-0" aria-hidden="true" />
-      BarBro Desktop is broken.
+      BarBro Desktop needs repair.
     </h1>
     <p class="text-muted-foreground mb-6 text-base">
-      The desktop client is running but its analysis engine is missing
-      Python dependencies. Reinstall the latest BarBro Desktop build to fix.
+      The desktop app is running, but required analysis files are missing.
+      Reinstall the latest BarBro Desktop build to fix.
     </p>
 
     {#if brokenChecks.length > 0}

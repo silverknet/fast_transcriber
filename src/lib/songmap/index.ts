@@ -7,8 +7,13 @@ export type {
   Beat,
   BeatSource,
   ChordSymbol,
+  CueAnchor,
+  CueEvent,
+  CueEventKind,
+  CueEventSource,
   CueMode,
   CueSettings,
+  CueTrack,
   CueTrackExport,
   HarmonyEvent,
   Meter,
@@ -22,16 +27,26 @@ export type {
   SongMapAppInfo,
   SongMapTimeline,
   SongMapV1,
+  SongMapV2,
   SongMetadata,
 } from './types'
-export { serializeSongMap } from './serialize'
+export { canonicalizeSongMapForSerialize, serializeSongMap } from './serialize'
 export type { SerializeSongMapOptions } from './serialize'
 export { parseSongMap, SongMapParseError } from './parse'
 export type { ParseSongMapOptions } from './parse'
 export { validateSongMap } from './validate'
 export type { ValidationResult } from './validate'
-export { isSongMapV1, assertSongMap } from './guards'
+export { isSongMapV1, isSongMapV2, assertSongMap } from './guards'
 export { defaultCueSettings, emptySongMetadata, DEFAULT_METER } from './defaults'
+export {
+  createDefaultCueTrack,
+  cueTrackHasSharedData,
+  DEFAULT_CUE_TRACK_ID,
+  generateCueTrackFromSections,
+  generatedCountKey,
+  generatedSectionKey,
+  getPrimaryCueTrack,
+} from './cueTracks'
 export {
   decodeSmapFile,
   downloadBlob,

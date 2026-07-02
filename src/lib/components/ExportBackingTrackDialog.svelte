@@ -21,6 +21,7 @@
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { selectBestStemSet } from '$lib/project/commit'
+  import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { downloadBlob, safeExportBasename } from '$lib/songmap/persist'
   import type { SongMap } from '$lib/songmap'
   import type { ProjectSongMetadataLite } from '$lib/stores/project'
@@ -92,16 +93,30 @@
     return list
   })
 
-  let cueOpt = $derived<SourceOpt | null>(
-    metadata?.hasCueTrack
-      ? {
-          key: 'cue',
-          label: 'Cue track',
-          hint: 'cue/cue-track.wav · spoken count-in + section labels',
-          fetch: fetchFromDisk('cue/cue-track.wav'),
-        }
-      : null,
+  let renderedCueTrack = $derived.by(() =>
+    songMap?.cueTracks.find((track) => track.renderExport?.relativePath) ?? null,
   )
+
+  let cueOpt = $derived.by<SourceOpt | null>(() => {
+    const rel = renderedCueTrack?.renderExport?.relativePath
+    if (rel) {
+      return {
+        key: 'cue',
+        label: renderedCueTrack?.name ? `Cue track · ${renderedCueTrack.name}` : 'Cue track',
+        hint: rel,
+        fetch: fetchFromDisk(rel),
+      }
+    }
+    if (metadata?.hasCueTrack) {
+      return {
+        key: 'cue',
+        label: 'Cue track',
+        hint: 'cue/cue-track.wav · legacy render',
+        fetch: fetchFromDisk('cue/cue-track.wav'),
+      }
+    }
+    return null
+  })
 
   /**
    * Click track is always available for a song with beats — synthesised
@@ -123,7 +138,11 @@
       hint: 'synthesised from beats',
       fetch: async () => {
         try {
-          const r = await renderCueTrackWavBlob(songMap, { includeSpeech: false, includeClicks: true })
+          const r = await renderCueTrackWavBlob(songMap, {
+            includeSpeech: false,
+            includeClicks: true,
+            cueTrack: getPrimaryCueTrack(songMap),
+          })
           return r.blob
         } catch {
           return null

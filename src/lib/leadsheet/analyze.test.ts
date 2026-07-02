@@ -58,7 +58,7 @@ function buildMap(opts: {
     timeline: { bars: opts.bars, beats: [] },
     sections: opts.sections ?? [],
     harmony: opts.harmony ?? [],
-    cues: { mode: 'off', countInBeats: 0, useSectionLabels: false },
+    cueTracks: [],
   } as unknown as SongMap
 }
 
