@@ -2050,7 +2050,12 @@ async function buildReceiverIndex(projectPath, projectManifest) {
  */
 function openHydrationPack(packPath) {
   return new Promise((resolve, reject) => {
-    yauzl.open(packPath, { lazyEntries: true }, (err, zipFile) => {
+    // autoClose:false is REQUIRED — we read every entry to 'end' first, then
+    // stream them for extraction later in the import handler. With yauzl's
+    // default autoClose:true the zip closes as soon as the last entry is read,
+    // so the subsequent openReadStream calls throw "closed" and nothing
+    // extracts. The caller closes the zip explicitly when done.
+    yauzl.open(packPath, { lazyEntries: true, autoClose: false }, (err, zipFile) => {
       if (err || !zipFile) {
         reject(err ?? new Error('Could not open hydration pack'))
         return
