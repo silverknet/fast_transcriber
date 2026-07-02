@@ -21,7 +21,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import {
   beatsScriptPath,
   bootstrapPythonExe,
@@ -4798,6 +4798,10 @@ function startBeaconServer() {
       void handleAutoStemsWatch(req, res, cors)
       return
     }
+    if (req.method === 'POST' && req.url === '/native/update/install') {
+      void handleUpdateInstall(req, res, cors)
+      return
+    }
 
     if (req.method === 'POST' && req.url === '/native/import/youtube') {
       void handleYoutubeImport(req, res, cors)
@@ -5150,6 +5154,49 @@ async function handleAutoStemsWatch(req, res, cors) {
     sendJson(res, 200, { ok: true }, cors)
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/update/install` — body `{ artifacts }` (the web's
+ * `desktop-downloads.json` artifacts map). Downloads the DMG matching THIS
+ * machine's arch and opens it in Finder so the user can drag-install and
+ * relaunch. This is the "one-click update" — as close to auto-update as we
+ * can get without code-signing/notarization (which macOS requires for true
+ * silent updates).
+ */
+async function handleUpdateInstall(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const artifacts = body && typeof body.artifacts === 'object' && body.artifacts ? body.artifacts : {}
+    const key = `darwin-${process.arch}` // darwin-arm64 or darwin-x64
+    const entry = artifacts[key]
+    const url = entry && typeof entry.url === 'string' ? entry.url.trim() : ''
+    if (!/^https:\/\//i.test(url)) {
+      return sendJson(res, 400, { ok: false, error: `No download available for ${key}` }, cors)
+    }
+    logInfo(`update: downloading ${url}`)
+    let dl
+    try {
+      dl = await fetch(url, { redirect: 'follow' })
+    } catch (e) {
+      return sendJson(res, 502, { ok: false, error: `Download failed: ${e instanceof Error ? e.message : String(e)}` }, cors)
+    }
+    if (!dl.ok) {
+      return sendJson(res, 502, { ok: false, error: `Download failed: HTTP ${dl.status}` }, cors)
+    }
+    const bytes = Buffer.from(await dl.arrayBuffer())
+    const dir = await mkdtemp(path.join(tmpdir(), 'barbro-update-'))
+    const dmgPath = path.join(dir, 'BarBro-Desktop-update.dmg')
+    await writeFile(dmgPath, bytes)
+    logInfo(`update: opening installer ${dmgPath} (${(bytes.length / 1_048_576).toFixed(1)} MB)`)
+    const openErr = await shell.openPath(dmgPath)
+    if (openErr) {
+      return sendJson(res, 500, { ok: false, error: `Could not open installer: ${openErr}` }, cors)
+    }
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
   }
 }
 
