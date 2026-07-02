@@ -504,7 +504,15 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const formatVersion = raw.formatVersion
   const isLegacyV1 = formatVersion === SONGMAP_LEGACY_FORMAT_VERSION
   if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1) {
-    throw new SongMapParseError(`Unsupported formatVersion: ${String(formatVersion)}`, 'formatVersion')
+    // A file from a NEWER build (formatVersion above what we understand) gets a
+    // user-facing "update BarBro" message wherever this error surfaces, instead
+    // of a cryptic version number. Older/unknown versions keep the raw message.
+    const n = typeof formatVersion === 'number' ? formatVersion : NaN
+    const msg =
+      Number.isFinite(n) && n > SONGMAP_FORMAT_VERSION
+        ? 'This song was saved by a newer version of BarBro. Update BarBro to open it.'
+        : `Unsupported formatVersion: ${String(formatVersion)}`
+    throw new SongMapParseError(msg, 'formatVersion')
   }
   const metadata = parseMetadata(raw.metadata, 'metadata')
   const timeline = parseTimeline(raw.timeline, 'timeline')

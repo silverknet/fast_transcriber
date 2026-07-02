@@ -136,4 +136,9 @@ describe('SongMap v1→v2 full round-trip (no non-cue data loss)', () => {
     const reparsed = parseSongMap(serializeSongMap(sm))
     expect(reparsed).toEqual(sm)
   })
+
+  it('gives a friendly "update BarBro" error for a file from a newer build', () => {
+    const fromFuture = JSON.stringify({ ...legacyV1, formatVersion: 999 })
+    expect(() => parseSongMap(fromFuture)).toThrow(/newer version of BarBro/i)
+  })
 })
