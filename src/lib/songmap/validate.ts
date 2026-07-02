@@ -2,6 +2,9 @@ import { SONGMAP_FORMAT_VERSION } from './version'
 import type {
   Bar,
   Beat,
+  CueAnchor,
+  CueEvent,
+  CueTrack,
   HarmonyEvent,
   Section,
   SongKey,
@@ -68,6 +71,8 @@ const SECTION_KINDS = new Set([
   'chorus',
   'bridge',
   'solo',
+  'riff',
+  'break',
   'outro',
   'custom',
 ])
@@ -96,6 +101,94 @@ function validateHarmony(h: HarmonyEvent, path: string, errors: string[]) {
   if (!isFiniteNumber(h.endSec)) errors.push(`${path}.endSec invalid`)
   if (h.endSec <= h.startSec) errors.push(`${path}.endSec must be > startSec`)
   validateChordSymbol(h.chord, `${path}.chord`, errors)
+}
+
+const CUE_EVENT_KINDS = new Set([
+  'section',
+  'count',
+  'intro',
+  'custom-text',
+  'recorded-audio-placeholder',
+])
+
+const CUE_EVENT_SOURCES = new Set(['generated', 'custom', 'imported', 'recorded'])
+
+function validateCueAnchor(anchor: CueAnchor, path: string, errors: string[]) {
+  if (!anchor || typeof anchor !== 'object') {
+    errors.push(`${path} invalid`)
+    return
+  }
+  if (anchor.kind === 'bar') {
+    if (typeof anchor.barId !== 'string' || !anchor.barId) errors.push(`${path}.barId required`)
+  } else if (anchor.kind === 'beat') {
+    if (typeof anchor.beatId !== 'string' || !anchor.beatId) errors.push(`${path}.beatId required`)
+  } else if (anchor.kind === 'time') {
+    if (!isFiniteNumber(anchor.timeSec)) errors.push(`${path}.timeSec invalid`)
+  } else {
+    errors.push(`${path}.kind invalid`)
+  }
+  if (anchor.offsetSec !== undefined && !isFiniteNumber(anchor.offsetSec)) {
+    errors.push(`${path}.offsetSec invalid`)
+  }
+  if (anchor.leadBars !== undefined && !isFiniteNumber(anchor.leadBars)) {
+    errors.push(`${path}.leadBars invalid`)
+  }
+  if (anchor.leadBeats !== undefined && !isFiniteNumber(anchor.leadBeats)) {
+    errors.push(`${path}.leadBeats invalid`)
+  }
+}
+
+function validateCueEvent(event: CueEvent, path: string, errors: string[]) {
+  if (typeof event.id !== 'string' || !event.id) errors.push(`${path}.id required`)
+  if (!CUE_EVENT_KINDS.has(event.kind)) errors.push(`${path}.kind invalid`)
+  if (typeof event.enabled !== 'boolean') errors.push(`${path}.enabled must be boolean`)
+  validateCueAnchor(event.anchor, `${path}.anchor`, errors)
+  if (event.text !== undefined && typeof event.text !== 'string') errors.push(`${path}.text invalid`)
+  if (event.generatedKey !== undefined && typeof event.generatedKey !== 'string') {
+    errors.push(`${path}.generatedKey invalid`)
+  }
+  if (event.generatedSource !== undefined) {
+    if (!event.generatedSource || event.generatedSource.kind !== 'section') {
+      errors.push(`${path}.generatedSource invalid`)
+    } else {
+      if (typeof event.generatedSource.sectionId !== 'string' || !event.generatedSource.sectionId) {
+        errors.push(`${path}.generatedSource.sectionId invalid`)
+      }
+      if (
+        event.generatedSource.leadBars !== undefined &&
+        !isFiniteNumber(event.generatedSource.leadBars)
+      ) {
+        errors.push(`${path}.generatedSource.leadBars invalid`)
+      }
+      if (
+        event.generatedSource.leadBeats !== undefined &&
+        !isFiniteNumber(event.generatedSource.leadBeats)
+      ) {
+        errors.push(`${path}.generatedSource.leadBeats invalid`)
+      }
+    }
+  }
+  if (event.source !== undefined && !CUE_EVENT_SOURCES.has(event.source)) {
+    errors.push(`${path}.source invalid`)
+  }
+  if (event.edited !== undefined && typeof event.edited !== 'boolean') errors.push(`${path}.edited invalid`)
+  if (event.stale !== undefined && typeof event.stale !== 'boolean') errors.push(`${path}.stale invalid`)
+}
+
+function validateCueTrack(track: CueTrack, path: string, errors: string[]) {
+  if (typeof track.id !== 'string' || !track.id) errors.push(`${path}.id required`)
+  if (typeof track.name !== 'string' || !track.name.trim()) errors.push(`${path}.name required`)
+  if (typeof track.enabled !== 'boolean') errors.push(`${path}.enabled must be boolean`)
+  if (track.voiceId !== undefined && typeof track.voiceId !== 'string') errors.push(`${path}.voiceId invalid`)
+  if (!Array.isArray(track.events)) errors.push(`${path}.events must be array`)
+  else track.events.forEach((event, i) => validateCueEvent(event, `${path}.events[${i}]`, errors))
+  if (!Array.isArray(track.suppressedGeneratedKeys)) {
+    errors.push(`${path}.suppressedGeneratedKeys must be array`)
+  } else {
+    track.suppressedGeneratedKeys.forEach((key, i) => {
+      if (typeof key !== 'string') errors.push(`${path}.suppressedGeneratedKeys[${i}] invalid`)
+    })
+  }
 }
 
 export function validateSongMap(map: SongMap): ValidationResult {
@@ -181,19 +274,8 @@ export function validateSongMap(map: SongMap): ValidationResult {
     }
   }
 
-  if (!map.cues || typeof map.cues.mode !== 'string') errors.push('cues invalid')
-  else {
-    if (!Number.isInteger(map.cues.countInBeats) || map.cues.countInBeats < 0) {
-      errors.push('cues.countInBeats invalid')
-    }
-    if (typeof map.cues.useSectionLabels !== 'boolean') errors.push('cues.useSectionLabels invalid')
-    if (map.cues.prependSec !== undefined && (!Number.isFinite(map.cues.prependSec) || map.cues.prependSec < 0)) {
-      errors.push('cues.prependSec invalid')
-    }
-    if (map.cues.spokenIntroText !== undefined && typeof map.cues.spokenIntroText !== 'string') {
-      errors.push('cues.spokenIntroText invalid')
-    }
-  }
+  if (!Array.isArray(map.cueTracks)) errors.push('cueTracks must be array')
+  else map.cueTracks.forEach((track, i) => validateCueTrack(track, `cueTracks[${i}]`, errors))
 
   if (map.countInBeats !== undefined) {
     if (!Number.isInteger(map.countInBeats) || map.countInBeats < 0) {
@@ -232,8 +314,12 @@ export function validateSongMap(map: SongMap): ValidationResult {
       errors.push(`${label}.relativePath invalid`)
     }
   }
-  if (map.cueTrackExport !== undefined) validateRenderedExport(map.cueTrackExport, 'cueTrackExport')
-  if (map.clickTrackExport !== undefined) validateRenderedExport(map.clickTrackExport, 'clickTrackExport')
+  if (Array.isArray(map.cueTracks)) {
+    map.cueTracks.forEach((track, i) => {
+      if (track.renderExport !== undefined) validateRenderedExport(track.renderExport, `cueTracks[${i}].renderExport`)
+    })
+  }
+  if (map.clickExport !== undefined) validateRenderedExport(map.clickExport, 'clickExport')
 
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
   else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))

@@ -95,7 +95,7 @@ function buildUniformMap(opts: {
     timeline: { bars: [bar0, bar1], beats },
     sections: [],
     harmony: [],
-    cues: { mode: 'off', countInBeats: 0, useSectionLabels: false },
+    cueTracks: [],
     countInBeats: opts.countInBeats,
     startBeatId: opts.startBeatId,
   } as unknown as SongMap
@@ -103,7 +103,7 @@ function buildUniformMap(opts: {
 
 /** The same shape as the in-renderer math: where `trim.startSec` lands on
  *  the click WAV. = `preludeSec + prependSec`. The Ableton export reads this
- *  from the rendered `clickTrackExport.preludeOffsetSec`; we synthesise it
+ *  from the rendered `clickExport.preludeOffsetSec`; we synthesise it
  *  here from `computeCountIn` so the test doesn't need to render audio. */
 function clickPreludeOffsetSec(sm: SongMap, preludeSec: number): number {
   const n = effectiveCountInBeats(sm)

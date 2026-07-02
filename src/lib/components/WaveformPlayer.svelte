@@ -1772,7 +1772,7 @@
         onclick={() => {
           followPlayhead = !followPlayhead
         }}
-        title="Follow playhead while zoomed (stops when you pan or use zoom controls)"
+        title="Follow playhead"
       >
         <LocateFixed class="size-4" aria-hidden="true" />
       </Button>
@@ -1780,23 +1780,20 @@
 
     <details
       class="text-muted-foreground group mx-auto max-w-3xl text-center text-[11px]"
-      aria-label="Waveform mouse and keyboard shortcuts"
+      aria-label="Waveform gestures"
     >
       <summary
         class="text-muted-foreground hover:text-foreground cursor-pointer list-none py-0.5 select-none marker:content-none [&::-webkit-details-marker]:hidden"
       >
-        <span class="underline-offset-2 group-open:underline">Zoom & shortcuts</span>
+        <span class="underline-offset-2 group-open:underline">Gestures</span>
       </summary>
       <p class="text-muted-foreground mt-2 text-left leading-relaxed">
         {#if isEditorVariant}
-          Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan (waveform, bar strip, minimap) · Grid: click bar,
-          vertical wheel = beats/bar; drag bar left/right edge to stretch that bar (beats stay even); Sections: drag across
-          bars, Shift+click range, ⌘/Ctrl+click toggle · Chords: drag or
-          Shift+click beat range, ⌘/Ctrl+click toggle; click a beat opens the picker · ⌘/Ctrl+C / ⌘/Ctrl+V copy & paste
-          resolved chords · Esc clears selection
+          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select; click a beat to edit
+          chords. Esc clears selection.
         {:else}
-          Ctrl/Cmd+scroll to zoom · two-finger / Shift+scroll to pan · top waveform: handles resize, body moves, outside
-          drag creates selection, tap seeks · minimap: viewport handles resize, body drags, outside recenters
+          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag handles to adjust the selection; drag the minimap
+          to move around.
         {/if}
       </p>
     </details>
@@ -2006,7 +2003,7 @@
                 <span
                   class="border-muted-foreground/30 border-t-foreground/80 size-3 animate-spin rounded-full border"
                 ></span>
-                Installing librosa… {sectionsInstallProgress}%
+                Preparing analysis… {sectionsInstallProgress}%
               </span>
             {:else if audioBordersStatus === 'ready' || audioBordersStatus === 'cached'}
               <span class="text-muted-foreground">
@@ -2028,7 +2025,7 @@
                 {/if}
               </details>
             {:else if audioBordersStatus === 'unavailable'}
-              <span class="text-muted-foreground italic">Sidecar offline — no borders</span>
+              <span class="text-muted-foreground italic">Open BarBro Desktop to detect borders</span>
             {/if}
             {#if onReanalyzeBorders && audioBordersStatus !== 'analyzing' && audioBordersStatus !== 'installing'}
               <Button

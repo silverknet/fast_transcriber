@@ -61,7 +61,7 @@
     onToggleHidden: () => void
     onRemove: () => void
     onRename: () => void
-    /** Trigger the project-level hidden file input + attach the audio bytes here. */
+    /** Open the shared project-level audio dialog and attach the selected audio here. */
     onAttachAudio: () => void
     /** Replace the audio of a song that already has it (hard reset of derived data). */
     onReplaceAudio: () => void

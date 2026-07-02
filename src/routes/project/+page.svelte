@@ -41,6 +41,7 @@
   import {
     attachImportedAudioToSong,
     attachAudioToSong,
+    replaceImportedAudioForSong,
     replaceAudioForSong,
     dropRecentProjectPath,
     importSmapToProject,
@@ -468,22 +469,26 @@
     renameSongDialogOpen = true
   }
 
-  // ── Attach-audio flow ────────────────────────────────────────────────
+  // ── Audio import / replace flow ──────────────────────────────────────
   // One shared dialog handles both local files and YouTube URL imports.
-  // The target song id is captured before the dialog opens so direct
+  // The active target song id is captured before the dialog opens so direct
   // project-audio YouTube jobs can write straight into that song folder.
   let attachAudioDialogOpen = $state(false)
   let attachAudioTargetId = $state<string | null>(null)
+  let replaceTargetId = $state<string | null>(null)
   let attachAudioBusyId = $state<string | null>(null)
 
   function onAttachAudio(entry: ProjectSongEntry) {
     actionError = ''
+    replaceTargetId = null
     attachAudioTargetId = entry.id
     attachAudioDialogOpen = true
   }
 
+  const audioDialogTargetId = $derived(replaceTargetId ?? attachAudioTargetId)
+
   const attachAudioYoutubeOutput = $derived.by<YoutubeImportOutput>(() => {
-    const songId = attachAudioTargetId
+    const songId = audioDialogTargetId
     const entry = $project.data?.songs.find((s) => s.id === songId)
     if ($project.osPath && entry) {
       return { kind: 'project-audio', projectPath: $project.osPath, songFolder: entry.folder }
@@ -522,9 +527,6 @@
   }
 
   // ── Replace audio (hard reset of a song's derived data) ───────────────────
-  let replaceAudioInput = $state<HTMLInputElement | undefined>()
-  let replaceTargetId = $state<string | null>(null)
-
   function onReplaceAudio(entry: ProjectSongEntry) {
     const title = $project.metadataByFolder[entry.folder]?.title || 'this song'
     const ok = confirm(
@@ -533,16 +535,13 @@
         `You'll re-analyze the new audio. (Other songs are unaffected.)`,
     )
     if (!ok) return
+    attachAudioTargetId = null
     replaceTargetId = entry.id
-    replaceAudioInput?.click()
+    attachAudioDialogOpen = true
   }
 
-  async function onReplaceAudioPicked(e: Event) {
-    const input = e.currentTarget as HTMLInputElement
-    const file = input.files?.[0]
-    input.value = '' // allow re-picking the same file later
+  async function onReplaceLocalAudio(file: File) {
     const songId = replaceTargetId
-    replaceTargetId = null
     if (!file || !songId) return
     attachAudioBusyId = songId
     actionError = ''
@@ -556,9 +555,25 @@
     }
   }
 
+  async function onReplaceImportedAudio(artifact: ImportedAudioArtifact) {
+    const songId = replaceTargetId
+    if (!songId) return
+    attachAudioBusyId = songId
+    actionError = ''
+    try {
+      await replaceImportedAudioForSong(songId, artifact)
+      await refreshProjectInfo().catch(() => {})
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : 'Could not replace audio'
+    } finally {
+      attachAudioBusyId = null
+    }
+  }
+
   $effect(() => {
     if (!attachAudioDialogOpen && !attachAudioBusyId) {
       attachAudioTargetId = null
+      replaceTargetId = null
     }
   })
 
@@ -596,7 +611,7 @@
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}
     <header class="border-foreground border-b-2 pb-4">
-      <h1 class="font-display text-3xl font-black tracking-tight">Projects</h1>
+      <h1 class="text-3xl font-bold tracking-tight">Projects</h1>
     </header>
 
     <div class="grid gap-3 sm:grid-cols-2">
@@ -740,7 +755,7 @@
     <header class="border-foreground border-b-2 pb-4">
       <input
         type="text"
-        class="font-display border-foreground/0 bg-transparent w-full border-b-2 pb-1 text-3xl font-black tracking-tight focus:border-foreground focus:outline-none"
+        class="border-foreground/0 bg-transparent w-full border-b-2 pb-1 text-3xl font-bold tracking-tight focus:border-foreground focus:outline-none"
         placeholder="Untitled project"
         bind:value={renameInput}
         onblur={commitNameRename}
@@ -915,21 +930,14 @@
       onchange={onSmapPicked}
     />
 
-    <input
-      bind:this={replaceAudioInput}
-      type="file"
-      class="sr-only"
-      accept=".wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff,audio/*"
-      onchange={onReplaceAudioPicked}
-    />
-
     <AddAudioDialog
       bind:open={attachAudioDialogOpen}
+      title={replaceTargetId ? 'Replace audio' : 'Add audio'}
       accept=".wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff,audio/*"
       youtubeOutput={attachAudioYoutubeOutput}
       desktopReachable={$desktopCompanionStatus.reachable}
-      onFile={onAttachLocalAudio}
-      onImported={onAttachImportedAudio}
+      onFile={replaceTargetId ? onReplaceLocalAudio : onAttachLocalAudio}
+      onImported={replaceTargetId ? onReplaceImportedAudio : onAttachImportedAudio}
     />
 
     <ProjectSettingsDialog bind:open={settingsDialogOpen} />

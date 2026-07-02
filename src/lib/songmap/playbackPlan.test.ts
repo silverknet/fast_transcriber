@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultCueSettings } from '$lib/songmap/defaults'
+import { createDefaultCueTrack } from '$lib/songmap/cueTracks'
 import { songPlaybackPlan, type PlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
@@ -70,12 +70,24 @@ function makeSong(opts: {
     timeline: { bars, beats },
     sections: [],
     harmony: [],
-    cues: {
-      ...defaultCueSettings(),
-      mode: 'off',
-      countInBeats: 0,
-      ...(opts.spokenIntroText !== undefined ? { spokenIntroText: opts.spokenIntroText } : {}),
-    },
+    cueTracks:
+      opts.spokenIntroText !== undefined
+        ? [
+            {
+              ...createDefaultCueTrack(),
+              events: [
+                {
+                  id: 'intro',
+                  kind: 'intro',
+                  enabled: true,
+                  anchor: { kind: 'time', timeSec: 0 },
+                  text: opts.spokenIntroText,
+                  source: 'custom',
+                },
+              ],
+            },
+          ]
+        : [],
     ...(opts.countInBeats !== undefined ? { countInBeats: opts.countInBeats } : {}),
     ...(opts.startBeatId !== undefined ? { startBeatId: opts.startBeatId } : {}),
   } as SongMap
@@ -262,8 +274,14 @@ describe('songPlaybackPlan — spoken layer', () => {
     expect(p.titlePreludeSec).toBe(0)
   })
 
-  it('titlePreludeSec is positive when count-in is active (even without spoken mode)', () => {
+  it('titlePreludeSec stays 0 when count-in is active without an intro cue', () => {
     const sm = makeSong({ barCount: 2, countInBeats: 4 })
+    const p = songPlaybackPlan(sm)!
+    expect(p.titlePreludeSec).toBe(0)
+  })
+
+  it('titlePreludeSec is positive when an intro cue is active', () => {
+    const sm = makeSong({ barCount: 2, spokenIntroText: 'Count us in' })
     const p = songPlaybackPlan(sm)!
     expect(p.titlePreludeSec).toBeGreaterThan(0)
   })

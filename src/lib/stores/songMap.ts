@@ -1,5 +1,6 @@
 import { derived, get, writable } from 'svelte/store'
 import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
 import { mergeAudioReferenceFromSession } from '$lib/songmap/session'
 import { validateSongMap, type SongMap } from '$lib/songmap'
 import { audioSession } from './audioSession'
@@ -148,13 +149,18 @@ export function patchSongMap(
     if (sess.file) {
       next = mergeAudioReferenceFromSession(next, sess)
     }
-    if (next.cueTrackExport || next.clickTrackExport) {
-      const fp = fingerprintCueTrackInputs(next)
-      if (next.cueTrackExport && fp !== next.cueTrackExport.fingerprint) {
-        next = { ...next, cueTrackExport: undefined }
-      }
-      if (next.clickTrackExport && fp !== next.clickTrackExport.fingerprint) {
-        next = { ...next, clickTrackExport: undefined }
+    if (next.cueTracks.some((track) => track.renderExport) || next.clickExport) {
+      const cueTracks = next.cueTracks.map((track) => {
+        if (!track.renderExport) return track
+        const fp = fingerprintCueTrackInputs(next, track)
+        return fp === track.renderExport.fingerprint ? track : { ...track, renderExport: undefined }
+      })
+      const primaryTrack = getPrimaryCueTrack({ ...next, cueTracks })
+      const clickFp = fingerprintCueTrackInputs(next, primaryTrack)
+      next = {
+        ...next,
+        cueTracks,
+        clickExport: next.clickExport && clickFp !== next.clickExport.fingerprint ? undefined : next.clickExport,
       }
     }
     const v = validateSongMap(next)

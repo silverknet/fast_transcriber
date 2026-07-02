@@ -26,9 +26,7 @@
   } from '$lib/chords'
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import {
-    countInSpeechOutputTimes,
-    resolvedSpokenIntroText,
-    songStartBeat,
+    resolveCueEventOriginalTimeSec,
   } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
@@ -39,6 +37,11 @@
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { metadataLiteFromSongMap } from '$lib/project/commit'
   import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+  import {
+    createDefaultCueTrack,
+    generateCueTrackFromSections,
+    getPrimaryCueTrack,
+  } from '$lib/songmap/cueTracks'
   import { safeExportBasename } from '$lib/songmap/persist'
   import { patchMetadataForFolder, project as projectStore } from '$lib/stores/project'
   import { newId } from '$lib/songmap/factory'
@@ -71,7 +74,17 @@
     timelineMatchesOriginal,
     type BarGridAction,
   } from '$lib/songmap/timelineEdit'
-  import type { Accidental, Bar, ChordSymbol, NoteName, SectionKind, SongKey, SongMap } from '$lib/songmap/types'
+  import type {
+    Accidental,
+    Bar,
+    ChordSymbol,
+    CueEvent,
+    CueTrack,
+    NoteName,
+    SectionKind,
+    SongKey,
+    SongMap,
+  } from '$lib/songmap/types'
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
   import {
@@ -129,7 +142,7 @@
 
   function confirmBackToImport() {
     const ok = confirm(
-      'Leave the editor and go to the import page?\n\nThis project only lives in this tab until you export a .smap file. If you continue without exporting, you can lose your work.',
+      'Leave the editor and go to the import page?\n\nThis song only lives in this tab until you save or export it. If you continue without saving, you can lose your work.',
     )
     if (!ok) return
     document.cookie = 'barbro_session=; Max-Age=0; Path=/; SameSite=Lax'
@@ -392,7 +405,7 @@
     }
     if (!$desktopCompanionStatus.reachable) {
       audioBordersStatus = 'unavailable'
-      audioBordersError = 'Desktop sidecar is not reachable.'
+      audioBordersError = 'BarBro Desktop is not reachable.'
       return
     }
 
@@ -402,7 +415,7 @@
     const setup = await getSectionsSetupStatus()
     if (!setup) {
       audioBordersStatus = 'unavailable'
-      audioBordersError = 'Could not query setup status from the sidecar.'
+      audioBordersError = 'Could not check analysis setup.'
       return
     }
     if (!setup.ready) {
@@ -529,7 +542,7 @@
     }
     if (!$desktopCompanionStatus.reachable) {
       chordChromaStatus = 'unavailable'
-      chordChromaError = 'Desktop sidecar is not reachable.'
+      chordChromaError = 'BarBro Desktop is not reachable.'
       return
     }
 
@@ -537,7 +550,7 @@
     const setup = await getSectionsSetupStatus()
     if (!setup) {
       chordChromaStatus = 'unavailable'
-      chordChromaError = 'Could not query setup status from the sidecar.'
+      chordChromaError = 'Could not check harmony setup.'
       return
     }
     if (!setup.ready) {
@@ -1385,46 +1398,266 @@
     const p = patchSongMap((m) => ({
       ...m,
       countInBeats: next,
-      cues: {
-        ...m.cues,
-        // Top-level `countInBeats` is the authoritative source now. Clear the
-        // legacy mirror so `effectiveCountInBeats`'s migration-window fallback
-        // doesn't report a stale value when the user picks "Off".
-        countInBeats: 0,
-        mode: m.cues.mode === 'countIn' ? 'off' : m.cues.mode,
-        prependSec: undefined,
-      },
     }))
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
   }
 
-  /**
-   * Live preview of what the spoken cue will announce — fallback chain
-   * is `cues.spokenIntroText.trim() ?? metadata.title.trim() ?? 'Untitled song'`.
-   * Same helper the cue WAV renderer uses, so the user always sees the
-   * exact text Piper will say.
-   */
-  let cueSpokenIntroPreview = $derived.by(() => {
+  let selectedCueTrackId = $state<string | null>(null)
+
+  let cueTracks = $derived($songMap?.cueTracks ?? [])
+  let selectedCueTrack = $derived.by<CueTrack | null>(() => {
     const sm = $songMap
-    if (!sm) return 'Untitled song'
-    return resolvedSpokenIntroText(sm)
+    if (!sm) return null
+    return sm.cueTracks.find((track) => track.id === selectedCueTrackId) ?? getPrimaryCueTrack(sm) ?? null
+  })
+  let selectedCueEvents = $derived.by(() => {
+    const track = selectedCueTrack
+    if (!track) return [] as CueEvent[]
+    return [...track.events].sort((a, b) => {
+      const sm = $songMap
+      if (!sm) return 0
+      const ta = resolveCueEventOriginalTimeSec(sm, a) ?? 0
+      const tb = resolveCueEventOriginalTimeSec(sm, b) ?? 0
+      return ta - tb || a.id.localeCompare(b.id)
+    })
+  })
+  let selectedCueTrackHasSpeech = $derived(
+    !!selectedCueTrack?.events.some((event) => event.enabled && event.text?.trim()),
+  )
+  let selectedCueIntroText = $derived(
+    selectedCueTrack?.events.find((event) => event.kind === 'intro')?.text ?? '',
+  )
+  let selectedCueRenderLabel = $derived.by(() => {
+    const exp = selectedCueTrack?.renderExport
+    if (!exp) return 'Not rendered'
+    const date = new Date(exp.generatedAt)
+    return Number.isNaN(date.getTime()) ? 'Rendered' : `Rendered ${date.toLocaleString()}`
   })
 
-  /** Current override (empty when the user hasn't set one — falls back to title). */
-  let cueSpokenIntroOverride = $derived($songMap?.cues.spokenIntroText ?? '')
+  $effect(() => {
+    const sm = $songMap
+    if (!sm) {
+      selectedCueTrackId = null
+      return
+    }
+    if (selectedCueTrackId && sm.cueTracks.some((track) => track.id === selectedCueTrackId)) return
+    selectedCueTrackId = sm.cueTracks[0]?.id ?? null
+  })
 
-  function applyCueSpokenIntroText(text: string) {
-    const trimmed = text.trim()
+  function cueTrackRelativePath(trackId: string): string {
+    return `cue/tracks/${trackId}/cue-track.wav`
+  }
+
+  function cueEventLabel(event: CueEvent): string {
+    if (event.kind === 'custom-text') return 'Custom'
+    if (event.kind === 'recorded-audio-placeholder') return 'Recorded'
+    return event.kind.charAt(0).toUpperCase() + event.kind.slice(1)
+  }
+
+  function cueEventTimeLabel(event: CueEvent): string {
+    const sm = get(songMap)
+    if (!sm) return '--'
+    const t = resolveCueEventOriginalTimeSec(sm, event)
+    return t == null ? 'Missing anchor' : `${t.toFixed(2)} s`
+  }
+
+  function addCueTrack() {
+    const id = newId()
     const p = patchSongMap((m) => ({
       ...m,
-      cues: {
-        ...m.cues,
-        // Clear the field when the user empties it — that re-enables the
-        // title fallback. Storing an empty string would not equal "use
-        // default" semantically.
-        spokenIntroText: trimmed.length > 0 ? trimmed : undefined,
-      },
+      cueTracks: [
+        ...m.cueTracks,
+        createDefaultCueTrack({ id, name: `Cue track ${m.cueTracks.length + 1}` }),
+      ],
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else {
+      beatEditError = ''
+      selectedCueTrackId = id
+    }
+  }
+
+  function renameSelectedCueTrack(name: string) {
+    const track = selectedCueTrack
+    const trimmed = name.trim()
+    if (!track || !trimmed) return
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? { ...t, name: trimmed } : t)),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function duplicateSelectedCueTrack() {
+    const track = selectedCueTrack
+    if (!track) return
+    const id = newId()
+    const copy: CueTrack = {
+      ...track,
+      id,
+      name: `${track.name} copy`,
+      renderExport: undefined,
+      events: track.events.map((event) => ({ ...event, id: newId() })),
+    }
+    const p = patchSongMap((m) => ({ ...m, cueTracks: [...m.cueTracks, copy] }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else {
+      beatEditError = ''
+      selectedCueTrackId = id
+    }
+  }
+
+  function deleteSelectedCueTrack() {
+    const track = selectedCueTrack
+    if (!track) return
+    const ok = confirm(`Delete cue track "${track.name}"?`)
+    if (!ok) return
+    const p = patchSongMap((m) => ({ ...m, cueTracks: m.cueTracks.filter((t) => t.id !== track.id) }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else {
+      beatEditError = ''
+      selectedCueTrackId = null
+    }
+  }
+
+  function setSelectedCueTrackEnabled(enabled: boolean) {
+    const track = selectedCueTrack
+    if (!track) return
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? { ...t, enabled } : t)),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function generateSelectedCueTrackFromSections() {
+    const track = selectedCueTrack
+    if (!track) {
+      addCueTrack()
+      return
+    }
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? generateCueTrackFromSections(m, t) : t)),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function updateCueEvent(trackId: string, eventId: string, patch: Partial<CueEvent>) {
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((track) =>
+        track.id === trackId
+          ? {
+              ...track,
+              events: track.events.map((event) =>
+                event.id === eventId
+                  ? {
+                      ...event,
+                      ...patch,
+                      edited: event.source === 'generated' ? true : (patch.edited ?? event.edited),
+                    }
+                  : event,
+              ),
+            }
+          : track,
+      ),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function deleteCueEvent(trackId: string, eventId: string) {
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((track) => {
+        if (track.id !== trackId) return track
+        const event = track.events.find((e) => e.id === eventId)
+        const suppressed =
+          event?.generatedKey && !track.suppressedGeneratedKeys.includes(event.generatedKey)
+            ? [...track.suppressedGeneratedKeys, event.generatedKey]
+            : track.suppressedGeneratedKeys
+        return {
+          ...track,
+          events: track.events.filter((e) => e.id !== eventId),
+          suppressedGeneratedKeys: suppressed,
+        }
+      }),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function setIntroCueText(text: string) {
+    const trimmed = text.trim()
+    let track = selectedCueTrack
+    if (!track) {
+      addCueTrack()
+      track = get(songMap)?.cueTracks.at(-1) ?? null
+    }
+    if (!track) return
+    const intro = track.events.find((event) => event.kind === 'intro')
+    if (!trimmed && intro) {
+      deleteCueEvent(track.id, intro.id)
+      return
+    }
+    const event: CueEvent = intro
+      ? { ...intro, text: trimmed, enabled: true, edited: true }
+      : {
+          id: newId(),
+          kind: 'intro',
+          enabled: true,
+          anchor: { kind: 'time', timeSec: 0 },
+          text: trimmed,
+          source: 'custom',
+        }
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) =>
+        t.id === track.id
+          ? {
+              ...t,
+              events: intro
+                ? t.events.map((existing) => (existing.id === intro.id ? event : existing))
+                : [event, ...t.events],
+            }
+          : t,
+      ),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
+  function addCustomCueAtPlayhead() {
+    const track = selectedCueTrack
+    if (!track) {
+      addCueTrack()
+      return
+    }
+    const text = prompt('Cue text')
+    const trimmed = text?.trim()
+    if (!trimmed) return
+    const sm = get(songMap)
+    if (!sm) return
+    const anchor =
+      selectedBeatId != null
+        ? { kind: 'beat' as const, beatId: selectedBeatId }
+        : { kind: 'time' as const, timeSec: audioEl?.currentTime ?? sm.audio?.trim?.startSec ?? 0 }
+    const event: CueEvent = {
+      id: newId(),
+      kind: 'custom-text',
+      enabled: true,
+      anchor,
+      text: trimmed,
+      source: 'custom',
+    }
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? { ...t, events: [...t.events, event] } : t)),
     }))
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
@@ -1508,7 +1741,6 @@
   let songStartBarIndex = $derived(cueStartBeatInfo?.barIndex ?? 0)
 
 
-  const CUE_TRACK_REL = 'cue/cue-track.wav'
   const CLICK_TRACK_REL = 'cue/click-track.wav'
 
   let cueGenBusy = $state(false)
@@ -1523,10 +1755,8 @@
   let lastClickDownloadBlob = $state<Blob | null>(null)
 
   $effect(() => {
-    if (!$songMap?.cueTrackExport) {
-      lastCueDownloadBlob = null
-      lastClickDownloadBlob = null
-    }
+    if (!selectedCueTrack?.renderExport) lastCueDownloadBlob = null
+    if (!$songMap?.clickExport) lastClickDownloadBlob = null
   })
 
   $effect(() => {
@@ -1547,8 +1777,14 @@
   async function generateCueTrackWav() {
     const sm = get(songMap)
     if (!sm) return
-    if (!piperCueReady) {
-      cueGenErr = 'BarBro desktop with Piper is required — start the desktop app and finish Piper setup (see TTS debug page).'
+    const track = selectedCueTrack ?? getPrimaryCueTrack(sm)
+    if (!track) {
+      cueGenErr = 'Create a cue track first.'
+      return
+    }
+    const needsVoice = track.events.some((event) => event.enabled && event.text?.trim())
+    if (needsVoice && !piperCueReady) {
+      cueGenErr = 'Voice cues are not ready. Start BarBro Desktop and finish voice setup.'
       return
     }
     cueGenBusy = true
@@ -1562,12 +1798,20 @@
       // without doubling the clicks. The cue file stops containing clicks
       // here; old cue files rendered before this split still have them
       // baked in and will need a fresh "Generate" press to separate.
-      const cueRender = await renderCueTrackWavBlob(sm, { includeSpeech: true, includeClicks: false })
-      const clickRender = await renderCueTrackWavBlob(sm, { includeSpeech: false, includeClicks: true })
+      const cueRender = await renderCueTrackWavBlob(sm, {
+        includeSpeech: true,
+        includeClicks: false,
+        cueTrack: track,
+      })
+      const clickRender = await renderCueTrackWavBlob(sm, {
+        includeSpeech: false,
+        includeClicks: true,
+        cueTrack: track,
+      })
       if (cueRender.speechSkippedReason) cueSpeechNote = cueRender.speechSkippedReason
-      const dur = cueTrackTotalDurationSec(sm)
+      const dur = cueTrackTotalDurationSec(sm, track)
       if (dur == null) throw new Error('Could not derive cue duration from trim + beats')
-      const fp = fingerprintCueTrackInputs(sm)
+      const fp = fingerprintCueTrackInputs(sm, track)
       const now = new Date().toISOString()
       let cueRelativePath: string | undefined
       let clickWritten = false
@@ -1579,12 +1823,13 @@
         } else {
           const cueBytes = new Uint8Array(await cueRender.blob.arrayBuffer())
           const clickBytes = new Uint8Array(await clickRender.blob.arrayBuffer())
+          const nextCuePath = cueTrackRelativePath(track.id)
           const [cueWrite, clickWrite] = await Promise.all([
-            writeProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/cue-track.wav', cueBytes),
-            writeProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/click-track.wav', clickBytes),
+            writeProjectSongAsset(ps.osPath, ps.activeSongFolder, nextCuePath, cueBytes),
+            writeProjectSongAsset(ps.osPath, ps.activeSongFolder, CLICK_TRACK_REL, clickBytes),
           ])
           if (cueWrite.ok) {
-            cueRelativePath = CUE_TRACK_REL
+            cueRelativePath = nextCuePath
           } else {
             cueGenErr = `Could not write cue file: ${cueWrite.error}.`
           }
@@ -1598,31 +1843,38 @@
 
       // Both exports get an explicit `preludeOffsetSec` so consumers (like
       // the Ableton setlist export) can skip the silence + count-in head
-      // of each WAV without re-deriving it from `sm.cues`. The renderer
+      // of each WAV without re-deriving it from cue settings. The renderer
       // returns the exact value it used; same number for both layers since
       // they share the prelude/prepend math.
       const cuePreludeOffsetSec = cueRender.preludeOffsetSec
       const clickPreludeOffsetSec = clickRender.preludeOffsetSec
       const p = patchSongMap((m) => ({
         ...m,
-        cueTrackExport: {
-          fingerprint: fp,
-          durationSec: dur,
-          sampleRate: 44100,
-          generatedAt: now,
-          preludeOffsetSec: cuePreludeOffsetSec,
-          relativePath: cueRelativePath,
-        },
-        clickTrackExport: clickWritten
+        cueTracks: m.cueTracks.map((t) =>
+          t.id === track.id
+            ? {
+                ...t,
+                renderExport: {
+                  fingerprint: fp,
+                  durationSec: dur,
+                  sampleRate: 44100,
+                  generatedAt: now,
+                  preludeOffsetSec: cuePreludeOffsetSec,
+                  relativePath: cueRelativePath,
+                },
+              }
+            : t,
+        ),
+        clickExport: clickWritten
           ? {
               fingerprint: fp,
               durationSec: dur,
               sampleRate: 44100,
               generatedAt: now,
               preludeOffsetSec: clickPreludeOffsetSec,
-              relativePath: 'cue/click-track.wav',
+              relativePath: CLICK_TRACK_REL,
             }
-          : m.clickTrackExport,
+          : m.clickExport,
       }))
       if (!p.ok) {
         cueGenErr = p.errors.join('; ')
@@ -1684,7 +1936,8 @@
     if (!sm.audio?.trim || !(sm.audio.trim.endSec > sm.audio.trim.startSec)) {
       return { ok: false, reason: 'Need trim (Grid).' }
     }
-    if (!piperCueReady) return { ok: false, reason: 'BarBro desktop + Piper required.' }
+    if (!selectedCueTrack) return { ok: false, reason: 'Create a cue track.' }
+    if (selectedCueTrackHasSpeech && !piperCueReady) return { ok: false, reason: 'Voice cues need BarBro Desktop.' }
     return { ok: true, reason: '' }
   })
 
@@ -1869,11 +2122,8 @@
             <span class="underline-offset-2 group-open:underline">About the cue track</span>
           </summary>
           <p class="mt-2 leading-relaxed">
-            The cue track is a rendered WAV that combines clicks with optional spoken cues (title,
-            count-in numbers, section labels) for headphone monitoring. Click placement and count-in
-            are controlled in the <strong>Grid</strong> tab; spoken cues will live here once the
-            speech pipeline lands. The click and cue WAVs are auto-rendered on demand (mixer
-            fallback, Ableton export) — there's no separate "generate" step.
+            Cue tracks combine the click with optional spoken cues for headphone monitoring. Set the count-in in
+            <strong>Grid</strong>; BarBro renders the cue automatically when playback or export needs it.
           </p>
         </details>
 
@@ -1906,35 +2156,193 @@
 
           <fieldset class="border-foreground border-2 px-3 py-3">
             <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
-              Spoken intro
+              Cue tracks
             </legend>
-            <div class="flex flex-wrap items-center gap-3 pt-1">
+            <div class="flex flex-wrap items-center gap-2 pt-1">
+              <select
+                class="border-foreground bg-background min-w-48 border-2 px-2 py-1 text-sm"
+                value={selectedCueTrackId ?? ''}
+                onchange={(e) => (selectedCueTrackId = e.currentTarget.value || null)}
+                aria-label="Cue track"
+              >
+                {#if cueTracks.length === 0}
+                  <option value="">No cue tracks</option>
+                {:else}
+                  {#each cueTracks as track (track.id)}
+                    <option value={track.id}>{track.name}</option>
+                  {/each}
+                {/if}
+              </select>
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                onclick={addCueTrack}
+              >
+                Add
+              </button>
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-2 py-1 text-xs font-bold"
+                disabled={!selectedCueTrack}
+                onclick={duplicateSelectedCueTrack}
+              >
+                Duplicate
+              </button>
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-2 py-1 text-xs font-bold"
+                disabled={!selectedCueTrack}
+                onclick={deleteSelectedCueTrack}
+              >
+                Delete
+              </button>
+            </div>
+
+            {#if selectedCueTrack}
+              <div class="mt-3 flex flex-wrap items-center gap-3">
+                <input
+                  type="text"
+                  value={selectedCueTrack.name}
+                  onchange={(e) => renameSelectedCueTrack((e.currentTarget as HTMLInputElement).value)}
+                  class="border-foreground bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm"
+                  aria-label="Cue track name"
+                />
+                <label class="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedCueTrack.enabled}
+                    onchange={(e) => setSelectedCueTrackEnabled(e.currentTarget.checked)}
+                    class="accent-foreground"
+                  />
+                  Enabled
+                </label>
+              </div>
+            {/if}
+          </fieldset>
+
+          {#if selectedCueTrack}
+            <fieldset class="border-foreground border-2 px-3 py-3">
+              <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
+                Intro cue
+              </legend>
               <input
                 type="text"
-                value={cueSpokenIntroOverride}
+                value={selectedCueIntroText}
                 placeholder={$songMap?.metadata.title ?? 'Untitled song'}
-                onchange={(e) => applyCueSpokenIntroText((e.currentTarget as HTMLInputElement).value)}
-                class="border-foreground bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm"
-                aria-label="Spoken intro text"
+                onchange={(e) => setIntroCueText((e.currentTarget as HTMLInputElement).value)}
+                class="border-foreground bg-background w-full border-2 px-2 py-1 text-sm"
+                aria-label="Intro cue text"
                 maxlength="120"
               />
-            </div>
-            <!-- Live readout so users know exactly what Piper will say. Pulls
-                 from `resolvedSpokenIntroText(sm)` — the same helper the cue
-                 WAV renderer uses, so what you see here matches what you'll
-                 hear. -->
-            <p class="text-muted-foreground mt-2 font-mono text-xs leading-relaxed" role="status">
-              Will announce: <span class="text-foreground">"{cueSpokenIntroPreview}"</span>
-              {#if !cueSpokenIntroOverride}
-                <span class="text-muted-foreground/70"> (from song title)</span>
+            </fieldset>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                onclick={generateSelectedCueTrackFromSections}
+              >
+                Generate from sections
+              </button>
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                onclick={addCustomCueAtPlayhead}
+              >
+                Add custom cue
+              </button>
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-2 py-1 text-xs font-bold"
+                disabled={!cueRenderGate.ok || cueGenBusy}
+                title={cueRenderGate.ok ? 'Render selected cue track' : cueRenderGate.reason}
+                onclick={() => void generateCueTrackWav()}
+              >
+                {cueGenBusy ? 'Rendering...' : 'Render track'}
+              </button>
+              {#if lastCueDownloadBlob}
+                <button
+                  type="button"
+                  class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                  onclick={downloadCueTrackFile}
+                >
+                  Download cue
+                </button>
               {/if}
-            </p>
-            <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
-              Leave empty to use the song title. Set this when the title's punctuation /
-              parentheses make Piper trip up, or when you want a shorter cue
-              (e.g. "Valerie" while the title is "Valerie (Amy Winehouse cover)").
-            </p>
-          </fieldset>
+              {#if lastClickDownloadBlob}
+                <button
+                  type="button"
+                  class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                  onclick={downloadClickTrackFile}
+                >
+                  Download click
+                </button>
+              {/if}
+              <span class="text-muted-foreground font-mono text-xs">{selectedCueRenderLabel}</span>
+            </div>
+
+            {#if cueGenErr}
+              <p class="text-destructive text-xs" role="status">{cueGenErr}</p>
+            {:else if cueSpeechNote}
+              <p class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</p>
+            {:else if !cueRenderGate.ok}
+              <p class="text-muted-foreground text-xs" role="status">{cueRenderGate.reason}</p>
+            {/if}
+
+            <fieldset class="border-foreground border-2 px-3 py-3">
+              <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
+                Events
+              </legend>
+              {#if selectedCueEvents.length === 0}
+                <p class="text-muted-foreground text-sm">Generate from sections or add a custom cue.</p>
+              {:else}
+                <div class="divide-foreground/15 divide-y">
+                  {#each selectedCueEvents as event (event.id)}
+                    <div class="grid gap-2 py-2 md:grid-cols-[auto_7rem_1fr_auto] md:items-center">
+                      <label class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide">
+                        <input
+                          type="checkbox"
+                          checked={event.enabled}
+                          onchange={(e) =>
+                            updateCueEvent(selectedCueTrack.id, event.id, {
+                              enabled: e.currentTarget.checked,
+                            })}
+                          class="accent-foreground"
+                        />
+                        {cueEventLabel(event)}
+                      </label>
+                      <span class="text-muted-foreground font-mono text-xs">{cueEventTimeLabel(event)}</span>
+                      <input
+                        type="text"
+                        value={event.text ?? ''}
+                        onchange={(e) =>
+                          updateCueEvent(selectedCueTrack.id, event.id, {
+                            text: (e.currentTarget as HTMLInputElement).value,
+                          })}
+                        class="border-foreground bg-background min-w-0 border-2 px-2 py-1 text-sm"
+                        aria-label="Cue text"
+                      />
+                      <button
+                        type="button"
+                        class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                        onclick={() => deleteCueEvent(selectedCueTrack.id, event.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </fieldset>
+          {:else}
+            <button
+              type="button"
+              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-2 text-sm font-bold"
+              onclick={addCueTrack}
+            >
+              Create cue track
+            </button>
+          {/if}
 
           <p class="text-muted-foreground text-xs leading-relaxed">
             Use the <strong>Mix</strong> tab for full multi-track playback with click + stems.
@@ -1955,9 +2363,8 @@
             <span class="underline-offset-2 group-open:underline">How the mixer works</span>
           </summary>
           <p class="mt-2 leading-relaxed">
-            Each track on disk (original, stems, cue) loads as its own lane. Volume / mute (M) / solo (S)
-            persist to <code>song.smap</code>. Stems and the original are virtually delayed so beat 1 lines up with
-            the cue track's count-in — the same alignment your Ableton export uses. Click on a waveform to seek.
+            Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with
+            the song, and every lane stays aligned for playback and export. Click on a waveform to seek.
           </p>
         </details>
         <MixerView />
@@ -1991,20 +2398,16 @@
           <div class="mt-2 space-y-2 leading-relaxed">
             {#if editMode === 'grid'}
               <p>
-                Edit bars and beats in the strip above the waveform. Add or remove bars at the ends; wheel on the strip
-                changes beats per bar when a bar is selected. Drag the left or right edge of a bar to lengthen or shorten
-                it in time; beats inside that bar stay evenly spaced (good for slight ritardandos).
+                Edit bars and beats in the strip above the waveform. Add or remove bars at the ends, wheel to change
+                beats per bar, and drag a bar edge to adjust timing.
               </p>
             {:else if editMode === 'sections'}
               <p>
-                Drag on the bar strip or Shift+click / ⌘/Ctrl+click to select a range. Pick a section type and tag it;
-                overlaps are replaced. Zoom matches Grid.
+                Drag on the bar strip, or use Shift+click / ⌘/Ctrl+click, to select a range. Pick a section type to tag it.
               </p>
             {:else}
               <p>
-                Select beats on the chord strip (drag or Shift+click / ⌘/Ctrl+click). Click a beat for the radial menu.
-                ⌘/Ctrl+C / V copy and paste resolved chords in beat order. Labels only on beats with explicit chords;
-                others inherit. Song key affects spelling, not stored pitch.
+                Select beats on the chord strip, then click a beat to edit. ⌘/Ctrl+C and ⌘/Ctrl+V copy and paste chords.
               </p>
             {/if}
           </div>
@@ -2233,7 +2636,7 @@
               type="button"
               onclick={reanalyzeGrid}
               disabled={reanalyzeBusy || !$audioSession.file}
-              title="Re-run beat detection. Chords + sections survive when the new grid has the same beat count; otherwise you'll get a warning before they're cleared."
+              title="Detect bars and beats again. You’ll be warned before chords or sections are cleared."
               class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
             >
               {reanalyzeBusy ? 'Re-analyzing…' : 'Re-analyze grid'}
@@ -2244,12 +2647,8 @@
           <p class="text-destructive mt-2 text-xs" role="status">{reanalyzeError}</p>
         {/if}
         <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
-          ⌘Z / Ctrl+Z undoes the last edit. Hold ⇧ to redo. Drag-edits
-          coalesce into one undo step. "Reset to analyzed" jumps
-          straight back to the analyzed baseline. "Re-analyze grid"
-          re-runs beat detection — chords + sections survive when the
-          new grid has the same beat count, otherwise you'll be warned
-          before they're cleared.
+          ⌘Z / Ctrl+Z undoes timeline edits. Hold ⇧ to redo. "Reset to analyzed" restores the saved grid;
+          "Re-analyze grid" detects bars and beats again.
         </p>
       </section>
     {/if}
@@ -2340,8 +2739,8 @@
       <summary
         class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-4 py-3 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
       >
-        <span class="underline-offset-2 group-open:underline">Debug tools</span>
-        <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview, bar play, click track</span>
+        <span class="underline-offset-2 group-open:underline">Timeline details</span>
+        <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview and bar playback</span>
       </summary>
       <div class="border-foreground space-y-6 border-t-2 px-4 py-4">
         <dl class="text-foreground/90 space-y-2 text-sm">
@@ -2363,7 +2762,7 @@
 
         {#if sm.timeline.bars.length > 0}
           <div>
-            <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars (debug)</p>
+            <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars</p>
             <ul class="space-y-3 text-xs">
               {#each sm.timeline.bars.slice(0, previewBars) as bar (bar.id)}
                 <li class="border-foreground border-b-2 pb-3 font-mono last:border-0 last:pb-0">

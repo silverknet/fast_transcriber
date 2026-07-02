@@ -21,6 +21,7 @@
 
   let {
     open = $bindable(false),
+    title = 'Add audio',
     accept = 'audio/*',
     youtubeOutput = { kind: 'temp' } as YoutubeImportOutput,
     desktopReachable = true,
@@ -28,6 +29,7 @@
     onImported,
   } = $props<{
     open?: boolean
+    title?: string
     accept?: string
     youtubeOutput?: YoutubeImportOutput
     desktopReachable?: boolean
@@ -224,7 +226,7 @@
 <Dialog bind:open>
   <DialogContent class="max-w-md">
     <DialogHeader>
-      <DialogTitle>Add audio</DialogTitle>
+      <DialogTitle>{title}</DialogTitle>
     </DialogHeader>
 
     <input

@@ -13,7 +13,6 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PlaybackController } from '$lib/audio/playbackController.svelte'
-import { defaultCueSettings } from '$lib/songmap/defaults'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 import type { SongMap } from '$lib/songmap/types'
 
@@ -100,7 +99,7 @@ function makeSong(opts: {
     timeline: { bars, beats },
     sections: [],
     harmony: [],
-    cues: { ...defaultCueSettings(), mode: 'off', countInBeats: 0 },
+    cueTracks: [],
     ...(opts.countInBeats !== undefined ? { countInBeats: opts.countInBeats } : {}),
   } as SongMap
 }

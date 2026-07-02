@@ -1,13 +1,13 @@
 # `.smap` — file format specification
 
-**Status:** v1 — stable
-**Container version (binary header `version`):** `1` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
+**Status:** v2 — stable
+**Container version (binary header `version`):** `2` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
 **JSON envelope version (`projectFormatVersion`):** `1` — [`SONG_PROJECT_FORMAT_VERSION`](../src/lib/songmap/smapFile.ts)
-**SongMap schema version (`formatVersion`):** `1` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
+**SongMap schema version (`formatVersion`):** `2` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
 **MIME type:** `application/vnd.barbro.smap` — [`SMAP_BLOB_TYPE`](../src/lib/songmap/smapFile.ts)
 **Extension:** `.smap`
 
-A `.smap` file is **one BarBro project**: a JSON musical document plus an optional binary audio chunk packed into a single file. No zip, no base64-encoded audio inside the JSON.
+A `.smap` file is **one BarBro project**: a JSON musical document in a compact binary wrapper. Audio bytes live separately on disk through `audio.originalPath`; no zip and no base64-encoded audio inside the JSON. Legacy container v1 files with an embedded audio chunk are still read, but new writes use container v2.
 
 The same format is used for:
 
@@ -20,32 +20,25 @@ The same format is used for:
 
 All integers are **little-endian**.
 
-### 1.1 Header — fixed 28 bytes ([`SMAP_HEADER_BYTE_LENGTH`](../src/lib/songmap/smapFile.ts))
+### 1.1 Header — fixed 16 bytes ([`SMAP_HEADER_BYTE_LENGTH`](../src/lib/songmap/smapFile.ts))
 
 | Byte range | Size | Field         | Type     | Description                                                                 |
 |-----------:|-----:|---------------|----------|-----------------------------------------------------------------------------|
 | `[0..3]`   | 4    | `magic`       | bytes    | ASCII `S M A P` — `0x53 0x4D 0x41 0x50`                                     |
-| `[4..7]`   | 4    | `version`     | `uint32` | Container version. v1 = `1`. Readers reject other values.                   |
-| `[8..11]`  | 4    | `flags`       | `uint32` | Bit 0 (`SMAP_FLAG_HAS_AUDIO`) = audio chunk present. Other bits reserved (0). |
-| `[12..19]` | 8    | `jsonLength`  | `uint64` | UTF-8 byte length of the JSON chunk.                                        |
-| `[20..27]` | 8    | `audioLength` | `uint64` | Byte length of the audio chunk. `0` iff `hasAudio` flag is unset.           |
+| `[4..7]`   | 4    | `version`     | `uint32` | Container version. v2 = `2`.                                                |
+| `[8..15]`  | 8    | `jsonLength`  | `uint64` | UTF-8 byte length of the JSON chunk.                                        |
 
 ### 1.2 JSON chunk — `jsonLength` bytes
 
 UTF-8 encoded JSON object. Schema: `SongProject` (§2). Object keys are written in **deterministic order** (deep alphabetical, `undefined` omitted) so identical inputs round-trip to byte-identical files. See [`encodeSmapFile`](../src/lib/songmap/smapFile.ts).
 
-### 1.3 Audio chunk — `audioLength` bytes (optional)
+### 1.3 Audio bytes
 
-Raw audio bytes — *not* base64, *not* wrapped. Present **iff** `flags.hasAudio` is set AND `audioLength > 0`. Typical content: trimmed reference audio encoded as low-bitrate MP3 (~64 kbps via lamejs) — small enough to bundle, good enough for in-browser playback. Analysis still runs on the full-quality upload; the small clip replaces it before save.
-
-Decoders read this chunk's MIME from `songMap.audio.mimeType` when present (e.g. `audio/mpeg`).
+Current container v2 has no audio chunk. Audio lives next to the `.smap` and is referenced by `songMap.audio.originalPath` when the desktop sidecar can write it. Legacy v1 files may contain an audio chunk; the decoder exposes it as `audioBlob` for import and re-saving drops the embedded bytes.
 
 ### 1.4 Encoding rules
 
-| Encoder state                                    | `flags.hasAudio` | `audioLength`     | Audio chunk     |
-|--------------------------------------------------|:---------------:|:------------------|:----------------|
-| `audioBlob` missing or `audioBlob.size === 0`    | `0`             | `0`               | absent          |
-| `audioBlob` present and non-empty                | `1`             | `audioBlob.size`  | raw bytes       |
+The encoder always writes container v2: 16-byte header + JSON chunk. Any `audioBlob` carried by a legacy import is ignored on re-save.
 
 ### 1.5 Decoding rules / well-defined errors
 
@@ -54,12 +47,10 @@ The reader ([`decodeSmapFile`](../src/lib/songmap/smapFile.ts)) throws on any of
 | Condition | Error |
 |---|---|
 | First 4 bytes ≠ `"SMAP"` | "wrong magic bytes" |
-| `version ≠ 1` | "unsupported container version" |
-| File size < `28 + jsonLength + audioLength` | "file shorter than declared lengths" |
-| `flags.hasAudio` set but `audioLength = 0` | "hasAudio flag is set but audioLength is 0" |
-| `audioLength > 0` but `flags.hasAudio` unset | "audio bytes are present but hasAudio flag is not set" |
+| unsupported container version | "unsupported container version" |
+| File size < `16 + jsonLength` | "file is truncated" |
 | JSON chunk is not valid UTF-8 JSON | "JSON chunk is not valid JSON" |
-| Extra bytes past the declared end | "N unexpected byte(s) after the audio chunk" |
+| Extra bytes past the declared end | "N unexpected byte(s) after JSON chunk" |
 
 ---
 
@@ -68,7 +59,7 @@ The reader ([`decodeSmapFile`](../src/lib/songmap/smapFile.ts)) throws on any of
 ```jsonc
 {
   "projectFormatVersion": 1,
-  "songMap": { /* SongMapV1, §3 */ }
+  "songMap": { /* SongMapV2, §3 */ }
 }
 ```
 
@@ -78,24 +69,25 @@ Defined in [`smapFile.ts`](../src/lib/songmap/smapFile.ts). The envelope exists 
 
 ---
 
-## 3. `SongMap` v1 schema
+## 3. `SongMap` v2 schema
 
-Source of truth: [`SongMapV1`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
+Source of truth: [`SongMapV2`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
 
 ```ts
-type SongMapV1 = {
-  formatVersion: 1
+type SongMapV2 = {
+  formatVersion: 2
   app?: { name: 'BarBro'; appVersion?: string }
   metadata: SongMetadata             // required
   audio?: AudioReference             // optional (no audio = JSON-only project)
   timeline: { bars: Bar[]; beats: Beat[] }   // required (arrays can be empty)
   sections: Section[]                // required (can be empty)
   harmony: HarmonyEvent[]            // required (can be empty)
-  cues: CueSettings                  // required
+  cueTracks: CueTrack[]              // shared editable cue data
+  countInBeats?: number              // top-level click count-in
+  startBeatId?: string               // optional song-start beat override
   projectFolder?: string             // display hint for the project folder name
   stemRefs?: Record<string, string>  // stem-name → project-relative path
-  cueTrackExport?: CueTrackExport    // last rendered cue WAV metadata
-  clickTrackExport?: ClickTrackExport // last rendered click WAV metadata
+  clickExport?: RenderedCueExport    // last rendered click WAV metadata
   mixState?: MixState                // mixer volume / mute / solo
   sectionBorderHints?: SectionBorderHints // cached Python analyzer output
   chordHints?: ChordHints                 // cached Python analyzer output
@@ -177,34 +169,60 @@ Inclusive bar ranges (not half-open).
 
 `ChordSymbol` = `{ root: NoteName, accidental?, quality?, extensions?, bass?, bassAccidental?, displayRaw }`.
 
-### 3.7 `cues` — `CueSettings`
+### 3.7 `cueTracks[]` — shared cue editor data
 
-| Field | Type | Notes |
-|---|---|---|
-| `mode` | `'off' \| 'spoken' \| 'click' \| 'countIn'` | Drives renderer behavior. |
-| `countInBeats` | `uint` | Number of count-in clicks before bar 1. Only meaningful when `mode === 'countIn'`. |
-| `useSectionLabels` | `boolean` | Whether the cue WAV speaks section names. |
-| `prependSec` | `number` | Optional cached value of `computeCountIn(...).prependSec`. Derived from timeline + `countInBeats`. |
-| `template`, `language` | `string` | Optional TTS phrasing settings. |
+```ts
+type CueTrack = {
+  id: string
+  name: string
+  enabled: boolean
+  voiceId?: string
+  events: CueEvent[]
+  suppressedGeneratedKeys: string[]
+  renderExport?: RenderedCueExport
+}
+
+type CueEvent = {
+  id: string
+  kind: 'section' | 'count' | 'intro' | 'custom-text' | 'recorded-audio-placeholder'
+  enabled: boolean
+  anchor: CueAnchor
+  text?: string
+  generatedKey?: string
+  generatedSource?: { kind: 'section'; sectionId: string; leadBars?: number; leadBeats?: number }
+  source?: 'generated' | 'custom' | 'imported' | 'recorded'
+  edited?: boolean
+  stale?: boolean
+}
+
+type CueAnchor =
+  | { kind: 'bar'; barId: string; leadBars?: number; leadBeats?: number; offsetSec?: number }
+  | { kind: 'beat'; beatId: string; leadBars?: number; leadBeats?: number; offsetSec?: number }
+  | { kind: 'time'; timeSec: number; leadBars?: number; leadBeats?: number; offsetSec?: number }
+```
+
+Cue tracks are collaborative song data. Generation from sections writes editable events into a selected track and uses stable `generatedKey`s / `generatedSource`s so regeneration can preserve custom cues, edited generated cues, disabled generated cues, and deleted generated cues listed in `suppressedGeneratedKeys`. Generated section cues anchor to the section-start beat with `leadBars: 1` by default, so the "one bar early" intent remains editable rather than baked into a resolved timestamp.
+
+Top-level `countInBeats` remains separate from cue speech. Top-level `startBeatId` optionally moves the song-start anchor used by click/count-in math.
 
 ### 3.8 `stemRefs` — `Record<stemName, projectRelativePath>`
 
 Map from stem name → relative path within the project folder. Stem names match [`STEM_TRACKS`](../src/lib/export/abletonSet.ts): `"Drums"`, `"Bass"`, `"Guitar"`, `"Vocals"`, `"FX"`. Display/persistence hint only — the canonical source is the filesystem (sidecar scans `<song>/stems/<preset>/*.wav`).
 
-### 3.9 `cueTrackExport` / `clickTrackExport` — render-cache metadata
+### 3.9 `renderExport` / `clickExport` — render-cache metadata
 
-Both share the [`CueTrackExport`](../src/lib/songmap/types.ts) shape:
+`cueTracks[].renderExport` stores the last rendered WAV metadata for that cue track. Top-level `clickExport` stores the click-only WAV metadata. Both share the [`RenderedCueExport`](../src/lib/songmap/types.ts) shape:
 
 | Field | Type | Notes |
 |---|---|---|
-| `fingerprint` | `string` | Equals [`fingerprintCueTrackInputs(sm)`](../src/lib/songmap/cueTrackFingerprint.ts) at render time. Covers `cues`, `audio.trim`, beats, sections — any of which becoming stale invalidates the cached WAV. |
+| `fingerprint` | `string` | Equals [`fingerprintCueTrackInputs(sm, track)`](../src/lib/songmap/cueTrackFingerprint.ts) at render time. Covers the selected cue track, `countInBeats`, `startBeatId`, `audio.trim`, beats, and sections. |
 | `durationSec` | `number` | Rendered WAV duration. |
 | `sampleRate` | `number` | Typically `44100`. |
 | `generatedAt` | ISO 8601 `string` | |
-| `preludeOffsetSec` | `number` | `titleCuePreludeSec(sm) + computeCountIn(sm,…)?.prependSec ?? 0` at render time. Position inside the WAV where `trim.startSec` lands. Consumers (Ableton export, mixer) read this to compute clip play ranges without re-deriving from `sm.cues`. |
-| `relativePath` | `string` | Path within the project folder when written there (e.g. `cue/click-track.wav`). |
+| `preludeOffsetSec` | `number` | Position inside the WAV where `trim.startSec` lands. Consumers (Ableton export, mixer) read this to compute clip play ranges without re-deriving renderer timing. |
+| `relativePath` | `string` | Local project path when written there. Cue tracks use `cue/tracks/<trackId>/cue-track.wav`; click-only uses `cue/click-track.wav`. Stripped from cloud sync. |
 
-**Staleness:** when the SongMap is loaded into the store, [`stores/songMap.ts`](../src/lib/stores/songMap.ts) re-computes the fingerprint and **clears** any export whose stored `fingerprint` no longer matches. The on-disk WAVs are NOT deleted — they're orphaned until next render.
+**Staleness:** when the SongMap is patched in the store, [`stores/songMap.ts`](../src/lib/stores/songMap.ts) re-computes the fingerprint and **clears** any export whose stored `fingerprint` no longer matches. The on-disk WAVs are NOT deleted — they're orphaned until next render.
 
 ### 3.10 `mixState` — `MixState`
 
@@ -240,7 +258,8 @@ Enforced by [`validate.ts`](../src/lib/songmap/validate.ts):
 - For every `Beat`: `barId` references an existing `Bar`, `indexInBar >= 0`.
 - For every `Section`: `kind` ∈ enum, `barRange.end >= barRange.start`, indices match `Bar.index`.
 - For every `HarmonyEvent`: `barId` references a `Bar`, `chord.root` ∈ note names, `chord.bass` ∈ note names if present, `displayRaw` is a string.
-- For `cueTrackExport` / `clickTrackExport` (when present): `preludeOffsetSec >= 0` and structurally well-formed.
+- For `cueTracks[]`: valid ids/names, known event kinds, valid anchors, and structurally well-formed `renderExport` when present.
+- For `clickExport` (when present): `preludeOffsetSec >= 0` and structurally well-formed.
 
 `parseSongMap` runs the validator and throws [`SongMapParseError`](../src/lib/songmap/parse.ts) on the first violation in strict mode.
 
@@ -262,10 +281,11 @@ Consequence: `decode(encode(x)) ≡ x` modulo dropped `undefined`s, and `encode(
 
 - **Legacy JSON-only files** (no binary wrapper): plain `SongMap` at the JSON root is accepted by [`parseImportedProjectFile`](../src/lib/songmap/persist.ts) and auto-wrapped into a `SongProject`.
 - **`.zip` bundles** (very old): explicitly rejected with a message instructing the user to re-export from BarBro as a single `.smap`.
-- **Missing optional fields** (e.g. `sectionBorderHints`, `chordHints`, `clickTrackExport`): silently ignored — they'll be regenerated on demand.
-- **Legacy `cueTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
+- **Missing optional fields** (e.g. `sectionBorderHints`, `chordHints`, `clickExport`): silently ignored — they'll be regenerated on demand.
+- **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`. New saves emit v2 only.
+- **Legacy `cueTrackExport` / `clickTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
 
-The parser preserves unknown JSON keys at the SongMap root in `extras` so future fields don't get nuked on round-trip. (See [`parse.ts`](../src/lib/songmap/parse.ts).)
+Unknown top-level JSON keys are stripped by default during parse. (See [`parse.ts`](../src/lib/songmap/parse.ts).)
 
 ---
 
@@ -290,5 +310,5 @@ The `.smap` does NOT include:
 
 - **Editor / UI state** — viewport, zoom, selected bar, open tabs, undo stack.
 - **Stem WAVs** — they live alongside the `.smap` under `<song>/stems/<preset>/*.wav`. The `.smap` only references them through `stemRefs`.
-- **Rendered click / cue WAVs** — they live at `<song>/cue/click-track.wav` and `<song>/cue/cue-track.wav`. The `.smap` only references them through `clickTrackExport` / `cueTrackExport`.
+- **Rendered click / cue WAVs** — they live at `<song>/cue/click-track.wav` and `<song>/cue/tracks/<trackId>/cue-track.wav`. The `.smap` only references them through `clickExport` / `cueTracks[].renderExport`.
 - **Project manifest** — the multi-song setlist (`barbro.project.json`) is a separate document; see [`src/lib/project/types.ts`](../src/lib/project/types.ts).

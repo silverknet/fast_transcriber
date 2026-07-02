@@ -29,7 +29,6 @@ function buildMap(opts: {
   trimEnd: number
   bpm?: number
   firstBeatTimeSec?: number
-  cuesMode?: 'off' | 'countIn'
   countInBeats?: number
 }): SongMap {
   const bars: Bar[] = [bar(0), bar(1)]
@@ -56,11 +55,8 @@ function buildMap(opts: {
     timeline: { bars, beats },
     sections: [],
     harmony: [],
-    cues: {
-      mode: opts.cuesMode ?? 'off',
-      countInBeats: opts.countInBeats ?? 0,
-      useSectionLabels: false,
-    },
+    cueTracks: [],
+    ...(opts.countInBeats !== undefined ? { countInBeats: opts.countInBeats } : {}),
   } as unknown as SongMap
 }
 
@@ -109,13 +105,12 @@ describe('songTimings', () => {
     expect(t.firstBeatSongTimeSec).toBe(0)
   })
 
-  it('surfaces count-in beats and duration from cues', () => {
+  it('surfaces top-level count-in beats and duration', () => {
     const map = buildMap({
       trimStart: 0,
       trimEnd: 60,
       bpm: 120,
       firstBeatTimeSec: 0,
-      cuesMode: 'countIn',
       countInBeats: 8,
     })
     const t = songTimings(map)
@@ -125,8 +120,8 @@ describe('songTimings', () => {
     expect(t.countInDurationSec).toBeCloseTo(2.0, 6) // 8 * 0.25
   })
 
-  it('keeps countInBeats=0 when cues.mode is "off"', () => {
-    const map = buildMap({ trimStart: 0, trimEnd: 60, cuesMode: 'off', countInBeats: 8 })
+  it('keeps countInBeats=0 when top-level countInBeats is absent', () => {
+    const map = buildMap({ trimStart: 0, trimEnd: 60 })
     expect(songTimings(map).countInBeats).toBe(0)
     expect(songTimings(map).countInDurationSec).toBe(0)
   })
@@ -148,7 +143,6 @@ describe('stemPlayRange', () => {
         trimEnd: 60,
         bpm: 120,
         firstBeatTimeSec: 5,
-        cuesMode: 'countIn',
         countInBeats: 8,
       }),
     )
@@ -165,7 +159,6 @@ describe('stemPlayRange', () => {
         trimEnd: 60,
         bpm: 120,
         firstBeatTimeSec: 0.5,
-        cuesMode: 'countIn',
         countInBeats: 8,
       }),
     )
@@ -198,7 +191,6 @@ describe('clickPlayRange', () => {
         trimEnd: 60,
         bpm: 120,
         firstBeatTimeSec: 0,
-        cuesMode: 'countIn',
         countInBeats: 8,
       }),
     )
@@ -217,7 +209,6 @@ describe('clickPlayRange', () => {
         trimEnd: 60,
         bpm: 120,
         firstBeatTimeSec: 1.5,
-        cuesMode: 'countIn',
         countInBeats: 8,
       }),
     )

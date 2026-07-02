@@ -1,7 +1,8 @@
-import { resolvedSpokenIntroText, titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
+import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
+import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
-import type { SongMap } from '$lib/songmap/types'
+import type { CueTrack, SongMap } from '$lib/songmap/types'
 
 function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6
@@ -11,7 +12,30 @@ function round6(n: number): number {
  * Canonical payload for cue-track alignment. Any change here should invalidate
  * a previously rendered cue WAV.
  */
-export function cueTrackFingerprintPayload(sm: SongMap): unknown {
+function stripRenderExport(track: CueTrack | undefined): unknown {
+  if (!track) return null
+  return {
+    id: track.id,
+    name: track.name,
+    enabled: track.enabled,
+    voiceId: track.voiceId ?? null,
+    suppressedGeneratedKeys: [...track.suppressedGeneratedKeys].sort(),
+    events: track.events.map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      enabled: event.enabled,
+      anchor: event.anchor,
+      text: event.text ?? null,
+      generatedKey: event.generatedKey ?? null,
+      generatedSource: event.generatedSource ?? null,
+      source: event.source ?? null,
+      edited: event.edited ?? false,
+      stale: event.stale ?? false,
+    })),
+  }
+}
+
+export function cueTrackFingerprintPayload(sm: SongMap, track: CueTrack | undefined = getPrimaryCueTrack(sm)): unknown {
   const trim = sm.audio?.trim ?? { startSec: 0, endSec: 0 }
   const bars = sm.timeline.bars.map((b) => ({
     i: b.index,
@@ -36,23 +60,15 @@ export function cueTrackFingerprintPayload(sm: SongMap): unknown {
   }))
 
   return {
-    v: 4,
+    v: 5,
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),
     startBeatId: sm.startBeatId ?? null,
-    cues: {
-      mode: sm.cues.mode,
-      useSectionLabels: sm.cues.useSectionLabels,
-      /** Headroom before count-in clicks for spoken title (regenerates cue when title length changes). */
-      titlePreludeSec: round6(titleCuePreludeSec(sm)),
-      /**
-       * The resolved announcement text. Changing the override OR the
-       * title-fallback value re-fingerprints, so the rendered TTS audio
-       * stays in lockstep with what the user authored.
-       */
-      spokenIntroText: resolvedSpokenIntroText(sm),
-    },
+    cueTrack: stripRenderExport(track),
+    titlePreludeSec: round6(titleCuePreludeSec(sm, track)),
+    spokenIntroText:
+      track?.events.find((event) => event.enabled && event.kind === 'intro')?.text?.trim() ?? null,
     bars,
     beats,
     sections,
@@ -60,8 +76,8 @@ export function cueTrackFingerprintPayload(sm: SongMap): unknown {
 }
 
 /** Stable short fingerprint (sync, for patch + UI). */
-export function fingerprintCueTrackInputs(sm: SongMap): string {
-  const raw = JSON.stringify(cueTrackFingerprintPayload(sm))
+export function fingerprintCueTrackInputs(sm: SongMap, track?: CueTrack): string {
+  const raw = JSON.stringify(cueTrackFingerprintPayload(sm, track))
   let h = 5381
   for (let i = 0; i < raw.length; i++) {
     h = (h * 33) ^ raw.charCodeAt(i)

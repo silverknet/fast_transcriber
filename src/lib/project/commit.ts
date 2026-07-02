@@ -1060,18 +1060,24 @@ export async function attachAudioToSong(
  * analyze flow (and auto-stems re-renders if the project has it enabled).
  */
 export async function replaceAudioForSong(songId: string, audioFile: File): Promise<void> {
-  const snap = get(project)
-  if (!snap.osPath || !snap.data) throw new Error('No active project')
-  const entry = snap.data.songs.find((s) => s.id === songId)
-  if (!entry) throw new Error('Song not found in project')
-  const osPath = snap.osPath
-
   let artifact: ImportedAudioArtifact
   try {
     artifact = await prepareImportedAudio(audioFile, { source: 'upload' })
   } catch (e) {
     throw new Error(`Could not decode audio file: ${e instanceof Error ? e.message : String(e)}`)
   }
+  await replaceImportedAudioForSong(songId, artifact)
+}
+
+export async function replaceImportedAudioForSong(
+  songId: string,
+  artifact: ImportedAudioArtifact,
+): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const entry = snap.data.songs.find((s) => s.id === songId)
+  if (!entry) throw new Error('Song not found in project')
+  const osPath = snap.osPath
 
   // Read the old smap to preserve the title and locate the old audio file.
   const r = await readProjectSong(osPath, entry.folder)
@@ -1083,11 +1089,13 @@ export async function replaceAudioForSong(songId: string, audioFile: File): Prom
 
   // Write the new audio bytes.
   const fileName = sanitizeAudioFilename(artifact.fileName || artifact.file?.name || 'audio.bin')
-  const subpath = `audio/${fileName}`
-  if (!artifact.file) throw new Error('No audio bytes available to replace.')
-  const bytes = new Uint8Array(await artifact.file.arrayBuffer())
-  const w = await writeProjectSongAsset(osPath, entry.folder, subpath, bytes)
-  if (!w.ok) throw new Error(`Could not write audio file: ${w.error}`)
+  const subpath = artifact.alreadyWrittenSubpath ?? `audio/${fileName}`
+  if (!artifact.alreadyWrittenSubpath) {
+    if (!artifact.file) throw new Error('No audio bytes available to replace.')
+    const bytes = new Uint8Array(await artifact.file.arrayBuffer())
+    const w = await writeProjectSongAsset(osPath, entry.folder, subpath, bytes)
+    if (!w.ok) throw new Error(`Could not write audio file: ${w.error}`)
+  }
 
   // Clean-slate SongMap: empty timeline/sections/harmony/cues (so no stale
   // chords/grid/chroma/stemRefs survive), title preserved, new audio block.

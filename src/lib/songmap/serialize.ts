@@ -1,4 +1,5 @@
 import type { SongMap } from './types'
+import { SONGMAP_FORMAT_VERSION } from './version'
 
 export type SerializeSongMapOptions = {
   /** Default true — JSON with 2-space indent for `.smap` diffs */
@@ -21,12 +22,25 @@ function omitUndefinedDeep(value: unknown): unknown {
   return out
 }
 
+export function canonicalizeSongMapForSerialize(map: SongMap): SongMap {
+  const out = {
+    ...(map as SongMap & Record<string, unknown>),
+    formatVersion: SONGMAP_FORMAT_VERSION,
+    cueTracks: Array.isArray(map.cueTracks) ? map.cueTracks : [],
+  } as SongMap & Record<string, unknown>
+  delete out.cues
+  delete out.cueTrackExport
+  delete out.clickTrackExport
+  return out as SongMap
+}
+
 /**
  * Serialize `SongMap` to JSON string. Key order follows object literal construction order
  * from `parse` / factories (stable round-trip if you parse and serialize again).
  */
 export function serializeSongMap(map: SongMap, options: SerializeSongMapOptions = {}): string {
   const { pretty = true, omitUndefined = true } = options
-  const payload = omitUndefined ? (omitUndefinedDeep(map) as SongMap) : map
+  const canonical = canonicalizeSongMapForSerialize(map)
+  const payload = omitUndefined ? (omitUndefinedDeep(canonical) as SongMap) : canonical
   return pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload)
 }

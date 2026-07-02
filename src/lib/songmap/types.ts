@@ -1,5 +1,5 @@
 /**
- * SongMap v1 — persistent musical model only (no editor / transport state).
+ * SongMap v2 — persistent musical model only (no editor / transport state).
  * Bar times use half-open intervals [startSec, endSec) on the master audio timeline.
  */
 
@@ -69,6 +69,10 @@ export type Section = {
 
 export type CueMode = 'off' | 'spoken' | 'click' | 'countIn'
 
+/**
+ * Legacy v1 cue settings. Runtime code receives migrated `cueTracks[]`;
+ * this type remains only so the v1 parser can read old `.smap` files.
+ */
 export type CueSettings = {
   mode: CueMode
   countInBeats: number
@@ -95,10 +99,10 @@ export type CueSettings = {
 }
 
 /**
- * Last exported spoken-cue WAV (see `cueTrackFingerprint.ts` + `renderCueTrack.ts`).
+ * Last exported cue/click WAV (see `cueTrackFingerprint.ts` + `renderCueTrack.ts`).
  * Cleared automatically when timeline/trim/cues no longer match `fingerprint`.
  */
-export type CueTrackExport = {
+export type RenderedCueExport = {
   /** Same value as `fingerprintCueTrackInputs()` at generation time. */
   fingerprint: string
   durationSec: number
@@ -109,21 +113,75 @@ export type CueTrackExport = {
    * song-aligned sample, in seconds. Equals
    * `titleCuePreludeSec(sm) + computeCountIn(sm, …)?.prependSec ?? 0`
    * at render time. Stored explicitly so consumers (e.g. the Ableton
-   * setlist export) can offset playback without re-deriving from `sm.cues`.
+   * setlist export) can offset playback without re-deriving renderer timing.
    */
   preludeOffsetSec: number
-  /** Set when written under a project song folder, e.g. `cue/cue-track.wav`. */
+  /** Set when written under a project song folder, e.g. `cue/tracks/main/cue-track.wav`. */
   relativePath?: string
 }
 
-/**
- * Last exported click-only WAV. Same render path and fingerprint as
- * `CueTrackExport` — every field has the same semantics, but the on-disk
- * file is `cue/click-track.wav` and contains only clicks (no spoken
- * cues). Tracked separately from `cueTrackExport` so the two layers can
- * be regenerated independently.
- */
-export type ClickTrackExport = CueTrackExport
+export type CueTrackExport = RenderedCueExport
+export type ClickTrackExport = RenderedCueExport
+
+export type CueAnchor =
+  | {
+      kind: 'bar'
+      barId: string
+      leadBars?: number
+      leadBeats?: number
+      offsetSec?: number
+    }
+  | {
+      kind: 'beat'
+      beatId: string
+      leadBars?: number
+      leadBeats?: number
+      offsetSec?: number
+    }
+  | {
+      kind: 'time'
+      timeSec: number
+      leadBars?: number
+      leadBeats?: number
+      offsetSec?: number
+    }
+
+export type CueEventKind =
+  | 'section'
+  | 'count'
+  | 'intro'
+  | 'custom-text'
+  | 'recorded-audio-placeholder'
+
+export type CueEventSource = 'generated' | 'custom' | 'imported' | 'recorded'
+
+export type CueEvent = {
+  id: string
+  kind: CueEventKind
+  enabled: boolean
+  anchor: CueAnchor
+  text?: string
+  generatedKey?: string
+  generatedSource?: {
+    kind: 'section'
+    sectionId: string
+    leadBars?: number
+    leadBeats?: number
+  }
+  source?: CueEventSource
+  edited?: boolean
+  stale?: boolean
+}
+
+export type CueTrack = {
+  id: string
+  name: string
+  enabled: boolean
+  voiceId?: string
+  events: CueEvent[]
+  suppressedGeneratedKeys: string[]
+  renderExport?: RenderedCueExport
+}
 
 export type AudioSource = 'upload' | 'import' | 'unknown'
 
@@ -262,7 +320,7 @@ export type StemRefs = Record<string, string>
  *
  * Tracks identified by stable `key`:
  *  - `"original"`              — the song.smap audio chunk (full reference)
- *  - `"cue"`                   — `cue/cue-track.wav` if present
+ *  - `"cue"`                   — rendered cue track if present
  *  - `"stem:<filename>"`       — one of `stemsOnDisk` (e.g. `"stem:vocals.wav"`)
  *
  * Tracks not listed get sensible defaults (volume 1, not muted, not soloed).
@@ -340,7 +398,7 @@ export type ChordHints = {
   analyzerSource?: 'stems-other' | 'mix'
 }
 
-export type SongMapV1 = {
+export type SongMapV2 = {
   formatVersion: typeof SONGMAP_FORMAT_VERSION
   app?: SongMapAppInfo
   metadata: SongMetadata
@@ -348,9 +406,9 @@ export type SongMapV1 = {
   timeline: SongMapTimeline
   sections: Section[]
   harmony: HarmonyEvent[]
-  cues: CueSettings
+  cueTracks: CueTrack[]
   /**
-   * Count-in beats before the song start, independent of `cues.mode`. When
+   * Count-in beats before the song start, independent of cue speech. When
    * absent or `0`, no count-in is rendered. Decoupled from cue speech so a
    * song can have both spoken cues AND a count-in.
    */
@@ -368,10 +426,8 @@ export type SongMapV1 = {
   projectFolder?: string
   /** Relative paths within the project folder to each stem audio file. */
   stemRefs?: StemRefs
-  /** Optional rendered spoken-cue WAV aligned to trim + count-in prepend. */
-  cueTrackExport?: CueTrackExport
   /** Optional rendered click-only WAV aligned to trim + count-in prepend. */
-  clickTrackExport?: ClickTrackExport
+  clickExport?: RenderedCueExport
   /** Optional saved mixer state for the in-browser DAW view. */
   mixState?: MixState
   /**
@@ -387,7 +443,10 @@ export type SongMapV1 = {
   chordHints?: ChordHints
 }
 
-export type SongMap = SongMapV1
+/** @deprecated Persistent runtime shape is v2; kept for older imports. */
+export type SongMapV1 = SongMapV2
+
+export type SongMap = SongMapV2
 
 /** Partial timeline + optional confidence from `/api/analyze` (merge into SongMap). */
 export type SongMapAnalysisFragment = {

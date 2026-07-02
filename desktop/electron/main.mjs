@@ -548,10 +548,7 @@ function extractSongMetadataLite(songProject) {
   if (typeof md.artist === 'string') out.artist = md.artist
   if (md.keyDetail) out.keyDetail = md.keyDetail
   if (typeof md.bpm === 'number') out.bpm = md.bpm
-  const cues = map.cues
-  if (cues && cues.mode === 'countIn' && typeof cues.countInBeats === 'number' && cues.countInBeats > 0) {
-    out.countInBeats = cues.countInBeats
-  }
+  if (typeof map.countInBeats === 'number' && map.countInBeats > 0) out.countInBeats = map.countInBeats
   // True when the SongMap names an audio source — covers both v1 baked
   // audio (`fileName` set) and v2 disk-stored audio (`originalPath` set).
   // Stub songs added via "Add empty" have no `audio` block at all.
@@ -622,6 +619,22 @@ async function listStemSets(songFolderAbs) {
   }
   if (flatAudio.length > 0) out['legacy'] = dedupeStemsByLowerCase(flatAudio)
   return out
+}
+
+async function hasRenderedCueTrack(songFolderAbs) {
+  if (existsSync(path.join(songFolderAbs, 'cue', 'cue-track.wav'))) return true
+  const tracksDir = path.join(songFolderAbs, 'cue', 'tracks')
+  let entries
+  try {
+    entries = await readdir(tracksDir, { withFileTypes: true })
+  } catch {
+    return false
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue
+    if (existsSync(path.join(tracksDir, ent.name, 'cue-track.wav'))) return true
+  }
+  return false
 }
 
 /**
@@ -762,11 +775,10 @@ async function handleProjectInfo(req, res, cors) {
       const folderAbs = path.join(projectPath, entry.folder)
       const smapPath = path.join(folderAbs, SONG_SMAP_FILENAME)
       const alsPath = path.join(folderAbs, SONG_ALS_FILENAME)
-      const cuePath = path.join(folderAbs, 'cue', 'cue-track.wav')
       const clickPath = path.join(folderAbs, 'cue', 'click-track.wav')
       const hasSmap = existsSync(smapPath)
       const hasAls = existsSync(alsPath)
-      const hasCueTrack = existsSync(cuePath)
+      const hasCueTrack = await hasRenderedCueTrack(folderAbs)
       const hasClickTrack = existsSync(clickPath)
       const songProject = hasSmap ? await readSmapHeaderJson(smapPath) : null
       const lite = extractSongMetadataLite(songProject) ?? { title: entry.folder }
@@ -912,7 +924,7 @@ async function handleProjectSongWrite(req, res, cors) {
 /**
  * `POST /native/project/song/asset/write` — body
  * `{ projectPath, songFolder, subpath, contentBase64 }`. Writes a single
- * file under the song folder (e.g. `cue/cue-track.wav`). `subpath` is
+ * file under the song folder (e.g. `cue/tracks/main/cue-track.wav`). `subpath` is
  * validated like `songFolder` — no `..`, no leading `/`, no `\\`.
  * Intermediate directories are created on demand.
  */

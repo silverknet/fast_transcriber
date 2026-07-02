@@ -32,6 +32,7 @@
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
+  import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { audioSession } from '$lib/stores/audioSession'
   import { project as projectStore } from '$lib/stores/project'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
@@ -100,7 +101,7 @@
     // prepended so musical time aligns: the cue's "beat 1" sits at the same
     // mix-timeline second as each stem's `trim.startSec` sample.
     if (forKey === 'cue' || forKey === 'click') return 0
-    const preludeSec = titleCuePreludeSec(sm)
+    const preludeSec = titleCuePreludeSec(sm, getPrimaryCueTrack(sm))
     let prependSec = 0
     const countInBeats = effectiveCountInBeats(sm)
     if (countInBeats > 0) {
@@ -158,6 +159,7 @@
       ? ps.metadataByFolder[ps.activeSongFolder]
       : undefined
     const bestStems = selectBestStemSet(folderMeta)
+    const primaryCueTrack = sm ? getPrimaryCueTrack(sm) : undefined
     if (bestStems) {
       for (const filename of bestStems.files) {
         const key = `stem:${filename}`
@@ -177,13 +179,14 @@
     }
 
     // Cue track (clicks + speech).
-    if (folderMeta?.hasCueTrack) {
+    const cueTrackPath = primaryCueTrack?.renderExport?.relativePath
+    if (cueTrackPath) {
       plan.push({
         key: 'cue',
-        label: 'Cue',
+        label: primaryCueTrack?.name ? `Cue · ${primaryCueTrack.name}` : 'Cue',
         loader: async () => {
           if (!ps.osPath || !ps.activeSongFolder) return null
-          const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/cue-track.wav')
+          const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, cueTrackPath)
           return r.ok ? r.blob : null
         },
       })
@@ -193,7 +196,7 @@
     // either fetched from disk WHEN THE CACHE IS FRESH, or synthesized
     // client-side from the current SongMap. The user never has to "render".
     //
-    // Freshness check: `sm.clickTrackExport` is auto-cleared on fingerprint
+    // Freshness check: `sm.clickExport` is auto-cleared on fingerprint
     // mismatch (see `stores/songMap.ts`), so its presence is the source-of-
     // truth that the disk WAV matches the current count-in / start-beat /
     // beat-grid. The on-disk file lingers when stale (we don't delete it
@@ -204,7 +207,7 @@
         key: 'click',
         label: 'Click',
         loader: async () => {
-          const cacheIsFresh = !!sm.clickTrackExport && !!folderMeta?.hasClickTrack
+          const cacheIsFresh = !!sm.clickExport && !!folderMeta?.hasClickTrack
           if (cacheIsFresh && ps.osPath && ps.activeSongFolder) {
             const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, 'cue/click-track.wav')
             if (r.ok) return r.blob
@@ -212,7 +215,11 @@
           // Stale or missing — synthesize fresh from the current SongMap.
           // Pure DSP, no TTS, fast (~100 ms).
           try {
-            const r = await renderCueTrackWavBlob(sm, { includeSpeech: false, includeClicks: true })
+            const r = await renderCueTrackWavBlob(sm, {
+              includeSpeech: false,
+              includeClicks: true,
+              cueTrack: primaryCueTrack,
+            })
             return r.blob
           } catch {
             return null
