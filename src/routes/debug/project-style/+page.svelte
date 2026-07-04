@@ -24,7 +24,7 @@
   } from '@lucide/svelte'
 
   type SongStatus = 'synced' | 'pending' | 'missing' | 'working'
-  type StyleDirectionId = 'orange-rig' | 'sticker-desk' | 'signal-paper' | 'stage-sheet'
+  type StyleDirectionId = 'orange-rig' | 'studio-brief'
 
   type MockSong = {
     id: string
@@ -57,25 +57,11 @@
       color: '#ff7a1a',
     },
     {
-      id: 'sticker-desk',
-      name: 'Sticker desk',
-      tag: 'Label pile',
-      texture: 'Dot punch',
-      color: '#f04495',
-    },
-    {
-      id: 'signal-paper',
-      name: 'Signal paper',
-      tag: 'Utility loud',
-      texture: 'Barcode grid',
-      color: '#16c7c1',
-    },
-    {
-      id: 'stage-sheet',
-      name: 'Stage sheet',
-      tag: 'Setlist pop',
-      texture: 'Tape marks',
-      color: '#b6d936',
+      id: 'studio-brief',
+      name: 'Studio brief',
+      tag: 'Focused project',
+      texture: 'Quiet paper',
+      color: '#ff7a1a',
     },
   ]
 
@@ -224,14 +210,29 @@
     </div>
   </section>
 
-  <section class="signal-strip" aria-label="Project pulse">
-    {#each pulseCards as card (card.label)}
-      <div class={`pulse-card ${card.tone}`}>
-        <span>{card.label}</span>
-        <strong>{card.value}</strong>
+  {#if activeDirection === 'studio-brief'}
+    <section class="focus-strip" aria-label="Project overview">
+      <div class="focus-copy">
+        <p>Tour rehearsal project</p>
+        <strong>14 songs · 42 min · 9 ready · 11/14 audio local</strong>
       </div>
-    {/each}
-  </section>
+      <div class="focus-members" aria-label="Project members">
+        {#each collaborators as person (person.name)}
+          <span class="avatar" style={`--avatar: ${person.color}`}>{person.name.slice(0, 1)}</span>
+        {/each}
+        <span class="member-count">3 members</span>
+      </div>
+    </section>
+  {:else}
+    <section class="signal-strip" aria-label="Project pulse">
+      {#each pulseCards as card (card.label)}
+        <div class={`pulse-card ${card.tone}`}>
+          <span>{card.label}</span>
+          <strong>{card.value}</strong>
+        </div>
+      {/each}
+    </section>
+  {/if}
 
   <div class="project-shell">
     <aside class="side-rail" aria-label="Project summary">
@@ -456,77 +457,26 @@
     padding: clamp(12px, 2vw, 26px);
   }
 
-  .project-style-lab.sticker-desk {
-    --paper: oklch(0.965 0.035 108);
-    --panel: oklch(0.99 0.016 96);
-    --muted-panel: oklch(0.94 0.028 190);
-    --loud: var(--pink);
+  .project-style-lab.studio-brief {
+    --paper: oklch(0.948 0.006 255);
+    --panel: oklch(0.992 0.002 255);
+    --muted-panel: oklch(0.91 0.004 255);
+    --loud: var(--orange);
     --texture-a: repeating-linear-gradient(
       90deg,
-      transparent 0 9px,
-      color-mix(in oklch, var(--pink) 18%, transparent) 9px 11px,
-      transparent 11px 30px
+      color-mix(in oklch, var(--ink) 4%, transparent) 0 1px,
+      transparent 1px 40px
     );
     --texture-b: repeating-linear-gradient(
       0deg,
-      transparent 0 14px,
-      color-mix(in oklch, var(--cyan) 16%, transparent) 14px 16px,
-      transparent 16px 44px
-    );
-    --texture-c: repeating-linear-gradient(
-      45deg,
-      transparent 0 20px,
-      color-mix(in oklch, var(--orange) 22%, transparent) 20px 23px,
-      transparent 23px 48px
-    );
-  }
-
-  .project-style-lab.signal-paper {
-    --paper: oklch(0.95 0.024 188);
-    --panel: oklch(0.985 0.012 130);
-    --muted-panel: oklch(0.925 0.024 210);
-    --loud: var(--cyan);
-    --texture-a: repeating-linear-gradient(
-      90deg,
-      transparent 0 12px,
-      color-mix(in oklch, var(--cyan) 24%, transparent) 12px 15px,
-      transparent 15px 35px
-    );
-    --texture-b: repeating-linear-gradient(
-      0deg,
-      color-mix(in oklch, var(--ink) 6%, transparent) 0 1px,
-      transparent 1px 32px
-    );
-    --texture-c: repeating-linear-gradient(
-      90deg,
-      transparent 0 78px,
-      color-mix(in oklch, var(--orange) 20%, transparent) 78px 88px,
-      transparent 88px 148px
-    );
-  }
-
-  .project-style-lab.stage-sheet {
-    --paper: oklch(0.96 0.03 132);
-    --panel: oklch(0.99 0.018 100);
-    --muted-panel: oklch(0.935 0.03 138);
-    --loud: var(--lime);
-    --texture-a: repeating-linear-gradient(
-      0deg,
-      transparent 0 21px,
-      color-mix(in oklch, var(--lime) 24%, transparent) 21px 24px,
-      transparent 24px 44px
-    );
-    --texture-b: repeating-linear-gradient(
-      90deg,
-      transparent 0 34px,
-      color-mix(in oklch, var(--orange) 18%, transparent) 34px 38px,
-      transparent 38px 70px
+      color-mix(in oklch, var(--ink) 3%, transparent) 0 1px,
+      transparent 1px 40px
     );
     --texture-c: repeating-linear-gradient(
       135deg,
-      transparent 0 28px,
-      color-mix(in oklch, var(--ink) 7%, transparent) 28px 29px,
-      transparent 29px 56px
+      transparent 0 36px,
+      color-mix(in oklch, var(--orange) 10%, transparent) 36px 38px,
+      transparent 38px 78px
     );
   }
 
@@ -633,6 +583,16 @@
     );
   }
 
+  .studio-brief .top-strip {
+    min-height: 116px;
+    box-shadow: 4px 4px 0 var(--shadow);
+  }
+
+  .studio-brief .top-strip::after {
+    height: 10px;
+    background: linear-gradient(90deg, var(--orange) 0 32%, var(--panel) 32% 70%, var(--ink) 70% 100%);
+  }
+
   .top-strip > * {
     position: relative;
     z-index: 1;
@@ -705,6 +665,10 @@
     padding: 1rem 1rem 1.45rem;
   }
 
+  .studio-brief .header-ribbon {
+    background: var(--panel);
+  }
+
   .header-ribbon span {
     font-size: 0.72rem;
     font-weight: 950;
@@ -741,6 +705,40 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0.65rem;
     margin-top: 1rem;
+  }
+
+  .focus-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 1rem;
+    border: 3px solid var(--ink);
+    background: var(--panel);
+    padding: 0.85rem 1rem;
+    box-shadow: 4px 4px 0 var(--shadow);
+  }
+
+  .focus-copy {
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .focus-copy p,
+  .member-count {
+    font-size: 0.72rem;
+    font-weight: 950;
+    text-transform: uppercase;
+  }
+
+  .focus-copy strong {
+    font-size: 1rem;
+  }
+
+  .focus-members {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
   }
 
   .pulse-card {
@@ -791,6 +789,11 @@
     align-items: start;
   }
 
+  .studio-brief .project-shell {
+    grid-template-columns: minmax(230px, 0.58fr) minmax(0, 1.55fr);
+    max-width: 1280px;
+  }
+
   .side-rail,
   .song-board,
   .tool-panel,
@@ -798,6 +801,17 @@
     border: 3px solid var(--ink);
     background: var(--panel);
     box-shadow: 5px 5px 0 var(--shadow);
+  }
+
+  .studio-brief .side-rail,
+  .studio-brief .song-board,
+  .studio-brief .tool-panel {
+    box-shadow: 3px 3px 0 var(--shadow);
+  }
+
+  .studio-brief .right-stack,
+  .studio-brief .bottom-mixer {
+    display: none;
   }
 
   .side-rail {
@@ -821,6 +835,10 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.5rem;
+  }
+
+  .studio-brief .metric-stack {
+    display: none;
   }
 
   .metric {
@@ -857,6 +875,11 @@
 
   .orange-band {
     background: var(--loud);
+  }
+
+  .studio-brief .orange-band {
+    border-left-width: 10px;
+    background: var(--panel);
   }
 
   .side-band div,
@@ -900,6 +923,10 @@
     font-weight: 950;
   }
 
+  .studio-brief .avatar {
+    background: color-mix(in oklch, var(--avatar) 28%, white);
+  }
+
   .song-board {
     padding: clamp(12px, 1.6vw, 20px);
   }
@@ -938,6 +965,19 @@
     background: oklch(0.99 0.006 105);
     padding: 0.65rem;
     box-shadow: 3px 3px 0 color-mix(in oklch, var(--ink) 90%, transparent);
+  }
+
+  .studio-brief .song-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-height: 82px;
+    border-left-width: 5px;
+    border-left-color: var(--orange);
+    background: var(--panel);
+    box-shadow: none;
+  }
+
+  .studio-brief .song-art {
+    display: none;
   }
 
   .song-row.orange {
@@ -997,6 +1037,26 @@
 
   .status.synced {
     background: var(--lime);
+  }
+
+  .studio-brief .status,
+  .studio-brief .stem-count,
+  .studio-brief .cue-pill,
+  .studio-brief .song-meta span {
+    background: var(--panel);
+    color: var(--ink);
+  }
+
+  .studio-brief .status.synced {
+    background: var(--ink);
+    color: var(--panel);
+  }
+
+  .studio-brief .status.pending,
+  .studio-brief .status.missing,
+  .studio-brief .status.working {
+    background: color-mix(in oklch, var(--orange) 16%, white);
+    color: var(--ink);
   }
 
   .status.pending {

@@ -19,6 +19,9 @@
   import AddAudioDialog from '$lib/components/AddAudioDialog.svelte'
   import CloudCollabSection from '$lib/components/CloudCollabSection.svelte'
   import ShareProjectDialog from '$lib/components/ShareProjectDialog.svelte'
+  import AudioLockedDialog from '$lib/components/AudioLockedDialog.svelte'
+  import { page } from '$app/stores'
+  import { projectRole, loadProjectRole } from '$lib/stores/projectRole'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
   import NewSongDialog from '$lib/components/NewSongDialog.svelte'
   import RenameSongDialog from '$lib/components/RenameSongDialog.svelte'
@@ -94,6 +97,20 @@
 
   // Share dialog (header button on the project-open view).
   let shareDialogOpen = $state(false)
+
+  // Audio is an owner-only capability on cloud projects: editors can edit
+  // chords/sections but must NOT reupload/replace audio (it would misalign or
+  // lose the shared grid + chords). `canEditAudio` gates the attach/replace
+  // flows; a blocked attempt opens AudioLockedDialog pointing to the package.
+  let audioLockedOpen = $state(false)
+  const isCloudLinked = $derived(!!$project.data?.cloud)
+  const canEditAudio = $derived(!isCloudLinked || $projectRole === 'owner')
+
+  $effect(() => {
+    // Reload the role whenever the open cloud project (or user) changes.
+    const userId = ($page.data?.user as { id?: string } | undefined)?.id ?? null
+    void loadProjectRole($project.data?.cloud?.projectId ?? null, userId)
+  })
 
   async function loadCloudProjects() {
     cloudProjectsLoading = true
@@ -480,6 +497,13 @@
 
   function onAttachAudio(entry: ProjectSongEntry) {
     actionError = ''
+    // Editors on a shared project can't introduce their own audio — it would
+    // diverge from the owner's recording the grid/chords are built on. Steer
+    // them to the owner's audio package instead.
+    if (!canEditAudio) {
+      audioLockedOpen = true
+      return
+    }
     replaceTargetId = null
     attachAudioTargetId = entry.id
     attachAudioDialogOpen = true
@@ -528,11 +552,18 @@
 
   // ── Replace audio (hard reset of a song's derived data) ───────────────────
   function onReplaceAudio(entry: ProjectSongEntry) {
+    // Owner-only on shared projects — replacing audio rebuilds the grid and
+    // wipes chords/sections everyone shares.
+    if (!canEditAudio) {
+      audioLockedOpen = true
+      return
+    }
     const title = $project.metadataByFolder[entry.folder]?.title || 'this song'
     const ok = confirm(
-      `Replace audio for "${title}"?\n\n` +
-        `This clears the analyzed grid, chords, sections, and stems for this song. ` +
-        `You'll re-analyze the new audio. (Other songs are unaffected.)`,
+      `⚠️ Replace audio for "${title}"?\n\n` +
+        `This CLEARS the analyzed grid, chords, sections, and stems for this song, ` +
+        `for everyone in the project. You'll re-analyze the new audio, and the shared ` +
+        `chords will be lost. (Other songs are unaffected.)\n\nThis cannot be undone.`,
     )
     if (!ok) return
     attachAudioTargetId = null
@@ -978,6 +1009,11 @@
 />
 
 <ShareProjectDialog bind:open={shareDialogOpen} />
+
+<AudioLockedDialog
+  bind:open={audioLockedOpen}
+  onImportPackage={() => (shareDialogOpen = true)}
+/>
 
 <SetlistExportDialog
   bind:open={setlistExportOpen}

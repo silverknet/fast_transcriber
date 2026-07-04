@@ -1087,6 +1087,13 @@ export async function replaceImportedAudioForSong(
   const oldTitle = oldMap.metadata?.title ?? ''
   const oldAudioPath = oldMap.audio?.originalPath ?? null
 
+  // Best-effort snapshot before the wipe — the grid, chords and sections are
+  // about to be dropped, so keep a recoverable copy of the previous .smap.
+  {
+    const bakBytes = r.bytes instanceof Uint8Array ? r.bytes : new Uint8Array(r.bytes as ArrayBuffer)
+    await writeProjectSongAsset(osPath, entry.folder, 'song.smap.bak', bakBytes).catch(() => {})
+  }
+
   // Write the new audio bytes.
   const fileName = sanitizeAudioFilename(artifact.fileName || artifact.file?.name || 'audio.bin')
   const subpath = artifact.alreadyWrittenSubpath ?? `audio/${fileName}`
