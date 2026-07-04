@@ -106,6 +106,13 @@ export interface ProjectSongEntry {
   cloudSongId?: string
   /** Last `cloud_songs.revision` this device pulled for this song. */
   lastSyncedRevision?: number
+  /**
+   * `collabContentFingerprint()` of the song's shared content the last time
+   * it was successfully pushed or pulled. Lets the autosave skip no-op pushes
+   * and lets 409 handling tell "the user changed nothing" (fast-forward) from
+   * "both sides edited" (real conflict) — see `projectAutosave.ts`.
+   */
+  lastSyncedContentHash?: string
 }
 
 /**

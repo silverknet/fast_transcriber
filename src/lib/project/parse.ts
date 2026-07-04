@@ -110,6 +110,9 @@ export function parseProjectJson(text: string): ProjectFile {
     if (typeof e.lastSyncedRevision === 'number' && Number.isFinite(e.lastSyncedRevision)) {
       entry.lastSyncedRevision = e.lastSyncedRevision
     }
+    if (typeof e.lastSyncedContentHash === 'string' && e.lastSyncedContentHash.length > 0) {
+      entry.lastSyncedContentHash = e.lastSyncedContentHash
+    }
     songs.push(entry)
   }
 

@@ -92,6 +92,67 @@ export function toCollabSongMap(sm: SongMap): SongMap {
 }
 
 /**
+ * Deterministic stringify with recursively-sorted keys, mirroring JSON's
+ * "omit undefined object properties" rule so two machines that built the
+ * same SongMap produce byte-identical output regardless of field insertion
+ * order.
+ */
+function stableStringify(v: unknown): string {
+  if (v === undefined) return 'null'
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']'
+  const obj = v as Record<string, unknown>
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
+}
+
+function djb2Hex(s: string): string {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 33) ^ s.charCodeAt(i)
+  }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
+/**
+ * Stable fingerprint of the MEANINGFUL shared content of a song — the thing
+ * that decides "did the user actually change something worth syncing?".
+ *
+ * It is deliberately blind to fields that differ per-machine or per-render and
+ * must never count as a conflict:
+ *   - `metadata.updatedAt` (bumped on every save)
+ *   - `clickExport` / per-track `renderExport` (local render artifacts; each
+ *     device regenerates its own — the historical source of phantom conflicts)
+ *   - everything `toCollabSongMap` already strips (local paths, mixState,
+ *     analysis-hint caches)
+ *
+ * Two devices with the same bars/beats/chords/sections/cue-tracks/count-in
+ * therefore fingerprint identically even if one just re-rendered a cue WAV.
+ * Used by the autosave dirty-check (skip no-op pushes) and by 409 handling
+ * (adopt/fast-forward instead of prompting) — see `projectAutosave.ts`.
+ */
+export function collabContentFingerprint(sm: SongMap): string {
+  const c = toCollabSongMap(sm) as Record<string, unknown>
+  const meta = { ...(c.metadata as Record<string, unknown>) }
+  delete meta.updatedAt
+  const normalized: Record<string, unknown> = { ...c, metadata: meta }
+  delete normalized.clickExport
+  // `expectedAudio` is a cloud-reconciliation artifact stamped onto the
+  // joiner's copy, not user content — the owner's map doesn't carry it, so
+  // including it would make owner and joiner fingerprints disagree forever.
+  delete normalized.expectedAudio
+  if (Array.isArray(normalized.cueTracks)) {
+    normalized.cueTracks = (normalized.cueTracks as Array<Record<string, unknown>>).map((t) => {
+      const { renderExport: _renderExport, ...rest } = t
+      return rest
+    })
+  }
+  return djb2Hex(stableStringify(normalized))
+}
+
+/**
  * Merge a cloud SongMap (from a pull) into the local SongMap, preserving
  * every local-only field. Collaborative fields take their values from
  * the cloud copy.

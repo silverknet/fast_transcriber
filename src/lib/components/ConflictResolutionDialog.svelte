@@ -30,6 +30,7 @@
     type ConflictDecisions,
   } from '$lib/songmap/collabMerge'
   import { pushCloudSong } from '$lib/client/cloudSync'
+  import { collabContentFingerprint } from '$lib/songmap/collab'
   import type { ProjectFile } from '$lib/project/types'
 
   let decisions = $state<ConflictDecisions>(new Map())
@@ -91,7 +92,13 @@
           pendingChanges: 0,
         },
         songs: proj.data.songs.map((s) =>
-          s.id === c.localSongId ? { ...s, lastSyncedRevision: c.remoteRevision } : s,
+          s.id === c.localSongId
+            ? {
+                ...s,
+                lastSyncedRevision: c.remoteRevision,
+                lastSyncedContentHash: collabContentFingerprint(c.report.merged),
+              }
+            : s,
         ),
       }
       projectStore.set({ ...proj, data: next })
@@ -154,7 +161,13 @@
             pendingChanges: 0,
           },
           songs: proj.data.songs.map((s) =>
-            s.id === c.localSongId ? { ...s, lastSyncedRevision: r.revision } : s,
+            s.id === c.localSongId
+              ? {
+                  ...s,
+                  lastSyncedRevision: r.revision,
+                  lastSyncedContentHash: collabContentFingerprint(resolved),
+                }
+              : s,
           ),
         }
         projectStore.set({ ...proj, data: next })

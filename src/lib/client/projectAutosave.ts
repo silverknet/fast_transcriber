@@ -29,6 +29,7 @@ import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
 import { mergeForConflict } from '$lib/songmap/collabMerge'
+import { collabContentFingerprint } from '$lib/songmap/collab'
 import { cloudConflict } from '$lib/stores/cloudConflict'
 import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
@@ -140,68 +141,86 @@ async function tryCloudPushOnce(): Promise<void> {
   const cloud = snap.data.cloud
   const entry = snap.data.songs.find((e) => e.id === snap.activeSongId)
   if (!entry) return
+  const entryId = entry.id
   const cloudSongId = entry.cloudSongId ?? entry.id
+  const contentHash = collabContentFingerprint(sm)
+
+  // Dirty-check: only push when the song's SHARED content actually changed
+  // since the last successful sync. This is the core phantom-conflict fix —
+  // the songMap store emits on load, navigation, and after a pull writes
+  // data, none of which are real edits. `collabContentFingerprint` ignores
+  // per-render / per-machine noise (renderExport, updatedAt, hint caches).
+  if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === contentHash) return
+
   const baseRev = entry.lastSyncedRevision ?? cloud.lastSyncedRevision
   const sortOrder = snap.data.songs.indexOf(entry)
   if (sortOrder < 0) return
 
-  const r = await pushCloudSong(
-    cloud.projectId,
-    cloudSongId,
-    sm,
-    sortOrder,
-    !!entry.hidden,
-    baseRev,
-  )
-
-  if (r.ok) {
-    // Mark this song + the project as synced through the returned revision.
+  // Mark the active song + project synced through `revision`/`hash`. Re-reads
+  // the store because an await may have elapsed since the snapshot.
+  function markSynced(revision: number, hash: string): void {
+    const cur = get(project)
+    if (!cur.data || !cur.data.cloud) return
     const next: ProjectFile = {
-      ...snap.data,
+      ...cur.data,
       cloud: {
-        ...cloud,
-        lastSyncedRevision: r.revision,
+        ...cur.data.cloud,
+        lastSyncedRevision: revision,
         lastPushedAt: new Date().toISOString(),
         pendingChanges: 0,
       },
-      songs: snap.data.songs.map((s) =>
-        s.id === entry.id
-          ? { ...s, cloudSongId, lastSyncedRevision: r.revision }
+      songs: cur.data.songs.map((s) =>
+        s.id === entryId
+          ? { ...s, cloudSongId, lastSyncedRevision: revision, lastSyncedContentHash: hash }
           : s,
       ),
     }
     setProjectData(next)
+  }
+
+  const r = await pushCloudSong(cloud.projectId, cloudSongId, sm, sortOrder, !!entry.hidden, baseRev)
+
+  if (r.ok) {
+    markSynced(r.revision, contentHash)
     return
   }
 
-  // Conflict path (Phase 8): surface the disagreement to the user via
-  // the cloudConflict store. The dialog renders the merge report; the
-  // user picks per-row before applying. We bump pendingChanges so the
-  // status pill reflects the unsynced state until they resolve.
+  // 409 conflict: distinguish a benign revision bump from a real edit clash.
   if ('conflict' in r && r.conflict && r.remote?.song_map) {
-    // Don't replace an already-pending conflict — the user is mid-resolve.
+    const remote = r.remote.song_map
+    const remoteHash = collabContentFingerprint(remote)
+
+    // Same shared content on both sides — only the revision moved (the other
+    // device pushed identical content, or the diff was render-cache only).
+    // Adopt the new revision silently; no dialog.
+    if (remoteHash === contentHash) {
+      markSynced(r.remote.revision, contentHash)
+      return
+    }
+
+    // Genuinely divergent content → surface the merge dialog once. The user
+    // picks per-row before applying; until then edits stack up locally.
     if (get(cloudConflict) === null) {
-      const report = mergeForConflict(sm, r.remote.song_map)
+      const report = mergeForConflict(sm, remote)
       cloudConflict.set({
         cloudProjectId: cloud.projectId,
         cloudSongId,
         localSongId: entry.id,
         local: sm,
-        remote: r.remote.song_map,
+        remote,
         remoteRevision: r.remote.revision,
         report,
       })
     }
   }
 
-  const next: ProjectFile = {
-    ...snap.data,
-    cloud: {
-      ...cloud,
-      pendingChanges: (cloud.pendingChanges ?? 0) + 1,
-    },
+  const cur = get(project)
+  if (cur.data && cur.data.cloud) {
+    setProjectData({
+      ...cur.data,
+      cloud: { ...cur.data.cloud, pendingChanges: (cur.data.cloud.pendingChanges ?? 0) + 1 },
+    })
   }
-  setProjectData(next)
 }
 
 function scheduleCloudPush(): void {
