@@ -21,6 +21,7 @@
     clientXToTimeInView,
     timeToPxInView,
   } from '$lib/audio/timeGeometry'
+  import { waveformBlockBucketCount } from '$lib/audio/waveformBlocks'
   import { drawPeaksToCanvas } from '$lib/audio/waveformDraw'
   import {
     hitTestSelectionTarget,
@@ -498,7 +499,7 @@
     const d = buf.duration
     const vs = viewEnd > viewStart ? viewStart : 0
     const ve = viewEnd > viewStart ? viewEnd : d
-    peaks = computePeaksForTimeRange(buf, vs, ve, w)
+    peaks = computePeaksForTimeRange(buf, vs, ve, waveformBlockBucketCount(w))
     redrawCanvas()
   }
 
@@ -1097,7 +1098,7 @@
       /** Must match minimap inner width: a hard cap (previously 800px) left empty space on wide layouts so the viewport box did not align with the overview waveform. */
       const w = Math.max(120, Math.min(raw, MAX_WAVE_WIDTH_PX))
       overviewWidth = w
-      overviewPeaks = computePeaks(buf, w)
+      overviewPeaks = computePeaks(buf, waveformBlockBucketCount(w))
       redrawOverviewCanvas()
     }
 

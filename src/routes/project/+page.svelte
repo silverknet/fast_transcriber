@@ -20,6 +20,8 @@
   import CloudCollabSection from '$lib/components/CloudCollabSection.svelte'
   import ShareProjectDialog from '$lib/components/ShareProjectDialog.svelte'
   import AudioLockedDialog from '$lib/components/AudioLockedDialog.svelte'
+  import AutoStemsStatusPanel from '$lib/components/AutoStemsStatusPanel.svelte'
+  import { refreshAutoStemsStatuses } from '$lib/client/autoStemsStatus'
   import { page } from '$app/stores'
   import { projectRole, loadProjectRole } from '$lib/stores/projectRole'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
@@ -325,8 +327,12 @@
     // state while this page is open so the per-stem "in progress" dots reflect
     // work happening even when nothing in the UI kicked it off.
     const jobPoll = setInterval(() => {
-      if ($desktopCompanionStatus.reachable) void syncStemJobsWithSidecar()
+      if ($desktopCompanionStatus.reachable) {
+        void syncStemJobsWithSidecar()
+        void refreshAutoStemsStatuses()
+      }
     }, 8000)
+    if ($desktopCompanionStatus.reachable) void refreshAutoStemsStatuses()
     return () => clearInterval(jobPoll)
   })
 
@@ -838,6 +844,8 @@
     </header>
 
     <CloudCollabSection />
+
+    <AutoStemsStatusPanel />
 
     {#if actionError}
       <p class="text-destructive text-sm" role="status">{actionError}</p>

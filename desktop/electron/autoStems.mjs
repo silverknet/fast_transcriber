@@ -122,6 +122,36 @@ export function createAutoStemsDaemon(deps) {
   const watched = new Set()
   /** Per-song (folderAbs) enqueue attempts since last success/reset. */
   const attempts = new Map()
+  /**
+   * Per-song (folderAbs) status for the web UI — so a song that isn't
+   * splitting shows WHY (not analyzed / no audio / gave up after N) instead
+   * of silently doing nothing. `{ folder, songId, phase, attempts, reason,
+   * stems, updatedAt }`. Phases: blocked | queued | running | ready |
+   * failed | abandoned.
+   */
+  const statuses = new Map()
+  /** Last failure reason per song (folderAbs), surfaced on `abandoned`. */
+  const lastErrorByKey = new Map()
+  /** Per-project normalized-policy fingerprint — reset attempts when it changes. */
+  const policyHashByProject = new Map()
+
+  function setStatus(songKey, patch) {
+    const prev = statuses.get(songKey) ?? {}
+    statuses.set(songKey, { ...prev, ...patch, updatedAt: Date.now() })
+  }
+
+  /** Clear attempt budget + status for keys under `projectPath` (or all). */
+  function clearBudgets(projectPath) {
+    for (const key of [...attempts.keys()]) {
+      if (!projectPath || key.startsWith(projectPath)) attempts.delete(key)
+    }
+    for (const key of [...statuses.keys()]) {
+      if (!projectPath || key.startsWith(projectPath)) statuses.delete(key)
+    }
+    for (const key of [...lastErrorByKey.keys()]) {
+      if (!projectPath || key.startsWith(projectPath)) lastErrorByKey.delete(key)
+    }
+  }
   /** @type {NodeJS.Timeout | null} */
   let timer = null
   let running = false
@@ -203,6 +233,15 @@ export function createAutoStemsDaemon(deps) {
         continue // unreadable manifest — try again next tick
       }
       const policy = normalizeAutoStems(manifest?.autoStems)
+
+      // Reset attempt budgets when the policy (stems/quality) changes, so
+      // songs that were abandoned under the old settings get another shot.
+      const policyHash = JSON.stringify(policy)
+      if (policyHashByProject.get(projectPath) !== policyHash) {
+        clearBudgets(projectPath)
+        policyHashByProject.set(projectPath, policyHash)
+      }
+
       if (!policy) continue
 
       for (const entry of manifest.songs ?? []) {
@@ -215,8 +254,12 @@ export function createAutoStemsDaemon(deps) {
   async function prepareSong(projectPath, entry, policy) {
     const folderAbs = path.join(projectPath, entry.folder)
     const songKey = folderAbs
+    const base = { folder: entry.folder, songId: entry.id ?? null }
 
-    if (entry.id && deps.hasInflightJobForSong(entry.id)) return
+    if (entry.id && deps.hasInflightJobForSong(entry.id)) {
+      setStatus(songKey, { ...base, phase: 'running' })
+      return
+    }
 
     let stemsByPreset
     try {
@@ -244,10 +287,23 @@ export function createAutoStemsDaemon(deps) {
 
     if (needed.length === 0) {
       attempts.delete(songKey)
+      lastErrorByKey.delete(songKey)
+      setStatus(songKey, { ...base, phase: 'ready', attempts: 0, reason: null })
       return
     }
 
-    if ((attempts.get(songKey) ?? 0) >= MAX_ATTEMPTS) return
+    if ((attempts.get(songKey) ?? 0) >= MAX_ATTEMPTS) {
+      setStatus(songKey, {
+        ...base,
+        phase: 'abandoned',
+        attempts: attempts.get(songKey),
+        stems: needed,
+        reason:
+          lastErrorByKey.get(songKey) ??
+          `Auto-split gave up after ${MAX_ATTEMPTS} attempts. Use Retry to try again.`,
+      })
+      return
+    }
 
     // One job at a time: once anything is queued/running (incl. a job we just
     // enqueued earlier in this same pass), stop enqueuing more.
@@ -261,14 +317,27 @@ export function createAutoStemsDaemon(deps) {
     } catch {
       return
     }
-    if (!header) return
+    if (!header) {
+      setStatus(songKey, { ...base, phase: 'blocked', reason: 'Could not read the song.' })
+      return
+    }
     const sm = header.songMap ?? header // tolerate either shape
     const analyzed = isSongAnalyzed(sm?.metadata?.analyzed, sm?.timeline?.bars?.length ?? 0)
     const rel = sm?.audio?.originalPath
-    if (!analyzed || !rel) return
+    if (!analyzed) {
+      setStatus(songKey, { ...base, phase: 'blocked', reason: 'Not analyzed yet — analyze the song first.' })
+      return
+    }
+    if (!rel) {
+      setStatus(songKey, { ...base, phase: 'blocked', reason: 'No audio attached.' })
+      return
+    }
 
     const inputPath = path.join(folderAbs, rel)
-    if (!deps.existsSync(inputPath)) return
+    if (!deps.existsSync(inputPath)) {
+      setStatus(songKey, { ...base, phase: 'blocked', reason: 'Audio file is missing on disk.' })
+      return
+    }
 
     const outputDir = path.join(folderAbs, 'stems', policy.quality)
     attempts.set(songKey, (attempts.get(songKey) ?? 0) + 1)
@@ -278,6 +347,13 @@ export function createAutoStemsDaemon(deps) {
       stems: needed,
       quality: policy.quality,
       songId: entry.id ?? null,
+    })
+    setStatus(songKey, {
+      ...base,
+      phase: 'queued',
+      attempts: attempts.get(songKey),
+      stems: needed,
+      reason: null,
     })
     if (jobId) {
       deps.log(
@@ -289,6 +365,39 @@ export function createAutoStemsDaemon(deps) {
   /** Call when a job for a folder succeeds, to clear its attempt budget. */
   function noteSongSatisfied(folderAbs) {
     attempts.delete(folderAbs)
+    lastErrorByKey.delete(folderAbs)
+    setStatus(folderAbs, { phase: 'ready', attempts: 0, reason: null, stems: [] })
+  }
+
+  /** Call when a job for a folder fails, to record why (surfaced on abandon). */
+  function noteSongFailed(folderAbs, reason) {
+    const msg = typeof reason === 'string' && reason ? reason : 'Stem split failed.'
+    lastErrorByKey.set(folderAbs, msg)
+    setStatus(folderAbs, { phase: 'failed', reason: msg })
+  }
+
+  /** Snapshot of per-song status for the web UI. */
+  function getStatuses() {
+    return [...statuses.entries()].map(([key, v]) => ({ key, ...v }))
+  }
+
+  /**
+   * Force a song back into the queue: clears its attempt budget + status so
+   * the next pass re-evaluates it. Returns true (always) so the caller can
+   * report success. `schedule` triggers a near-immediate re-scan.
+   */
+  function retrySong(folderAbs) {
+    attempts.delete(folderAbs)
+    lastErrorByKey.delete(folderAbs)
+    statuses.delete(folderAbs)
+    schedule(250)
+    return true
+  }
+
+  /** Clear all attempt budgets (optionally for one project) + re-scan. */
+  function resetAttempts(projectPath) {
+    clearBudgets(projectPath || undefined)
+    schedule(250)
   }
 
   function start() {
@@ -305,5 +414,18 @@ export function createAutoStemsDaemon(deps) {
     pending = false
   }
 
-  return { watchProject, start, stop, runOnce, noteSongSatisfied, _watched: watched, _attempts: attempts }
+  return {
+    watchProject,
+    start,
+    stop,
+    runOnce,
+    noteSongSatisfied,
+    noteSongFailed,
+    getStatuses,
+    retrySong,
+    resetAttempts,
+    _watched: watched,
+    _attempts: attempts,
+    _statuses: statuses,
+  }
 }

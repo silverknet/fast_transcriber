@@ -25,6 +25,9 @@
 
   type SongStatus = 'synced' | 'pending' | 'missing' | 'working'
   type StyleDirectionId = 'orange-rig' | 'studio-brief'
+  type StemKey = 'drums' | 'bass' | 'guitar' | 'keys' | 'vox'
+  type StemState = 'ready' | 'queued' | 'missing'
+  type WaveformStyleId = 'blocks' | 'stepped' | 'needles'
 
   type MockSong = {
     id: string
@@ -38,6 +41,7 @@
     cues: string
     color: string
     accent: string
+    stemLights: Record<StemKey, StemState>
   }
 
   type StyleDirection = {
@@ -46,6 +50,18 @@
     tag: string
     texture: string
     color: string
+  }
+
+  type WaveformStyle = {
+    id: WaveformStyleId
+    name: string
+  }
+
+  type WaveformSlice = {
+    id: string
+    level: number
+    bar: number
+    beat: number
   }
 
   const styleDirections: StyleDirection[] = [
@@ -65,6 +81,20 @@
     },
   ]
 
+  const stemColumns: { key: StemKey; label: string }[] = [
+    { key: 'drums', label: 'Drm' },
+    { key: 'bass', label: 'Bass' },
+    { key: 'guitar', label: 'Gtr' },
+    { key: 'keys', label: 'Keys' },
+    { key: 'vox', label: 'Vox' },
+  ]
+
+  const waveformStyles: WaveformStyle[] = [
+    { id: 'blocks', name: 'Blocks' },
+    { id: 'stepped', name: 'Stepped' },
+    { id: 'needles', name: 'Needles' },
+  ]
+
   const songs: MockSong[] = [
     {
       id: 's1',
@@ -78,6 +108,13 @@
       cues: 'Main + drummer',
       color: 'orange',
       accent: '#ff7a1a',
+      stemLights: {
+        drums: 'ready',
+        bass: 'ready',
+        guitar: 'ready',
+        keys: 'missing',
+        vox: 'ready',
+      },
     },
     {
       id: 's2',
@@ -91,6 +128,13 @@
       cues: 'Singer',
       color: 'cyan',
       accent: '#16c7c1',
+      stemLights: {
+        drums: 'queued',
+        bass: 'ready',
+        guitar: 'missing',
+        keys: 'ready',
+        vox: 'missing',
+      },
     },
     {
       id: 's3',
@@ -104,6 +148,13 @@
       cues: 'Main',
       color: 'pink',
       accent: '#f04495',
+      stemLights: {
+        drums: 'ready',
+        bass: 'ready',
+        guitar: 'ready',
+        keys: 'ready',
+        vox: 'ready',
+      },
     },
     {
       id: 's4',
@@ -117,6 +168,13 @@
       cues: 'None',
       color: 'lime',
       accent: '#b6d936',
+      stemLights: {
+        drums: 'missing',
+        bass: 'missing',
+        guitar: 'missing',
+        keys: 'missing',
+        vox: 'missing',
+      },
     },
   ]
 
@@ -147,7 +205,30 @@
     working: 'Working',
   }
 
-  let activeDirection = $state<StyleDirectionId>('orange-rig')
+  const stemStateLabel: Record<StemState, string> = {
+    ready: 'available',
+    queued: 'queued',
+    missing: 'missing',
+  }
+
+  const waveformSlices: WaveformSlice[] = [
+    14, 24, 18, 34, 44, 38, 22, 28, 62, 76, 68, 58, 48, 36, 30, 42,
+    72, 84, 64, 52, 46, 56, 78, 88, 54, 36, 28, 24, 40, 62, 70, 50,
+    34, 44, 66, 82, 90, 74, 58, 46, 32, 26, 38, 52, 68, 60, 42, 30,
+  ].map((level, index) => ({
+    id: `slice-${index}`,
+    level,
+    bar: Math.floor(index / 16) + 1,
+    beat: Math.floor((index % 16) / 4) + 1,
+  }))
+
+  const rulerMarkers = Array.from({ length: 12 }, (_, index) => ({
+    id: `marker-${index}`,
+    label: index % 4 === 0 ? `Bar ${Math.floor(index / 4) + 1}` : `${(index % 4) + 1}`,
+  }))
+
+  let activeDirection = $state<StyleDirectionId>('studio-brief')
+  let activeWaveformStyle = $state<WaveformStyleId>('blocks')
   const activeStyle = $derived(
     styleDirections.find((direction) => direction.id === activeDirection) ?? styleDirections[0],
   )
@@ -300,6 +381,18 @@
       </div>
 
       <div class="song-list">
+        {#if activeDirection === 'studio-brief'}
+          <div class="stem-table-head" aria-hidden="true">
+            <span>Song</span>
+            <div class="stem-labels">
+              {#each stemColumns as stem (stem.key)}
+                <span>{stem.label}</span>
+              {/each}
+            </div>
+            <span>Actions</span>
+          </div>
+        {/if}
+
         {#each songs as song, index (song.id)}
           <article class={`song-row ${song.color}`}>
             <div class="song-art" style={`--accent: ${song.accent}`}>
@@ -319,6 +412,16 @@
               </div>
             </div>
 
+            <div class="stem-lights" aria-label={`${song.title} stem availability`}>
+              {#each stemColumns as stem (stem.key)}
+                <span
+                  class={`stem-light ${song.stemLights[stem.key]}`}
+                  aria-label={`${stem.label} ${stemStateLabel[song.stemLights[stem.key]]}`}
+                  title={`${stem.label}: ${stemStateLabel[song.stemLights[stem.key]]}`}
+                ></span>
+              {/each}
+            </div>
+
             <div class="song-tools" aria-label={`${song.title} tools`}>
               <span class="stem-count">{song.stems} stems</span>
               <span class="cue-pill">
@@ -335,6 +438,49 @@
           </article>
         {/each}
       </div>
+
+      {#if activeDirection === 'studio-brief'}
+        <section class="waveform-panel" aria-label="Quantized waveform preview">
+          <div class="waveform-head">
+            <div>
+              <p class="eyebrow">Waveform</p>
+              <h2>Neon Staircase</h2>
+            </div>
+            <div class="wave-style-toggle" aria-label="Waveform style">
+              {#each waveformStyles as style (style.id)}
+                <button
+                  type="button"
+                  class:active={activeWaveformStyle === style.id}
+                  aria-pressed={activeWaveformStyle === style.id}
+                  onclick={() => (activeWaveformStyle = style.id)}
+                >
+                  {style.name}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div
+            class={`waveform-stage ${activeWaveformStyle}`}
+            style={`--slice-count: ${waveformSlices.length}`}
+          >
+            <div class="wave-ruler" aria-hidden="true">
+              {#each rulerMarkers as marker (marker.id)}
+                <span>{marker.label}</span>
+              {/each}
+            </div>
+            <div class="wave-slices">
+              {#each waveformSlices as slice (slice.id)}
+                <span
+                  class:downbeat={slice.beat === 1}
+                  style={`--level: ${slice.level}; --bar: ${slice.bar}; --beat: ${slice.beat}`}
+                  aria-label={`Bar ${slice.bar}, beat ${slice.beat}, level ${slice.level}`}
+                ></span>
+              {/each}
+            </div>
+          </div>
+        </section>
+      {/if}
     </section>
 
     <aside class="right-stack" aria-label="Project tools">
@@ -958,7 +1104,7 @@
 
   .song-row {
     display: grid;
-    grid-template-columns: 62px minmax(0, 1fr) auto;
+    grid-template-columns: 62px minmax(0, 1fr) minmax(190px, 0.72fr) auto;
     gap: 0.85rem;
     align-items: center;
     border: 2px solid var(--ink);
@@ -968,7 +1114,7 @@
   }
 
   .studio-brief .song-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) 238px 260px;
     min-height: 82px;
     border-left-width: 5px;
     border-left-color: var(--orange);
@@ -978,6 +1124,71 @@
 
   .studio-brief .song-art {
     display: none;
+  }
+
+  .stem-table-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 238px 260px;
+    align-items: center;
+    gap: 0.85rem;
+    border: 2px solid var(--ink);
+    background: var(--ink);
+    color: var(--panel);
+    padding: 0.45rem 0.65rem 0.45rem calc(0.65rem + 5px);
+    font-size: 0.68rem;
+    font-weight: 950;
+    text-transform: uppercase;
+  }
+
+  .stem-labels,
+  .stem-lights {
+    display: grid;
+    grid-template-columns: repeat(5, 34px);
+    justify-content: end;
+    gap: 0.45rem;
+  }
+
+  .stem-labels span {
+    text-align: center;
+  }
+
+  .stem-lights {
+    align-items: center;
+  }
+
+  .stem-light {
+    position: relative;
+    display: block;
+    width: 34px;
+    height: 22px;
+    border: 2px solid var(--ink);
+    background: var(--panel);
+  }
+
+  .stem-light::after {
+    content: '';
+    position: absolute;
+    inset: 4px;
+    background: color-mix(in oklch, var(--ink) 10%, white);
+  }
+
+  .stem-light.ready::after {
+    background: var(--orange);
+  }
+
+  .stem-light.queued::after {
+    background: repeating-linear-gradient(
+      90deg,
+      var(--orange) 0 5px,
+      var(--panel) 5px 9px
+    );
+  }
+
+  .stem-light.missing::after {
+    background:
+      linear-gradient(45deg, transparent 0 44%, var(--ink) 44% 56%, transparent 56%),
+      linear-gradient(-45deg, transparent 0 44%, var(--ink) 44% 56%, transparent 56%),
+      var(--panel);
   }
 
   .song-row.orange {
@@ -1093,6 +1304,10 @@
     gap: 0.45rem;
   }
 
+  .studio-brief .song-tools {
+    width: 260px;
+  }
+
   .song-tools button {
     width: 2.25rem;
     min-height: 2.25rem;
@@ -1101,6 +1316,138 @@
 
   .cue-pill {
     background: color-mix(in oklch, var(--loud) 18%, white);
+  }
+
+  .waveform-panel {
+    display: grid;
+    gap: 0.85rem;
+    margin-top: 1rem;
+    border: 3px solid var(--ink);
+    background: var(--panel);
+    padding: 1rem;
+  }
+
+  .waveform-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .wave-style-toggle {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.45rem;
+  }
+
+  .wave-style-toggle button {
+    min-height: 2.1rem;
+    padding: 0 0.65rem;
+    box-shadow: none;
+  }
+
+  .wave-style-toggle button.active {
+    background: var(--orange);
+  }
+
+  .waveform-stage {
+    --slice-width: 18px;
+    overflow-x: auto;
+    border: 2px solid var(--ink);
+    background:
+      repeating-linear-gradient(
+        90deg,
+        transparent 0 calc(var(--slice-width) * 4 - 2px),
+        color-mix(in oklch, var(--ink) 12%, transparent) calc(var(--slice-width) * 4 - 2px)
+          calc(var(--slice-width) * 4)
+      ),
+      color-mix(in oklch, var(--muted-panel) 48%, white);
+  }
+
+  .wave-ruler,
+  .wave-slices {
+    width: max(100%, calc(var(--slice-count) * var(--slice-width)));
+  }
+
+  .wave-ruler {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(calc(var(--slice-width) * 4), 1fr));
+    border-bottom: 2px solid var(--ink);
+    background: var(--panel);
+  }
+
+  .wave-ruler span {
+    min-width: 0;
+    border-right: 1px solid color-mix(in oklch, var(--ink) 25%, transparent);
+    padding: 0.35rem 0.4rem;
+    font-size: 0.64rem;
+    font-weight: 950;
+    text-transform: uppercase;
+  }
+
+  .wave-slices {
+    display: grid;
+    grid-template-columns: repeat(var(--slice-count), minmax(var(--slice-width), 1fr));
+    align-items: center;
+    height: 132px;
+    padding: 0.75rem 0.55rem;
+  }
+
+  .wave-slices span {
+    position: relative;
+    display: block;
+    justify-self: center;
+    width: calc(var(--slice-width) - 5px);
+    min-height: 8px;
+    height: calc(var(--level) * 1%);
+    border: 2px solid var(--ink);
+    background: var(--orange);
+  }
+
+  .wave-slices span.downbeat {
+    background: var(--ink);
+  }
+
+  .waveform-stage.blocks .wave-slices span {
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+
+  .waveform-stage.stepped .wave-slices span {
+    width: calc(var(--slice-width) - 3px);
+    background:
+      repeating-linear-gradient(
+        0deg,
+        var(--orange) 0 10px,
+        var(--panel) 10px 13px
+      );
+  }
+
+  .waveform-stage.stepped .wave-slices span.downbeat {
+    background:
+      repeating-linear-gradient(
+        0deg,
+        var(--ink) 0 10px,
+        var(--panel) 10px 13px
+      );
+  }
+
+  .waveform-stage.needles .wave-slices span {
+    width: 5px;
+    border-width: 0 2px;
+    background: var(--ink);
+  }
+
+  .waveform-stage.needles .wave-slices span::after {
+    content: '';
+    position: absolute;
+    top: -5px;
+    left: 50%;
+    width: 13px;
+    height: 9px;
+    border: 2px solid var(--ink);
+    background: var(--orange);
+    transform: translateX(-50%);
   }
 
   .right-stack {
@@ -1233,6 +1580,11 @@
       grid-template-columns: 1fr;
     }
 
+    .studio-brief .project-shell {
+      grid-template-columns: 1fr;
+      max-width: none;
+    }
+
     .signal-strip {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -1245,6 +1597,23 @@
     .people-list {
       grid-column: 1 / -1;
       grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 920px) {
+    .studio-brief .song-row,
+    .stem-table-head {
+      grid-template-columns: minmax(0, 1fr) 238px;
+    }
+
+    .stem-table-head > span:last-child {
+      display: none;
+    }
+
+    .studio-brief .song-tools {
+      grid-column: 1 / -1;
+      width: auto;
+      justify-content: start;
     }
   }
 
@@ -1312,13 +1681,42 @@
       grid-template-columns: 1fr;
     }
 
+    .focus-strip,
+    .waveform-head {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .focus-members,
+    .wave-style-toggle {
+      justify-content: start;
+    }
+
+    .stem-table-head {
+      display: none;
+    }
+
+    .studio-brief .song-row,
     .song-row {
       display: grid;
+      grid-template-columns: 1fr;
+    }
+
+    .stem-lights {
+      justify-content: start;
     }
 
     .song-tools {
       justify-content: start;
       flex-wrap: wrap;
+    }
+
+    .studio-brief .song-tools {
+      width: auto;
+    }
+
+    .waveform-stage {
+      --slice-width: 16px;
     }
 
     .board-head {

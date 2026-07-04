@@ -1,3 +1,5 @@
+import { drawBlockPeaksToCanvas } from '$lib/audio/waveformBlocks'
+
 /**
  * Compute downsampled min/max peaks for a single channel of an AudioBuffer
  * over a time range. Returns a flat `[min0, max0, min1, max1, ...]` array
@@ -51,26 +53,7 @@ export function drawPeaksToCanvas(
   width: number,
   height: number,
 ): void {
-  const dpr = window.devicePixelRatio || 1
-  canvas.width = Math.max(1, Math.floor(width * dpr))
-  canvas.height = Math.max(1, Math.floor(height * dpr))
-  canvas.style.width = `${width}px`
-  canvas.style.height = `${height}px`
   const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  ctx.scale(dpr, dpr)
-  ctx.clearRect(0, 0, width, height)
-  ctx.beginPath()
-  const mid = height / 2
-  const buckets = peaks.length / 2
-  for (let b = 0; b < buckets; b++) {
-    const x = (b / buckets) * width
-    const min = peaks[b * 2] ?? 0
-    const max = peaks[b * 2 + 1] ?? 0
-    const yTop = mid - max * mid
-    const yBot = mid - min * mid
-    ctx.moveTo(x + 0.5, yTop)
-    ctx.lineTo(x + 0.5, yBot < yTop + 1 ? yTop + 1 : yBot)
-  }
-  ctx.stroke()
+  const fill = typeof ctx?.strokeStyle === 'string' ? ctx.strokeStyle : '#000'
+  drawBlockPeaksToCanvas(canvas, peaks, width, height, fill)
 }

@@ -8,9 +8,9 @@
    * playhead line is overlaid via absolute positioning so we don't repaint
    * the canvas on every rAF tick.
    */
-  import { onMount } from 'svelte'
   import { Button } from '$lib/components/ui/button'
   import { computePeaks, drawPeaksToCanvas } from '$lib/audio/peaks'
+  import { waveformBlockBucketCount } from '$lib/audio/waveformBlocks'
 
   let {
     label,
@@ -67,7 +67,7 @@
 
   $effect(() => {
     if (!canvas || !buffer || waveWidth <= 0) return
-    const peaks = computePeaks(buffer, 0, buffer.duration, waveWidth)
+    const peaks = computePeaks(buffer, 0, buffer.duration, waveformBlockBucketCount(waveWidth))
     const ctx2 = canvas.getContext('2d')
     if (ctx2) ctx2.strokeStyle = color
     drawPeaksToCanvas(canvas, peaks, waveWidth, WAVE_HEIGHT)

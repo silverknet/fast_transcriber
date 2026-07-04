@@ -2779,6 +2779,18 @@ async function runQueuedJob(job) {
     logWarn(`stems: job ${job.jobId.slice(0, 8)} finished as ${job.state}${job.lastErrorMsg ? ' — ' + job.lastErrorMsg : ''}`)
   }
 
+  // Feed the outcome back to the auto-stems daemon so it can clear a song's
+  // attempt budget on success, or record WHY it failed (surfaced to the user
+  // as the "abandoned" reason instead of a silent stall). Only for jobs whose
+  // output follows the `<songFolder>/stems/<quality>` convention.
+  if (autoStemsDaemon && job.outDir && path.basename(path.dirname(job.outDir)) === 'stems') {
+    const songFolderAbs = path.dirname(path.dirname(job.outDir))
+    if (job.state === 'done') autoStemsDaemon.noteSongSatisfied(songFolderAbs)
+    else if (job.state === 'error') {
+      autoStemsDaemon.noteSongFailed(songFolderAbs, job.lastErrorMsg ?? 'Stem split failed.')
+    }
+  }
+
   activeJobId = null
   scheduleJobCleanup(job.jobId)
 }
@@ -4813,6 +4825,19 @@ function startBeaconServer() {
       void handleAutoStemsWatch(req, res, cors)
       return
     }
+    if (req.method === 'GET' && req.url === '/native/auto-stems/status') {
+      const statuses = autoStemsDaemon ? autoStemsDaemon.getStatuses() : []
+      sendJson(res, 200, { ok: true, statuses }, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/auto-stems/retry') {
+      void handleAutoStemsRetry(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/auto-stems/restart') {
+      void handleAutoStemsRestart(req, res, cors)
+      return
+    }
     if (req.method === 'POST' && req.url === '/native/update/install') {
       void handleUpdateInstall(req, res, cors)
       return
@@ -5166,6 +5191,46 @@ async function handleAutoStemsWatch(req, res, cors) {
     }
     if (!autoStemsDaemon) setupAutoStemsDaemon()
     autoStemsDaemon.watchProject(projectPath)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/auto-stems/retry` — body `{ projectPath, folder }`. Clears one
+ * song's attempt budget + status so the daemon re-evaluates it on the next
+ * pass (used by the per-song "Retry" button after an abandon/failure).
+ */
+async function handleAutoStemsRetry(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    const folder = typeof body.folder === 'string' ? body.folder.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!folder) return sendJson(res, 400, { ok: false, error: 'folder is required' }, cors)
+    if (!autoStemsDaemon) setupAutoStemsDaemon()
+    autoStemsDaemon.retrySong(path.join(projectPath, folder))
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/auto-stems/restart` — body `{ projectPath }`. Clears every
+ * attempt budget for a project + re-scans, so all abandoned songs get another
+ * shot ("Restart auto-split").
+ */
+async function handleAutoStemsRestart(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!autoStemsDaemon) setupAutoStemsDaemon()
+    autoStemsDaemon.resetAttempts(projectPath)
     sendJson(res, 200, { ok: true }, cors)
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
