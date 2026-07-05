@@ -1,13 +1,15 @@
-import { drawBlockPeaksToCanvas } from '$lib/audio/waveformBlocks'
+import {
+  computeVisualBlockPeaksFromChannels,
+  drawBlockPeaksToCanvas,
+} from '$lib/audio/waveformBlocks'
 
 /**
- * Compute downsampled min/max peaks for a single channel of an AudioBuffer
- * over a time range. Returns a flat `[min0, max0, min1, max1, ...]` array
- * of length `2 * bucketCount` ready for canvas rendering.
+ * Compute downsampled visual peaks for a waveform lane over a time range.
+ * Returns a flat `[min0, max0, min1, max1, ...]` array of length
+ * `2 * bucketCount` ready for canvas rendering.
  *
- * Channel handling: if the buffer has multiple channels, the first channel
- * is summed mono-style with the second (averaged) for a representative
- * peak view. For mono buffers this is just the single channel.
+ * Channel handling: stereo channels are inspected independently so
+ * opposite-polarity left/right material does not cancel to silence.
  */
 export function computePeaks(
   buffer: AudioBuffer,
@@ -15,37 +17,19 @@ export function computePeaks(
   endSec: number,
   bucketCount: number,
 ): Float32Array {
-  const out = new Float32Array(bucketCount * 2)
-  if (bucketCount <= 0 || buffer.length === 0) return out
+  if (bucketCount <= 0 || buffer.length === 0) return new Float32Array(0)
 
   const ch0 = buffer.getChannelData(0)
   const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null
   const sr = buffer.sampleRate
   const i0 = Math.max(0, Math.floor(startSec * sr))
   const i1 = Math.min(buffer.length, Math.max(i0 + 1, Math.ceil(endSec * sr)))
-  const totalSamples = Math.max(1, i1 - i0)
-  const samplesPerBucket = totalSamples / bucketCount
-
-  for (let b = 0; b < bucketCount; b++) {
-    const sStart = i0 + Math.floor(b * samplesPerBucket)
-    const sEnd = Math.min(i1, i0 + Math.floor((b + 1) * samplesPerBucket))
-    let min = 0
-    let max = 0
-    for (let i = sStart; i < sEnd; i++) {
-      const s = ch1 ? ((ch0[i] ?? 0) + (ch1[i] ?? 0)) * 0.5 : ch0[i] ?? 0
-      if (s < min) min = s
-      if (s > max) max = s
-    }
-    out[b * 2] = min
-    out[b * 2 + 1] = max
-  }
-  return out
+  return computeVisualBlockPeaksFromChannels(ch0, ch1, i0, i1, bucketCount)
 }
 
 /**
- * Render `[min, max, min, max, ...]` peaks to a canvas as vertical
- * line strokes. Centered around `height / 2`. Color via the canvas's
- * current `strokeStyle`.
+ * Render `[min, max, min, max, ...]` visual peaks to a canvas as block
+ * columns. Color via the canvas's current `strokeStyle`.
  */
 export function drawPeaksToCanvas(
   canvas: HTMLCanvasElement,

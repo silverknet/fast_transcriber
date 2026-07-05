@@ -21,13 +21,13 @@
     clientXToTimeInView,
     timeToPxInView,
   } from '$lib/audio/timeGeometry'
-  import { waveformBlockBucketCount } from '$lib/audio/waveformBlocks'
+  import type { BlockWaveformData } from '$lib/audio/waveformBlocks'
   import { drawPeaksToCanvas } from '$lib/audio/waveformDraw'
   import {
     hitTestSelectionTarget,
     hitTestViewportTarget,
   } from '$lib/audio/waveformInteraction'
-  import { computePeaks, computePeaksForTimeRange } from '$lib/audio/waveformPeaks'
+  import { computeStablePeaksForTimeRange } from '$lib/audio/waveformPeaks'
   import {
     clampSelectionToTimeline,
     MIN_SELECTION_SPAN_SEC,
@@ -274,12 +274,14 @@
   // —— Waveform assets ——
   /** Kept for recomputing peaks when the container resizes (full file → fit width). */
   let decodedAudioBuffer = $state<AudioBuffer | null>(null)
-  let peaks = $state<Float32Array | null>(null)
+  let peaks = $state<BlockWaveformData | null>(null)
   /** Detail canvas width in CSS px — fits available viewport width. */
   let waveWidth = $state(0)
   /** Full-timeline overview for minimap (low bucket count). */
-  let overviewPeaks = $state<Float32Array | null>(null)
+  let overviewPeaks = $state<BlockWaveformData | null>(null)
   let overviewWidth = $state(0)
+  let mainFramesPerBlock = $state(0)
+  let overviewFramesPerBlock = $state(0)
   /** Visible time window [viewStart, viewEnd] (sec). Sub-range = zoomed detail; full file = [0, duration]. */
   let viewStart = $state(0)
   let viewEnd = $state(0)
@@ -342,7 +344,7 @@
     downClientX: 0,
     viewAtDown: { start: 0, end: 0 },
   }
-  /** Coalesce `computePeaksForTimeRange` during rapid zoom/pan (wheel can fire far above display refresh). */
+  /** Coalesce stable waveform recomputes during rapid zoom/pan (wheel can fire far above display refresh). */
   let mainPeaksRafId = 0
   /** Past this, empty-area drag becomes “new selection” instead of tap-to-seek (jitter tolerance). */
   const TAP_VS_SELECT_PX = 22
@@ -499,7 +501,9 @@
     const d = buf.duration
     const vs = viewEnd > viewStart ? viewStart : 0
     const ve = viewEnd > viewStart ? viewEnd : d
-    peaks = computePeaksForTimeRange(buf, vs, ve, waveformBlockBucketCount(w))
+    const next = computeStablePeaksForTimeRange(buf, vs, ve, w, mainFramesPerBlock)
+    peaks = next.waveform
+    mainFramesPerBlock = next.framesPerBlock
     redrawCanvas()
   }
 
@@ -939,6 +943,10 @@
     error = ''
     peaks = null
     waveWidth = 0
+    overviewPeaks = null
+    overviewWidth = 0
+    mainFramesPerBlock = 0
+    overviewFramesPerBlock = 0
     decodedAudioBuffer = null
     timelineSec = 0
     decodedDuration = 0
@@ -1020,6 +1028,8 @@
       waveWidth = 0
       overviewPeaks = null
       overviewWidth = 0
+      mainFramesPerBlock = 0
+      overviewFramesPerBlock = 0
       decodedAudioBuffer = null
       viewStart = 0
       viewEnd = 0
@@ -1098,7 +1108,9 @@
       /** Must match minimap inner width: a hard cap (previously 800px) left empty space on wide layouts so the viewport box did not align with the overview waveform. */
       const w = Math.max(120, Math.min(raw, MAX_WAVE_WIDTH_PX))
       overviewWidth = w
-      overviewPeaks = computePeaks(buf, waveformBlockBucketCount(w))
+      const next = computeStablePeaksForTimeRange(buf, 0, buf.duration, w, overviewFramesPerBlock)
+      overviewPeaks = next.waveform
+      overviewFramesPerBlock = next.framesPerBlock
       redrawOverviewCanvas()
     }
 
