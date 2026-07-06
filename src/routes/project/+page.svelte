@@ -1091,7 +1091,13 @@
   .studio-song-board {
     border-radius: var(--radius);
     overflow: hidden;
-    box-shadow: 5px 5px 0 var(--foreground);
+    /* EXPERIMENT (likely revert): keep the hard brutalist shadow, but layer a
+       very soft, wide shadow under it for a hint of ambient occlusion so the
+       box feels gently lifted off the background. */
+    box-shadow:
+      5px 5px 0 var(--foreground),
+      0 2px 6px rgba(0, 0, 0, 0.07),
+      0 14px 32px rgba(0, 0, 0, 0.1);
   }
 
   :global(.song-row-grid) {
