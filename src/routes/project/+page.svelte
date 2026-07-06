@@ -802,11 +802,10 @@
           if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
         }}
       />
-      <CloudStatusChip onManage={() => (shareDialogOpen = true)} />
       <Button
-        variant="outline"
+        variant="ghost"
         size="sm"
-        class="h-8 gap-1"
+        class="h-9 gap-1 border-transparent px-2"
         onclick={() => (settingsDialogOpen = true)}
         title="Project settings — automatic stem preparation"
       >
@@ -814,9 +813,9 @@
         Settings
       </Button>
       <Button
-        variant="outline"
+        variant="ghost"
         size="sm"
-        class="h-8 gap-1"
+        class="h-9 gap-1 border-transparent px-2"
         onclick={() => (shareDialogOpen = true)}
         title="Invite collaborators to this project"
       >
@@ -824,9 +823,9 @@
         Share
       </Button>
       <Button
-        variant="outline"
+        variant="ghost"
         size="sm"
-        class="h-8 gap-1"
+        class="h-9 gap-1 border-transparent px-2"
         disabled={refreshing}
         onclick={() => void onRefreshProject()}
         title="Re-scan every song folder for stems and metadata changes"
@@ -834,6 +833,7 @@
         <RefreshCw class="size-3.5 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
         {refreshing ? 'Refreshing…' : 'Refresh'}
       </Button>
+      <CloudStatusChip onManage={() => (shareDialogOpen = true)} />
     </header>
     <div class="text-muted-foreground -mt-1 flex items-center gap-3 text-xs">
       <span>{songs.length} song{songs.length === 1 ? '' : 's'}</span>

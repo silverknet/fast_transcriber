@@ -42,35 +42,42 @@
   const status = $derived(pulling ? 'syncing' : pending > 0 ? 'pending' : 'synced')
 </script>
 
+<!--
+  The ONE boxed element in the header row: a solid bordered card so cloud
+  status reads distinctly from the raw (borderless) action buttons next to it.
+-->
 {#if !cloud}
   <button
     type="button"
-    class="border-foreground/40 hover:border-foreground hover:bg-muted inline-flex h-8 shrink-0 items-center gap-1.5 border-2 px-2.5 text-xs font-semibold"
+    class="border-foreground bg-muted/40 hover:bg-muted inline-flex h-9 shrink-0 items-center gap-2 border-2 px-3 text-xs font-semibold"
     onclick={() => onManage?.()}
-    title="Enable cloud sync to share this project"
+    title="Enable cloud sync to share this project with others"
   >
-    <Cloud class="size-3.5" aria-hidden="true" />
-    Sync to cloud
+    <Cloud class="text-muted-foreground size-4" aria-hidden="true" />
+    <span class="flex flex-col items-start leading-tight">
+      <span>Not synced</span>
+      <span class="text-muted-foreground text-[10px] font-normal">Sync to cloud →</span>
+    </span>
   </button>
 {:else}
   <button
     type="button"
-    class="border-foreground/40 hover:border-foreground hover:bg-muted inline-flex h-8 shrink-0 items-center gap-2 border-2 px-2.5 text-xs"
+    class="border-foreground bg-muted/40 hover:bg-muted inline-flex h-9 shrink-0 items-center gap-2.5 border-2 px-3 text-xs"
     onclick={() => onManage?.()}
     title="Manage sharing — members and invites"
   >
     {#if status === 'syncing'}
-      <Loader2 class="text-muted-foreground size-3.5 animate-spin" aria-hidden="true" />
+      <Loader2 class="text-muted-foreground size-4 animate-spin" aria-hidden="true" />
       <span class="font-semibold">Syncing…</span>
     {:else if status === 'pending'}
-      <Cloud class="text-amber-600 dark:text-amber-400 size-3.5" aria-hidden="true" />
+      <Cloud class="text-amber-600 dark:text-amber-400 size-4" aria-hidden="true" />
       <span class="font-semibold">Saving…</span>
     {:else}
-      <Check class="text-emerald-600 dark:text-emerald-400 size-3.5" aria-hidden="true" />
+      <Check class="text-emerald-600 dark:text-emerald-400 size-4" aria-hidden="true" />
       <span class="font-semibold">Synced</span>
     {/if}
-    <span class="bg-foreground/15 h-3.5 w-px" aria-hidden="true"></span>
-    <span class="text-muted-foreground inline-flex items-center gap-1">
+    <span class="bg-foreground/20 h-4 w-px" aria-hidden="true"></span>
+    <span class="text-muted-foreground inline-flex items-center gap-1" title={`${memberCount || 1} member${(memberCount || 1) === 1 ? '' : 's'}`}>
       <Users class="size-3.5" aria-hidden="true" />
       {memberCount || 1}
     </span>
