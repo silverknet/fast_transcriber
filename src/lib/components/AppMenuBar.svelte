@@ -80,23 +80,6 @@
     } catch {}
   }
 
-  // Navbar style A/B/C — a quick "try 3 looks" switcher (persisted). Cycle it
-  // with the small A/B/C button in the actions area; pick one and I'll drop the
-  // switcher + keep the winner.
-  let navVariant = $state<'a' | 'b' | 'c'>('a')
-  if (browser) {
-    try {
-      const savedNav = localStorage.getItem('barbro-nav-variant')
-      if (savedNav === 'a' || savedNav === 'b' || savedNav === 'c') navVariant = savedNav
-    } catch {}
-  }
-  function cycleNavVariant() {
-    navVariant = navVariant === 'a' ? 'b' : navVariant === 'b' ? 'c' : 'a'
-    try {
-      localStorage.setItem('barbro-nav-variant', navVariant)
-    } catch {}
-  }
-
   let menuError = $state('')
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
@@ -341,7 +324,7 @@
 </script>
 
 <header
-  class="app-menu nav-{navVariant} text-sm"
+  class="app-menu text-sm"
   aria-label="Application"
   data-app-menu
 >
@@ -447,15 +430,6 @@
   </div>
 
   <div class="app-menu-actions">
-    <button
-      type="button"
-      class="chrome-button nav-variant-switch"
-      onclick={cycleNavVariant}
-      title={`Navbar style ${navVariant.toUpperCase()} — click to try the next`}
-      aria-label="Try the next navbar style"
-    >
-      {navVariant.toUpperCase()}
-    </button>
     <CloudSyncPill />
     <a
       href="/download"
@@ -730,110 +704,6 @@
     border-color: color-mix(in oklch, #047857 72%, var(--foreground));
     background: color-mix(in oklch, #6ee7b7 22%, var(--card));
     color: var(--foreground);
-  }
-
-  /* ── Navbar style variants (A/B/C try-out switcher) ─────────────────────
-     Pick one and I'll drop the switcher + keep the winner. */
-
-  .nav-variant-switch {
-    min-width: 2rem;
-    padding: 0;
-    font-weight: 900;
-    letter-spacing: 0.02em;
-    opacity: 0.7;
-  }
-
-  /* A — Hard underline: flat, thick black baseline; hard shadow lifts on hover. */
-  .app-menu.nav-a {
-    border-radius: 0;
-    border-bottom: 3px solid var(--foreground);
-  }
-  .nav-a .logo-mark {
-    letter-spacing: -0.02em;
-  }
-  .nav-a .chrome-icon,
-  .nav-a .chrome-link,
-  .nav-a .chrome-button,
-  .nav-a .chrome-avatar {
-    border-radius: 0;
-    border-color: var(--foreground);
-  }
-  .nav-a .chrome-icon:hover,
-  .nav-a .chrome-link:hover,
-  .nav-a .chrome-button:hover,
-  .nav-a .chrome-avatar:hover,
-  .nav-a .chrome-button[aria-expanded='true'],
-  .nav-a .chrome-avatar[aria-expanded='true'] {
-    background: var(--card);
-    box-shadow: 3px 3px 0 var(--foreground);
-    transform: translate(-1px, -1px);
-  }
-
-  /* B — Sticker blocks: no baseline; every control is a shadowed box, logo is
-     an inverted black block; controls press in on hover. */
-  .app-menu.nav-b {
-    border-radius: 0;
-  }
-  .nav-b .logo-mark {
-    background: var(--foreground);
-    color: var(--card);
-    padding: 0.12em 0.42em;
-    border: 2px solid var(--foreground);
-    box-shadow: 3px 3px 0 var(--foreground);
-  }
-  .nav-b .chrome-icon,
-  .nav-b .chrome-link,
-  .nav-b .chrome-button,
-  .nav-b .chrome-avatar {
-    border-radius: 0;
-    border-color: var(--foreground);
-    background: var(--card);
-    box-shadow: 2px 2px 0 var(--foreground);
-    transition:
-      transform 90ms ease,
-      box-shadow 90ms ease;
-  }
-  .nav-b .chrome-icon:hover,
-  .nav-b .chrome-link:hover,
-  .nav-b .chrome-button:hover,
-  .nav-b .chrome-avatar:hover,
-  .nav-b .chrome-button[aria-expanded='true'],
-  .nav-b .chrome-avatar[aria-expanded='true'] {
-    background: var(--card);
-    transform: translate(2px, 2px);
-    box-shadow: 0 0 0 var(--foreground);
-  }
-
-  /* C — Orange accent: orange baseline stripe + highlighter underline on the
-     logo; borders hidden until hover, then orange. */
-  .app-menu.nav-c {
-    border-radius: 0;
-    border-bottom: 4px solid var(--studio-orange);
-  }
-  .nav-c .logo-mark {
-    box-shadow: inset 0 -0.16em 0 color-mix(in oklch, var(--studio-orange) 60%, transparent);
-  }
-  .nav-c .chrome-icon,
-  .nav-c .chrome-link,
-  .nav-c .chrome-button,
-  .nav-c .chrome-avatar {
-    border-radius: 0;
-    border-color: transparent;
-  }
-  .nav-c .chrome-icon:hover,
-  .nav-c .chrome-link:hover,
-  .nav-c .chrome-button:hover,
-  .nav-c .chrome-avatar:hover,
-  .nav-c .chrome-button[aria-expanded='true'],
-  .nav-c .chrome-avatar[aria-expanded='true'] {
-    border-color: var(--studio-orange);
-    background: color-mix(in oklch, var(--studio-orange) 14%, var(--card));
-    box-shadow: 2px 2px 0 var(--studio-orange);
-    color: var(--foreground);
-  }
-  .nav-c .chrome-icon.is-connected {
-    border-color: var(--studio-orange);
-    background: color-mix(in oklch, var(--studio-orange) 18%, var(--card));
   }
 
   .app-menu-error {
