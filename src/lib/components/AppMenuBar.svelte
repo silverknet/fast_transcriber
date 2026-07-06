@@ -324,7 +324,7 @@
 </script>
 
 <header
-  class="app-menu border-foreground border-b-2 text-sm"
+  class="app-menu text-sm"
   aria-label="Application"
   data-app-menu
 >
@@ -604,6 +604,7 @@
     row-gap: 0.45rem;
     min-height: 3rem;
     padding: 0.45rem 0.75rem 0.6rem;
+    border-radius: var(--radius) var(--radius) 0 0;
     background: var(--card);
     color: var(--foreground);
   }
@@ -635,7 +636,7 @@
   .logo-mark {
     display: inline-flex;
     align-items: center;
-    font-size: 1.05rem;
+    font-size: 1.6rem;
     font-weight: 900;
     line-height: 1;
     letter-spacing: 0;
@@ -653,6 +654,7 @@
     justify-content: center;
     gap: 0.35rem;
     border: 2px solid var(--chrome-edge);
+    border-radius: var(--radius);
     background: transparent;
     color: var(--foreground);
     font: inherit;
@@ -733,7 +735,7 @@
     }
 
     .logo-mark {
-      font-size: 1.05rem;
+      font-size: 1.3rem;
     }
   }
 </style>

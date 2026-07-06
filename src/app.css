@@ -65,7 +65,7 @@
 	   are only just soft enough to feel intentional. Drive everything via
 	   this token so the four `rounded-[var(--radius)]` call-sites stay
 	   the only knob. */
-	--radius: 4px;
+	--radius: 3px;
 	--studio-orange: #ff7a1a;
 	--studio-orange-soft: oklch(0.87 0.12 58);
 	--studio-paper: oklch(0.948 0.006 255);
