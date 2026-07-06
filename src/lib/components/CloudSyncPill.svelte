@@ -99,11 +99,12 @@
 <style>
   .cloud-sync-pill {
     display: inline-flex;
-    height: 2rem;
+    height: 1.6rem;
     flex-shrink: 0;
     align-items: center;
     gap: 0.35rem;
-    border: 2px solid color-mix(in oklch, var(--foreground) 42%, transparent);
+    border: none;
+    border-radius: var(--radius);
     background: transparent;
     padding: 0 0.5rem;
     color: var(--foreground);

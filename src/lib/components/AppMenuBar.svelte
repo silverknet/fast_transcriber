@@ -601,9 +601,9 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     column-gap: 0.5rem;
-    row-gap: 0.45rem;
-    min-height: 3rem;
-    padding: 0.45rem 0.75rem 0.6rem;
+    row-gap: 0.35rem;
+    min-height: 2rem;
+    padding: 0.2rem 0.75rem;
     border-radius: var(--radius) var(--radius) 0 0;
     background: var(--card);
     color: var(--foreground);
@@ -636,7 +636,7 @@
   .logo-mark {
     display: inline-flex;
     align-items: center;
-    font-size: 1.6rem;
+    font-size: 1.35rem;
     font-weight: 900;
     line-height: 1;
     letter-spacing: 0;
@@ -648,12 +648,12 @@
   .chrome-avatar,
   .chrome-button {
     display: inline-flex;
-    height: 2rem;
+    height: 1.6rem;
     flex-shrink: 0;
     align-items: center;
     justify-content: center;
     gap: 0.35rem;
-    border: 2px solid var(--chrome-edge);
+    border: none;
     border-radius: var(--radius);
     background: transparent;
     color: var(--foreground);
@@ -667,7 +667,7 @@
 
   .chrome-icon,
   .chrome-avatar {
-    width: 2rem;
+    width: 1.6rem;
     overflow: hidden;
   }
 
