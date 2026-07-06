@@ -356,9 +356,9 @@
     width: 0.58rem;
     height: 0.58rem;
     flex-shrink: 0;
-    border: 1px solid color-mix(in oklch, var(--foreground) 70%, transparent);
-    border-radius: 1px;
-    box-shadow: 1px 1px 0 var(--foreground);
+    border: 1px solid color-mix(in oklch, var(--ink) 70%, transparent);
+    border-radius: 2px;
+    box-shadow: 1px 1px 0 var(--ink);
   }
 
   :global(.project-song-row [data-slot='button']) {

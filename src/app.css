@@ -72,6 +72,10 @@
 	--studio-panel: oklch(0.992 0.002 255);
 	--studio-muted: oklch(0.91 0.004 255);
 	--studio-ink: oklch(0.17 0.014 255);
+	/* Structural "ink" for brutalist borders + hard shadows. Stays near-black
+	   in BOTH themes (studio-ink is never flipped in .dark) so dark mode keeps
+	   black outlines/shadows instead of inverting to light. */
+	--ink: var(--studio-ink);
 	--background: var(--studio-paper);
 	--foreground: var(--studio-ink);
 	--card: var(--studio-panel);
@@ -140,6 +144,23 @@
 	--sidebar-border: oklch(0.48 0.01 260);
 	--sidebar-ring: oklch(0.55 0.01 260);
 	--brutalist-shadow-color: oklch(0.05 0.012 260);
+}
+
+/*
+ * Dark-mode ink fix: the brutalist look uses `border-foreground` and
+ * `bg-foreground` for black borders + inverted fills. In dark mode
+ * `--foreground` flips to light, turning the whole UI into a photo negative.
+ * Retarget those utilities to `--ink` (near-black in both themes) so borders
+ * stay black and inverted fills stay dark (with light text). Text that uses
+ * `text-foreground` is untouched, so copy stays light on dark. Opacity
+ * variants (`border-foreground/40`) are intentionally left as subtle dividers.
+ */
+.dark .border-foreground {
+	border-color: var(--ink);
+}
+.dark .bg-foreground {
+	background-color: var(--ink);
+	color: var(--studio-paper);
 }
 
 .brutalist-shadow {

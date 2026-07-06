@@ -131,13 +131,15 @@
 
 <style>
   .auto-stems-panel {
-    border: 2px solid var(--foreground);
+    border: 2px solid var(--ink);
+    border-radius: var(--radius);
     background: var(--card);
-    box-shadow: 4px 4px 0 var(--foreground);
+    overflow: hidden;
+    box-shadow: 4px 4px 0 var(--ink);
   }
 
   .auto-stems-head {
-    border-bottom: 2px solid var(--foreground);
+    border-bottom: 2px solid var(--ink);
     background: color-mix(in oklch, var(--muted) 72%, var(--card));
   }
 </style>

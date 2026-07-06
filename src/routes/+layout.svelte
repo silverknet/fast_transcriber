@@ -318,7 +318,7 @@
   }
   :global(body) {
     /* The visible matte around the frame. */
-    background-color: var(--foreground);
+    background-color: var(--ink);
     padding: 10px;
   }
 
@@ -329,18 +329,18 @@
     height: calc(100dvh - 20px);
     display: flex;
     flex-direction: column;
-    border: 3px solid var(--foreground);
-    border-radius: 0;
+    border: 3px solid var(--ink);
+    border-radius: calc(var(--radius) * 1.5);
     background-color: var(--background);
     background-image:
       repeating-linear-gradient(
         90deg,
-        color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px,
+        color-mix(in oklch, var(--ink) 4%, transparent) 0 1px,
         transparent 1px 42px
       ),
       repeating-linear-gradient(
         0deg,
-        color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px,
+        color-mix(in oklch, var(--ink) 3%, transparent) 0 1px,
         transparent 1px 42px
       );
     overflow: clip;

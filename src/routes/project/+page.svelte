@@ -1051,13 +1051,13 @@
 
   .project-page > header {
     position: relative;
-    border: 2px solid var(--foreground);
+    border: 2px solid var(--ink);
     border-radius: var(--radius);
     background: var(--card);
     padding: 1rem;
     overflow: hidden;
     box-shadow:
-      6px 6px 0 var(--foreground),
+      6px 6px 0 var(--ink),
       var(--ao-soft);
   }
 
@@ -1068,22 +1068,22 @@
     bottom: 0;
     left: 0;
     height: 6px;
-    border-top: 2px solid var(--foreground);
+    border-top: 2px solid var(--ink);
     background: var(--studio-orange);
   }
 
   .studio-section {
-    border: 2px solid var(--foreground);
+    border: 2px solid var(--ink);
     border-radius: var(--radius);
     background: var(--card);
     padding: 0.9rem;
     box-shadow:
-      4px 4px 0 var(--foreground),
+      4px 4px 0 var(--ink),
       var(--ao-soft);
   }
 
   .studio-list {
-    border: 2px solid var(--foreground);
+    border: 2px solid var(--ink);
     border-radius: var(--radius);
     background: var(--card);
     overflow: hidden;
@@ -1091,7 +1091,7 @@
 
   .studio-empty,
   .studio-action-box {
-    border: 2px dashed color-mix(in oklch, var(--foreground) 62%, transparent);
+    border: 2px dashed color-mix(in oklch, var(--ink) 62%, transparent);
     border-radius: var(--radius);
     background: color-mix(in oklch, var(--card) 84%, var(--muted));
   }
@@ -1099,7 +1099,7 @@
   .studio-action-box {
     border-style: solid;
     box-shadow:
-      4px 4px 0 var(--foreground),
+      4px 4px 0 var(--ink),
       var(--ao-soft);
   }
 
@@ -1107,7 +1107,7 @@
     border-radius: var(--radius);
     overflow: hidden;
     box-shadow:
-      5px 5px 0 var(--foreground),
+      5px 5px 0 var(--ink),
       var(--ao-soft);
   }
 
