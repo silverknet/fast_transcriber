@@ -789,9 +789,10 @@
       <p class="text-destructive text-xs" role="status">{restoreError}</p>
     {/if}
   {:else}
-    <!-- Title sits raw over the background (no box). Rename inline; cloud
-         status + Settings / Share / Refresh share the row. -->
-    <header class="flex flex-wrap items-center gap-2">
+    <!-- Title sits raw over the background (no box). A <div>, NOT a <header>,
+         to escape the `.project-page > header` studio box rule below. Rename
+         inline; cloud box + Settings / Share / Refresh share the row. -->
+    <div class="flex flex-wrap items-center gap-2">
       <input
         type="text"
         class="min-w-[8rem] flex-1 border-b-2 border-transparent bg-transparent pb-0.5 text-3xl font-bold tracking-tight focus:border-foreground focus:outline-none"
@@ -834,7 +835,7 @@
         {refreshing ? 'Refreshing…' : 'Refresh'}
       </Button>
       <CloudStatusChip onManage={() => (shareDialogOpen = true)} />
-    </header>
+    </div>
     <div class="text-muted-foreground -mt-1 flex items-center gap-3 text-xs">
       <span>{songs.length} song{songs.length === 1 ? '' : 's'}</span>
       {#if refreshMsg}
