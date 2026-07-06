@@ -1040,6 +1040,15 @@
     5× stem (28) | cue (28) | edit (32) | ⋮ (32)
 -->
 <style>
+  /* EXPERIMENT (likely revert): a soft, roughly-centered ambient-occlusion
+     shadow layered under the hard brutalist shadow on every studio box.
+     Reused via var() so all boxes stay in sync. */
+  .project-page {
+    --ao-soft:
+      0 3px 10px rgba(0, 0, 0, 0.1),
+      0 8px 44px rgba(0, 0, 0, 0.16);
+  }
+
   .project-page > header {
     position: relative;
     border: 2px solid var(--foreground);
@@ -1047,7 +1056,9 @@
     background: var(--card);
     padding: 1rem;
     overflow: hidden;
-    box-shadow: 6px 6px 0 var(--foreground);
+    box-shadow:
+      6px 6px 0 var(--foreground),
+      var(--ao-soft);
   }
 
   .project-page > header::after {
@@ -1066,7 +1077,9 @@
     border-radius: var(--radius);
     background: var(--card);
     padding: 0.9rem;
-    box-shadow: 4px 4px 0 var(--foreground);
+    box-shadow:
+      4px 4px 0 var(--foreground),
+      var(--ao-soft);
   }
 
   .studio-list {
@@ -1085,19 +1098,17 @@
 
   .studio-action-box {
     border-style: solid;
-    box-shadow: 4px 4px 0 var(--foreground);
+    box-shadow:
+      4px 4px 0 var(--foreground),
+      var(--ao-soft);
   }
 
   .studio-song-board {
     border-radius: var(--radius);
     overflow: hidden;
-    /* EXPERIMENT (likely revert): keep the hard brutalist shadow, but layer a
-       very soft, wide shadow under it for a hint of ambient occlusion so the
-       box feels gently lifted off the background. */
     box-shadow:
       5px 5px 0 var(--foreground),
-      0 2px 6px rgba(0, 0, 0, 0.07),
-      0 14px 32px rgba(0, 0, 0, 0.1);
+      var(--ao-soft);
   }
 
   :global(.song-row-grid) {
