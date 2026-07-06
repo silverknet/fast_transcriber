@@ -25,13 +25,21 @@
 
   // Realtime auto-pull: resubscribe when the cloud project changes. Any remote
   // change → debounced pull inside the helper. No manual Pull button needed.
+  // Wrapped in try/catch: subscribeToCloudProject constructs the Supabase
+  // client synchronously and can throw if env isn't configured — that must NOT
+  // blank the whole box (this was why the chip could vanish on a cloud project).
   $effect(() => {
     const id = cloud?.projectId
     if (!id) return
-    let unsub: Unsubscribe | null = subscribeToCloudProject(id, () => {
-      pulling = true
-      void pullCloudChanges().finally(() => (pulling = false))
-    })
+    let unsub: Unsubscribe | null = null
+    try {
+      unsub = subscribeToCloudProject(id, () => {
+        pulling = true
+        void pullCloudChanges().finally(() => (pulling = false))
+      })
+    } catch (e) {
+      console.warn('[CloudStatusChip] realtime unavailable:', e)
+    }
     return () => {
       unsub?.()
       unsub = null
