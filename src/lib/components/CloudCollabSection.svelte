@@ -146,9 +146,11 @@
 <style>
   .cloud-collab-strip,
   .cloud-merge-panel {
-    border: 2px solid var(--foreground);
+    border: 2px solid var(--ink);
+    border-radius: var(--radius);
     background: var(--card);
-    box-shadow: 4px 4px 0 var(--foreground);
+    overflow: hidden;
+    box-shadow: 4px 4px 0 var(--ink);
   }
 
   .cloud-collab-strip {
@@ -159,13 +161,13 @@
     content: "";
     width: 0.42rem;
     align-self: stretch;
-    border-right: 2px solid var(--foreground);
+    border-right: 2px solid var(--ink);
     background: var(--studio-orange);
     margin: -0.5rem 0 -0.5rem -0.75rem;
   }
 
   .cloud-merge-panel {
-    border-color: color-mix(in oklch, var(--studio-orange) 72%, var(--foreground));
+    border-color: color-mix(in oklch, var(--studio-orange) 72%, var(--ink));
     background: color-mix(in oklch, var(--studio-orange) 12%, var(--card));
   }
 </style>

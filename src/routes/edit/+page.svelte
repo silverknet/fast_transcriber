@@ -2828,10 +2828,12 @@
 <style>
   .edit-page > header {
     position: relative;
-    border: 2px solid var(--foreground);
+    border: 2px solid var(--ink);
+    border-radius: var(--radius);
     background: var(--card);
     padding: 1rem;
-    box-shadow: 5px 5px 0 var(--foreground);
+    overflow: hidden;
+    box-shadow: 5px 5px 0 var(--ink);
   }
 
   .edit-page > header::after {
@@ -2841,7 +2843,7 @@
     bottom: 0;
     left: 0;
     height: 5px;
-    border-top: 2px solid var(--foreground);
+    border-top: 2px solid var(--ink);
     background: var(--studio-orange);
   }
 
@@ -2858,7 +2860,7 @@
 
   .edit-page :global(.inline-grid.grid-cols-6.border-foreground.bg-muted) {
     background: var(--card);
-    box-shadow: 4px 4px 0 var(--foreground);
+    box-shadow: 4px 4px 0 var(--ink);
   }
 
   .edit-page :global(fieldset.border-foreground) {
