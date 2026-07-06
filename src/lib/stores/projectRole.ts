@@ -8,26 +8,32 @@
  * effectively the owner) or the role couldn't be determined.
  */
 import { writable } from 'svelte/store'
-import { getCloudProjectManifest } from '$lib/client/cloudSync'
+import { getCloudProjectManifest, type CloudMemberView } from '$lib/client/cloudSync'
 
 export type ProjectRole = 'owner' | 'editor' | null
 
 export const projectRole = writable<ProjectRole>(null)
+/** Members of the open cloud project (for the header cloud chip). */
+export const projectMembers = writable<CloudMemberView[]>([])
 
-/** Fetch + cache the current user's role for a cloud project. */
+/** Fetch + cache the current user's role + member list for a cloud project. */
 export async function loadProjectRole(
   cloudProjectId: string | null | undefined,
   userId: string | null | undefined,
 ): Promise<void> {
   if (!cloudProjectId || !userId) {
     projectRole.set(null)
+    projectMembers.set([])
     return
   }
   try {
     const manifest = await getCloudProjectManifest(cloudProjectId)
-    const role = manifest?.members?.find((m) => m.user_id === userId)?.role
+    const members = manifest?.members ?? []
+    projectMembers.set(members)
+    const role = members.find((m) => m.user_id === userId)?.role
     projectRole.set(role === 'owner' || role === 'editor' ? role : null)
   } catch {
     projectRole.set(null)
+    projectMembers.set([])
   }
 }

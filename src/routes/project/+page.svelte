@@ -17,7 +17,7 @@
   import StemsDialog from '$lib/components/StemsDialog.svelte'
   import ProjectSettingsDialog from '$lib/components/ProjectSettingsDialog.svelte'
   import AddAudioDialog from '$lib/components/AddAudioDialog.svelte'
-  import CloudCollabSection from '$lib/components/CloudCollabSection.svelte'
+  import CloudStatusChip from '$lib/components/CloudStatusChip.svelte'
   import ShareProjectDialog from '$lib/components/ShareProjectDialog.svelte'
   import AudioLockedDialog from '$lib/components/AudioLockedDialog.svelte'
   import AutoStemsStatusPanel from '$lib/components/AutoStemsStatusPanel.svelte'
@@ -789,10 +789,12 @@
       <p class="text-destructive text-xs" role="status">{restoreError}</p>
     {/if}
   {:else}
-    <header class="border-foreground border-b-2 pb-4">
+    <!-- Title sits raw over the background (no box). Rename inline; cloud
+         status + Settings / Share / Refresh share the row. -->
+    <header class="flex flex-wrap items-center gap-2">
       <input
         type="text"
-        class="border-foreground/0 bg-transparent w-full border-b-2 pb-1 text-3xl font-bold tracking-tight focus:border-foreground focus:outline-none"
+        class="min-w-[8rem] flex-1 border-b-2 border-transparent bg-transparent pb-0.5 text-3xl font-bold tracking-tight focus:border-foreground focus:outline-none"
         placeholder="Untitled project"
         bind:value={renameInput}
         onblur={commitNameRename}
@@ -800,50 +802,45 @@
           if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
         }}
       />
-      <div class="mt-2 flex flex-wrap items-center gap-3">
-        <p class="text-muted-foreground text-xs">
-          {songs.length} song{songs.length === 1 ? '' : 's'}
-        </p>
-        <Button
-          variant="outline"
-          size="sm"
-          class="ml-auto gap-1"
-          onclick={() => (settingsDialogOpen = true)}
-          title="Project settings — automatic stem preparation"
-        >
-          <Settings class="size-3.5" aria-hidden="true" />
-          Settings
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="gap-1"
-          onclick={() => (shareDialogOpen = true)}
-          title="Invite collaborators or manage cloud sync for this project"
-        >
-          <Share2 class="size-3.5" aria-hidden="true" />
-          Share
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="gap-1"
-          disabled={refreshing}
-          onclick={() => void onRefreshProject()}
-          title="Re-scan every song folder for stems and metadata changes"
-        >
-          <RefreshCw class="size-3.5 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
-          {refreshing ? 'Refreshing…' : 'Refresh'}
-        </Button>
-      </div>
-      {#if refreshMsg}
-        <p class="text-muted-foreground mt-1 truncate text-xs" role="status" title={refreshMsgTitle || refreshMsg}>
-          {refreshMsg}
-        </p>
-      {/if}
+      <CloudStatusChip onManage={() => (shareDialogOpen = true)} />
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-8 gap-1"
+        onclick={() => (settingsDialogOpen = true)}
+        title="Project settings — automatic stem preparation"
+      >
+        <Settings class="size-3.5" aria-hidden="true" />
+        Settings
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-8 gap-1"
+        onclick={() => (shareDialogOpen = true)}
+        title="Invite collaborators to this project"
+      >
+        <Share2 class="size-3.5" aria-hidden="true" />
+        Share
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-8 gap-1"
+        disabled={refreshing}
+        onclick={() => void onRefreshProject()}
+        title="Re-scan every song folder for stems and metadata changes"
+      >
+        <RefreshCw class="size-3.5 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
+        {refreshing ? 'Refreshing…' : 'Refresh'}
+      </Button>
     </header>
-
-    <CloudCollabSection />
+    <div class="text-muted-foreground -mt-1 flex items-center gap-3 text-xs">
+      <span>{songs.length} song{songs.length === 1 ? '' : 's'}</span>
+      {#if refreshMsg}
+        <span class="truncate" role="status" title={refreshMsgTitle || refreshMsg}>· {refreshMsg}</span>
+      {/if}
+    </div>
 
     <AutoStemsStatusPanel />
 
@@ -1045,8 +1042,10 @@
   .project-page > header {
     position: relative;
     border: 2px solid var(--foreground);
+    border-radius: var(--radius);
     background: var(--card);
     padding: 1rem;
+    overflow: hidden;
     box-shadow: 6px 6px 0 var(--foreground);
   }
 
@@ -1063,6 +1062,7 @@
 
   .studio-section {
     border: 2px solid var(--foreground);
+    border-radius: var(--radius);
     background: var(--card);
     padding: 0.9rem;
     box-shadow: 4px 4px 0 var(--foreground);
@@ -1070,12 +1070,15 @@
 
   .studio-list {
     border: 2px solid var(--foreground);
+    border-radius: var(--radius);
     background: var(--card);
+    overflow: hidden;
   }
 
   .studio-empty,
   .studio-action-box {
     border: 2px dashed color-mix(in oklch, var(--foreground) 62%, transparent);
+    border-radius: var(--radius);
     background: color-mix(in oklch, var(--card) 84%, var(--muted));
   }
 
@@ -1085,6 +1088,8 @@
   }
 
   .studio-song-board {
+    border-radius: var(--radius);
+    overflow: hidden;
     box-shadow: 5px 5px 0 var(--foreground);
   }
 

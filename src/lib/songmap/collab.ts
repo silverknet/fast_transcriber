@@ -99,6 +99,13 @@ export function toCollabSongMap(sm: SongMap): SongMap {
  */
 function stableStringify(v: unknown): string {
   if (v === undefined) return 'null'
+  // Round non-integer numbers to 6 decimals so a value that survives a
+  // JSON round-trip through the server (JSONB re-normalization, float repr)
+  // still fingerprints identically — otherwise the sync would loop forever
+  // seeing "changes" that are just re-serialization noise.
+  if (typeof v === 'number') {
+    return JSON.stringify(Number.isInteger(v) ? v : Math.round(v * 1e6) / 1e6)
+  }
   if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
   if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']'
   const obj = v as Record<string, unknown>

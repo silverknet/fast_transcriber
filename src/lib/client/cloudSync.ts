@@ -588,6 +588,15 @@ async function applyCloudSongIntoLocal(
   const data = await decodeSmapFile(blob)
   const local = data.project.songMap
   const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
+  const incomingHash = collabContentFingerprint(cloudSong.song_map as SongMap)
+  // Self-echo guard: if the incoming content already matches what we last
+  // synced (our own push coming back via realtime, or an unchanged song),
+  // skip the disk rewrite entirely — just advance the revision watermark.
+  // Rewriting would re-stamp a fresh hash and, if it differed by a hair,
+  // make the autosave think the live song changed → push → 409 → loop.
+  if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
+    return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
+  }
   const merged = mergeLocalIntoCollab(local, cloudSong.song_map)
   // Stamp expectedAudio onto the local map so the Phase 5 reconciler
   // can use it without re-fetching from the server.
