@@ -1948,7 +1948,7 @@
 </script>
 
 <main
-  class="relative z-10 flex min-h-dvh w-full max-w-none flex-col gap-6 px-2 py-8 sm:px-4 md:px-6 md:py-12 lg:px-8"
+  class="edit-page relative z-10 flex min-h-dvh w-full max-w-none flex-col gap-6 px-2 py-8 sm:px-4 md:px-6 md:py-12 lg:px-8"
 >
   {#if !browser}
     <div class="min-h-[50vh]" aria-hidden="true"></div>
@@ -2824,3 +2824,44 @@
     </Button>
   {/if}
 </main>
+
+<style>
+  .edit-page > header {
+    position: relative;
+    border: 2px solid var(--foreground);
+    background: var(--card);
+    padding: 1rem;
+    box-shadow: 5px 5px 0 var(--foreground);
+  }
+
+  .edit-page > header::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 5px;
+    border-top: 2px solid var(--foreground);
+    background: var(--studio-orange);
+  }
+
+  .edit-page :global(.brutalist-shadow.border-foreground.bg-background),
+  .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-background),
+  .edit-page :global(details.border-foreground.bg-background) {
+    background: var(--card);
+  }
+
+  .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-muted) {
+    background: var(--studio-orange);
+    color: var(--foreground);
+  }
+
+  .edit-page :global(.inline-grid.grid-cols-6.border-foreground.bg-muted) {
+    background: var(--card);
+    box-shadow: 4px 4px 0 var(--foreground);
+  }
+
+  .edit-page :global(fieldset.border-foreground) {
+    background: color-mix(in oklch, var(--card) 84%, var(--muted));
+  }
+</style>

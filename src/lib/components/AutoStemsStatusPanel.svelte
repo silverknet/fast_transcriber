@@ -60,8 +60,8 @@
 </script>
 
 {#if rows.length > 0}
-  <section class="border-foreground/30 border-2">
-    <header class="border-foreground/15 flex items-center gap-2 border-b px-3 py-2">
+  <section class="auto-stems-panel">
+    <header class="auto-stems-head flex items-center gap-2 px-3 py-2">
       <h2 class="text-xs font-bold uppercase tracking-wider">Auto-split</h2>
       <span class="text-muted-foreground text-[11px]">{rows.length} in progress / needs attention</span>
       <div class="ml-auto flex items-center gap-1.5">
@@ -128,3 +128,16 @@
     </ul>
   </section>
 {/if}
+
+<style>
+  .auto-stems-panel {
+    border: 2px solid var(--foreground);
+    background: var(--card);
+    box-shadow: 4px 4px 0 var(--foreground);
+  }
+
+  .auto-stems-head {
+    border-bottom: 2px solid var(--foreground);
+    background: color-mix(in oklch, var(--muted) 72%, var(--card));
+  }
+</style>

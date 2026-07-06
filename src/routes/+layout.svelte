@@ -287,7 +287,7 @@
 </svelte:head>
 
 <!--
-  App frame: a rounded black outline that is static against the viewport.
+  App frame: a black studio outline that is static against the viewport.
   The body itself doesn't scroll; the `.app-scroll` div below the chrome
   is the only scrollable area. That way the frame and the chrome stay
   pinned no matter how long the page content gets.
@@ -319,18 +319,41 @@
   :global(body) {
     /* The visible matte around the frame. */
     background-color: var(--foreground);
-    padding: 12px;
+    padding: 10px;
   }
 
   .app-frame {
-    /* Static rounded outline around the entire app. Fills the body's
+    /* Static outline around the entire app. Fills the body's
        content area (viewport minus body padding) and is the flex column
        that contains the chrome stack + scrollable content area. */
-    height: calc(100dvh - 24px);
+    height: calc(100dvh - 20px);
     display: flex;
     flex-direction: column;
-    border: 2px solid var(--foreground);
-    border-radius: 14px;
+    border: 3px solid var(--foreground);
+    border-radius: 0;
+    background-color: var(--background);
+    background-image:
+      repeating-linear-gradient(
+        90deg,
+        color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px,
+        transparent 1px 42px
+      ),
+      repeating-linear-gradient(
+        0deg,
+        color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px,
+        transparent 1px 42px
+      );
     overflow: clip;
+  }
+
+  @media (max-width: 640px) {
+    :global(body) {
+      padding: 6px;
+    }
+
+    .app-frame {
+      height: calc(100dvh - 12px);
+      border-width: 2px;
+    }
   }
 </style>

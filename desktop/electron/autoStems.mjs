@@ -14,7 +14,8 @@
  *
  * Safety properties (this runs unattended):
  *   - Off unless a watched project's manifest has `autoStems.enabled`.
- *   - Only analyzed, non-hidden songs with audio are touched.
+ *   - Non-hidden songs WITH AUDIO are touched. Analysis (the beat grid) is NOT
+ *     required — demucs separates the raw audio and doesn't use the grid.
  *   - Renders the FULL untrimmed source (trim-independent).
  *   - Partial/corrupt stem WAVs (companion killed mid-render) are detected
  *     and re-rendered.
@@ -309,7 +310,9 @@ export function createAutoStemsDaemon(deps) {
     // enqueued earlier in this same pass), stop enqueuing more.
     if (deps.anyStemJobActive && deps.anyStemJobActive()) return
 
-    // Read the smap once: gate on analyzed + resolve the source audio path.
+    // Read the smap once to resolve the source audio path. Stem separation
+    // (demucs) works on the raw audio and does NOT need the beat grid — so we
+    // do NOT gate on `analyzed`; any song with audio can be split.
     const smapPath = path.join(folderAbs, 'song.smap')
     let header
     try {
@@ -322,14 +325,13 @@ export function createAutoStemsDaemon(deps) {
       return
     }
     const sm = header.songMap ?? header // tolerate either shape
-    const analyzed = isSongAnalyzed(sm?.metadata?.analyzed, sm?.timeline?.bars?.length ?? 0)
     const rel = sm?.audio?.originalPath
-    if (!analyzed) {
-      setStatus(songKey, { ...base, phase: 'blocked', reason: 'Not analyzed yet — analyze the song first.' })
-      return
-    }
     if (!rel) {
-      setStatus(songKey, { ...base, phase: 'blocked', reason: 'No audio attached.' })
+      setStatus(songKey, {
+        ...base,
+        phase: 'blocked',
+        reason: 'No audio yet — add or import audio for this song first.',
+      })
       return
     }
 

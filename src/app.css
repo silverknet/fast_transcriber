@@ -66,37 +66,43 @@
 	   this token so the four `rounded-[var(--radius)]` call-sites stay
 	   the only knob. */
 	--radius: 4px;
-	--background: oklch(0.95 0.01 80);
-	--foreground: oklch(0.2 0.01 80);
-	--card: oklch(0.95 0.01 80);
-	--card-foreground: oklch(0.2 0.01 80);
-	--popover: oklch(0.95 0.01 80);
-	--popover-foreground: oklch(0.2 0.01 80);
-	--primary: oklch(0.2 0.01 80);
-	--primary-foreground: oklch(0.95 0.01 80);
-	--secondary: oklch(0.9 0.01 80);
-	--secondary-foreground: oklch(0.2 0.01 80);
-	--muted: oklch(0.9 0.01 80);
-	--muted-foreground: oklch(0.33 0.01 80);
-	--accent: oklch(0.88 0.01 80);
-	--accent-foreground: oklch(0.2 0.01 80);
+	--studio-orange: #ff7a1a;
+	--studio-orange-soft: oklch(0.87 0.12 58);
+	--studio-paper: oklch(0.948 0.006 255);
+	--studio-panel: oklch(0.992 0.002 255);
+	--studio-muted: oklch(0.91 0.004 255);
+	--studio-ink: oklch(0.17 0.014 255);
+	--background: var(--studio-paper);
+	--foreground: var(--studio-ink);
+	--card: var(--studio-panel);
+	--card-foreground: var(--studio-ink);
+	--popover: var(--studio-panel);
+	--popover-foreground: var(--studio-ink);
+	--primary: var(--studio-ink);
+	--primary-foreground: var(--studio-panel);
+	--secondary: var(--studio-muted);
+	--secondary-foreground: var(--studio-ink);
+	--muted: var(--studio-muted);
+	--muted-foreground: oklch(0.38 0.006 255);
+	--accent: color-mix(in oklch, var(--studio-orange) 18%, white);
+	--accent-foreground: var(--studio-ink);
 	--destructive: oklch(0.577 0.245 27.325);
-	--border: oklch(0.2 0.01 80);
-	--input: oklch(0.2 0.01 80);
-	--ring: oklch(0.2 0.01 80);
-	--chart-1: oklch(0.646 0.222 41.116);
+	--border: var(--studio-ink);
+	--input: var(--studio-ink);
+	--ring: var(--studio-orange);
+	--chart-1: oklch(0.72 0.19 55);
 	--chart-2: oklch(0.6 0.118 184.704);
 	--chart-3: oklch(0.398 0.07 227.392);
 	--chart-4: oklch(0.828 0.189 84.429);
 	--chart-5: oklch(0.769 0.188 70.08);
-	--sidebar: oklch(0.95 0.01 80);
-	--sidebar-foreground: oklch(0.2 0.01 80);
-	--sidebar-primary: oklch(0.2 0.01 80);
-	--sidebar-primary-foreground: oklch(0.95 0.01 80);
-	--sidebar-accent: oklch(0.88 0.01 80);
-	--sidebar-accent-foreground: oklch(0.2 0.01 80);
-	--sidebar-border: oklch(0.2 0.01 80);
-	--sidebar-ring: oklch(0.2 0.01 80);
+	--sidebar: var(--studio-panel);
+	--sidebar-foreground: var(--studio-ink);
+	--sidebar-primary: var(--studio-ink);
+	--sidebar-primary-foreground: var(--studio-panel);
+	--sidebar-accent: var(--accent);
+	--sidebar-accent-foreground: var(--studio-ink);
+	--sidebar-border: var(--studio-ink);
+	--sidebar-ring: var(--studio-orange);
 	--brutalist-shadow-color: var(--foreground);
 }
 
@@ -137,11 +143,11 @@
 }
 
 .brutalist-shadow {
-	box-shadow: 4px 4px 0 var(--brutalist-shadow-color);
+	box-shadow: 5px 5px 0 var(--brutalist-shadow-color);
 }
 
 .brutalist-shadow-sm {
-	box-shadow: 2px 2px 0 var(--brutalist-shadow-color);
+	box-shadow: 3px 3px 0 var(--brutalist-shadow-color);
 }
 
 /*
@@ -174,5 +180,10 @@
 		@apply bg-background text-foreground;
 		overscroll-behavior-x: none;
 		font-weight: 500;
+	}
+
+	::selection {
+		background: var(--studio-orange);
+		color: var(--studio-ink);
 	}
 }

@@ -643,7 +643,7 @@
   let songs = $derived($project.data?.songs ?? [])
 </script>
 
-<main class="relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col gap-6 px-4 py-12 sm:px-6">
+<main class="project-page relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col gap-6 px-4 py-12 sm:px-6">
   {#if restoring}
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}
@@ -654,7 +654,7 @@
     <div class="grid gap-3 sm:grid-cols-2">
       <button
         type="button"
-        class="brutalist-shadow border-foreground bg-foreground text-background flex flex-col items-start gap-1.5 border-2 p-4 text-left"
+        class="border-foreground bg-foreground text-background flex flex-col items-start gap-1.5 border-2 p-4 text-left"
         onclick={() => (newProjectDialogOpen = true)}
       >
         <FolderPlus class="size-5" aria-hidden="true" />
@@ -663,7 +663,7 @@
       </button>
       <button
         type="button"
-        class="brutalist-shadow-sm border-foreground bg-background flex flex-col items-start gap-1.5 border-2 p-4 text-left hover:bg-foreground/5"
+        class="border-foreground bg-background flex flex-col items-start gap-1.5 border-2 p-4 text-left hover:bg-foreground/5"
         onclick={() => void browseAndOpen()}
       >
         <FolderOpen class="size-5" aria-hidden="true" />
@@ -677,9 +677,9 @@
     {/if}
 
     {#if recentEntries.length > 0}
-      <section class="space-y-2">
+      <section class="studio-section space-y-2">
         <h2 class="text-xs font-bold uppercase tracking-wider text-muted-foreground">Recent</h2>
-        <ul class="border-foreground/20 border-2 divide-foreground/10 divide-y">
+        <ul class="studio-list divide-foreground/10 divide-y">
           {#each recentEntries as r (r.path)}
             <li>
               <button
@@ -716,7 +716,7 @@
       JoinCloudProjectDialog to materialize the local copy.
     -->
     {#if myInvites.length > 0 || myInvitesLoading}
-      <section class="space-y-2">
+      <section class="studio-section space-y-2">
         <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
           <MailOpen class="size-3.5" aria-hidden="true" />
           Invited to
@@ -725,7 +725,7 @@
           {/if}
         </h2>
         {#if myInvites.length > 0}
-          <ul class="border-foreground/20 border-2 divide-foreground/10 divide-y">
+          <ul class="studio-list divide-foreground/10 divide-y">
             {#each myInvites as inv (inv.id)}
               <li class="flex items-center gap-3 px-3 py-2">
                 <MailOpen class="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
@@ -753,7 +753,7 @@
       </section>
     {/if}
 
-    <section class="space-y-2">
+    <section class="studio-section space-y-2">
       <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
         <Cloud class="size-3.5" aria-hidden="true" />
         Shared with me
@@ -762,11 +762,11 @@
         {/if}
       </h2>
       {#if cloudProjects.length === 0 && !cloudProjectsLoading}
-        <p class="border-foreground/20 border-2 border-dashed p-3 text-xs text-muted-foreground">
+        <p class="studio-empty p-3 text-xs text-muted-foreground">
           No shared projects yet. When someone invites you, it'll show up here.
         </p>
       {:else if cloudProjects.length > 0}
-        <ul class="border-foreground/20 border-2 divide-foreground/10 divide-y">
+        <ul class="studio-list divide-foreground/10 divide-y">
           {#each cloudProjects as c (c.id)}
             <li class="flex items-center gap-3 px-3 py-2">
               <Cloud class="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
@@ -852,18 +852,18 @@
     {/if}
 
     {#if dragSongs.length === 0}
-      <div class="border-foreground/40 border-2 border-dashed p-8 text-center">
+      <div class="studio-empty p-8 text-center">
         <p class="text-muted-foreground text-sm">No songs yet. Add the first one below.</p>
       </div>
     {:else}
-      <div class="flex flex-col">
+      <div class="studio-song-board flex flex-col">
         <!--
           Sticky column header. Single-letter stem labels with full names in
           `title` for hover (the rows below are dots only, so the letter is
           enough to anchor the column visually).
         -->
         <div
-          class="song-row-grid border-foreground bg-muted text-muted-foreground sticky top-0 z-10 h-8 items-center gap-2 rounded-none border-2 px-2 text-[10px] font-semibold uppercase tracking-wider"
+          class="song-row-grid border-foreground bg-foreground text-background sticky top-0 z-10 h-8 items-center gap-2 rounded-none border-2 px-2 text-[10px] font-bold uppercase"
           role="row"
         >
           <span aria-hidden="true"></span>
@@ -915,7 +915,7 @@
       </div>
     {/if}
 
-    <div class="border-foreground border-2 p-4">
+    <div class="studio-action-box border-foreground border-2 p-4">
       <DropdownMenu>
         <DropdownMenuTrigger>
           {#snippet child({ props })}
@@ -938,7 +938,7 @@
     </div>
 
     {#if songs.length > 0}
-      <div class="border-foreground/40 flex items-center gap-3 border-2 border-dashed px-4 py-3">
+      <div class="studio-action-box flex items-center gap-3 px-4 py-3">
         <div class="min-w-0 flex-1">
           <p class="text-xs font-semibold">Setlist · Ableton Live 12</p>
           <p class="text-muted-foreground text-[11px]">
@@ -1042,6 +1042,52 @@
     5× stem (28) | cue (28) | edit (32) | ⋮ (32)
 -->
 <style>
+  .project-page > header {
+    position: relative;
+    border: 2px solid var(--foreground);
+    background: var(--card);
+    padding: 1rem;
+    box-shadow: 6px 6px 0 var(--foreground);
+  }
+
+  .project-page > header::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 6px;
+    border-top: 2px solid var(--foreground);
+    background: var(--studio-orange);
+  }
+
+  .studio-section {
+    border: 2px solid var(--foreground);
+    background: var(--card);
+    padding: 0.9rem;
+    box-shadow: 4px 4px 0 var(--foreground);
+  }
+
+  .studio-list {
+    border: 2px solid var(--foreground);
+    background: var(--card);
+  }
+
+  .studio-empty,
+  .studio-action-box {
+    border: 2px dashed color-mix(in oklch, var(--foreground) 62%, transparent);
+    background: color-mix(in oklch, var(--card) 84%, var(--muted));
+  }
+
+  .studio-action-box {
+    border-style: solid;
+    box-shadow: 4px 4px 0 var(--foreground);
+  }
+
+  .studio-song-board {
+    box-shadow: 5px 5px 0 var(--foreground);
+  }
+
   :global(.song-row-grid) {
     display: grid;
     grid-template-columns:

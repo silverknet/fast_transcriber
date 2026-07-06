@@ -69,7 +69,7 @@
 {#if display.kind !== 'hidden'}
   {#if display.kind === 'offline'}
     <span
-      class="border-foreground/30 text-muted-foreground inline-flex h-8 shrink-0 items-center gap-1.5 border-2 px-2 text-[11px] font-semibold uppercase tracking-wider"
+      class="cloud-sync-pill"
       title="Browser reports offline — edits stay local until you're back online."
     >
       <CloudOff class="size-3.5" aria-hidden="true" />
@@ -79,7 +79,7 @@
     <button
       type="button"
       onclick={manualRetry}
-      class="border-foreground text-foreground hover:bg-foreground/5 inline-flex h-8 shrink-0 items-center gap-1.5 border-2 px-2 text-[11px] font-semibold uppercase tracking-wider"
+      class="cloud-sync-pill is-pending"
       title="{display.count} edit{display.count === 1 ? '' : 's'} waiting to sync. Click to retry now."
     >
       <RefreshCw class="size-3.5" aria-hidden="true" />
@@ -87,7 +87,7 @@
     </button>
   {:else}
     <span
-      class="border-emerald-700/40 text-emerald-700 dark:border-emerald-400/40 dark:text-emerald-300 inline-flex h-8 shrink-0 items-center gap-1.5 border-2 px-2 text-[11px] font-semibold uppercase tracking-wider"
+      class="cloud-sync-pill is-synced"
       title="All edits pushed to the cloud."
     >
       <CloudCheck class="size-3.5" aria-hidden="true" />
@@ -95,3 +95,40 @@
     </span>
   {/if}
 {/if}
+
+<style>
+  .cloud-sync-pill {
+    display: inline-flex;
+    height: 2rem;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.35rem;
+    border: 2px solid color-mix(in oklch, var(--foreground) 42%, transparent);
+    background: transparent;
+    padding: 0 0.5rem;
+    color: var(--foreground);
+    font-size: 0.6875rem;
+    font-weight: 800;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  button.cloud-sync-pill {
+    cursor: pointer;
+  }
+
+  button.cloud-sync-pill:hover {
+    border-color: var(--foreground);
+    background: color-mix(in oklch, var(--studio-orange) 16%, var(--card));
+  }
+
+  .cloud-sync-pill.is-pending {
+    border-color: var(--foreground);
+    box-shadow: inset 0 -3px 0 var(--studio-orange);
+  }
+
+  .cloud-sync-pill.is-synced {
+    border-color: color-mix(in oklch, #047857 72%, var(--foreground));
+    background: color-mix(in oklch, #6ee7b7 22%, var(--card));
+  }
+</style>

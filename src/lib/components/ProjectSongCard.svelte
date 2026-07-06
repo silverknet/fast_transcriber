@@ -137,7 +137,7 @@
 -->
 <li
   data-song-id={entry.id}
-  class="border-foreground border-b-2 last:border-b-0 py-1.5 {entry.hidden ? 'opacity-60' : ''}"
+  class="project-song-row border-foreground border-b-2 last:border-b-0 py-1.5 {entry.hidden ? 'opacity-60' : ''}"
 >
   <!-- ── Thin row aligned to the column header ──────────────────────────── -->
   <!--
@@ -213,7 +213,7 @@
       title={hasAudio ? 'Audio file: ready' : 'Audio file: not added yet'}
     >
       <span
-        class="size-2 shrink-0 rounded-full {hasAudio ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        class="studio-light {hasAudio ? 'bg-emerald-500' : 'bg-foreground/20'}"
         aria-label={`audio: ${hasAudio ? 'ready' : 'not added yet'}`}
       ></span>
     </span>
@@ -233,7 +233,7 @@
             : `${s.name}: not generated`}
       >
         <span
-          class="size-2 shrink-0 rounded-full {s.present
+          class="studio-light {s.present
             ? 'bg-emerald-500'
             : stemInProgress
               ? 'animate-pulse bg-amber-400'
@@ -249,7 +249,7 @@
       title={hasCueTrack ? 'Cue track: ready' : 'Cue track: not generated'}
     >
       <span
-        class="size-2 shrink-0 rounded-full {hasCueTrack ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        class="studio-light {hasCueTrack ? 'bg-emerald-500' : 'bg-foreground/20'}"
         aria-label={`cue: ${hasCueTrack ? 'ready' : 'not generated'}`}
       ></span>
     </span>
@@ -336,3 +336,32 @@
     </div>
   {/if}
 </li>
+
+<style>
+  .project-song-row {
+    background: var(--card);
+    transition: background-color 120ms ease;
+  }
+
+  .project-song-row:nth-child(even) {
+    background: color-mix(in oklch, var(--card) 78%, var(--muted));
+  }
+
+  .project-song-row:hover {
+    background: color-mix(in oklch, var(--studio-orange) 10%, var(--card));
+  }
+
+  .studio-light {
+    display: block;
+    width: 0.58rem;
+    height: 0.58rem;
+    flex-shrink: 0;
+    border: 1px solid color-mix(in oklch, var(--foreground) 70%, transparent);
+    border-radius: 1px;
+    box-shadow: 1px 1px 0 var(--foreground);
+  }
+
+  :global(.project-song-row [data-slot='button']) {
+    box-shadow: none;
+  }
+</style>

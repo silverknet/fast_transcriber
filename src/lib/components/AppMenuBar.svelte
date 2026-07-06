@@ -5,7 +5,6 @@
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
   import { get } from 'svelte/store'
-  import { Button } from '$lib/components/ui/button'
   import {
     Dialog,
     DialogContent,
@@ -325,31 +324,29 @@
 </script>
 
 <header
-  class="bg-background border-foreground flex flex-wrap items-center gap-2 border-b-2 px-3 py-1.5 text-sm"
+  class="app-menu border-foreground border-b-2 text-sm"
   aria-label="Application"
   data-app-menu
 >
   <a
     href={logoHref}
-    class="text-foreground hover:text-foreground flex shrink-0 items-center gap-2 py-1 pr-2 transition-colors"
+    class="app-menu-brand"
     aria-label={logoAria}
   >
-    <!-- BAR / BRO wordmark — same offset / gradient as the welcome-page hero,
-         shrunk to chrome scale. Doubles as the home / project link. -->
-    <span class="logo-mark inline-flex" aria-label="BarBro">
-      <span class="logo-mark-bar">BAR</span>
-      <span class="logo-mark-bro">BRO</span>
+    <!-- BAR / BRO wordmark doubles as the home / project link. -->
+    <span class="logo-mark" aria-label="BarBro">
+      <span>BARBRO</span>
     </span>
   </a>
 
-  <div class="flex flex-1 flex-wrap items-center gap-1.5">
+  <div class="app-menu-primary">
     <DropdownMenu>
       <DropdownMenuTrigger>
         {#snippet child({ props })}
-          <Button variant="outline" size="sm" class="h-8 gap-1 px-2.5" {...props}>
+          <button type="button" class="chrome-button" {...props}>
             File
             <ChevronDown class="size-3.5 opacity-60" aria-hidden="true" />
-          </Button>
+          </button>
         {/snippet}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" class="min-w-[12rem]">
@@ -432,23 +429,19 @@
     </DropdownMenu>
   </div>
 
-  <div class="ml-auto flex shrink-0 items-center gap-2">
+  <div class="app-menu-actions">
     <CloudSyncPill />
     <a
       href="/download"
-      class="inline-flex size-8 items-center justify-center border-2 no-underline {desktopConnected
-        ? 'border-emerald-600 bg-emerald-100 text-emerald-800 dark:border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200'
-        : 'border-muted-foreground/50 bg-muted/40 text-muted-foreground hover:border-foreground/40 hover:bg-muted/60'}"
+      class="chrome-icon {desktopConnected ? 'is-connected' : ''}"
       title={desktopStatusTitle}
       aria-label={desktopStatusTitle}
     >
       <Monitor class="size-4" aria-hidden="true" />
     </a>
-    <Button
+    <button
       type="button"
-      variant="outline"
-      size="icon"
-      class="size-8"
+      class="chrome-icon"
       onclick={toggleDarkMode}
       aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
     >
@@ -457,7 +450,7 @@
       {:else}
         <Moon class="size-4" />
       {/if}
-    </Button>
+    </button>
     <!--
       Admin shortcut — only renders when the layout server flagged the
       current user as admin. Hidden for everyone else (link doesn't even
@@ -466,7 +459,7 @@
     {#if $page.data?.isAdmin}
       <a
         href="/admin/access"
-        class="border-foreground/40 text-muted-foreground hover:border-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 border-2 px-2 text-xs font-semibold uppercase tracking-wider no-underline"
+        class="chrome-link"
         title="Admin: access requests"
       >
         <Shield class="size-3.5" aria-hidden="true" />
@@ -488,7 +481,7 @@
           {#snippet child({ props })}
             <button
               type="button"
-              class="border-foreground bg-background hover:bg-muted inline-flex size-8 shrink-0 items-center justify-center overflow-hidden border-2"
+              class="chrome-avatar"
               title={$userStore.name ?? $userStore.email ?? 'Account'}
               aria-label="Account menu"
               {...props}
@@ -521,7 +514,7 @@
     {:else}
       <a
         href="/login"
-        class="border-foreground/40 text-muted-foreground hover:border-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 border-2 px-2 text-xs font-semibold uppercase tracking-wider no-underline"
+        class="chrome-link"
         title="Sign in"
       >
         <LogIn class="size-3.5" aria-hidden="true" />
@@ -529,46 +522,40 @@
       </a>
     {/if}
     {#if !isInProjectMode}
-      <Button
+      <button
         type="button"
-        variant="outline"
-        size="sm"
-        class="h-8"
+        class="chrome-button"
         onclick={() => goto('/set')}
         title="Experimental: export Ableton Live set"
       >
         Set ⚗
-      </Button>
+      </button>
     {/if}
     {#if import.meta.env.DEV}
-      <Button
+      <button
         type="button"
-        variant="outline"
-        size="sm"
-        class="h-8 opacity-50"
+        class="chrome-button is-dev"
         onclick={() => {
           debugOpen = true
         }}
       >
         JSON
-      </Button>
-      <Button
+      </button>
+      <button
         type="button"
-        variant="outline"
-        size="sm"
-        class="h-8 opacity-50"
+        class="chrome-button is-dev"
         onclick={() => goto('/analyzing?preview')}
       >
         ∿
-      </Button>
-      <Button type="button" variant="outline" size="sm" class="h-8 opacity-50" onclick={() => goto('/texttospeech')}>
+      </button>
+      <button type="button" class="chrome-button is-dev" onclick={() => goto('/texttospeech')}>
         TTS
-      </Button>
+      </button>
     {/if}
   </div>
 
   {#if menuError}
-    <p class="text-destructive w-full max-w-md truncate text-xs sm:w-auto" role="status">{menuError}</p>
+    <p class="app-menu-error text-destructive truncate text-xs" role="status">{menuError}</p>
   {/if}
 
   <input
@@ -602,32 +589,151 @@
 
 <style>
   /*
-   * BAR / BRO wordmark — small chrome-scale variant of the welcome-page
-   * logo. Same Space Grotesk weight, same offset trick, same peach gradient
-   * on BRO. Kept here (not in a shared component) so the menubar stays a
-   * single file you can scan top-to-bottom.
+   * Plain chrome-scale wordmark. Keep it quiet; the orange belongs to the
+   * system accent line, not to a chunky logo treatment.
+   * Kept here (not in a shared component) so the menubar stays a single file
+   * you can scan top-to-bottom.
    */
-  .logo-mark {
-    align-items: baseline;
-    gap: 0.04em;
-    font-weight: 700;
-    font-size: 1.25rem;
-    line-height: 1;
-    letter-spacing: -0.04em;
+  .app-menu {
+    --chrome-edge: color-mix(in oklch, var(--foreground) 42%, transparent);
+    --chrome-hover: color-mix(in oklch, var(--studio-orange) 16%, var(--card));
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 0.5rem;
+    row-gap: 0.45rem;
+    min-height: 3rem;
+    padding: 0.45rem 0.75rem 0.6rem;
+    background: var(--card);
     color: var(--foreground);
   }
-  .logo-mark-bar,
-  .logo-mark-bro {
-    display: inline-block;
+
+  .app-menu-brand {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    color: var(--foreground);
+    text-decoration: none;
   }
-  .logo-mark-bar {
-    transform: translateY(0.1em);
+
+  .app-menu-primary,
+  .app-menu-actions {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.4rem;
   }
-  .logo-mark-bro {
-    transform: translateY(-0.1em);
-    background: linear-gradient(135deg, #ffcec2, #f08a76);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+
+  .app-menu-primary {
+    justify-content: flex-start;
+  }
+
+  .app-menu-actions {
+    justify-content: flex-end;
+  }
+
+  .logo-mark {
+    display: inline-flex;
+    align-items: center;
+    font-size: 1.05rem;
+    font-weight: 900;
+    line-height: 1;
+    letter-spacing: 0;
+    color: var(--foreground);
+  }
+
+  .chrome-icon,
+  .chrome-link,
+  .chrome-avatar,
+  .chrome-button {
+    display: inline-flex;
+    height: 2rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    border: 2px solid var(--chrome-edge);
+    background: transparent;
+    color: var(--foreground);
+    font: inherit;
+    line-height: 1;
+    text-decoration: none;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease;
+  }
+
+  .chrome-icon,
+  .chrome-avatar {
+    width: 2rem;
+    overflow: hidden;
+  }
+
+  .chrome-link {
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .chrome-button {
+    padding: 0 0.55rem;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 800;
+  }
+
+  .chrome-button.is-dev {
+    opacity: 0.68;
+  }
+
+  .chrome-icon:hover,
+  .chrome-link:hover,
+  .chrome-avatar:hover,
+  .chrome-avatar[aria-expanded='true'],
+  .chrome-button:hover,
+  .chrome-button[aria-expanded='true'] {
+    border-color: var(--foreground);
+    background: var(--chrome-hover);
+    color: var(--foreground);
+  }
+
+  .chrome-icon.is-connected {
+    border-color: color-mix(in oklch, #047857 72%, var(--foreground));
+    background: color-mix(in oklch, #6ee7b7 22%, var(--card));
+    color: var(--foreground);
+  }
+
+  .app-menu-error {
+    grid-column: 1 / -1;
+    max-width: 42rem;
+  }
+
+  @media (max-width: 920px) {
+    .app-menu {
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.45rem 0.75rem;
+    }
+
+    .app-menu-primary {
+      justify-content: flex-end;
+    }
+
+    .app-menu-actions {
+      grid-column: 1 / -1;
+      justify-content: flex-start;
+      overflow-x: auto;
+      padding-bottom: 0.05rem;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .app-menu {
+      padding: 0.45rem 0.5rem 0.65rem;
+    }
+
+    .logo-mark {
+      font-size: 1.05rem;
+    }
   }
 </style>
