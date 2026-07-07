@@ -317,8 +317,10 @@
     overflow: hidden;
   }
   :global(body) {
-    /* The visible matte around the frame. */
-    background-color: var(--ink);
+    /* The visible matte around the frame — temporarily HIDDEN (kept): blends
+       with the frame so no black surround shows. Restore with var(--ink). */
+    /* background-color: var(--ink); */
+    background-color: var(--background);
     padding: 10px;
   }
 
@@ -329,7 +331,11 @@
     height: calc(100dvh - 20px);
     display: flex;
     flex-direction: column;
-    border: 3px solid var(--ink);
+    /* Outline temporarily HIDDEN (kept, not removed) — restore by swapping the
+       color back to var(--ink). Transparent (not `none`) so the 3px keeps the
+       same layout/size while hidden. */
+    /* border: 3px solid var(--ink); */
+    border: 3px solid transparent;
     border-radius: calc(var(--radius) * 1.5);
     background-color: var(--background);
     background-image:
