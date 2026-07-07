@@ -280,11 +280,12 @@
   }
 </script>
 
-<!-- 3D fabric-grid background. z-0 (not -z-10) so it sits ABOVE the app-frame's
-     opaque background but below the page content (main is z-10). -->
+<!-- 3D fabric-grid background. z-0 (above the app-frame background, below the
+     page content at z-10). Solid bg-background covers the frame's static grid
+     texture so only THIS animated grid shows (no double grid). -->
 <canvas
   bind:this={canvas}
-  class="fixed inset-0 z-0 h-full w-full pointer-events-none"
+  class="bg-background pointer-events-none fixed inset-0 z-0 h-full w-full"
   aria-hidden="true"
 ></canvas>
 
