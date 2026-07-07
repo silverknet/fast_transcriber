@@ -116,6 +116,34 @@
     return Math.max(0, offset)
   }
 
+  /**
+   * Song sections mapped onto the mixer timeline as fractions [0..1]. Uses the
+   * SAME silence offset the stems/original get (`computePrepend('original')`)
+   * so the bands line up with the waveforms. Display-only — the shaded bands
+   * are groundwork for future per-section stem control.
+   */
+  const sectionBands = $derived.by<
+    { startFrac: number; endFrac: number; label: string; index: number }[]
+  >(() => {
+    const sm = $songMap
+    const dur = snapshot.durationSec
+    if (!sm || !sm.sections?.length || !sm.timeline.bars.length || dur <= 0) return []
+    const offset = computePrepend('original')
+    const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
+    const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
+    const out: { startFrac: number; endFrac: number; label: string; index: number }[] = []
+    sm.sections.forEach((s, i) => {
+      const startBar = barByIndex.get(s.barRange.startBarIndex)
+      const endBar = barByIndex.get(s.barRange.endBarIndex)
+      if (!startBar || !endBar) return
+      const startFrac = clamp01((startBar.startSec + offset) / dur)
+      const endFrac = clamp01((endBar.endSec + offset) / dur)
+      if (endFrac <= startFrac) return
+      out.push({ startFrac, endFrac, label: s.label, index: i })
+    })
+    return out
+  })
+
   /** Pretty label for a stem filename — Vocals/Drums/Bass/Other/etc. */
   function labelForStem(filename: string): string {
     const m: Record<string, string> = {
@@ -429,7 +457,7 @@
 
   {#if lanes.length > 0}
     <div class="flex flex-col gap-1.5">
-      {#each lanes as lane (lane.key)}
+      {#each lanes as lane, i (lane.key)}
         <MixerTrackLane
           label={lane.label}
           buffer={lane.buffer}
@@ -439,6 +467,8 @@
           color={lane.color}
           positionSec={snapshot.positionSec}
           durationSec={snapshot.durationSec}
+          {sectionBands}
+          showSectionLabels={i === 0}
           onVolumeChange={(v) => onVolume(lane.key, v)}
           onToggleMuted={() => onToggleMuted(lane.key)}
           onToggleSoloed={() => onToggleSoloed(lane.key)}

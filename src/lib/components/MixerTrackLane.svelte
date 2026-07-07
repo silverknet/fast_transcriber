@@ -21,6 +21,8 @@
     positionSec,
     durationSec,
     color = '#7c3aed',
+    sectionBands = [],
+    showSectionLabels = false,
     onVolumeChange,
     onToggleMuted,
     onToggleSoloed,
@@ -37,6 +39,10 @@
     durationSec: number
     /** Waveform stroke color. */
     color?: string
+    /** Song sections as mix-timeline fractions [0..1], drawn as shaded bands. */
+    sectionBands?: { startFrac: number; endFrac: number; label: string; index: number }[]
+    /** Draw section labels — only the top lane sets this true. */
+    showSectionLabels?: boolean
     onVolumeChange: (v: number) => void
     onToggleMuted: () => void
     onToggleSoloed: () => void
@@ -149,6 +155,20 @@
     aria-valuemax={durationSec || 0}
     aria-valuenow={positionSec}
   >
+    <!-- Section bands (behind the waveform): alternating tint + left divider so
+         sections read as continuous columns across every lane. -->
+    {#each sectionBands as band (band.index)}
+      <div
+        class="pointer-events-none absolute top-0 bottom-0"
+        style="left: {band.startFrac * 100}%; width: {(band.endFrac - band.startFrac) *
+          100}%; border-left: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent); {band.index %
+          2 ===
+        0
+          ? 'background: color-mix(in oklch, var(--foreground) 7%, transparent);'
+          : ''}"
+      ></div>
+    {/each}
+
     {#if buffer}
       <canvas bind:this={canvas} class="absolute inset-0"></canvas>
       <!-- Boundary line where this buffer ends on the mix timeline -->
@@ -167,6 +187,17 @@
       <div class="text-muted-foreground flex h-full items-center justify-center text-[10px]">
         loading…
       </div>
+    {/if}
+
+    <!-- Section labels sit on top, only on the labelled (top) lane. -->
+    {#if showSectionLabels}
+      {#each sectionBands as band (band.index)}
+        <span
+          class="text-foreground/70 pointer-events-none absolute top-0.5 truncate text-[9px] font-semibold uppercase leading-none tracking-wide"
+          style="left: {band.startFrac * 100}%; max-width: {(band.endFrac - band.startFrac) *
+            100}%; padding-left: 3px;"
+        >{band.label}</span>
+      {/each}
     {/if}
   </div>
 </div>

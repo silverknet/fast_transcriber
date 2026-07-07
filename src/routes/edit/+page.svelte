@@ -95,7 +95,7 @@
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, Music, Pause, Pencil, Play } from '@lucide/svelte'
+  import { ArrowLeft, Pause, Pencil, Play } from '@lucide/svelte'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { trimAudioFileToWav } from '$lib/audio/trimAudio'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
@@ -630,6 +630,15 @@
   /** Derived: the detected key from the cached chord hints, or null. */
   const detectedKey = $derived($songMap?.chordHints?.detectedKey ?? null)
 
+  /** Key label for the header: the manual key if set, else the detected key. */
+  const keyLabel = $derived.by(() => {
+    const kd = $songMap?.metadata.keyDetail
+    if (kd) return formatSongKeyLabel(kd)
+    const dk = detectedKey
+    if (dk) return formatSongKeyLabel({ root: dk.root, accidental: dk.accidental, mode: dk.mode })
+    return null
+  })
+
   /**
    * True when the existing key picker matches the detected key — so we
    * can hide the "Use" hint once it's been accepted (or the user picked
@@ -928,7 +937,9 @@
   }
 
   /** Main workspace mode. */
-  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix' | 'leadsheet'>('grid')
+  let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'leadsheet'>(
+    'overview',
+  )
 
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 
@@ -1983,43 +1994,39 @@
   {:else if $audioSession.file && $songMap}
     {@const sm = $songMap}
 
-    <header
-      class="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
+    <!-- Song-first header, raw over the background (a <div>, NOT a <header>, so
+         it escapes the `.edit-page > header` studio-box rule). -->
+    <div
+      class="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"
     >
-      <div class="flex items-center gap-3">
+      <div class="min-w-0">
+        {#if editingTitle}
+          <input
+            class="border-foreground bg-background text-foreground w-full min-w-0 max-w-md border-b-2 px-0.5 text-3xl font-bold tracking-tight outline-none"
+            bind:value={titleDraft}
+            onblur={commitTitleEdit}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
+            use:focusOnMount
+          />
+        {:else}
+          <h1 class="flex items-center gap-2 text-3xl font-bold tracking-tight">
+            <span class="truncate">{sm.metadata.title || 'Untitled song'}</span>
+            <button
+              type="button"
+              class="text-muted-foreground/50 hover:text-foreground shrink-0 transition-colors"
+              onclick={startTitleEdit}
+              aria-label="Rename song"
+            >
+              <Pencil class="size-4" />
+            </button>
+          </h1>
+        {/if}
         <div
-          class="brutalist-shadow-sm border-foreground bg-muted text-foreground inline-flex size-11 shrink-0 items-center justify-center border-2"
-          aria-hidden="true"
+          class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums"
         >
-          <Music class="size-6" strokeWidth={2} />
-        </div>
-        <div>
-          <p class="text-muted-foreground text-xs font-medium tracking-wide uppercase">BarBro</p>
-          <h1 class="text-2xl font-semibold tracking-tight">Edit</h1>
-          <p class="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-sm">
-            {#if editingTitle}
-              <input
-                class="border-foreground bg-background text-foreground min-w-0 w-40 border-b px-0.5 text-sm outline-none"
-                bind:value={titleDraft}
-                onblur={commitTitleEdit}
-                onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
-                use:focusOnMount
-              />
-            {:else}
-              <span>{sm.metadata.title}</span>
-              <button
-                type="button"
-                class="text-muted-foreground/50 hover:text-foreground transition-colors"
-                onclick={startTitleEdit}
-                aria-label="Rename song"
-              >
-                <Pencil class="size-3" />
-              </button>
-            {/if}
-            <span class="text-muted-foreground/80 font-mono text-xs tabular-nums">
-              · {sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}
-            </span>
-          </p>
+          <span>{sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}</span>
+          <span class="text-muted-foreground/40" aria-hidden="true">·</span>
+          <span>{keyLabel ?? '— key'}</span>
         </div>
       </div>
 
@@ -2028,6 +2035,19 @@
         role="tablist"
         aria-label="Edit mode"
       >
+        <Button
+          type="button"
+          role="tab"
+          aria-selected={editMode === 'overview'}
+          variant="ghost"
+          size="sm"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'overview'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
+          onclick={() => (editMode = 'overview')}
+        >
+          Overview
+        </Button>
         <Button
           type="button"
           role="tab"
@@ -2083,19 +2103,6 @@
         <Button
           type="button"
           role="tab"
-          aria-selected={editMode === 'mix'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'mix'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'mix')}
-        >
-          Mix
-        </Button>
-        <Button
-          type="button"
-          role="tab"
           aria-selected={editMode === 'leadsheet'}
           variant="ghost"
           size="sm"
@@ -2107,7 +2114,7 @@
           Lead sheet
         </Button>
       </div>
-    </header>
+    </div>
 
 
     {#if editMode === 'cue'}
@@ -2351,11 +2358,19 @@
       </section>
     {/if}
 
-    {#if editMode === 'mix'}
+    {#if editMode === 'overview'}
       <section
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Mixer"
+        aria-label="Overview"
       >
+        <div
+          class="text-muted-foreground mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs tabular-nums"
+        >
+          <span>{sm.timeline.bars.length} bars</span>
+          <span>{sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}</span>
+          {#if sm.metadata.bpm != null}<span>{Math.round(sm.metadata.bpm)} BPM</span>{/if}
+          {#if keyLabel}<span>{keyLabel}</span>{/if}
+        </div>
         <details class="text-muted-foreground mb-3 text-xs sm:mb-4">
           <summary
             class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
@@ -2826,27 +2841,8 @@
 </main>
 
 <style>
-  .edit-page > header {
-    position: relative;
-    border: 2px solid var(--ink);
-    border-radius: var(--radius);
-    background: var(--card);
-    padding: 1rem;
-    overflow: hidden;
-    box-shadow: 5px 5px 0 var(--ink);
-  }
-
-  .edit-page > header::after {
-    content: "";
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    height: 5px;
-    border-top: 2px solid var(--ink);
-    background: var(--studio-orange);
-  }
-
+  /* (The old `.edit-page > header` studio box was removed — the header is now a
+     raw <div> over the background.) */
   .edit-page :global(.brutalist-shadow.border-foreground.bg-background),
   .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-background),
   .edit-page :global(details.border-foreground.bg-background) {
