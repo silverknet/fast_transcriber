@@ -294,10 +294,11 @@
   }
 </script>
 
-<!-- Dot-grid background -->
+<!-- 3D fabric-grid background. z-0 (not -z-10) so it sits ABOVE the app-frame's
+     opaque background but below the page content (main is z-10). -->
 <canvas
   bind:this={canvas}
-  class="fixed inset-0 -z-10 h-full w-full pointer-events-none"
+  class="fixed inset-0 z-0 h-full w-full pointer-events-none"
   aria-hidden="true"
 ></canvas>
 

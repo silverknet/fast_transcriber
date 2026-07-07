@@ -262,6 +262,8 @@
     if (here?.startsWith('/auth')) return
     // /debug/* is for inspection — doesn't need the sidecar.
     if (here?.startsWith('/debug')) return
+    // /analyzing?preview is a standalone animation preview — no sidecar needed.
+    if (here === '/analyzing' && $page.url.searchParams.has('preview')) return
     // Four reasons to lock the user to /download:
     //   1. Sidecar unreachable (no companion running)
     //   2. Sidecar reachable but its version is below the web app's
