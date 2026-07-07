@@ -300,7 +300,7 @@
 -->
 <div class="app-frame bg-background font-sans">
   {#if showChrome}
-    <div class="shrink-0">
+    <div class="relative z-20 shrink-0">
       <AppMenuBar />
       <DesktopUpdateBanner />
       <ProjectContextBar />

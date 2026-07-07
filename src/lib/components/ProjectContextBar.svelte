@@ -34,7 +34,7 @@
 
 {#if visible}
   <div
-    class="project-context-bar border-foreground bg-card text-foreground flex h-11 items-center gap-3 border-b-2 px-3 text-sm"
+    class="project-context-bar bg-card text-foreground flex h-9 items-center gap-3 px-3 text-sm"
     role="navigation"
     aria-label="Project context"
   >

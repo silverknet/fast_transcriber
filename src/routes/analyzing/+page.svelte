@@ -26,12 +26,11 @@
   //   world node   : (x, y, z)          z = CAM_D − bump(x, y, t)
   //   projection   : s = CAM_D / z       screenX = cx + x·s,  screenY = cy + y·s
   //   bump lowers z  ⇒  s > 1  ⇒  that patch spreads out + its dots grow.
-  const CELL = 40 // grid spacing in world units (≈ px on the flat baseline)
+  const CELL = 42 // grid spacing in world units (≈ px on the flat baseline)
   const CAM_D = 1000 // depth of the flat sheet; doubles as the focal length
-  const BUMP_A = 430 // how far a ball pulls the sheet toward the camera
-  const BUMP_SIGMA = 150 // ball footprint (world units)
+  const BUMP_A = 235 // how far a ball pulls the sheet toward the camera (gentle)
+  const BUMP_SIGMA = 165 // ball footprint (world units)
   const OVERSCAN = 1.4 // extra lattice past the screen so magnified edges stay covered
-  const BASE_R = 1.5 // dot radius on the flat baseline
 
   $effect(() => {
     if (!canvas) return
@@ -49,7 +48,6 @@
     let halfH = 0
     let px = new Float32Array(0)
     let py = new Float32Array(0)
-    let pr = new Float32Array(0)
 
     function resize() {
       dpr = window.devicePixelRatio || 1
@@ -66,7 +64,6 @@
       const n = cols * rows
       px = new Float32Array(n)
       py = new Float32Array(n)
-      pr = new Float32Array(n)
     }
 
     const ro = new ResizeObserver(resize)
@@ -100,12 +97,11 @@
           const dy2 = wy - b2y
           const bump =
             BUMP_A * Math.exp(-(dx1 * dx1 + dy1 * dy1) * inv2s2) +
-            BUMP_A * 0.85 * Math.exp(-(dx2 * dx2 + dy2 * dy2) * inv2s2)
+            BUMP_A * 0.7 * Math.exp(-(dx2 * dx2 + dy2 * dy2) * inv2s2)
           const s = CAM_D / (CAM_D - bump)
           const idx = j * cols + i
           px[idx] = cx + wx * s
           py[idx] = cy + wy * s
-          pr[idx] = BASE_R * s * s // grow faster than linear so the bump pops
         }
       }
 
@@ -127,16 +123,6 @@
         }
       }
       ctx!.stroke()
-
-      // Nodes: radius grows toward the camera for a depth pop.
-      ctx!.fillStyle = dark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.3)'
-      for (let idx = 0; idx < px.length; idx++) {
-        const r = pr[idx]
-        if (r <= 0.25) continue
-        ctx!.beginPath()
-        ctx!.arc(px[idx], py[idx], r, 0, Math.PI * 2)
-        ctx!.fill()
-      }
     }
 
     rafId = requestAnimationFrame(frame)
