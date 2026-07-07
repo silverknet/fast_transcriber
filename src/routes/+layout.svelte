@@ -298,7 +298,7 @@
   scroll area — no per-bar `top-N` offsets anywhere. Adding or removing
   a chrome row never requires touching another component.
 -->
-<div class="app-frame bg-background font-sans">
+<div class="app-frame bg-background font-sans" class:no-grid={onBareRoute}>
   {#if showChrome}
     <div class="relative z-20 shrink-0">
       <AppMenuBar />
@@ -355,6 +355,13 @@
         transparent 1px 42px
       );
     overflow: clip;
+  }
+
+  /* Self-contained full-page routes (welcome / login / pending / download) have
+     their own backgrounds, so drop the frame's grid texture to avoid a double
+     grid. */
+  .app-frame.no-grid {
+    background-image: none;
   }
 
   @media (max-width: 640px) {
