@@ -317,26 +317,26 @@
     overflow: hidden;
   }
   :global(body) {
-    /* The visible matte around the frame — temporarily HIDDEN (kept): blends
-       with the frame so no black surround shows. Restore with var(--ink). */
+    /* Frame matte + edge padding REMOVED (kept for restore) — content now runs
+       edge-to-edge. Restore: padding: 10px; background-color: var(--ink); */
     /* background-color: var(--ink); */
     background-color: var(--background);
-    padding: 10px;
+    padding: 0;
   }
 
   .app-frame {
-    /* Static outline around the entire app. Fills the body's
-       content area (viewport minus body padding) and is the flex column
-       that contains the chrome stack + scrollable content area. */
-    height: calc(100dvh - 20px);
+    /* App-frame outline REMOVED (kept for restore): the whole app now fills the
+       viewport edge-to-edge with no border/rounding. To bring the frame back,
+       restore the three commented values below (height, border, radius) and the
+       body padding + matte above. */
+    /* height: calc(100dvh - 20px); */
+    height: 100dvh;
     display: flex;
     flex-direction: column;
-    /* Outline temporarily HIDDEN (kept, not removed) — restore by swapping the
-       color back to var(--ink). Transparent (not `none`) so the 3px keeps the
-       same layout/size while hidden. */
     /* border: 3px solid var(--ink); */
-    border: 3px solid transparent;
-    border-radius: calc(var(--radius) * 1.5);
+    border: none;
+    /* border-radius: calc(var(--radius) * 1.5); */
+    border-radius: 0;
     background-color: var(--background);
     background-image:
       repeating-linear-gradient(
