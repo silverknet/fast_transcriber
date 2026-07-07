@@ -95,7 +95,7 @@
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, Pause, Pencil, Play } from '@lucide/svelte'
+  import { ArrowLeft, Pause, Pencil, Play, RefreshCw } from '@lucide/svelte'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { trimAudioFileToWav } from '$lib/audio/trimAudio'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
@@ -701,6 +701,32 @@
       ...(dk.accidental ? { accidental: dk.accidental } : {}),
       mode: dk.mode,
     })
+  }
+
+  /**
+   * Force a fresh key detection from the audio and OVERWRITE the current key.
+   * The normal auto-fill only sets the key when it's empty (it never corrects
+   * an already-set one), so old songs keep a stale/wrong key forever. This
+   * re-runs the chroma analyzer (bypassing the cache) and applies whatever it
+   * detects.
+   */
+  let redetectingKey = $state(false)
+  async function redetectKey() {
+    if (redetectingKey) return
+    redetectingKey = true
+    try {
+      await runChordChromaAnalysis(true)
+      const dk = detectedKey
+      if (dk) {
+        applyKeyPatch({
+          root: dk.root,
+          ...(dk.accidental ? { accidental: dk.accidental } : {}),
+          mode: dk.mode,
+        })
+      }
+    } finally {
+      redetectingKey = false
+    }
   }
 
   function suggestionSig(sm: SongMap | null, sug: { kind: string; bars: number } | null): string | null {
@@ -2026,7 +2052,23 @@
         >
           <span>{sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}</span>
           <span class="text-muted-foreground/40" aria-hidden="true">·</span>
-          <span>{keyLabel ?? '— key'}</span>
+          <span class="inline-flex items-center gap-1">
+            {keyLabel ?? '— key'}
+            <button
+              type="button"
+              class="text-muted-foreground/50 hover:text-foreground transition-colors disabled:opacity-40"
+              onclick={() => void redetectKey()}
+              disabled={redetectingKey || chordChromaStatus === 'analyzing' || chordChromaStatus === 'installing'}
+              title="Re-detect the key from the audio (overwrites the current key)"
+              aria-label="Re-detect key"
+            >
+              <RefreshCw
+                class="size-3 {redetectingKey || chordChromaStatus === 'analyzing'
+                  ? 'animate-spin'
+                  : ''}"
+              />
+            </button>
+          </span>
         </div>
       </div>
 
