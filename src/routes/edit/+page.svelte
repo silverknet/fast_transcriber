@@ -495,7 +495,7 @@
   // v3: stem-aware input — when demucs "other" stem is on disk, the
   //     analyzer reads the harmonic stem instead of the full mix.
   //     Strips drum + vocal bleed; biggest single accuracy unlock.
-  const CHORD_ANALYZER_VERSION = 3
+  const CHORD_ANALYZER_VERSION = 4
 
   let chordChromaStatus = $state<
     'idle' | 'installing' | 'analyzing' | 'ready' | 'cached' | 'error' | 'unavailable'

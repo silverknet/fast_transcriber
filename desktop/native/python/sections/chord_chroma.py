@@ -54,19 +54,26 @@ BEAT_WINDOW_SEC = 0.15
 # at low E). Above 5 kHz is mostly cymbals + noise. The 80–4000 Hz window
 # corresponds roughly to the fundamental range of most chord-bearing
 # instruments (guitar, piano, bass-heavy mixes still light up via harmonics).
-MIN_BIN_HZ = 80.0
-MAX_BIN_HZ = 4000.0
+# 100–2000 Hz is the harmonic "core": above sub-bass rumble, below cymbal hash.
+# Restricting to this band (rather than 80–4000) was, together with dropping the
+# 1/f weighting below, what fixed real-world key detection — a wider band + bass
+# weighting let low-frequency energy drag the chroma toward the wrong tonic
+# (e.g. "Can't Tame Her" mis-detected as F major instead of A / F# minor).
+MIN_BIN_HZ = 100.0
+MAX_BIN_HZ = 2000.0
 
-# Per-bin weighting: emphasize the middle pitch range where chord tones
-# dominate over drum/noise energy. A simple 1/f weighting (so 200 Hz counts
-# more per-magnitude-unit than 2000 Hz) is enough to suppress cymbal hash.
-USE_INVERSE_FREQ_WEIGHTING = True
+# Per-bin weighting. 1/f weighting was tried to suppress cymbal hash, but it
+# OVER-weighted the bass and systematically skewed the averaged chroma toward
+# the wrong key on real mixes. Flat weighting (validated against synthetic keys
+# AND real songs) detects the correct key; keep it off.
+USE_INVERSE_FREQ_WEIGHTING = False
 
-# Confidence floor: below this, we return detectedKey=null. Krumhansl–Schmuckler
-# correlations on real music typically produce best-vs-runner-up margins of
-# 0.05–0.20; the floor catches "two keys tied" cases (atonal / very modal
-# / extremely loud drums drowning out tonal content).
-KEY_CONFIDENCE_FLOOR = 0.02
+# Confidence floor: below this, we return detectedKey=null. The margin is
+# best-vs-runner-up; relative major/minor (e.g. A major vs F# minor) share every
+# scale tone, so the correct answer often wins by only ~0.02. Keep the floor low
+# so those aren't rejected — the client treats low-confidence keys as a hint and
+# only auto-commits when confidence is high.
+KEY_CONFIDENCE_FLOOR = 0.01
 
 # Bump when the algorithm changes meaningfully (window size, chroma binning,
 # K-K templates, similarity metric, etc.) so cached `chordHints.analyzerVersion`
@@ -79,7 +86,11 @@ KEY_CONFIDENCE_FLOOR = 0.02
 #       (typically demucs "other") when one is on disk, instead of the
 #       full mix. No algorithm change. Invalidates the v2 cache so songs
 #       with stems on disk re-analyze against the cleaner signal.
-ANALYZER_VERSION = 3
+#   v4: FIX — dropped the 1/f bass weighting and narrowed the band to
+#       100–2000 Hz. The old bass-weighted chroma systematically detected the
+#       wrong key on real mixes (e.g. F major for an A-major / F#-minor song).
+#       Also lowered the confidence floor so correct relative-key calls pass.
+ANALYZER_VERSION = 4
 
 
 # Krumhansl–Kessler probe-tone profiles (Kostka–Payne corrected). Indexed
