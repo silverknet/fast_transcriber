@@ -137,6 +137,7 @@ export function parseProjectJson(text: string): ProjectFile {
   }
 
   const autoStems = parseAutoStems(o.autoStems)
+  const defaults = parseDefaults(o.defaults)
 
   return {
     formatVersion: PROJECT_FILE_VERSION,
@@ -147,5 +148,22 @@ export function parseProjectJson(text: string): ProjectFile {
     songs,
     ...(cloud ? { cloud } : {}),
     ...(autoStems ? { autoStems } : {}),
+    ...(defaults ? { defaults } : {}),
   }
+}
+
+/** Parse the optional project-wide `defaults` (count-in + pre-count-in cue). */
+function parseDefaults(raw: unknown): ProjectFile['defaults'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  const out: NonNullable<ProjectFile['defaults']> = {}
+  if (typeof r.countInBeats === 'number' && Number.isInteger(r.countInBeats) && r.countInBeats >= 0) {
+    out.countInBeats = r.countInBeats
+  }
+  const pc = r.preCountInCue as Record<string, unknown> | undefined
+  if (pc && (pc.mode === 'off' || pc.mode === 'title' || pc.mode === 'custom')) {
+    out.preCountInCue = { mode: pc.mode }
+    if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }

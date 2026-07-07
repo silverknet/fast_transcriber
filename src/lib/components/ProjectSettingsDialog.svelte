@@ -15,7 +15,13 @@
     DialogTitle,
   } from '$lib/components/ui/dialog'
   import { project as projectStore } from '$lib/stores/project'
-  import { setProjectAutoStems } from '$lib/project/commit'
+  import { setProjectAutoStems, setProjectDefaults, applyDefaultsToAllSongs } from '$lib/project/commit'
+  import {
+    watchProjectForAutoStems,
+    unwatchProjectForAutoStems,
+    isProjectAutoStemsWatched,
+  } from '$lib/client/desktopProjectFs'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import {
     AUTO_STEM_NAMES,
     type AutoStemName,
@@ -45,10 +51,14 @@
     other: false,
   })
   let quality = $state<AutoStemQuality>('balanced')
+  let countInBeats = $state(0)
+  /** THIS machine: auto-prepare stems locally (per-machine, not shared). */
+  let localPrepare = $state(false)
   let busy = $state(false)
   let error = $state('')
+  let applyMsg = $state('')
 
-  // Seed the form from the manifest each time the dialog opens.
+  // Seed the form from the manifest (+ this machine's watch state) on open.
   $effect(() => {
     if (!open) return
     const cfg = $projectStore.data?.autoStems
@@ -61,8 +71,13 @@
       bass: set.has('bass'),
       other: set.has('other'),
     }
+    countInBeats = $projectStore.data?.defaults?.countInBeats ?? 0
     error = ''
+    applyMsg = ''
     busy = false
+    // This machine's opt-in — read from the sidecar's per-machine watch list.
+    const osPath = $projectStore.osPath
+    if (osPath) void isProjectAutoStemsWatched(osPath).then((w) => (localPrepare = w))
   })
 
   const chosenStems = $derived(AUTO_STEM_NAMES.filter((n) => selected[n]))
@@ -73,10 +88,38 @@
     busy = true
     error = ''
     try {
+      // Shared project config (source of truth).
       await setProjectAutoStems({ enabled, stems: chosenStems, quality })
+      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0 })
+      // This machine (local): opt in/out of auto-preparing stems here.
+      const osPath = $projectStore.osPath
+      if (osPath) {
+        if (localPrepare) await watchProjectForAutoStems(osPath)
+        else await unwatchProjectForAutoStems(osPath)
+      }
       open = false
     } catch (e) {
       error = e instanceof Error ? e.message : 'Could not save project settings.'
+    } finally {
+      busy = false
+    }
+  }
+
+  async function applyCountInToAll() {
+    if (busy) return
+    busy = true
+    error = ''
+    applyMsg = ''
+    try {
+      // Persist the default first so "apply" writes the current value.
+      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0 })
+      const r = await applyDefaultsToAllSongs()
+      applyMsg =
+        r.errors > 0
+          ? `Updated ${r.updated} song${r.updated === 1 ? '' : 's'} · ${r.errors} error(s)`
+          : `Applied to ${r.updated} song${r.updated === 1 ? '' : 's'}.`
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Could not apply to all songs.'
     } finally {
       busy = false
     }
@@ -89,15 +132,20 @@
       <DialogTitle>Project settings</DialogTitle>
     </DialogHeader>
 
-    <div class="flex flex-col gap-5 pt-1">
+    <div class="flex max-h-[75vh] flex-col gap-5 overflow-y-auto pt-1">
+      <!-- ── Project config — the shared source of truth ─────────────────── -->
       <section class="flex flex-col gap-3">
+        <h3 class="text-muted-foreground text-[11px] font-bold uppercase tracking-wider">
+          Project · shared with collaborators
+        </h3>
+
         <label class="flex items-start gap-3">
           <input type="checkbox" bind:checked={enabled} class="accent-foreground mt-0.5 size-4" />
           <span class="flex flex-col">
-            <span class="text-sm font-semibold">Prepare stems automatically</span>
+            <span class="text-sm font-semibold">Use prepared stems</span>
             <span class="text-muted-foreground text-xs">
-              BarBro keeps the chosen stems ready for every song with audio.
-              Needs BarBro Desktop running.
+              The set of stems this project targets. Whether they're generated on
+              <em>your</em> machine is a separate choice below.
             </span>
           </span>
         </label>
@@ -113,11 +161,7 @@
           <div class="grid grid-cols-2 gap-1.5">
             {#each AUTO_STEM_NAMES as name (name)}
               <label class="flex cursor-pointer items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  bind:checked={selected[name]}
-                  class="accent-foreground size-3.5"
-                />
+                <input type="checkbox" bind:checked={selected[name]} class="accent-foreground size-3.5" />
                 {STEM_LABELS[name]}
               </label>
             {/each}
@@ -143,10 +187,68 @@
             {/each}
           </div>
         </fieldset>
+
+        <!-- Count-in default -->
+        <div class="border-foreground/10 flex flex-col gap-1.5 border-t pt-3">
+          <label class="flex flex-wrap items-center gap-2 text-sm">
+            <span class="font-semibold">Count-in</span>
+            <input
+              type="number"
+              min="0"
+              max="16"
+              bind:value={countInBeats}
+              class="border-foreground/30 bg-background w-16 border-2 px-2 py-1 text-sm tabular-nums focus:border-foreground focus:outline-none"
+            />
+            <span class="text-muted-foreground text-xs">clicks before each song (0 = none)</span>
+          </label>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-7 text-xs"
+              onclick={applyCountInToAll}
+              disabled={busy}
+            >
+              Apply to all songs
+            </Button>
+            {#if applyMsg}<span class="text-muted-foreground text-xs">{applyMsg}</span>{/if}
+          </div>
+          <span class="text-muted-foreground text-[11px]">
+            Saving sets the default for new songs; “Apply to all” also writes it to every existing
+            song. You can still override the count-in per song in the editor.
+          </span>
+        </div>
+      </section>
+
+      <!-- ── This computer — per-machine, never shared ───────────────────── -->
+      <section class="border-foreground/10 flex flex-col gap-2 border-t pt-4">
+        <h3 class="text-muted-foreground text-[11px] font-bold uppercase tracking-wider">
+          This computer
+        </h3>
+        <label class="flex items-start gap-3">
+          <input
+            type="checkbox"
+            bind:checked={localPrepare}
+            class="accent-foreground mt-0.5 size-4"
+            disabled={!$desktopCompanionStatus.reachable}
+          />
+          <span class="flex flex-col">
+            <span class="text-sm font-semibold">Prepare stems automatically on this computer</span>
+            <span class="text-muted-foreground text-xs">
+              Only affects this machine. Leave it off if you'd rather wait for a shared audio
+              package than have your computer run stem-splitting — it never changes the project or
+              anyone else's machine.
+            </span>
+          </span>
+        </label>
+        {#if !$desktopCompanionStatus.reachable}
+          <p class="text-muted-foreground pl-7 text-[11px]">BarBro Desktop must be running for this.</p>
+        {/if}
       </section>
 
       {#if noStemsButEnabled}
-        <p class="text-amber-600 text-xs">Pick at least one stem, or turn the feature off.</p>
+        <p class="text-amber-600 text-xs">Pick at least one stem, or turn “Use prepared stems” off.</p>
       {/if}
       {#if error}
         <p class="text-destructive text-xs">{error}</p>

@@ -186,6 +186,20 @@ export function createAutoStemsDaemon(deps) {
     schedule(250)
   }
 
+  /**
+   * Stop auto-preparing stems for a project on THIS machine (per-machine opt-
+   * out). The project's shared stem config is untouched — only this device
+   * stops generating. Used when a collaborator wants to wait for a package.
+   */
+  function unwatchProject(projectPath) {
+    if (typeof projectPath !== 'string' || !projectPath) return
+    if (watched.delete(projectPath)) {
+      clearBudgets(projectPath)
+      persist()
+      deps.log(`auto-stems: stopped watching ${projectPath}`)
+    }
+  }
+
   function schedule(delay = intervalMs) {
     if (stopped) return // never arm a timer after stop() (e.g. on app quit)
     if (timer) clearTimeout(timer)
@@ -418,6 +432,7 @@ export function createAutoStemsDaemon(deps) {
 
   return {
     watchProject,
+    unwatchProject,
     start,
     stop,
     runOnce,

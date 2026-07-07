@@ -46,12 +46,37 @@ export interface ProjectFile {
    */
   cloud?: ProjectCloudLink
   /**
-   * Project-wide auto stem-separation policy. When `enabled`, the desktop
-   * companion renders the listed `stems` at `quality` for every non-hidden
-   * song with audio, in the background. Absent on projects that never
-   * configured it (treated as disabled).
+   * Project-wide STEM TARGET (shared config): which `stems` at what `quality`
+   * the project wants prepared. This is the source of truth for the SET of
+   * stems, shared with collaborators. Whether a given MACHINE actually
+   * auto-generates them is a separate, per-machine choice (the sidecar's
+   * watch list) — so a collaborator on a weak laptop can leave auto-prep off
+   * and wait for the owner's package without changing this config.
    */
   autoStems?: ProjectAutoStems
+  /**
+   * Project-wide defaults (shared config): applied to songs as their starting
+   * point, overridable per song. Only ever written via `setProjectDefaults`.
+   */
+  defaults?: ProjectDefaults
+}
+
+export interface ProjectDefaults {
+  /** Default count-in beats for songs in this project (per-song overridable). */
+  countInBeats?: number
+  /** Default pre-count-in spoken cue (Phase B). */
+  preCountInCue?: PreCountInCueConfig
+}
+
+/**
+ * The spoken cue played BEFORE the count-in clicks. `title` announces each
+ * song's cue title; `custom` speaks a fixed `text` for every song; `off`
+ * disables it. The count length + spoken count are derived from the song's
+ * count-in.
+ */
+export interface PreCountInCueConfig {
+  mode: 'off' | 'title' | 'custom'
+  text?: string
 }
 
 /** Demucs stem slots the auto-splitter can target. Matches `StemName` in desktopBridge. */

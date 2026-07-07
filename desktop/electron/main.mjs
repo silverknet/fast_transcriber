@@ -463,6 +463,7 @@ function parseManifestObject(raw) {
   }
   const autoStems = parseManifestAutoStems(raw.autoStems)
   const cloud = parseManifestCloud(raw.cloud)
+  const defaults = parseManifestDefaults(raw.defaults)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -472,7 +473,27 @@ function parseManifestObject(raw) {
     songs,
     ...(autoStems ? { autoStems } : {}),
     ...(cloud ? { cloud } : {}),
+    ...(defaults ? { defaults } : {}),
   }
+}
+
+/**
+ * Parse the optional `defaults` block (project-wide count-in + pre-count-in
+ * cue). Preserved on round-trip so a sidecar manifest write never drops the
+ * shared project config (same class of bug as autoStems/cloud stripping).
+ */
+function parseManifestDefaults(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const out = {}
+  if (typeof raw.countInBeats === 'number' && Number.isInteger(raw.countInBeats) && raw.countInBeats >= 0) {
+    out.countInBeats = raw.countInBeats
+  }
+  const pc = raw.preCountInCue
+  if (pc && typeof pc === 'object' && (pc.mode === 'off' || pc.mode === 'title' || pc.mode === 'custom')) {
+    out.preCountInCue = { mode: pc.mode }
+    if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 async function readProjectManifest(projectPath) {
@@ -4825,9 +4846,14 @@ function startBeaconServer() {
       void handleAutoStemsWatch(req, res, cors)
       return
     }
+    if (req.method === 'POST' && req.url === '/native/auto-stems/unwatch') {
+      void handleAutoStemsUnwatch(req, res, cors)
+      return
+    }
     if (req.method === 'GET' && req.url === '/native/auto-stems/status') {
       const statuses = autoStemsDaemon ? autoStemsDaemon.getStatuses() : []
-      sendJson(res, 200, { ok: true, statuses }, cors)
+      const watched = autoStemsDaemon ? [...autoStemsDaemon._watched] : []
+      sendJson(res, 200, { ok: true, statuses, watched }, cors)
       return
     }
     if (req.method === 'POST' && req.url === '/native/auto-stems/retry') {
@@ -5191,6 +5217,25 @@ async function handleAutoStemsWatch(req, res, cors) {
     }
     if (!autoStemsDaemon) setupAutoStemsDaemon()
     autoStemsDaemon.watchProject(projectPath)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/auto-stems/unwatch` — body `{ projectPath }`. Per-machine
+ * opt-OUT: this device stops auto-preparing stems for the project (the shared
+ * project config is untouched). Lets a collaborator wait for a package instead
+ * of grinding on splits.
+ */
+async function handleAutoStemsUnwatch(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (autoStemsDaemon) autoStemsDaemon.unwatchProject(projectPath)
     sendJson(res, 200, { ok: true }, cors)
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)

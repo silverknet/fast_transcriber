@@ -13,7 +13,7 @@
  * manifest, with rollback if anything in between fails.
  */
 import { get } from 'svelte/store'
-import type { ProjectAutoStems, ProjectFile, ProjectSongEntry } from './types'
+import type { ProjectAutoStems, ProjectDefaults, ProjectFile, ProjectSongEntry } from './types'
 import { AUTO_STEM_NAMES } from './types'
 import {
   PROJECT_FILE_VERSION,
@@ -41,7 +41,6 @@ import {
   createProjectSong,
   getProjectInfo,
   getProjectWavInfoBatch,
-  watchProjectForAutoStems,
   readProjectSong,
   readProjectSongAsset,
   removeProjectSong,
@@ -245,7 +244,9 @@ export async function createProjectOnDisk(parentPath: string, name: string): Pro
   setActiveProject(r.projectPath, r.manifest, {})
   writeLastProjectPath(r.projectPath)
   recordRecentProjectPath(r.projectPath)
-  void watchProjectForAutoStems(r.projectPath).catch(() => {})
+  // Auto stem-prep is a per-MACHINE opt-in now (the "Prepare stems on this
+  // computer" toggle in Project settings) — NOT started automatically on open,
+  // so a collaborator's machine never grinds on splits it didn't ask for.
   return r.manifest
 }
 
@@ -269,10 +270,10 @@ export async function openProjectByPath(projectPath: string): Promise<ProjectFil
   setActiveProject(projectPath, r.manifest, meta)
   writeLastProjectPath(projectPath)
   recordRecentProjectPath(projectPath)
-  // Hand the project to the sidecar's background stem daemon. Best-effort:
-  // the daemon only acts if the manifest opts in (`autoStems.enabled`), and a
-  // failure here must never block opening the project.
-  void watchProjectForAutoStems(projectPath).catch(() => {})
+  // NOTE: no longer auto-registers the project for background stem prep on
+  // open — that's now an explicit per-machine opt-in (Project settings →
+  // "Prepare stems on this computer"). Prevents a collaborator's machine from
+  // auto-splitting stems it didn't choose to.
 
   const migrated = await migrateProjectSongsToV2(projectPath, r.manifest).catch((e) => {
     console.warn('[project] migration sweep failed:', e)
@@ -1234,6 +1235,72 @@ export async function setProjectAutoStems(config: ProjectAutoStems): Promise<voi
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)
+}
+
+/**
+ * Set the project-wide shared defaults (count-in + pre-count-in cue). The ONLY
+ * writer of this config block — it is never mutated as a side effect anywhere
+ * else, so casual actions can't corrupt the project's source of truth.
+ */
+export async function setProjectDefaults(patch: Partial<ProjectDefaults>): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    defaults: { ...snap.data.defaults, ...patch },
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/**
+ * Write the project defaults into EVERY non-hidden song's `.smap` (count-in
+ * now; the pre-count-in cue in Phase B) — the "Apply to all songs" action.
+ * Per-song edits in the editor still override afterward. Serial + best-effort.
+ */
+export async function applyDefaultsToAllSongs(): Promise<{ updated: number; errors: number }> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const osPath = snap.osPath
+  const defaults = snap.data.defaults ?? {}
+  let updated = 0
+  let errors = 0
+  for (const entry of snap.data.songs) {
+    if (entry.hidden) continue
+    try {
+      const r = await readProjectSong(osPath, entry.folder)
+      if (!r.ok) {
+        errors++
+        continue
+      }
+      const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+      const data = await decodeSmapFile(blob)
+      const sm = data.project.songMap
+      const nextMap: SongMap = { ...sm, metadata: { ...sm.metadata } }
+      let changed = false
+      if (defaults.countInBeats !== undefined) {
+        const cib = defaults.countInBeats > 0 ? defaults.countInBeats : undefined
+        if (nextMap.countInBeats !== cib) {
+          nextMap.countInBeats = cib
+          changed = true
+        }
+      }
+      if (!changed) continue
+      const enc = await encodeSmapFile({ project: { ...data.project, songMap: nextMap } })
+      const w = await writeProjectSong(osPath, entry.folder, new Uint8Array(await enc.arrayBuffer()))
+      if (!w.ok) {
+        errors++
+        continue
+      }
+      patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(nextMap))
+      updated++
+    } catch {
+      errors++
+    }
+  }
+  return { updated, errors }
 }
 
 export async function removeSongFromProject(

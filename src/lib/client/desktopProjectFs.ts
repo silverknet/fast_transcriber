@@ -110,6 +110,30 @@ export async function watchProjectForAutoStems(projectPath: string): Promise<Pro
   return await postJson<ProjectOkResult>(`${BASE_URL}/native/auto-stems/watch`, { projectPath })
 }
 
+/**
+ * Per-machine opt-out: stop auto-preparing stems for a project on THIS device.
+ * The shared project config is untouched.
+ */
+export async function unwatchProjectForAutoStems(projectPath: string): Promise<ProjectOkResult> {
+  return await postJson<ProjectOkResult>(`${BASE_URL}/native/auto-stems/unwatch`, { projectPath })
+}
+
+/**
+ * Whether this machine is currently auto-preparing stems for `projectPath`
+ * (reads the sidecar's per-machine watch list). Used to seed the settings
+ * toggle. Best-effort — returns false if the sidecar is unreachable.
+ */
+export async function isProjectAutoStemsWatched(projectPath: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/auto-stems/status`, { cache: 'no-store' })
+    if (!res.ok) return false
+    const data = (await res.json()) as { watched?: string[] }
+    return Array.isArray(data.watched) && data.watched.includes(projectPath)
+  } catch {
+    return false
+  }
+}
+
 export async function writeProjectManifest(
   projectPath: string,
   manifest: ProjectFile,
