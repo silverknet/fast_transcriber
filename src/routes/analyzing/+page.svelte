@@ -17,10 +17,21 @@
   // ── Dot-grid canvas ──────────────────────────────────────────────────────
   let canvas = $state<HTMLCanvasElement>()
 
-  // ~0.75 cm at 96 dpi; dot radius varies ±1.5 px around a 2 px base (max ~3.5 px ≈ 0.18 cm diameter)
-  const SPACING = 19
-  const BASE_R  = 2.7
-  const AMP     = 1.8
+  // ── 3D "fabric" grid ────────────────────────────────────────────────────
+  // A flat lattice of nodes, each given a Z, projected through a tiny pinhole
+  // camera. A couple of Gaussian "metal balls" roll across the sheet and pull
+  // it toward the camera — like watching a stretched fabric from below while
+  // something heavy rolls on top: the dented region bulges out and magnifies.
+  //
+  //   world node   : (x, y, z)          z = CAM_D − bump(x, y, t)
+  //   projection   : s = CAM_D / z       screenX = cx + x·s,  screenY = cy + y·s
+  //   bump lowers z  ⇒  s > 1  ⇒  that patch spreads out + its dots grow.
+  const CELL = 40 // grid spacing in world units (≈ px on the flat baseline)
+  const CAM_D = 1000 // depth of the flat sheet; doubles as the focal length
+  const BUMP_A = 430 // how far a ball pulls the sheet toward the camera
+  const BUMP_SIGMA = 150 // ball footprint (world units)
+  const OVERSCAN = 1.4 // extra lattice past the screen so magnified edges stay covered
+  const BASE_R = 1.5 // dot radius on the flat baseline
 
   $effect(() => {
     if (!canvas) return
@@ -28,18 +39,34 @@
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    let dpr  = window.devicePixelRatio || 1
+    let dpr = window.devicePixelRatio || 1
     let cssW = 0
     let cssH = 0
     let rafId = 0
+    let cols = 0
+    let rows = 0
+    let halfW = 0
+    let halfH = 0
+    let px = new Float32Array(0)
+    let py = new Float32Array(0)
+    let pr = new Float32Array(0)
 
     function resize() {
-      dpr  = window.devicePixelRatio || 1
+      dpr = window.devicePixelRatio || 1
       cssW = canvas!.offsetWidth
       cssH = canvas!.offsetHeight
-      canvas!.width  = Math.round(cssW * dpr)
+      canvas!.width = Math.round(cssW * dpr)
       canvas!.height = Math.round(cssH * dpr)
       ctx!.setTransform(dpr, 0, 0, dpr, 0, 0)
+      // Lattice sized to cover the (over-scanned) viewport in world units.
+      halfW = (cssW / 2) * OVERSCAN
+      halfH = (cssH / 2) * OVERSCAN
+      cols = Math.max(2, Math.ceil((halfW * 2) / CELL) + 1)
+      rows = Math.max(2, Math.ceil((halfH * 2) / CELL) + 1)
+      const n = cols * rows
+      px = new Float32Array(n)
+      py = new Float32Array(n)
+      pr = new Float32Array(n)
     }
 
     const ro = new ResizeObserver(resize)
@@ -51,43 +78,64 @@
       const t = performance.now() / 1000
 
       ctx!.clearRect(0, 0, cssW, cssH)
-
       const dark = document.documentElement.classList.contains('dark')
-      ctx!.fillStyle = dark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.13)'
-
       const cx = cssW / 2
       const cy = cssH / 2
-      const maxRad = Math.hypot(cx, cy) + SPACING
 
-      // Two sources that drift slowly on independent Lissajous paths
-      const drift = cssW * 0.16
-      const s1x = cx + Math.cos(t * 0.23) * drift - cssW * 0.12
-      const s1y = cy + Math.sin(t * 0.17) * drift * 0.5
-      const s2x = cx + Math.cos(t * 0.19 + 1.9) * drift + cssW * 0.12
-      const s2y = cy + Math.sin(t * 0.29 + 0.7) * drift * 0.5
+      // Two heavy balls rolling on independent, slowly-wandering paths.
+      const b1x = Math.sin(t * 0.34) * halfW * 0.62
+      const b1y = Math.cos(t * 0.27) * halfH * 0.55
+      const b2x = Math.cos(t * 0.23 + 1.3) * halfW * 0.5
+      const b2y = Math.sin(t * 0.31 + 0.6) * halfH * 0.62
+      const inv2s2 = 1 / (2 * BUMP_SIGMA * BUMP_SIGMA)
 
-      for (let rad = SPACING; rad < maxRad; rad += SPACING) {
-        const numDots = Math.max(6, Math.floor((2 * Math.PI * rad) / SPACING))
-        for (let i = 0; i < numDots; i++) {
-          const theta = (i / numDots) * Math.PI * 2
-          const x = cx + rad * Math.cos(theta)
-          const y = cy + rad * Math.sin(theta)
-
-          const d1 = Math.hypot(x - s1x, y - s1y)
-          const d2 = Math.hypot(x - s2x, y - s2y)
-
-          // Different spatial AND temporal frequencies break standing waves
-          const wave =
-            Math.sin(d1 * 0.019 - t * 5.1) * 0.5 +
-            Math.sin(d2 * 0.013 - t * 3.3 + 1.1) * 0.5
-
-          const r = BASE_R + wave * AMP
-          if (r <= 0.3) continue
-
-          ctx!.beginPath()
-          ctx!.arc(x, y, r, 0, Math.PI * 2)
-          ctx!.fill()
+      // Project every node. z shrinks under a ball → s magnifies that patch.
+      for (let j = 0; j < rows; j++) {
+        const wy = j * CELL - halfH
+        for (let i = 0; i < cols; i++) {
+          const wx = i * CELL - halfW
+          const dx1 = wx - b1x
+          const dy1 = wy - b1y
+          const dx2 = wx - b2x
+          const dy2 = wy - b2y
+          const bump =
+            BUMP_A * Math.exp(-(dx1 * dx1 + dy1 * dy1) * inv2s2) +
+            BUMP_A * 0.85 * Math.exp(-(dx2 * dx2 + dy2 * dy2) * inv2s2)
+          const s = CAM_D / (CAM_D - bump)
+          const idx = j * cols + i
+          px[idx] = cx + wx * s
+          py[idx] = cy + wy * s
+          pr[idx] = BASE_R * s * s // grow faster than linear so the bump pops
         }
+      }
+
+      // Mesh: one path, uniform faint stroke — the deformation itself sells 3D.
+      ctx!.strokeStyle = dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.07)'
+      ctx!.lineWidth = 1
+      ctx!.beginPath()
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const idx = j * cols + i
+          if (i < cols - 1) {
+            ctx!.moveTo(px[idx], py[idx])
+            ctx!.lineTo(px[idx + 1], py[idx + 1])
+          }
+          if (j < rows - 1) {
+            ctx!.moveTo(px[idx], py[idx])
+            ctx!.lineTo(px[idx + cols], py[idx + cols])
+          }
+        }
+      }
+      ctx!.stroke()
+
+      // Nodes: radius grows toward the camera for a depth pop.
+      ctx!.fillStyle = dark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.3)'
+      for (let idx = 0; idx < px.length; idx++) {
+        const r = pr[idx]
+        if (r <= 0.25) continue
+        ctx!.beginPath()
+        ctx!.arc(px[idx], py[idx], r, 0, Math.PI * 2)
+        ctx!.fill()
       }
     }
 

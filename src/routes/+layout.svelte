@@ -338,15 +338,18 @@
     /* border-radius: calc(var(--radius) * 1.5); */
     border-radius: 0;
     background-color: var(--background);
+    /* Subtle grid texture. Uses --foreground (NOT --ink) so it adapts per
+       theme: faint dark lines on light paper, faint light lines on the dark
+       background — otherwise the dark-mode grid vanishes into the bg. */
     background-image:
       repeating-linear-gradient(
         90deg,
-        color-mix(in oklch, var(--ink) 4%, transparent) 0 1px,
+        color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px,
         transparent 1px 42px
       ),
       repeating-linear-gradient(
         0deg,
-        color-mix(in oklch, var(--ink) 3%, transparent) 0 1px,
+        color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px,
         transparent 1px 42px
       );
     overflow: clip;
