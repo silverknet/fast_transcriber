@@ -70,9 +70,13 @@
     ro.observe(canvas)
     resize()
 
+    const startMs = performance.now()
     function frame() {
       rafId = requestAnimationFrame(frame)
-      const t = performance.now() / 1000
+      const t = (performance.now() - startMs) / 1000
+      // Ease the bumps in from a flat sheet, so at t≈0 it's a regular
+      // undeformed grid and the deformation rolls in over ~1.5s.
+      const ramp = 1 - Math.exp(-t / 1.4)
 
       ctx!.clearRect(0, 0, cssW, cssH)
       const dark = document.documentElement.classList.contains('dark')
@@ -96,8 +100,9 @@
           const dx2 = wx - b2x
           const dy2 = wy - b2y
           const bump =
-            BUMP_A * Math.exp(-(dx1 * dx1 + dy1 * dy1) * inv2s2) +
-            BUMP_A * 0.7 * Math.exp(-(dx2 * dx2 + dy2 * dy2) * inv2s2)
+            ramp *
+            (BUMP_A * Math.exp(-(dx1 * dx1 + dy1 * dy1) * inv2s2) +
+              BUMP_A * 0.7 * Math.exp(-(dx2 * dx2 + dy2 * dy2) * inv2s2))
           const s = CAM_D / (CAM_D - bump)
           const idx = j * cols + i
           px[idx] = cx + wx * s
