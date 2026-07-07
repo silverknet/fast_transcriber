@@ -26,6 +26,7 @@
     AUTO_STEM_NAMES,
     type AutoStemName,
     type AutoStemQuality,
+    type PreCountInCueMode,
   } from '$lib/project/types'
 
   let { open = $bindable(false) } = $props<{ open?: boolean }>()
@@ -52,6 +53,8 @@
   })
   let quality = $state<AutoStemQuality>('balanced')
   let countInBeats = $state(0)
+  let cueMode = $state<PreCountInCueMode>('off')
+  let cueText = $state('')
   /** THIS machine: auto-prepare stems locally (per-machine, not shared). */
   let localPrepare = $state(false)
   let busy = $state(false)
@@ -72,6 +75,9 @@
       other: set.has('other'),
     }
     countInBeats = $projectStore.data?.defaults?.countInBeats ?? 0
+    const pc = $projectStore.data?.defaults?.preCountInCue
+    cueMode = pc?.mode ?? 'off'
+    cueText = pc?.text ?? ''
     error = ''
     applyMsg = ''
     busy = false
@@ -82,6 +88,10 @@
 
   const chosenStems = $derived(AUTO_STEM_NAMES.filter((n) => selected[n]))
   const noStemsButEnabled = $derived(enabled && chosenStems.length === 0)
+  const preCountInCue = $derived({
+    mode: cueMode,
+    ...(cueMode === 'custom' && cueText.trim() ? { text: cueText.trim() } : {}),
+  })
 
   async function save() {
     if (busy) return
@@ -90,7 +100,7 @@
     try {
       // Shared project config (source of truth).
       await setProjectAutoStems({ enabled, stems: chosenStems, quality })
-      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0 })
+      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0, preCountInCue })
       // This machine (local): opt in/out of auto-preparing stems here.
       const osPath = $projectStore.osPath
       if (osPath) {
@@ -112,7 +122,7 @@
     applyMsg = ''
     try {
       // Persist the default first so "apply" writes the current value.
-      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0 })
+      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0, preCountInCue })
       const r = await applyDefaultsToAllSongs()
       applyMsg =
         r.errors > 0
@@ -217,6 +227,44 @@
           <span class="text-muted-foreground text-[11px]">
             Saving sets the default for new songs; “Apply to all” also writes it to every existing
             song. You can still override the count-in per song in the editor.
+          </span>
+        </div>
+
+        <!-- Pre-count-in spoken cue -->
+        <div class="border-foreground/10 flex flex-col gap-1.5 border-t pt-3">
+          <span class="text-sm font-semibold">Spoken count-in</span>
+          <span class="text-muted-foreground text-xs">
+            Before the clicks, a voice announces the song and count length, then counts the beats in
+            time (e.g. “Valerie… 8… one, two, three…”).
+          </span>
+          <div class="mt-1 flex flex-col gap-1.5">
+            {#each [{ value: 'off', label: 'Off', hint: 'Clicks only' }, { value: 'title', label: 'Announce the song', hint: 'Uses each song’s cue title' }, { value: 'custom', label: 'Custom phrase', hint: 'Same words for every song' }] as opt (opt.value)}
+              <label class="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="pre-count-in-cue"
+                  value={opt.value}
+                  checked={cueMode === opt.value}
+                  onchange={() => (cueMode = opt.value as PreCountInCueMode)}
+                  class="accent-foreground size-3.5"
+                />
+                <span class="font-medium">{opt.label}</span>
+                <span class="text-muted-foreground text-xs">— {opt.hint}</span>
+              </label>
+            {/each}
+          </div>
+          {#if cueMode === 'custom'}
+            <input
+              type="text"
+              bind:value={cueText}
+              placeholder="e.g. Here we go"
+              maxlength="60"
+              class="border-foreground/30 bg-background mt-1 border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
+            />
+          {/if}
+          <span class="text-muted-foreground text-[11px]">
+            The count length is taken from the count-in above. Override the spoken words per song in
+            the Cue section.
           </span>
         </div>
       </section>

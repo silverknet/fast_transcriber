@@ -1570,6 +1570,17 @@
     else beatEditError = ''
   }
 
+  function setSelectedCueSpokenCountIn(spokenCountIn: boolean) {
+    const track = selectedCueTrack
+    if (!track) return
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? { ...t, spokenCountIn } : t)),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
   function generateSelectedCueTrackFromSections() {
     const track = selectedCueTrack
     if (!track) {
@@ -2283,6 +2294,21 @@
                 aria-label="Intro cue text"
                 maxlength="120"
               />
+              <label class="mt-2 flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedCueTrack.spokenCountIn ?? false}
+                  onchange={(e) => setSelectedCueSpokenCountIn((e.currentTarget as HTMLInputElement).checked)}
+                  class="accent-foreground mt-0.5 size-4"
+                />
+                <span class="flex flex-col">
+                  <span class="font-medium">Speak the count-in</span>
+                  <span class="text-muted-foreground text-xs">
+                    Announces the intro above + the count length, then counts the beats aloud
+                    (e.g. “{selectedCueIntroText || $songMap?.metadata.title || 'Song'}… {cueCountInBeats || 4}… one, two…”).
+                  </span>
+                </span>
+              </label>
             </fieldset>
 
             <div class="flex flex-wrap items-center gap-2">

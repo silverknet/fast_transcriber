@@ -74,8 +74,10 @@ export interface ProjectDefaults {
  * disables it. The count length + spoken count are derived from the song's
  * count-in.
  */
+export type PreCountInCueMode = 'off' | 'title' | 'custom'
+
 export interface PreCountInCueConfig {
-  mode: 'off' | 'title' | 'custom'
+  mode: PreCountInCueMode
   text?: string
 }
 

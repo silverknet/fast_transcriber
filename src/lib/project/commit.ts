@@ -15,6 +15,7 @@
 import { get } from 'svelte/store'
 import type { ProjectAutoStems, ProjectDefaults, ProjectFile, ProjectSongEntry } from './types'
 import { AUTO_STEM_NAMES } from './types'
+import { createDefaultCueTrack } from '$lib/songmap/cueTracks'
 import {
   PROJECT_FILE_VERSION,
   PROJECT_SONGS_DIR,
@@ -1286,6 +1287,49 @@ export async function applyDefaultsToAllSongs(): Promise<{ updated: number; erro
           nextMap.countInBeats = cib
           changed = true
         }
+      }
+      // Pre-count-in spoken cue: set the primary cue track's spokenCountIn flag
+      // (and, for a fixed custom phrase, seed an intro event). Per-song edits in
+      // the Cue section still override afterward.
+      const pc = defaults.preCountInCue
+      if (pc) {
+        const spoken = pc.mode !== 'off'
+        const tracks =
+          nextMap.cueTracks && nextMap.cueTracks.length > 0
+            ? nextMap.cueTracks.map((t) => ({ ...t, events: [...t.events] }))
+            : [createDefaultCueTrack()]
+        const primaryIdx = Math.max(
+          0,
+          tracks.findIndex((t) => t.enabled),
+        )
+        const primary = tracks[primaryIdx]!
+        if (primary.spokenCountIn !== spoken) {
+          primary.spokenCountIn = spoken
+          changed = true
+        }
+        if (pc.mode === 'custom' && pc.text?.trim()) {
+          const text = pc.text.trim()
+          const introIdx = primary.events.findIndex((e) => e.kind === 'intro')
+          if (introIdx >= 0) {
+            const cur = primary.events[introIdx]!
+            if (cur.text !== text || !cur.enabled) {
+              primary.events[introIdx] = { ...cur, text, enabled: true, edited: true }
+              changed = true
+            }
+          } else {
+            primary.events.unshift({
+              id: `cue_intro_${crypto.randomUUID().slice(0, 8)}`,
+              kind: 'intro',
+              enabled: true,
+              anchor: { kind: 'time', timeSec: 0 },
+              text,
+              source: 'custom',
+              edited: true,
+            })
+            changed = true
+          }
+        }
+        nextMap.cueTracks = tracks
       }
       if (!changed) continue
       const enc = await encodeSmapFile({ project: { ...data.project, songMap: nextMap } })

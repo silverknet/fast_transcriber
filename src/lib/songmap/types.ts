@@ -181,6 +181,13 @@ export type CueTrack = {
   events: CueEvent[]
   suppressedGeneratedKeys: string[]
   renderExport?: RenderedCueExport
+  /**
+   * Speak the count-in before the song: announce the intro (title or custom
+   * text) + the count length, then count the beats in time — e.g.
+   * "Valerie … 8 … one, two, …, eight". Derived at render time from
+   * `countInBeats` (not stored as events). Off/absent = click-only count-in.
+   */
+  spokenCountIn?: boolean
 }
 
 export type AudioSource = 'upload' | 'import' | 'unknown'

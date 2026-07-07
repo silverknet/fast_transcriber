@@ -4,7 +4,7 @@ import type { Bar, CueEvent, CueTrack, Section, SongMap } from './types'
 
 export const DEFAULT_CUE_TRACK_ID = 'main'
 
-const NUMBER_WORDS = [
+export const NUMBER_WORDS = [
   'one',
   'two',
   'three',
@@ -217,6 +217,7 @@ export function cueTrackHasSharedData(track: CueTrack): boolean {
     track.name.trim() ||
       track.voiceId ||
       track.events.length > 0 ||
-      track.suppressedGeneratedKeys.length > 0,
+      track.suppressedGeneratedKeys.length > 0 ||
+      track.spokenCountIn,
   )
 }

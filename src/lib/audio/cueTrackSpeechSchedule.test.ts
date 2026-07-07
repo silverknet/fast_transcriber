@@ -305,6 +305,64 @@ describe('buildCueSpeechEvents uses the announcement override', () => {
   })
 })
 
+describe('buildCueSpeechEvents spoken count-in', () => {
+  it('announces "{intro} N" then counts 1..N on the count-in beats', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Valerie (Amy Winehouse cover)'
+    const track = setIntroCue(sm, 'Valerie')
+    track.spokenCountIn = true
+    const ev = buildCueSpeechEvents(sm, track)
+
+    // Title announces the intro override + the count length.
+    const titleEv = ev.find((e) => e.kind === 'title')
+    expect(titleEv?.text).toBe('Valerie 4.')
+
+    // N spoken counts, in order, on the count-in beats.
+    const counts = ev.filter((e) => e.kind === 'count')
+    expect(counts.map((e) => e.text)).toEqual(['one.', 'two.', 'three.', 'four.'])
+
+    // Counts land after the prelude, on the pre-song beats, evenly spaced.
+    const preludeSec = titleCuePreludeSec(sm, track)
+    const ci = computeCountIn(sm, 4)!
+    const times = countInSpeechOutputTimes(sm, sm.audio!.trim, ci.prependSec, 4)
+    for (let i = 0; i < 4; i++) {
+      expect(counts[i]!.tSec).toBeCloseTo(Math.max(0.0001, preludeSec + times[i]!), 4)
+    }
+  })
+
+  it('falls back to the song title for the announcement when no intro cue exists', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Dum av Dig'
+    const track = trackWithEvents([])
+    track.spokenCountIn = true
+    sm.cueTracks = [track]
+    const ev = buildCueSpeechEvents(sm, track)
+    const titleEv = ev.find((e) => e.kind === 'title')
+    expect(titleEv?.text).toBe('Dum av Dig 4.')
+    expect(ev.filter((e) => e.kind === 'count')).toHaveLength(4)
+  })
+
+  it('emits nothing extra when spokenCountIn is off', () => {
+    const sm = mapWithCountIn(4)
+    sm.metadata.title = 'Dum av Dig'
+    const track = trackWithEvents([])
+    sm.cueTracks = [track]
+    const ev = buildCueSpeechEvents(sm, track)
+    expect(ev).toHaveLength(0)
+  })
+
+  it('does nothing when countInBeats is 0 even if spokenCountIn is on', () => {
+    const sm = mapWithCountIn(0)
+    sm.countInBeats = undefined
+    const track = trackWithEvents([])
+    track.spokenCountIn = true
+    sm.cueTracks = [track]
+    const ev = buildCueSpeechEvents(sm, track)
+    expect(ev.filter((e) => e.kind === 'count')).toHaveLength(0)
+    expect(ev.find((e) => e.kind === 'title')).toBeUndefined()
+  })
+})
+
 describe('effectiveCountInBeats', () => {
   it('reads top-level countInBeats', () => {
     const sm = mapWithCountIn(0)

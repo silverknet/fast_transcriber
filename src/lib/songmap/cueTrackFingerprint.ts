@@ -19,6 +19,7 @@ function stripRenderExport(track: CueTrack | undefined): unknown {
     name: track.name,
     enabled: track.enabled,
     voiceId: track.voiceId ?? null,
+    spokenCountIn: track.spokenCountIn ?? false,
     suppressedGeneratedKeys: [...track.suppressedGeneratedKeys].sort(),
     events: track.events.map((event) => ({
       id: event.id,
@@ -60,7 +61,7 @@ export function cueTrackFingerprintPayload(sm: SongMap, track: CueTrack | undefi
   }))
 
   return {
-    v: 5,
+    v: 6,
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),

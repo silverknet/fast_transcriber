@@ -91,7 +91,7 @@ describe('fingerprintCueTrackInputs', () => {
   it('payload is JSON-stable for bar order', () => {
     const m = minimalMap()
     const p = cueTrackFingerprintPayload(m)
-    expect(JSON.stringify(p)).toContain('"v":5')
+    expect(JSON.stringify(p)).toContain('"v":6')
   })
 
   it('changes when intro cue text changes', () => {
@@ -118,5 +118,13 @@ describe('fingerprintCueTrackInputs', () => {
       metadata: { ...a.metadata, title: 'Different name same length' },
     })
     expect(fingerprintCueTrackInputs(a)).toBe(fingerprintCueTrackInputs(b))
+  })
+
+  it('changes when the spoken count-in is toggled', () => {
+    const a = minimalMap({ cueTracks: [introTrack('Valerie')] })
+    const b = minimalMap({
+      cueTracks: [{ ...introTrack('Valerie'), spokenCountIn: true }],
+    })
+    expect(fingerprintCueTrackInputs(a)).not.toBe(fingerprintCueTrackInputs(b))
   })
 })
