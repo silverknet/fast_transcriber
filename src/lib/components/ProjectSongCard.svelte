@@ -76,7 +76,13 @@
 
   let title = $derived(metadata?.title ?? entry.folder.replace(/^songs\//, ''))
   let artist = $derived(metadata?.artist ?? '')
-  let keyText = $derived(formatKey(metadata?.keyDetail))
+  // Show the committed key if set, otherwise the auto-detected one (rendered
+  // muted so "detected" reads differently from "confirmed").
+  let keyText = $derived(formatKey(metadata?.keyDetail ?? metadata?.detectedKey))
+  let keyIsDetected = $derived(!metadata?.keyDetail && !!metadata?.detectedKey)
+  // Songs with audio but no beat grid yet — surfaced clearly so a blank
+  // key/BPM doesn't look broken.
+  let notAnalyzed = $derived(!!metadata?.hasAudio && metadata?.analyzed === false)
   // BPM column is narrow (~40 px), so we display the rounded integer and put
   // the precise value in `title` for hover — keeps "120" or "92" visible
   // without truncating songs whose detector returned "120.5", "91.73", etc.
@@ -178,6 +184,13 @@
       {#if entry.hidden}
         <span class="border-foreground/40 text-muted-foreground shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider">hidden</span>
       {/if}
+      {#if notAnalyzed}
+        <!-- Has audio but no beat grid yet — make it obvious the blanks aren't a bug. -->
+        <span
+          class="border-amber-500/60 text-amber-700 dark:text-amber-400 shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider"
+          title="This song has audio but hasn't been analyzed yet — open it to detect beats, bars and key."
+        >Not analyzed</span>
+      {/if}
       {#if !hasAudio}
         <!-- Inline upload affordance for stub songs. Triggers the project-level
              hidden file input via `onAttachAudio`; one click → file picker →
@@ -194,8 +207,13 @@
       {/if}
     </div>
 
-    <!-- Key column: musical key text, left-aligned, truncated. -->
-    <div class="text-muted-foreground min-w-0 truncate font-mono text-xs">
+    <!-- Key column: committed key, or the auto-detected key rendered muted. -->
+    <div
+      class="min-w-0 truncate font-mono text-xs {keyIsDetected
+        ? 'text-muted-foreground/60 italic'
+        : 'text-muted-foreground'}"
+      title={keyIsDetected ? 'Detected automatically — open the song to confirm' : undefined}
+    >
       {keyText}
     </div>
     <!-- BPM column: rounded integer for column fit; precise value in tooltip. -->

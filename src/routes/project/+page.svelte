@@ -22,6 +22,7 @@
   import AudioLockedDialog from '$lib/components/AudioLockedDialog.svelte'
   import AutoStemsStatusPanel from '$lib/components/AutoStemsStatusPanel.svelte'
   import { refreshAutoStemsStatuses } from '$lib/client/autoStemsStatus'
+  import { runKeyBackfill } from '$lib/client/keyBackfill'
   import { page } from '$app/stores'
   import { projectRole, loadProjectRole } from '$lib/stores/projectRole'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
@@ -287,6 +288,7 @@
     } finally {
       refreshing = false
     }
+    void runKeyBackfill()
   }
 
   $effect(() => {
@@ -316,6 +318,9 @@
         // sidecar wrote stems straight into the project folder, and
         // `refreshProjectInfo` above already mirrored those into the manifest.
         await hydrateSidecarJobs()
+        // Fill in keys for any analyzed songs that don't have one yet, in the
+        // background — cards update live as each is detected.
+        void runKeyBackfill()
       } catch (e) {
         restoreError = e instanceof Error ? e.message : 'Failed to restore project.'
       } finally {

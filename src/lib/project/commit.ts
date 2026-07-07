@@ -151,6 +151,12 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   if (m.artist) out.artist = m.artist
   if (m.keyDetail) out.keyDetail = m.keyDetail
   if (m.bpm !== undefined) out.bpm = m.bpm
+  out.analyzed = m.analyzed ?? map.timeline.bars.length > 0
+  const dk = map.chordHints?.detectedKey
+  if (dk) {
+    out.detectedKey = { root: dk.root, ...(dk.accidental ? { accidental: dk.accidental } : {}), mode: dk.mode }
+    out.keyIsDetected = !m.keyDetail
+  }
   const countIn = effectiveCountInBeats(map)
   if (countIn > 0) {
     out.countInBeats = countIn
