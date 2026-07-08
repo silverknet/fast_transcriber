@@ -1845,7 +1845,11 @@
       cueGenErr = 'Create a cue track first.'
       return
     }
-    const needsVoice = track.events.some((event) => event.enabled && event.text?.trim())
+    // The spoken count-in produces speech that isn't stored as text events, so
+    // it must count toward "needs voice" — otherwise the render skips the
+    // readiness guard and silently produces a cue with no speech.
+    const needsVoice =
+      !!track.spokenCountIn || track.events.some((event) => event.enabled && event.text?.trim())
     if (needsVoice && !piperCueReady) {
       cueGenErr = 'Voice cues are not ready. Start BarBro Desktop and finish voice setup.'
       return
@@ -2531,7 +2535,11 @@
             {:else if overviewCuesEnabled && !$desktopCompanionStatus.reachable}
               <span class="text-muted-foreground text-xs">BarBro Desktop needed for spoken cues.</span>
             {/if}
-            {#if cueGenErr}<span class="text-destructive text-xs">{cueGenErr}</span>{/if}
+            {#if cueGenErr}
+              <span class="text-destructive text-xs">{cueGenErr}</span>
+            {:else if cueSpeechNote}
+              <span class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</span>
+            {/if}
           </div>
         {/if}
 
