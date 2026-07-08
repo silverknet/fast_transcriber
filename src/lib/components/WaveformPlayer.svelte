@@ -126,6 +126,8 @@
     selectedBeatId = $bindable<string | null>(null),
     /** Resolved + formatted chord label per beat (carry-forward included). */
     chordLabelByBeatId = {} as Record<string, string>,
+    /** Playback overview: formatted current chord per beat, usually carry-forward resolved. */
+    currentChordLabelByBeatId = {} as Record<string, string>,
     /** Per-bar chord suggestions from cached chroma, keyed by downbeat id (chords mode only). */
     chordSuggestionByBeatId = {} as Record<string, { label: string; confidence: number }>,
     /** Chords mode: pointer position when user picks a beat (popover anchor). */
@@ -531,6 +533,25 @@
     rangeEnd = next.end
   }
 
+  function beatIdAtTime(beats: Beat[], timeSec: number): string | null {
+    if (beats.length === 0) return null
+    let lo = 0
+    let hi = beats.length - 1
+    let best = -1
+    const t = Math.max(0, timeSec)
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2)
+      const beat = beats[mid]!
+      if (beat.timeSec <= t + 1e-4) {
+        best = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    return best >= 0 ? beats[best]!.id : null
+  }
+
   function setViewport(start, end) {
     const next = clampViewportToTimeline(timelineSec, start, end, MIN_VIEW_SPAN_SEC)
     viewStart = next.start
@@ -579,6 +600,36 @@
       ? (Math.max(0, Math.min(currentTime, timelineSec)) / timelineSec) * 100
       : 0,
   )
+  let playbackBeats = $derived.by(() => (beatGrid ? sortBeatsByTime(beatGrid.beats) : []))
+  let overviewChordDataCount = $derived.by(
+    () =>
+      Object.keys(currentChordLabelByBeatId).length + Object.keys(chordLabelByBeatId).length,
+  )
+  let hasOverviewChordData = $derived(overviewChordDataCount > 0)
+  let showOverviewChordReadout = $derived(
+    isEditorVariant && playbackBeats.length > 0 && (hasOverviewChordData || isPlaying),
+  )
+  let overviewChordTimeCandidates = $derived.by(() => {
+    const offset = controller.mediaTimeOffsetSec
+    const candidates = [currentTime]
+    if (Math.abs(offset) > 1e-6) {
+      candidates.push(currentTime - offset, currentTime + offset)
+    }
+    return candidates
+  })
+  let currentOverviewChordLabel = $derived.by(() => {
+    if (!showOverviewChordReadout || !hasOverviewChordData || playbackBeats.length === 0) return ''
+    for (const timeSec of overviewChordTimeCandidates) {
+      if (!Number.isFinite(timeSec)) continue
+      const beatId = beatIdAtTime(playbackBeats, timeSec)
+      if (!beatId) continue
+      const label = currentChordLabelByBeatId[beatId] ?? chordLabelByBeatId[beatId] ?? ''
+      if (label) return label
+    }
+    return ''
+  })
+  let overviewChordDisplayLabel = $derived(currentOverviewChordLabel || '-')
+  let overviewChordStatusLabel = $derived(isPlaying ? 'Playing chord' : 'Current chord')
 
   /** Time range [startSec, endSec) of the current edit-mode selection (sections or chords). */
   let editSelectionTimeSec = $derived.by((): { startSec: number; endSec: number } | null => {
@@ -2136,14 +2187,26 @@
     </div>
 
     <div class="flex flex-col gap-1.5">
-      <p class="text-muted-foreground text-[10px]">
-        {#if isEditorVariant}
-          Overview — full timeline · shaded = selection · bright box = detail viewport (same navigation as import)
-        {:else}
-          Overview — full file · shaded = selection · bright box = detail viewport (drag body, resize grips, click outside
-          to recenter)
+      <div class="flex min-h-5 items-center justify-between gap-3">
+        <p class="text-muted-foreground text-[10px]">
+          {#if isEditorVariant}
+            Overview — full timeline · shaded = selection · bright box = detail viewport (same navigation as import)
+          {:else}
+            Overview — full file · shaded = selection · bright box = detail viewport (drag body, resize grips, click outside
+            to recenter)
+          {/if}
+        </p>
+        {#if showOverviewChordReadout}
+          <div
+            class="border-foreground bg-primary text-primary-foreground brutalist-shadow-sm inline-flex shrink-0 items-center gap-2 rounded-[var(--radius)] border-2 px-2.5 py-1 text-[11px] font-black"
+            aria-live="polite"
+            aria-label={`Current chord: ${overviewChordDisplayLabel}`}
+          >
+            <span class="opacity-80">{overviewChordStatusLabel}</span>
+            <span class="font-mono text-sm tabular-nums">{overviewChordDisplayLabel}</span>
+          </div>
         {/if}
-      </p>
+      </div>
       <div
         bind:this={minimapEl}
         class="text-foreground border-foreground/15 bg-foreground/5 relative h-[52px] w-full overflow-hidden overscroll-x-contain rounded-md border {minimapCursorClass}"

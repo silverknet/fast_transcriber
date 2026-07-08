@@ -15,11 +15,18 @@
    *     1 s); the project autosave then ships it to disk.
    *  4. On unmount, dispose the engine (releases buffers + closes context).
    */
-  import { onDestroy, onMount } from 'svelte'
+  import { onDestroy, onMount, untrack } from 'svelte'
   import { get } from 'svelte/store'
   import { Button } from '$lib/components/ui/button'
   import MixerTrackLane from '$lib/components/MixerTrackLane.svelte'
+  import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
   import { Pause, Play, Square } from '@lucide/svelte'
+  import {
+    formatChordSymbol,
+    formatSongKeyLabel,
+    resolveChordAtEachBeat,
+    songKeyPreferFlats,
+  } from '$lib/chords'
   import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
@@ -33,6 +40,7 @@
   import { refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
+  import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
   import { project as projectStore } from '$lib/stores/project'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
@@ -50,6 +58,14 @@
     '#f97316', // orange (cue)
   ]
 
+  /**
+   * Bump `reloadSignal` from the parent to force a full re-scan + re-load of
+   * lanes (e.g. after the Overview "Play cues" toggle renders/removes the cue
+   * WAV). Changing it re-runs `reload()`; the initial value is ignored so mount
+   * doesn't double-load.
+   */
+  let { reloadSignal = 0 } = $props<{ reloadSignal?: number }>()
+
   /** What we hand to MixerTrackLane for rendering. */
   interface LaneView {
     key: string
@@ -61,12 +77,54 @@
     soloed: boolean
   }
 
+  interface ChordTimelineSegment {
+    id: string
+    label: string
+    startSec: number
+    endSec: number
+    hasChord: boolean
+  }
+
+  interface ChordApproachView extends ChordTimelineSegment {
+    startsInLabel: string
+    distanceSec: number
+    leftPct: number
+    widthPct: number
+    opacity: number
+    urgent: boolean
+    active: boolean
+  }
+
+  interface SectionTimelineRange {
+    id: string
+    label: string
+    startSec: number
+    endSec: number
+    index: number
+  }
+
+  interface LaneLight {
+    key: string
+    label: string
+    color: string
+    active: boolean
+    muted: boolean
+  }
+
+  const NO_CHORD_LABEL = 'No chord'
+  const CHORD_APPROACH_WINDOW_SEC = 12
+
   let loading = $state(true)
   let loadingMsg = $state('Loading tracks…')
   let loadError = $state<string | null>(null)
+  let playbackMode = $state(false)
+  let repeatSectionEnabled = $state(false)
+  let repeatSectionId = $state<string | null>(null)
+  let repeatSeekGuard = false
 
   let engine: MixerEngine | null = null
   let snapshot = $state<MixerSnapshot>({ state: 'stopped', positionSec: 0, durationSec: 0 })
+  let mixerDurationSec = $state(0)
   let lanes = $state<LaneView[]>([])
 
   /** Pull the current saved state for one track-key from songMap. */
@@ -116,6 +174,234 @@
     return Math.max(0, offset)
   }
 
+  function clamp(n: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, n))
+  }
+
+  function pushChordSegment(
+    segments: ChordTimelineSegment[],
+    next: Omit<ChordTimelineSegment, 'id'>,
+  ): void {
+    if (next.endSec - next.startSec <= 0.01) return
+    const last = segments.at(-1)
+    if (
+      last &&
+      last.label === next.label &&
+      last.hasChord === next.hasChord &&
+      Math.abs(last.endSec - next.startSec) < 0.05
+    ) {
+      last.endSec = next.endSec
+      return
+    }
+    segments.push({ ...next, id: `${segments.length}:${next.startSec.toFixed(3)}:${next.label}` })
+  }
+
+  const mixerSongOffsetSec = $derived.by(() => {
+    if (!$songMap) return 0
+    return computePrepend('original')
+  })
+
+  const songTitle = $derived($songMap?.metadata.title?.trim() || 'Untitled song')
+  const songKeyLabel = $derived(
+    $songMap?.metadata.keyDetail ? formatSongKeyLabel($songMap.metadata.keyDetail) : 'No key',
+  )
+  const songBpmLabel = $derived(
+    $songMap?.metadata.bpm != null ? `${Math.round($songMap.metadata.bpm)} BPM` : 'No BPM',
+  )
+
+  const chordTimelineSegments = $derived.by<ChordTimelineSegment[]>(() => {
+    const sm = $songMap
+    const durationSec = mixerDurationSec
+    if (!sm || !(durationSec > 0)) return []
+
+    const beats = sortBeatsByTime(sm.timeline.beats)
+    if (beats.length === 0) {
+      return [
+        {
+          id: 'no-grid',
+          label: NO_CHORD_LABEL,
+          startSec: 0,
+          endSec: durationSec,
+          hasChord: false,
+        },
+      ]
+    }
+
+    const segments: ChordTimelineSegment[] = []
+    const offset = mixerSongOffsetSec
+    const firstBeatStart = beats[0]!.timeSec + offset
+    if (firstBeatStart > 0) {
+      pushChordSegment(segments, {
+        label: NO_CHORD_LABEL,
+        startSec: 0,
+        endSec: Math.min(firstBeatStart, durationSec),
+        hasChord: false,
+      })
+    }
+
+    const resolved = resolveChordAtEachBeat(sm)
+    const preferFlats = sm.metadata.keyDetail ? songKeyPreferFlats(sm.metadata.keyDetail) : false
+    for (let i = 0; i < beats.length; i++) {
+      const beat = beats[i]!
+      const nextBeat = beats[i + 1]
+      const startSec = beat.timeSec + offset
+      const endSec = nextBeat ? nextBeat.timeSec + offset : durationSec
+      if (endSec <= 0 || startSec >= durationSec) continue
+
+      const chord = resolved.get(beat.id)
+      pushChordSegment(segments, {
+        label: chord ? formatChordSymbol(chord, { preferFlats }) : NO_CHORD_LABEL,
+        startSec: clamp(startSec, 0, durationSec),
+        endSec: clamp(endSec, 0, durationSec),
+        hasChord: !!chord,
+      })
+    }
+
+    if (segments.length === 0) {
+      pushChordSegment(segments, {
+        label: NO_CHORD_LABEL,
+        startSec: 0,
+        endSec: durationSec,
+        hasChord: false,
+      })
+    } else {
+      segments[segments.length - 1]!.endSec = durationSec
+    }
+
+    return segments
+  })
+
+  const currentChordSegmentIndex = $derived.by(() => {
+    const segments = chordTimelineSegments
+    if (segments.length === 0) return -1
+    const pos = clamp(snapshot.positionSec, 0, Math.max(mixerDurationSec, 0))
+    const idx = segments.findIndex((seg, i) => {
+      const isLast = i === segments.length - 1
+      return pos >= seg.startSec - 1e-6 && (pos < seg.endSec - 1e-6 || isLast)
+    })
+    return idx >= 0 ? idx : 0
+  })
+
+  const currentChordSegment = $derived(
+    currentChordSegmentIndex >= 0 ? chordTimelineSegments[currentChordSegmentIndex] : null,
+  )
+  const currentChordLabel = $derived(currentChordSegment?.label ?? NO_CHORD_LABEL)
+  const currentChordProgressPct = $derived.by(() => {
+    const seg = currentChordSegment
+    if (!seg) return 0
+    const span = seg.endSec - seg.startSec
+    if (!(span > 0)) return 0
+    return clamp(((snapshot.positionSec - seg.startSec) / span) * 100, 0, 100)
+  })
+  const currentChordRemainingLabel = $derived.by(() => {
+    const seg = currentChordSegment
+    if (!seg) return fmtTime(0)
+    return fmtTime(Math.max(0, seg.endSec - snapshot.positionSec))
+  })
+  const chordApproachViews = $derived.by<ChordApproachView[]>(() => {
+    const approachWindowSec = CHORD_APPROACH_WINDOW_SEC
+    const now = snapshot.positionSec
+    return chordTimelineSegments
+      .filter((seg) => seg.hasChord)
+      .filter((seg) => seg.endSec > now + 1e-6 && seg.startSec < now + approachWindowSec - 1e-6)
+      .map((seg) => {
+        const startDistanceSec = seg.startSec - now
+        const endDistanceSec = seg.endSec - now
+        const distanceSec = Math.max(0, startDistanceSec)
+        const active = startDistanceSec <= 0 && endDistanceSec > 0
+        const closeness = clamp(1 - distanceSec / approachWindowSec, 0, 1)
+        const leftPct = clamp((Math.max(0, startDistanceSec) / approachWindowSec) * 100, 0, 100)
+        const endPct = clamp((Math.max(0, endDistanceSec) / approachWindowSec) * 100, leftPct, 100)
+        const widthPct = endPct - leftPct
+        return {
+          ...seg,
+          startsInLabel: active ? 'now' : fmtTime(distanceSec),
+          distanceSec,
+          leftPct,
+          widthPct,
+          opacity: active ? 1 : 0.45 + closeness * 0.55,
+          urgent: !active && distanceSec < 2,
+          active,
+        }
+      })
+      .filter((seg) => seg.widthPct > 0.2)
+  })
+  const nextChordView = $derived(chordApproachViews.find((seg) => !seg.active) ?? null)
+  const currentChordHeading = $derived(snapshot.state === 'playing' ? 'Playing chord' : 'Current chord')
+
+  const sectionTimelineRanges = $derived.by<SectionTimelineRange[]>(() => {
+    const sm = $songMap
+    const durationSec = mixerDurationSec
+    if (!sm || !sm.sections?.length || !sm.timeline.bars.length || !(durationSec > 0)) return []
+    const offset = mixerSongOffsetSec
+    const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
+    const out: SectionTimelineRange[] = []
+    sm.sections.forEach((section, i) => {
+      const startBar = barByIndex.get(section.barRange.startBarIndex)
+      const endBar = barByIndex.get(section.barRange.endBarIndex)
+      if (!startBar || !endBar) return
+      const startSec = clamp(startBar.startSec + offset, 0, durationSec)
+      const endSec = clamp(endBar.endSec + offset, 0, durationSec)
+      if (endSec <= startSec) return
+      out.push({
+        id: section.id,
+        label: section.label,
+        startSec,
+        endSec,
+        index: i,
+      })
+    })
+    return out
+  })
+
+  const currentSectionRange = $derived.by(() => {
+    const pos = snapshot.positionSec
+    return (
+      sectionTimelineRanges.find((section, i) => {
+        const isLast = i === sectionTimelineRanges.length - 1
+        return pos >= section.startSec - 1e-6 && (pos < section.endSec - 1e-6 || isLast)
+      }) ?? null
+    )
+  })
+
+  const repeatSectionRange = $derived.by(() => {
+    if (!repeatSectionEnabled || !repeatSectionId) return null
+    return sectionTimelineRanges.find((section) => section.id === repeatSectionId) ?? null
+  })
+
+  const repeatSectionButtonLabel = $derived.by(() => {
+    if (repeatSectionRange) return `Repeat ${repeatSectionRange.label}`
+    if (currentSectionRange) return `Repeat ${currentSectionRange.label}`
+    return 'Repeat section'
+  })
+
+  const stageWaveformLane = $derived(
+    lanes.find((lane) => lane.key === 'original') ??
+      lanes.find((lane) => lane.key.startsWith('stem:') && lane.buffer) ??
+      lanes.find((lane) => lane.buffer) ??
+      null,
+  )
+
+  const laneLights = $derived.by<LaneLight[]>(() => {
+    const anySoloed = lanes.some((lane) => lane.soloed)
+    return lanes.map((lane) => {
+      const inRange = !!lane.buffer && snapshot.positionSec < lane.buffer.duration - 0.02
+      const audible =
+        snapshot.state === 'playing' &&
+        inRange &&
+        lane.volume > 0.001 &&
+        !lane.muted &&
+        (!anySoloed || lane.soloed)
+      return {
+        key: lane.key,
+        label: lane.label.replace(/\s+·\s+.+$/, ''),
+        color: lane.color,
+        active: audible,
+        muted: lane.muted,
+      }
+    })
+  })
+
   /**
    * Song sections mapped onto the mixer timeline as fractions [0..1]. Uses the
    * SAME silence offset the stems/original get (`computePrepend('original')`)
@@ -125,23 +411,15 @@
   const sectionBands = $derived.by<
     { startFrac: number; endFrac: number; label: string; index: number }[]
   >(() => {
-    const sm = $songMap
-    const dur = snapshot.durationSec
-    if (!sm || !sm.sections?.length || !sm.timeline.bars.length || dur <= 0) return []
-    const offset = computePrepend('original')
-    const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
+    const dur = mixerDurationSec
+    if (dur <= 0) return []
     const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
-    const out: { startFrac: number; endFrac: number; label: string; index: number }[] = []
-    sm.sections.forEach((s, i) => {
-      const startBar = barByIndex.get(s.barRange.startBarIndex)
-      const endBar = barByIndex.get(s.barRange.endBarIndex)
-      if (!startBar || !endBar) return
-      const startFrac = clamp01((startBar.startSec + offset) / dur)
-      const endFrac = clamp01((endBar.endSec + offset) / dur)
-      if (endFrac <= startFrac) return
-      out.push({ startFrac, endFrac, label: s.label, index: i })
-    })
-    return out
+    return sectionTimelineRanges.map((section) => ({
+      startFrac: clamp01(section.startSec / dur),
+      endFrac: clamp01(section.endSec / dur),
+      label: section.label,
+      index: section.index,
+    }))
   })
 
   /** Pretty label for a stem filename — Vocals/Drums/Bass/Other/etc. */
@@ -206,9 +484,11 @@
       }
     }
 
-    // Cue track (clicks + speech).
+    // Cue track (speech). Only a lane when the cue track is enabled AND has a
+    // rendered WAV on disk — the Overview "Play cues" toggle drives `enabled`
+    // and the render, so switching it off drops the lane on the next reload.
     const cueTrackPath = primaryCueTrack?.renderExport?.relativePath
-    if (cueTrackPath) {
+    if (primaryCueTrack?.enabled && cueTrackPath) {
       plan.push({
         key: 'cue',
         label: primaryCueTrack?.name ? `Cue · ${primaryCueTrack.name}` : 'Cue',
@@ -349,6 +629,34 @@
     engine.stop()
   }
 
+  function toggleRepeatSection() {
+    if (repeatSectionEnabled) {
+      repeatSectionEnabled = false
+      repeatSectionId = null
+      return
+    }
+    if (!currentSectionRange) return
+    repeatSectionId = currentSectionRange.id
+    repeatSectionEnabled = true
+  }
+
+  function handleTransportUpdate(s: MixerSnapshot) {
+    snapshot = s
+    if (Math.abs(mixerDurationSec - s.durationSec) > 1e-4) {
+      mixerDurationSec = s.durationSec
+    }
+    if (!engine || !repeatSectionEnabled || repeatSeekGuard || s.state !== 'playing') return
+    const range = repeatSectionRange
+    if (!range || range.endSec - range.startSec < 0.1) return
+    if (s.positionSec >= range.endSec - 0.035) {
+      repeatSeekGuard = true
+      engine.seek(range.startSec)
+      window.setTimeout(() => {
+        repeatSeekGuard = false
+      }, 120)
+    }
+  }
+
   function fmtTime(sec: number): string {
     const safe = Math.max(0, sec)
     const m = Math.floor(safe / 60)
@@ -385,11 +693,26 @@
     await syncAndLoad()
   }
 
+  $effect(() => {
+    if (repeatSectionEnabled && repeatSectionId && !repeatSectionRange) {
+      repeatSectionEnabled = false
+      repeatSectionId = null
+    }
+  })
+
+  // Parent-driven reload (e.g. Overview "Play cues" toggle). Skips the initial
+  // value so mount's own load isn't duplicated.
+  let lastReloadSignal = untrack(() => reloadSignal)
+  $effect(() => {
+    const sig = reloadSignal
+    if (sig === lastReloadSignal) return
+    lastReloadSignal = sig
+    void reload()
+  })
+
   onMount(() => {
     engine = new MixerEngine()
-    engine.onUpdate((s) => {
-      snapshot = s
-    })
+    engine.onUpdate(handleTransportUpdate)
     void syncAndLoad()
   })
 
@@ -433,20 +756,100 @@
     <div class="font-mono text-sm tabular-nums">
       {fmtTime(snapshot.positionSec)} / {fmtTime(snapshot.durationSec)}
     </div>
-    <div class="text-muted-foreground ml-auto text-xs">
-      {lanes.length} track{lanes.length === 1 ? '' : 's'}
-    </div>
-    <Button
-      variant="outline"
-      size="sm"
-      class="h-8 gap-1 px-2"
-      onclick={() => void reload()}
-      disabled={loading}
-      title="Re-scan disk and reload all tracks"
+    <label
+      class="border-foreground bg-background inline-flex h-8 items-center gap-2 rounded-[var(--radius)] border-2 px-2 text-xs font-bold"
+      title="Show a minimal band playback view"
     >
-      <RefreshCw class="size-3.5 {loading ? 'animate-spin' : ''}" aria-hidden="true" />
-      Reload
+      <input type="checkbox" bind:checked={playbackMode} class="accent-foreground size-3.5" />
+      Playback mode
+    </label>
+    <Button
+      variant={repeatSectionEnabled ? 'default' : 'outline'}
+      size="sm"
+      class="h-8"
+      onclick={toggleRepeatSection}
+      disabled={!repeatSectionEnabled && !currentSectionRange}
+      title={repeatSectionEnabled && repeatSectionRange
+        ? `Repeating ${repeatSectionRange.label}`
+        : currentSectionRange
+          ? `Repeat ${currentSectionRange.label}`
+          : 'No section at the playhead'}
+    >
+      {repeatSectionButtonLabel}
     </Button>
+    {#if !playbackMode}
+      <div
+        class="bg-muted/70 ring-foreground/10 flex min-w-0 flex-[1_1_24rem] items-center gap-2 overflow-hidden rounded-[var(--radius)] px-2 py-1 ring-1"
+        aria-live="polite"
+        aria-label={`${currentChordHeading}: ${currentChordLabel}`}
+      >
+        <div class="min-w-[7.5rem] flex-none">
+          <div class="flex items-baseline gap-2">
+            <span class="text-muted-foreground text-[10px] font-black uppercase">Chord</span>
+            <span class="truncate font-mono text-lg leading-none font-black tabular-nums">{currentChordLabel}</span>
+          </div>
+          <div class="bg-foreground/10 mt-1 h-1.5 overflow-hidden rounded-full">
+            <div
+              class="bg-primary h-full rounded-full transition-[width] duration-100 ease-linear"
+              style={`width: ${currentChordProgressPct}%`}
+            ></div>
+          </div>
+          <div class="text-muted-foreground mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] leading-none font-bold tabular-nums">
+            <span class="uppercase">Next</span>
+            <span class="text-foreground truncate font-black">{nextChordView?.label ?? 'End'}</span>
+            {#if nextChordView}
+              <span>{nextChordView.startsInLabel}</span>
+            {/if}
+          </div>
+        </div>
+        <div
+          class="bg-background/70 ring-foreground/10 relative h-9 min-w-0 flex-1 overflow-hidden rounded-[var(--radius)] ring-1"
+          aria-label="Upcoming chord approach lane"
+        >
+          <div
+            class="bg-foreground/10 pointer-events-none absolute bottom-0 top-0 w-px"
+            style="left: 33%"
+          ></div>
+          <div
+            class="bg-foreground/10 pointer-events-none absolute bottom-0 top-0 w-px"
+            style="left: 66%"
+          ></div>
+          {#if chordApproachViews.length === 0}
+            <span class="text-muted-foreground flex h-full items-center justify-center text-xs font-bold">End</span>
+          {:else}
+            {#each chordApproachViews as seg (seg.id)}
+              <span
+                class="ring-foreground/10 absolute top-1/2 flex h-7 -translate-y-1/2 items-center justify-center overflow-hidden rounded-[var(--radius)] px-1 text-center font-mono text-xs leading-none font-black tabular-nums shadow-sm ring-1 transition-[left,width,opacity] duration-100 ease-linear {seg.active
+                  ? 'bg-primary text-primary-foreground ring-primary/20'
+                  : seg.id === nextChordView?.id
+                    ? 'bg-primary/20 text-foreground ring-primary/40'
+                  : 'bg-background/95 text-foreground'}"
+                style={`left: ${seg.leftPct}%; width: ${seg.widthPct}%; opacity: ${seg.opacity}; z-index: ${seg.active ? 4 : seg.id === nextChordView?.id ? 3 : 1};`}
+                title={`${seg.label} in ${seg.startsInLabel}`}
+              >
+                {seg.label}
+              </span>
+            {/each}
+          {/if}
+        </div>
+      </div>
+    {/if}
+    {#if !playbackMode}
+      <div class="text-muted-foreground ml-auto text-xs">
+        {lanes.length} track{lanes.length === 1 ? '' : 's'}
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-8 gap-1 px-2"
+        onclick={() => void reload()}
+        disabled={loading}
+        title="Re-scan disk and reload all tracks"
+      >
+        <RefreshCw class="size-3.5 {loading ? 'animate-spin' : ''}" aria-hidden="true" />
+        Reload
+      </Button>
+    {/if}
   </div>
 
   {#if loadError}
@@ -455,7 +858,123 @@
     <p class="text-muted-foreground text-sm">{loadingMsg}</p>
   {/if}
 
-  {#if lanes.length > 0}
+  {#if playbackMode}
+    <section class="space-y-4 py-2" aria-label="Playback mode">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-foreground truncate text-3xl font-black leading-none sm:text-4xl">{songTitle}</h2>
+          <div class="text-muted-foreground mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-sm tabular-nums">
+            <span>{songKeyLabel}</span>
+            <span>{songBpmLabel}</span>
+            {#if currentSectionRange}<span>{currentSectionRange.label}</span>{/if}
+          </div>
+        </div>
+        <div class="flex max-w-full flex-wrap items-center justify-end gap-1.5">
+          {#each laneLights as light (light.key)}
+            <button
+              type="button"
+              class="ring-foreground/10 inline-flex h-7 items-center gap-1.5 rounded-full px-2 text-[11px] font-black ring-1 transition-colors {light.active
+                ? 'bg-foreground text-background'
+                : 'bg-muted/70 text-muted-foreground'}"
+              onclick={() => onToggleMuted(light.key)}
+              title={light.muted ? `Unmute ${light.label}` : `Mute ${light.label}`}
+              aria-pressed={!light.muted}
+            >
+              <span
+                class="size-2.5 rounded-full"
+                style={`background: ${light.active ? light.color : 'color-mix(in oklch, var(--foreground) 25%, transparent)'}`}
+              ></span>
+              {light.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="grid gap-3 lg:grid-cols-[minmax(12rem,18rem)_1fr] lg:items-stretch">
+        <div class="bg-background ring-foreground/10 rounded-[var(--radius)] p-3 ring-1">
+          <div class="text-muted-foreground text-xs font-black uppercase">{currentChordHeading}</div>
+          <div class="mt-1 truncate font-mono text-6xl leading-none font-black tabular-nums sm:text-7xl">
+            {currentChordLabel}
+          </div>
+          <div class="bg-foreground/10 mt-3 h-3 overflow-hidden rounded-full">
+            <div
+              class="bg-primary h-full rounded-full transition-[width] duration-100 ease-linear"
+              style={`width: ${currentChordProgressPct}%`}
+            ></div>
+          </div>
+          <div class="text-muted-foreground mt-1 font-mono text-xs tabular-nums">
+            {currentChordRemainingLabel} left
+          </div>
+        </div>
+
+        <div class="bg-muted/70 ring-foreground/10 rounded-[var(--radius)] p-3 ring-1">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-muted-foreground text-xs font-black uppercase">Upcoming chords</div>
+            <div class="text-muted-foreground flex items-center gap-1 font-mono text-[10px] font-bold tabular-nums">
+              <span class="uppercase">Next</span>
+              <span class="text-foreground font-black">{nextChordView?.label ?? 'End'}</span>
+              {#if nextChordView}
+                <span>{nextChordView.startsInLabel}</span>
+              {/if}
+            </div>
+          </div>
+          <div
+            class="bg-background/70 ring-foreground/10 relative mt-2 h-24 overflow-hidden rounded-[var(--radius)] ring-1"
+            aria-label="Upcoming chord approach lane"
+          >
+            <div
+              class="bg-foreground/15 pointer-events-none absolute bottom-0 top-0 w-px"
+              style="left: 33%"
+            ></div>
+            <div
+              class="bg-foreground/15 pointer-events-none absolute bottom-0 top-0 w-px"
+              style="left: 66%"
+            ></div>
+
+            {#if chordApproachViews.length === 0}
+              <div class="text-muted-foreground flex h-full items-center justify-center text-sm font-bold">
+                End
+              </div>
+            {:else}
+              {#each chordApproachViews as seg (seg.id)}
+                <div
+                  class="absolute top-1/2 h-12 -translate-y-1/2 transition-[left,width,opacity] duration-100 ease-linear"
+                  style={`left: ${seg.leftPct}%; width: ${seg.widthPct}%; opacity: ${seg.opacity}; z-index: ${seg.active ? 4 : seg.id === nextChordView?.id ? 3 : 1};`}
+                  title={`${seg.label} in ${seg.startsInLabel}`}
+                >
+                  <div
+                    class="ring-foreground/10 flex h-full flex-col justify-center overflow-hidden rounded-[var(--radius)] px-2 shadow-sm ring-1 {seg.active
+                      ? 'bg-primary text-primary-foreground ring-primary/20'
+                      : seg.id === nextChordView?.id
+                        ? 'bg-primary/20 text-foreground ring-primary/40'
+                      : 'bg-background/95 text-foreground'}"
+                  >
+                    <div class="truncate font-mono text-lg leading-none font-black tabular-nums">{seg.label}</div>
+                    <div
+                      class="font-mono text-[10px] tabular-nums {seg.active
+                        ? 'text-primary-foreground/80'
+                        : 'text-muted-foreground'}"
+                    >
+                      {seg.startsInLabel}
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <MixerStageWaveform
+        buffer={stageWaveformLane?.buffer ?? null}
+        color={stageWaveformLane?.color ?? '#f97316'}
+        positionSec={snapshot.positionSec}
+        durationSec={snapshot.durationSec}
+        {sectionBands}
+        onSeekFraction={onSeekFraction}
+      />
+    </section>
+  {:else if lanes.length > 0}
     <div class="flex flex-col gap-1.5">
       {#each lanes as lane, i (lane.key)}
         <MixerTrackLane

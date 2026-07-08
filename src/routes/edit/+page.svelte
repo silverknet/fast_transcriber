@@ -1020,6 +1020,21 @@
     return out
   })
 
+  /** Playback/overview labels carry the last defined chord forward until the next change. */
+  let playbackChordLabelByBeatId = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return {} as Record<string, string>
+    const key = sm.metadata.keyDetail
+    const preferFlats = key ? songKeyPreferFlats(key) : false
+    const resolved = resolveChordAtEachBeat(sm)
+    const out: Record<string, string> = {}
+    for (const [beatId, chord] of resolved) {
+      if (!chord) continue
+      out[beatId] = formatChordSymbol(chord, { preferFlats })
+    }
+    return out
+  })
+
   /**
    * Per-bar chord suggestions derived from cached chroma. Pure function;
    * recomputes when songMap mutates (key change, section edits, beats edits,
@@ -1952,6 +1967,54 @@
     }
   }
 
+  // ── Overview "Play cues" toggle ──────────────────────────────────────────
+  // Drives the primary cue track's `enabled` and, on enable, auto-renders the
+  // cue WAV (desktop TTS) so the mixer's cue lane appears. `mixerReloadSignal`
+  // forces MixerView to re-scan disk + reload lanes after the render/toggle.
+  let mixerReloadSignal = $state(0)
+  let overviewCueTrack = $derived($songMap ? getPrimaryCueTrack($songMap) : undefined)
+  let overviewHasCueContent = $derived(
+    !!overviewCueTrack &&
+      (overviewCueTrack.events.some((e) => e.enabled && e.text?.trim()) ||
+        !!overviewCueTrack.spokenCountIn),
+  )
+  let overviewCuesEnabled = $derived(!!overviewCueTrack?.enabled)
+  let overviewCuesStale = $derived.by(() => {
+    const sm = $songMap
+    const t = overviewCueTrack
+    if (!sm || !t) return true
+    const exp = t.renderExport
+    if (!exp?.relativePath) return true
+    return exp.fingerprint !== fingerprintCueTrackInputs(sm, t)
+  })
+  /** Checkbox reflects "cues will actually play" — enabled AND freshly rendered. */
+  let overviewCuesActive = $derived(overviewCuesEnabled && !overviewCuesStale)
+
+  async function toggleOverviewCues(on: boolean) {
+    const t0 = overviewCueTrack
+    if (!t0) return
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((x) => (x.id === t0.id ? { ...x, enabled: on } : x)),
+    }))
+    if (!p.ok) {
+      cueGenErr = p.errors.join('; ')
+      return
+    }
+    cueGenErr = ''
+    if (on) {
+      // Render only when the on-disk WAV is missing or stale for the current
+      // cue content (fingerprint mismatch — e.g. the spoken count-in changed).
+      const sm = get(songMap)
+      const t = sm ? getPrimaryCueTrack(sm) : undefined
+      const exp = t?.renderExport
+      const stale =
+        !sm || !t || !exp?.relativePath || exp.fingerprint !== fingerprintCueTrackInputs(sm, t)
+      if (stale) await generateCueTrackWav()
+    }
+    mixerReloadSignal++
+  }
+
   function downloadCueTrackFile() {
     const sm = get(songMap)
     if (!lastCueDownloadBlob || !sm) return
@@ -2450,7 +2513,29 @@
             the song, and every lane stays aligned for playback and export. Click on a waveform to seek.
           </p>
         </details>
-        <MixerView />
+
+        {#if overviewHasCueContent}
+          <div class="border-foreground/15 mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-b pb-3 sm:mb-4">
+            <label class="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={overviewCuesActive}
+                disabled={cueGenBusy}
+                onchange={(e) => void toggleOverviewCues((e.currentTarget as HTMLInputElement).checked)}
+                class="accent-foreground size-4"
+              />
+              <span class="font-semibold">Play cues</span>
+            </label>
+            {#if cueGenBusy}
+              <span class="text-muted-foreground text-xs">Preparing cues…</span>
+            {:else if overviewCuesEnabled && !$desktopCompanionStatus.reachable}
+              <span class="text-muted-foreground text-xs">BarBro Desktop needed for spoken cues.</span>
+            {/if}
+            {#if cueGenErr}<span class="text-destructive text-xs">{cueGenErr}</span>{/if}
+          </div>
+        {/if}
+
+        <MixerView reloadSignal={mixerReloadSignal} />
       </section>
     {/if}
 
@@ -2631,6 +2716,7 @@
           bind:sectionsSelectionBarIds
           bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
+          currentChordLabelByBeatId={playbackChordLabelByBeatId}
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}

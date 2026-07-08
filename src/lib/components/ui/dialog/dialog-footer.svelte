@@ -15,7 +15,7 @@
 <div
 	bind:this={ref}
 	data-slot="dialog-footer"
-	class={cn("bg-muted -mx-4 -mb-4 border-t-2 border-foreground p-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
+	class={cn("bg-muted -mx-4 -mb-4 rounded-b-[var(--radius)] border-t-2 border-foreground p-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
 	{...restProps}
 >
 	{@render children?.()}
