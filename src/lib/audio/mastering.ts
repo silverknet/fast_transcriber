@@ -17,7 +17,7 @@
  * `OfflineAudioContext`), zero dependencies. Cue/click lanes are never
  * processed — spoken cues and clicks must stay untouched.
  */
-import type { AutoStemName, MasteringIntensity, ProjectMastering } from '$lib/project/types'
+import type { AutoStemName, MasteringIntensity, ProjectMastering, StemSound } from '$lib/project/types'
 
 // ── Lane classification ────────────────────────────────────────────────────
 
@@ -148,6 +148,81 @@ export function stemCompressorPreset(
   return STEM_PRESETS[kind][intensity]
 }
 
+// ── Tone shaping (EQ presets) ──────────────────────────────────────────────
+
+/** One biquad stage in a tone preset. */
+interface EqStage {
+  type: BiquadFilterType
+  freqHz: number
+  gainDb?: number
+  q?: number
+}
+
+/**
+ * "Live ready" tone per stem — bass gets a rich low end plus definition so it
+ * carries on small speakers; drums get kick weight, less mud, and snap; vocals
+ * and other get cleanup + presence. Deliberately modest values: character, not
+ * a re-mix.
+ */
+const TONE_PRESETS: Record<AutoStemName, EqStage[]> = {
+  bass: [
+    { type: 'lowshelf', freqHz: 85, gainDb: 3.5 }, // rich fundament
+    { type: 'peaking', freqHz: 750, gainDb: 1.5, q: 1 }, // definition/growl
+    { type: 'highshelf', freqHz: 6000, gainDb: -1.5 }, // tuck string fizz
+  ],
+  drums: [
+    { type: 'lowshelf', freqHz: 95, gainDb: 2 }, // kick weight
+    { type: 'peaking', freqHz: 400, gainDb: -1.5, q: 1 }, // cut boxy mud
+    { type: 'highshelf', freqHz: 4500, gainDb: 2.5 }, // snap + clarity
+  ],
+  vocals: [
+    { type: 'highpass', freqHz: 100 }, // rumble/plosive cleanup
+    { type: 'peaking', freqHz: 3000, gainDb: 2, q: 0.9 }, // presence
+  ],
+  other: [
+    { type: 'highpass', freqHz: 70 }, // keep lows for the bass stem
+    { type: 'highshelf', freqHz: 5000, gainDb: 1.5 }, // air
+  ],
+}
+
+/** Build the tone-EQ biquad chain for a stem, or null when not shaped. */
+function buildToneEq(ctx: BaseAudioContext, kind: AutoStemName): AudioChain | null {
+  const stages = TONE_PRESETS[kind]
+  if (stages.length === 0) return null
+  let input: AudioNode | null = null
+  let prev: AudioNode | null = null
+  for (const s of stages) {
+    const f = ctx.createBiquadFilter()
+    f.type = s.type
+    f.frequency.value = s.freqHz
+    if (s.gainDb !== undefined) f.gain.value = s.gainDb
+    if (s.q !== undefined) f.Q.value = s.q
+    if (prev) prev.connect(f)
+    if (!input) input = f
+    prev = f
+  }
+  return input && prev ? { input, output: prev } : null
+}
+
+/** Per-stem trim clamp (dB). */
+const TRIM_CLAMP_DB = 9
+
+/**
+ * Total static gain (dB) a stem's chain applies: loudness match + user trim +
+ * compressor make-up. Pure — unit-testable.
+ */
+export function stemTotalGainDb(
+  kind: AutoStemName,
+  cfg: ProjectMastering,
+  measuredRmsDb: number,
+): number {
+  const sound: StemSound = cfg.stems?.[kind] ?? {}
+  const matchDb = cfg.matchLoudness ? loudnessMatchGainDb(kind, measuredRmsDb) : 0
+  const trimDb = Math.max(-TRIM_CLAMP_DB, Math.min(TRIM_CLAMP_DB, sound.trimDb ?? 0))
+  const preset = stemCompressorPreset(kind, sound.intensity)
+  return matchDb + trimDb + (preset?.makeupDb ?? 0)
+}
+
 // ── Chain builders (work in AudioContext AND OfflineAudioContext) ──────────
 
 export interface AudioChain {
@@ -166,10 +241,10 @@ function compressorNode(ctx: BaseAudioContext, p: CompressorPreset): DynamicsCom
 }
 
 /**
- * Per-lane insert for one stem: [compressor →] [gain] — or null when the
- * config gives this lane nothing to do (caller wires source → gain directly).
- * `measuredRmsDb` comes from the DECODED buffer (pre-chain), so loudness
- * matching is deterministic regardless of live playback.
+ * Per-lane insert for one stem: [tone EQ →] [compressor →] [gain] — or null
+ * when the config gives this lane nothing to do (caller wires source → gain
+ * directly). `measuredRmsDb` comes from the DECODED buffer (pre-chain), so
+ * loudness matching is deterministic regardless of live playback.
  */
 export function buildStemChain(
   ctx: BaseAudioContext,
@@ -178,18 +253,27 @@ export function buildStemChain(
   measuredRmsDb: number,
 ): AudioChain | null {
   if (!cfg.enabled) return null
-  const preset = stemCompressorPreset(kind, cfg.stems?.[kind])
-  const matchDb = cfg.matchLoudness ? loudnessMatchGainDb(kind, measuredRmsDb) : 0
-  const totalGainDb = matchDb + (preset?.makeupDb ?? 0)
-  if (!preset && totalGainDb === 0) return null
+  const sound: StemSound = cfg.stems?.[kind] ?? {}
+  const preset = stemCompressorPreset(kind, sound.intensity)
+  const eq = sound.tone === 'shaped' ? buildToneEq(ctx, kind) : null
+  const totalGainDb = stemTotalGainDb(kind, cfg, measuredRmsDb)
+  if (!preset && !eq && totalGainDb === 0) return null
 
   const gain = ctx.createGain()
   gain.gain.value = dbToGain(totalGainDb)
-  if (!preset) return { input: gain, output: gain }
 
-  const comp = compressorNode(ctx, preset)
-  comp.connect(gain)
-  return { input: comp, output: gain }
+  // Wire back-to-front: … → comp? → gain, then eq? in front of that.
+  let input: AudioNode = gain
+  if (preset) {
+    const comp = compressorNode(ctx, preset)
+    comp.connect(input)
+    input = comp
+  }
+  if (eq) {
+    eq.output.connect(input)
+    input = eq.input
+  }
+  return { input, output: gain }
 }
 
 /** Master bus: glue compressor → safety limiter (both only when enabled). */

@@ -71,6 +71,20 @@ export interface ProjectFile {
 /** How firmly a stem's levels are evened out (compression preset intensity). */
 export type MasteringIntensity = 'off' | 'light' | 'firm'
 
+/** Tone character: 'shaped' applies the stem-appropriate EQ preset (rich low
+ * end for bass, punch + clarity for drums, presence for vocals/other). */
+export type StemTone = 'natural' | 'shaped'
+
+/** Per-stem sound settings inside the project mastering config. */
+export interface StemSound {
+  /** Envelope evening (compression). Absent = 'off'. */
+  intensity?: MasteringIntensity
+  /** Level trim in dB, applied after loudness matching. Clamped to ±9. */
+  trimDb?: number
+  /** Tone shaping preset. Absent = 'natural' (no EQ). */
+  tone?: StemTone
+}
+
 export interface ProjectMastering {
   /** Master switch — false/absent = fully bypassed everywhere. */
   enabled: boolean
@@ -79,8 +93,8 @@ export interface ProjectMastering {
    * sits at the same level in every song of the project.
    */
   matchLoudness?: boolean
-  /** Per-stem envelope evening. Absent = 'off'. */
-  stems?: Partial<Record<AutoStemName, MasteringIntensity>>
+  /** Per-stem sound (level trim, evening, tone). */
+  stems?: Partial<Record<AutoStemName, StemSound>>
   /** Gentle glue compression + a safety limiter on the summed master bus. */
   masterGlue?: boolean
 }

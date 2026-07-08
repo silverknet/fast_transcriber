@@ -522,7 +522,21 @@ function parseManifestMastering(raw) {
     const stems = {}
     for (const name of ['vocals', 'drums', 'bass', 'other']) {
       const v = raw.stems[name]
-      if (v === 'off' || v === 'light' || v === 'firm') stems[name] = v
+      // Legacy shape: bare intensity string.
+      if (v === 'off' || v === 'light' || v === 'firm') {
+        stems[name] = { intensity: v }
+        continue
+      }
+      if (!v || typeof v !== 'object') continue
+      const entry = {}
+      if (v.intensity === 'off' || v.intensity === 'light' || v.intensity === 'firm') {
+        entry.intensity = v.intensity
+      }
+      if (typeof v.trimDb === 'number' && Number.isFinite(v.trimDb)) {
+        entry.trimDb = Math.max(-9, Math.min(9, v.trimDb))
+      }
+      if (v.tone === 'natural' || v.tone === 'shaped') entry.tone = v.tone
+      if (Object.keys(entry).length > 0) stems[name] = entry
     }
     if (Object.keys(stems).length > 0) out.stems = stems
   }

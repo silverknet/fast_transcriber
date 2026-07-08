@@ -167,7 +167,22 @@ function parseMastering(raw: unknown): ProjectFile['mastering'] | undefined {
     const parsed: NonNullable<NonNullable<ProjectFile['mastering']>['stems']> = {}
     for (const name of AUTO_STEM_NAMES) {
       const v = stems[name]
-      if (v === 'off' || v === 'light' || v === 'firm') parsed[name] = v
+      // Legacy shape (first release stored just the intensity string).
+      if (v === 'off' || v === 'light' || v === 'firm') {
+        parsed[name] = { intensity: v }
+        continue
+      }
+      if (!v || typeof v !== 'object') continue
+      const s = v as Record<string, unknown>
+      const entry: NonNullable<typeof parsed[typeof name]> = {}
+      if (s.intensity === 'off' || s.intensity === 'light' || s.intensity === 'firm') {
+        entry.intensity = s.intensity
+      }
+      if (typeof s.trimDb === 'number' && Number.isFinite(s.trimDb)) {
+        entry.trimDb = Math.max(-9, Math.min(9, s.trimDb))
+      }
+      if (s.tone === 'natural' || s.tone === 'shaped') entry.tone = s.tone
+      if (Object.keys(entry).length > 0) parsed[name] = entry
     }
     if (Object.keys(parsed).length > 0) out.stems = parsed
   }

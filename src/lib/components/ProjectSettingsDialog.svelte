@@ -63,15 +63,25 @@
   let cueMode = $state<PreCountInCueMode>('off')
   let cueText = $state('')
   // Project sound (mastering)
+  type StemSoundForm = { intensity: MasteringIntensity; trimDb: number; tone: boolean }
+  // Defaults aim "live ready" out of the box: rich bass, punchy clear drums.
+  const DEFAULT_STEM_SOUND: Record<AutoStemName, StemSoundForm> = {
+    vocals: { intensity: 'off', trimDb: 0, tone: false },
+    drums: { intensity: 'light', trimDb: 0, tone: true },
+    bass: { intensity: 'light', trimDb: 0, tone: true },
+    other: { intensity: 'off', trimDb: 0, tone: false },
+  }
+  /** Stem-appropriate tone-shaping label (what 'shaped' means for each). */
+  const TONE_LABELS: Record<AutoStemName, string> = {
+    vocals: 'Clear',
+    drums: 'Punchy & clear',
+    bass: 'Rich',
+    other: 'Clear',
+  }
   let soundEnabled = $state(false)
   let soundMatchLoudness = $state(true)
   let soundMasterGlue = $state(true)
-  let soundStems = $state<Record<AutoStemName, MasteringIntensity>>({
-    vocals: 'off',
-    drums: 'light',
-    bass: 'light',
-    other: 'off',
-  })
+  let soundStems = $state<Record<AutoStemName, StemSoundForm>>(structuredClone(DEFAULT_STEM_SOUND))
   /** THIS machine: auto-prepare stems locally (per-machine, not shared). */
   let localPrepare = $state(false)
   let busy = $state(false)
@@ -110,12 +120,17 @@
     soundEnabled = ms?.enabled ?? false
     soundMatchLoudness = ms?.matchLoudness ?? true
     soundMasterGlue = ms?.masterGlue ?? true
-    soundStems = {
-      vocals: ms?.stems?.vocals ?? 'off',
-      drums: ms?.stems?.drums ?? 'light',
-      bass: ms?.stems?.bass ?? 'light',
-      other: ms?.stems?.other ?? 'off',
+    const stemForm = structuredClone(DEFAULT_STEM_SOUND)
+    for (const name of AUTO_STEM_NAMES) {
+      const s = ms?.stems?.[name]
+      if (!s) continue
+      stemForm[name] = {
+        intensity: s.intensity ?? 'off',
+        trimDb: Math.max(-9, Math.min(9, Math.round(s.trimDb ?? 0))),
+        tone: s.tone === 'shaped',
+      }
     }
+    soundStems = stemForm
     error = ''
     applyMsg = ''
     busy = false
@@ -139,12 +154,23 @@
       // Shared project config (source of truth).
       await setProjectAutoStems({ enabled, stems: chosenStems, quality })
       await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0, preCountInCue })
-      await setProjectMastering({
-        enabled: soundEnabled,
-        matchLoudness: soundMatchLoudness,
-        masterGlue: soundMasterGlue,
-        stems: { ...soundStems },
-      })
+      {
+        const stems: NonNullable<Parameters<typeof setProjectMastering>[0]['stems']> = {}
+        for (const name of AUTO_STEM_NAMES) {
+          const f = soundStems[name]
+          stems[name] = {
+            intensity: f.intensity,
+            ...(f.trimDb !== 0 ? { trimDb: f.trimDb } : {}),
+            ...(f.tone ? { tone: 'shaped' as const } : {}),
+          }
+        }
+        await setProjectMastering({
+          enabled: soundEnabled,
+          matchLoudness: soundMatchLoudness,
+          masterGlue: soundMasterGlue,
+          stems,
+        })
+      }
       // This machine (local): opt in/out of auto-preparing stems here.
       const osPath = $projectStore.osPath
       if (osPath) {
@@ -335,28 +361,59 @@
               <span class="font-medium">Match loudness across songs</span>
             </label>
 
-            <div class="mt-1 grid grid-cols-[max-content_1fr] items-center gap-x-3 gap-y-1.5">
+            <div class="mt-1 flex flex-col gap-2">
               {#each AUTO_STEM_NAMES as name (name)}
-                <span class="text-sm">{STEM_LABELS[name]}</span>
-                <div class="flex gap-1" role="radiogroup" aria-label={`Even out ${STEM_LABELS[name]}`}>
-                  {#each [{ v: 'off', l: 'Off' }, { v: 'light', l: 'Light' }, { v: 'firm', l: 'Firm' }] as opt (opt.v)}
-                    <button
-                      type="button"
-                      class="border-2 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider {soundStems[name] === opt.v
-                        ? 'border-foreground bg-foreground text-background'
-                        : 'border-foreground/30 hover:border-foreground'}"
-                      onclick={() => (soundStems[name] = opt.v as MasteringIntensity)}
-                      aria-pressed={soundStems[name] === opt.v}
-                    >
-                      {opt.l}
-                    </button>
-                  {/each}
+                <div class="border-foreground/15 flex flex-col gap-1.5 border p-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-sm font-semibold">{STEM_LABELS[name]}</span>
+                    <label class="flex cursor-pointer items-center gap-1.5 text-xs">
+                      <input
+                        type="checkbox"
+                        bind:checked={soundStems[name].tone}
+                        class="accent-foreground size-3.5"
+                      />
+                      <span class="font-medium">{TONE_LABELS[name]}</span>
+                    </label>
+                  </div>
+                  <label class="flex items-center gap-2">
+                    <span class="text-muted-foreground w-10 text-[10px] font-bold uppercase tracking-wider">Level</span>
+                    <input
+                      type="range"
+                      min="-9"
+                      max="9"
+                      step="1"
+                      bind:value={soundStems[name].trimDb}
+                      class="accent-foreground h-1 min-w-0 flex-1"
+                      aria-label={`${STEM_LABELS[name]} level`}
+                    />
+                    <span class="w-14 text-right font-mono text-xs tabular-nums">
+                      {soundStems[name].trimDb > 0 ? '+' : ''}{soundStems[name].trimDb} dB
+                    </span>
+                  </label>
+                  <div class="flex items-center gap-2">
+                    <span class="text-muted-foreground w-10 text-[10px] font-bold uppercase tracking-wider">Even</span>
+                    <div class="flex gap-1" role="radiogroup" aria-label={`Even out ${STEM_LABELS[name]}`}>
+                      {#each [{ v: 'off', l: 'Off' }, { v: 'light', l: 'Light' }, { v: 'firm', l: 'Firm' }] as opt (opt.v)}
+                        <button
+                          type="button"
+                          class="border-2 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider {soundStems[name].intensity === opt.v
+                            ? 'border-foreground bg-foreground text-background'
+                            : 'border-foreground/30 hover:border-foreground'}"
+                          onclick={() => (soundStems[name].intensity = opt.v as MasteringIntensity)}
+                          aria-pressed={soundStems[name].intensity === opt.v}
+                        >
+                          {opt.l}
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
                 </div>
               {/each}
             </div>
             <span class="text-muted-foreground text-[11px]">
-              Light / Firm evens out each stem’s levels (compression) so e.g. every bass note lands
-              with a similar weight.
+              Level raises or lowers just that stem in every song. “Even” smooths its dynamics so
+              e.g. every bass note lands with similar weight. The named toggle shapes the tone —
+              rich low end for bass, punch and clarity for drums.
             </span>
 
             <label class="flex cursor-pointer items-center gap-2 text-sm">

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import type { ProjectMastering } from '$lib/project/types'
 import {
   channelsRmsDb,
   dbToGain,
   loudnessMatchGainDb,
   stemCompressorPreset,
   stemKindForLaneKey,
+  stemTotalGainDb,
 } from './mastering'
 
 describe('stemKindForLaneKey', () => {
@@ -82,6 +84,36 @@ describe('stemCompressorPreset', () => {
     expect(stemCompressorPreset('drums', 'light')!.attackSec).toBeGreaterThan(
       stemCompressorPreset('bass', 'light')!.attackSec,
     )
+  })
+})
+
+describe('stemTotalGainDb', () => {
+  const base: ProjectMastering = { enabled: true, matchLoudness: false }
+
+  it('sums user trim with loudness match and make-up', () => {
+    const cfg: ProjectMastering = {
+      ...base,
+      matchLoudness: true,
+      stems: { bass: { intensity: 'off', trimDb: 3 } },
+    }
+    // match: -24 → -18 = +6; trim +3.
+    expect(stemTotalGainDb('bass', cfg, -24)).toBeCloseTo(9, 5)
+  })
+
+  it('clamps the trim to ±9 dB', () => {
+    const up: ProjectMastering = { ...base, stems: { bass: { trimDb: 40 } } }
+    const down: ProjectMastering = { ...base, stems: { bass: { trimDb: -40 } } }
+    expect(stemTotalGainDb('bass', up, -18)).toBe(9)
+    expect(stemTotalGainDb('bass', down, -18)).toBe(-9)
+  })
+
+  it('includes the compressor make-up when evening is on', () => {
+    const cfg: ProjectMastering = { ...base, stems: { bass: { intensity: 'firm' } } }
+    expect(stemTotalGainDb('bass', cfg, -18)).toBeCloseTo(4, 5) // firm bass makeup
+  })
+
+  it('is 0 for an untouched stem', () => {
+    expect(stemTotalGainDb('vocals', base, -18)).toBe(0)
   })
 })
 

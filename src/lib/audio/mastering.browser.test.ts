@@ -41,7 +41,7 @@ describe('mastering chains (real browser)', () => {
   it('loudness matching pulls a quiet bass toward the shared target', async () => {
     // ~-24 dB RMS sine (amp ≈ 0.0893) → bass target -18 dB → expect ≈ +6 dB.
     const src = toneBuffer({ amp: 0.0893 })
-    const cfg: ProjectMastering = { enabled: true, matchLoudness: true, stems: { bass: 'off' } }
+    const cfg: ProjectMastering = { enabled: true, matchLoudness: true, stems: { bass: { intensity: 'off' } } }
     const out = await renderBufferThroughStemChain(src, 'bass', cfg)
     const inRms = bufferRmsDb(src)
     const outRms = bufferRmsDb(out)
@@ -53,7 +53,7 @@ describe('mastering chains (real browser)', () => {
   it('firm compression narrows the gap between quiet and loud passages', async () => {
     // First second quiet (0.06), second second loud (0.9).
     const src = toneBuffer({ seconds: 2, amp: (t) => (t < 1 ? 0.06 : 0.9) })
-    const cfg: ProjectMastering = { enabled: true, matchLoudness: false, stems: { bass: 'firm' } }
+    const cfg: ProjectMastering = { enabled: true, matchLoudness: false, stems: { bass: { intensity: 'firm' } } }
     const out = await renderBufferThroughStemChain(src, 'bass', cfg)
     // Measure away from the boundary so attack/release transients don't skew.
     const inGap = segmentRmsDb(src, 1.4, 1.9) - segmentRmsDb(src, 0.4, 0.9)
@@ -64,7 +64,7 @@ describe('mastering chains (real browser)', () => {
 
   it('bypasses cleanly when mastering is disabled', async () => {
     const src = toneBuffer({ amp: 0.3 })
-    const cfg: ProjectMastering = { enabled: false, matchLoudness: true, stems: { bass: 'firm' } }
+    const cfg: ProjectMastering = { enabled: false, matchLoudness: true, stems: { bass: { intensity: 'firm' } } }
     const out = await renderBufferThroughStemChain(src, 'bass', cfg)
     expect(out).toBe(src)
   })
@@ -85,4 +85,43 @@ describe('mastering chains (real browser)', () => {
     const out = await renderBufferThroughMasterChain(src, cfg)
     expect(out).toBe(src)
   })
+
+  it('per-stem level trim raises just that stem by the requested dB', async () => {
+    const src = toneBuffer({ amp: 0.2 })
+    const cfg: ProjectMastering = {
+      enabled: true,
+      matchLoudness: false,
+      stems: { bass: { intensity: 'off', trimDb: 6 } },
+    }
+    const out = await renderBufferThroughStemChain(src, 'bass', cfg)
+    expect(bufferRmsDb(out) - bufferRmsDb(src)).toBeCloseTo(6, 0)
+  }, 20_000)
+
+  it('"rich" bass tone boosts the low end more than the mids', async () => {
+    const cfg: ProjectMastering = {
+      enabled: true,
+      matchLoudness: false,
+      stems: { bass: { intensity: 'off', tone: 'shaped' } },
+    }
+    const low = toneBuffer({ freq: 60, amp: 0.3 })
+    const mid = toneBuffer({ freq: 1000, amp: 0.3 })
+    const lowGain = bufferRmsDb(await renderBufferThroughStemChain(low, 'bass', cfg)) - bufferRmsDb(low)
+    const midGain = bufferRmsDb(await renderBufferThroughStemChain(mid, 'bass', cfg)) - bufferRmsDb(mid)
+    expect(lowGain).toBeGreaterThan(midGain + 1.5) // low shelf clearly ahead
+    expect(lowGain).toBeGreaterThan(2) // rich = audible low-end lift
+  }, 20_000)
+
+  it('"punchy & clear" drums tone lifts the highs and dips the mud band', async () => {
+    const cfg: ProjectMastering = {
+      enabled: true,
+      matchLoudness: false,
+      stems: { drums: { intensity: 'off', tone: 'shaped' } },
+    }
+    const mud = toneBuffer({ freq: 400, amp: 0.3 })
+    const snap = toneBuffer({ freq: 6000, amp: 0.3 })
+    const mudGain = bufferRmsDb(await renderBufferThroughStemChain(mud, 'drums', cfg)) - bufferRmsDb(mud)
+    const snapGain = bufferRmsDb(await renderBufferThroughStemChain(snap, 'drums', cfg)) - bufferRmsDb(snap)
+    expect(mudGain).toBeLessThan(0) // 400 Hz dip
+    expect(snapGain).toBeGreaterThan(1.5) // clarity shelf
+  }, 20_000)
 })
