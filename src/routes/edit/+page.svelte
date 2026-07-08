@@ -1336,9 +1336,10 @@
    * / stop() / seek()`.
    */
   const playbackController = new PlaybackController()
-  // v1: audio pitch-shift is GATED OFF (no bundled stretcher; Rubber Band CLI
-  // 503s). Chord/key transpose still applies as display. See AGENT_BRIDGE MSG 27.
-  const transposeAudioEnabled: boolean = false
+  // Audio pitch-shift via Rubber Band (dev: `brew install rubberband`; packaged:
+  // licensed binary or BARBRO_RUBBERBAND). Falls back to "chords & key only"
+  // when the engine isn't available. See AGENT_BRIDGE MSG 27.
+  const transposeAudioEnabled: boolean = true
   let transposeAudioStatus = $state<'idle' | 'rendering' | 'ready' | 'error'>('idle')
   let transposeAudioError = $state('')
   let transposePlaybackBuffer = $state<AudioBuffer | null>(null)

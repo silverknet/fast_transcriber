@@ -331,9 +331,26 @@
     controller?.setAudioElement(audioEl ?? null)
   })
   $effect(() => {
-    controller?.setAudioBuffer(
-      playbackAudioBufferOverride === undefined ? decodedAudioBuffer : playbackAudioBufferOverride,
-    )
+    // Depend ONLY on the buffer inputs. Transport state is read inside
+    // `untrack` — tracking `isPlaying` here is the documented anti-pattern that
+    // killed the source `play()` had just started.
+    const nextBuf =
+      playbackAudioBufferOverride === undefined ? decodedAudioBuffer : playbackAudioBufferOverride
+    if (!controller) return
+    untrack(() => {
+      const prev = controller.audioBuffer
+      if (prev === nextBuf) return // no real change (e.g. re-run with same buffer)
+      const wasPlaying = controller.isPlaying
+      const resumeAt = wasPlaying ? controller.currentTime : 0
+      controller.setAudioBuffer(nextBuf) // stops playback if this was a mid-play swap
+      // Seamless transpose: resume where we were instead of silently stopping,
+      // so changing semitones (or resetting to 0) doesn't look like "nothing
+      // happened" while playing.
+      if (wasPlaying && nextBuf) {
+        controller.seek(resumeAt)
+        controller.play()
+      }
+    })
   })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */

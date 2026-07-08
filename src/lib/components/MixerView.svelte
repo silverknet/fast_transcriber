@@ -62,12 +62,12 @@
     '#06b6d4', // cyan (fx / extra stems)
     '#f97316', // orange (cue)
   ]
-  // v1: audio pitch-shift is GATED OFF. librosa quality was below bar and the
-  // Rubber Band engine needs a licensed CLI binary that isn't bundled — so
-  // attempting it just 503s ("Rubber Band CLI not found"). Chord/key transpose
-  // still works (pure display derivation). Flip back on once a bundled,
-  // permissive stretcher lands (see AGENT_BRIDGE MSG 27).
-  const transposeAudioEnabled: boolean = false
+  // Audio pitch-shift via Rubber Band (high quality). Dev: `brew install
+  // rubberband` (resolved off PATH). Packaged builds need a licensed binary in
+  // desktop/native/bin/rubberband/<platform>/ or BARBRO_RUBBERBAND — without it
+  // the sidecar reports unavailable and the UI degrades to "chords & key only".
+  // Chord/key transpose is display-derived and always works.
+  const transposeAudioEnabled: boolean = true
 
   /**
    * Bump `reloadSignal` from the parent to force a full re-scan + re-load of
