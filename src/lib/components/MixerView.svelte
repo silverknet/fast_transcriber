@@ -625,10 +625,18 @@
   // reloads). Re-applying mid-play re-schedules sources at the same position.
   const laneRms = new WeakMap<AudioBuffer, number>()
   let lastAppliedSoundJson = '"__unset__"'
+  /**
+   * LOCAL before/after switch: true = play the raw lanes (chains removed) for
+   * comparison. Never written to the shared config — collaborators and the
+   * saved project sound are untouched.
+   */
+  let soundBypassed = $state(false)
+  const projectSoundOn = $derived(!!$projectStore.data?.mastering?.enabled)
 
   function applyProjectSound() {
     if (!engine) return
-    const cfg = get(projectStore).data?.mastering
+    const saved = get(projectStore).data?.mastering
+    const cfg = soundBypassed ? undefined : saved
     const wasPlaying = snapshot.state === 'playing'
     const pos = snapshot.positionSec
     engine.setMasterChain(cfg ? buildMasterChain(engine.ac, cfg) : null)
@@ -646,8 +654,14 @@
       engine.setTrack({ ...t, insert })
     }
     syncLanesFromEngine()
-    lastAppliedSoundJson = JSON.stringify(cfg ?? null)
+    lastAppliedSoundJson = JSON.stringify(saved ?? null)
     if (wasPlaying) void engine.play(pos)
+  }
+
+  /** Before/after: flip the bypass and re-apply, resuming at the playhead. */
+  function toggleSoundBypass() {
+    soundBypassed = !soundBypassed
+    applyProjectSound()
   }
 
   // Live re-apply when the SHARED config actually changes (JSON-compared so
@@ -889,6 +903,25 @@
       <input type="checkbox" bind:checked={playbackMode} class="accent-foreground size-3.5" />
       Playback mode
     </label>
+    {#if projectSoundOn}
+      <button
+        type="button"
+        class="inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] border-2 px-2 text-xs font-bold transition-colors {soundBypassed
+          ? 'border-foreground/40 bg-background text-muted-foreground'
+          : 'border-foreground bg-foreground text-background'}"
+        onclick={toggleSoundBypass}
+        aria-pressed={!soundBypassed}
+        title={soundBypassed
+          ? 'Playing the original, untreated sound — click to hear the project sound'
+          : 'Playing with the project sound — click to compare with the original'}
+      >
+        <span
+          class="size-2 rounded-full {soundBypassed ? 'bg-foreground/30' : 'bg-emerald-400'}"
+          aria-hidden="true"
+        ></span>
+        {soundBypassed ? 'Original' : 'Project sound'}
+      </button>
+    {/if}
     <Button
       variant={repeatSectionEnabled ? 'default' : 'outline'}
       size="sm"
