@@ -14,6 +14,7 @@
     DialogHeader,
     DialogTitle,
   } from '$lib/components/ui/dialog'
+  import { get } from 'svelte/store'
   import { project as projectStore } from '$lib/stores/project'
   import { setProjectAutoStems, setProjectDefaults, applyDefaultsToAllSongs } from '$lib/project/commit'
   import {
@@ -61,10 +62,21 @@
   let error = $state('')
   let applyMsg = $state('')
 
-  // Seed the form from the manifest (+ this machine's watch state) on open.
+  // Seed the form ONCE each time the dialog opens. The store is read via
+  // `get()` (non-reactive) on purpose: autosave / cloud-status ticks mutate
+  // `$projectStore` constantly, and a reactive read here re-ran the effect on
+  // every tick — wiping the user's in-progress selections (e.g. picking a
+  // pre-count-in radio snapped straight back to the saved value).
+  let seeded = false
   $effect(() => {
-    if (!open) return
-    const cfg = $projectStore.data?.autoStems
+    if (!open) {
+      seeded = false
+      return
+    }
+    if (seeded) return
+    seeded = true
+    const snap = get(projectStore)
+    const cfg = snap.data?.autoStems
     enabled = cfg?.enabled ?? false
     quality = cfg?.quality ?? 'balanced'
     const set = new Set(cfg?.stems ?? [])
@@ -74,15 +86,15 @@
       bass: set.has('bass'),
       other: set.has('other'),
     }
-    countInBeats = $projectStore.data?.defaults?.countInBeats ?? 0
-    const pc = $projectStore.data?.defaults?.preCountInCue
+    countInBeats = snap.data?.defaults?.countInBeats ?? 0
+    const pc = snap.data?.defaults?.preCountInCue
     cueMode = pc?.mode ?? 'off'
     cueText = pc?.text ?? ''
     error = ''
     applyMsg = ''
     busy = false
     // This machine's opt-in — read from the sidecar's per-machine watch list.
-    const osPath = $projectStore.osPath
+    const osPath = snap.osPath
     if (osPath) void isProjectAutoStemsWatched(osPath).then((w) => (localPrepare = w))
   })
 
