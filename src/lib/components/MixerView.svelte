@@ -36,13 +36,14 @@
     type MixerSnapshot,
     type MixerTrack,
   } from '$lib/audio/mixerEngine'
-  import { ensureProjectPitchShiftCache, readProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
+  import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
-  import { project as projectStore, type ProjectStoreState } from '$lib/stores/project'
+  import { project as projectStore } from '$lib/stores/project'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
   import {
     effectiveTransposeSemitones,
@@ -62,11 +63,8 @@
     '#06b6d4', // cyan (fx / extra stems)
     '#f97316', // orange (cue)
   ]
-  // Audio pitch-shift via Rubber Band (high quality). Dev: `brew install
-  // rubberband` (resolved off PATH). Packaged builds need a licensed binary in
-  // desktop/native/bin/rubberband/<platform>/ or BARBRO_RUBBERBAND — without it
-  // the sidecar reports unavailable and the UI degrades to "chords & key only".
-  // Chord/key transpose is display-derived and always works.
+  // Audio pitch-shift runs CLIENT-SIDE via signalsmith-stretch (MIT, WASM) —
+  // free to ship, no sidecar dependency. See $lib/audio/clientPitchShift.
   const transposeAudioEnabled: boolean = true
 
   /**
@@ -463,27 +461,6 @@
     return null
   }
 
-  async function maybeLoadTransposedProjectBlob(
-    ps: ProjectStoreState,
-    srcSubpath: string | null | undefined,
-    fallback: () => Promise<Blob | null>,
-  ): Promise<Blob | null> {
-    if (!transposeAudioEnabled || transposeSemitones === 0) return await fallback()
-    if (!ps.osPath || !ps.activeSongFolder || !srcSubpath) {
-      throw new Error('Transpose audio needs project audio on disk.')
-    }
-    const cache = await ensureProjectPitchShiftCache(
-      ps.osPath,
-      ps.activeSongFolder,
-      srcSubpath,
-      transposeSemitones,
-    )
-    if (!cache.ok) throw new Error(cache.error)
-    const shifted = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, cache.relPath)
-    if (!shifted.ok) throw new Error(shifted.error)
-    return shifted.blob
-  }
-
   async function loadAndRegisterTracks() {
     if (!engine) return
     const sm = get(songMap)
@@ -599,12 +576,16 @@
     for (const p of plan) {
       loadingMsg = `Loading ${p.label}… (${done + 1} / ${plan.length})`
       try {
-        const blob =
-          p.transposeSrcSubpath !== undefined
-            ? await maybeLoadTransposedProjectBlob(ps, p.transposeSrcSubpath, p.loader)
-            : await p.loader()
+        const blob = await p.loader()
         if (!blob) continue
         let buf = await decodeBlob(engine, blob)
+        // Client-side transpose (signalsmith-stretch, MIT): shift the decoded
+        // musical lanes in-browser. Cue/click lanes never set
+        // `transposeSrcSubpath`, so speech and clicks stay unshifted.
+        if (transposeAudioEnabled && transposeSemitones !== 0 && p.transposeSrcSubpath !== undefined) {
+          loadingMsg = `Transposing ${p.label}… (${done + 1} / ${plan.length})`
+          buf = await pitchShiftAudioBuffer(buf, transposeSemitones)
+        }
         const pre = computePrepend(p.key)
         if (pre > 0) buf = bufferWithPrepend(engine.ac, buf, pre)
         const saved = savedFor(p.key)

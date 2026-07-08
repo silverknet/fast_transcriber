@@ -42,10 +42,10 @@
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
   import {
-    ensureProjectPitchShiftCache,
     readProjectSongAsset,
     writeProjectSongAsset,
   } from '$lib/client/desktopProjectFs'
+  import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { metadataLiteFromSongMap } from '$lib/project/commit'
   import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
@@ -1336,9 +1336,8 @@
    * / stop() / seek()`.
    */
   const playbackController = new PlaybackController()
-  // Audio pitch-shift via Rubber Band (dev: `brew install rubberband`; packaged:
-  // licensed binary or BARBRO_RUBBERBAND). Falls back to "chords & key only"
-  // when the engine isn't available. See AGENT_BRIDGE MSG 27.
+  // Audio pitch-shift runs CLIENT-SIDE via signalsmith-stretch (MIT, WASM) —
+  // free to ship, no sidecar dependency. See $lib/audio/clientPitchShift.
   const transposeAudioEnabled: boolean = true
   let transposeAudioStatus = $state<'idle' | 'rendering' | 'ready' | 'error'>('idle')
   let transposeAudioError = $state('')
@@ -1450,18 +1449,17 @@
 
     void (async () => {
       try {
-        const cache = await ensureProjectPitchShiftCache(
+        // Client-side shift (signalsmith-stretch, MIT): decode the source once
+        // (cached per file), then render the shifted buffer in-browser. No
+        // sidecar round-trip; per-semitone results are cached inside
+        // pitchShiftAudioBuffer, so revisiting a shift is instant.
+        const original = await transposeSourceBufferCached(
           ps.osPath!,
           ps.activeSongFolder!,
           srcSubpath,
-          semitones,
         )
         if (generation !== transposeAudioGeneration) return
-        if (!cache.ok) throw new Error(cache.error)
-        const shifted = await readProjectSongAsset(ps.osPath!, ps.activeSongFolder!, cache.relPath)
-        if (generation !== transposeAudioGeneration) return
-        if (!shifted.ok) throw new Error(shifted.error)
-        const buffer = await decodePlaybackBlob(shifted.blob)
+        const buffer = await pitchShiftAudioBuffer(original, semitones)
         if (generation !== transposeAudioGeneration) return
         transposePlaybackBuffer = buffer
         transposeAudioStatus = 'ready'
@@ -1473,6 +1471,37 @@
       }
     })()
   })
+
+  /**
+   * Decoded transpose source, cached by project/song/file so changing the
+   * semitone amount doesn't re-read + re-decode the audio. A failed decode
+   * clears the cache entry so the next attempt retries.
+   */
+  let transposeSrcKey = ''
+  let transposeSrcPromise: Promise<AudioBuffer> | null = null
+  function transposeSourceBufferCached(
+    osPath: string,
+    folder: string,
+    subpath: string,
+  ): Promise<AudioBuffer> {
+    const key = `${osPath}::${folder}::${subpath}`
+    if (transposeSrcKey !== key || !transposeSrcPromise) {
+      transposeSrcKey = key
+      const p = (async () => {
+        const r = await readProjectSongAsset(osPath, folder, subpath)
+        if (!r.ok) throw new Error(r.error)
+        return await decodePlaybackBlob(r.blob)
+      })()
+      p.catch(() => {
+        if (transposeSrcKey === key) {
+          transposeSrcPromise = null
+          transposeSrcKey = ''
+        }
+      })
+      transposeSrcPromise = p
+    }
+    return transposeSrcPromise
+  }
 
   $effect(() => {
     const pending = transposePlaybackResume
