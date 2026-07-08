@@ -115,6 +115,18 @@ function stableStringify(v: unknown): string {
   return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
 }
 
+/**
+ * Canonical equality for two shared-content values — the merge-time counterpart
+ * of `collabContentFingerprint`. Uses the same `stableStringify` normalization
+ * (6-decimal float rounding, `undefined`/missing-key coalescing, key sorting),
+ * so a value that only differs by JSON round-trip noise from the server compares
+ * EQUAL. This is what keeps the conflict merge from surfacing phantom rows for
+ * chords/beats whose `startSec`/`endSec` floats were re-serialized by JSONB.
+ */
+export function canonicalEqual(a: unknown, b: unknown): boolean {
+  return stableStringify(a) === stableStringify(b)
+}
+
 function djb2Hex(s: string): string {
   let h = 5381
   for (let i = 0; i < s.length; i++) {

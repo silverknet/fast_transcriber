@@ -29,6 +29,7 @@
  * SongMap from the conflict report + user choices.
  */
 import type { SongMap, HarmonyEvent, Section, Bar, Beat, CueEvent, CueTrack } from './types'
+import { canonicalEqual } from './collab'
 
 /**
  * One disputed change. `path` identifies the field so the UI can label
@@ -60,22 +61,15 @@ export type ConflictDecisions = Map<string, 'mine' | 'theirs'>
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/**
+ * Content equality for merge decisions. Delegates to `canonicalEqual`, which
+ * normalizes the same way the sync fingerprint does — so two items that differ
+ * only by server JSON round-trip noise (float re-serialization, `undefined` vs
+ * missing keys, key order) are treated as identical and never surface a phantom
+ * conflict row.
+ */
 function shallowEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
-  if (Array.isArray(a) !== Array.isArray(b)) return false
-  if (Array.isArray(a)) {
-    if (a.length !== (b as unknown[]).length) return false
-    for (let i = 0; i < a.length; i++) if (!shallowEqual(a[i], (b as unknown[])[i])) return false
-    return true
-  }
-  const ka = Object.keys(a as object)
-  const kb = Object.keys(b as object)
-  if (ka.length !== kb.length) return false
-  for (const k of ka) {
-    if (!shallowEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false
-  }
-  return true
+  return canonicalEqual(a, b)
 }
 
 /**

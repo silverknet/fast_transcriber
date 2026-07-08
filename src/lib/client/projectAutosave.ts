@@ -198,10 +198,22 @@ async function tryCloudPushOnce(): Promise<void> {
       return
     }
 
+    const report = mergeForConflict(sm, remote)
+
+    // No field-level conflict → the fingerprints differ only by noise the
+    // merge treats as non-conflicting (server float re-serialization, or
+    // fields that always defer to cloud). Adopt the new revision silently,
+    // exactly like the identical-content branch above. This is the fix for
+    // the conflict dialog re-popping on every autosave with rows whose
+    // "Yours"/"Theirs" are byte-identical.
+    if (report.conflicts.length === 0) {
+      markSynced(r.remote.revision, contentHash)
+      return
+    }
+
     // Genuinely divergent content → surface the merge dialog once. The user
     // picks per-row before applying; until then edits stack up locally.
     if (get(cloudConflict) === null) {
-      const report = mergeForConflict(sm, remote)
       cloudConflict.set({
         cloudProjectId: cloud.projectId,
         cloudSongId,

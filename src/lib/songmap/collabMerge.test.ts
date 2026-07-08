@@ -64,6 +64,31 @@ describe('collabMerge · mergeForConflict', () => {
     expect(merged.harmony.map((h) => h.id).sort()).toEqual(['h-1', 'h-2', 'h-3', 'h-4'])
   })
 
+  it('does NOT flag a phantom conflict when a chord differs only by float round-trip noise', () => {
+    // The server (JSONB) re-serializes floats, so a chord that came back from
+    // the cloud can have startSec 1.2000000000000002 vs the local 1.2. These
+    // are the same chord — must not surface a conflict row.
+    const base = createEmptySongMap()
+    const mine = { ...chord('h-1', 'C'), startSec: 1.2, endSec: 2.4 }
+    const theirs = { ...chord('h-1', 'C'), startSec: 1.2000000000000002, endSec: 2.3999999999999995 }
+    const local: SongMap = { ...base, harmony: [mine] }
+    const cloud: SongMap = { ...base, harmony: [theirs] }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts).toEqual([])
+  })
+
+  it('does NOT flag a phantom conflict for an undefined-vs-missing optional field', () => {
+    const base = createEmptySongMap()
+    const mine = { ...chord('h-1', 'C'), beatId: undefined } as HarmonyEvent
+    const theirs = chord('h-1', 'C') // no beatId key at all
+    const local: SongMap = { ...base, harmony: [mine] }
+    const cloud: SongMap = { ...base, harmony: [theirs] }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts).toEqual([])
+  })
+
   it('flags a safe conflict for same-id chord with different content; defaults to theirs', () => {
     const base = createEmptySongMap()
     const local: SongMap = { ...base, harmony: [chord('h-1', 'C')] }
