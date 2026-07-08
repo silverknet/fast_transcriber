@@ -24,7 +24,7 @@ import { get, type Unsubscriber } from 'svelte/store'
 import { browser } from '$app/environment'
 import { page } from '$app/stores'
 import { pushCloudSong } from '$lib/client/cloudSync'
-import { writeProjectSong } from '$lib/client/desktopProjectFs'
+import { writeProjectSong, writeProjectManifest } from '$lib/client/desktopProjectFs'
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
@@ -176,6 +176,10 @@ async function tryCloudPushOnce(): Promise<void> {
       ),
     }
     setProjectData(next)
+    // Persist the advanced sync state to the manifest, otherwise a reload reads
+    // a stale base revision and 409s on the very first push (the load-time
+    // conflict storm). Best-effort + fire-and-forget.
+    if (cur.osPath) void writeProjectManifest(cur.osPath, next).catch(() => {})
   }
 
   const r = await pushCloudSong(cloud.projectId, cloudSongId, sm, sortOrder, !!entry.hidden, baseRev)
@@ -216,7 +220,10 @@ async function tryCloudPushOnce(): Promise<void> {
     if (report.conflicts.length === 0) {
       let base = r.remote.revision
       let merged = report.merged
-      for (let attempt = 0; attempt < 4; attempt++) {
+      // At most 2 inline attempts — one rebase, plus one if the server moved
+      // once more. Beyond that the debounced tick retries, so a fast-moving
+      // server can't make a single edit fire a slow burst of PUTs.
+      for (let attempt = 0; attempt < 2; attempt++) {
         const rr = await pushCloudSong(cloud.projectId, cloudSongId, merged, sortOrder, !!entry.hidden, base)
         if (rr.ok) {
           // Adopt the converged content locally, preserving local-only fields
