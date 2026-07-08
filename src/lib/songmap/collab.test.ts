@@ -20,6 +20,7 @@ function mapWithRenderedCue(): SongMap {
     timeline: { bars: [], beats: [] },
     sections: [],
     harmony: [],
+    transpose: { baseSemitones: 2 },
     cueTracks: [
       {
         id: 'main',
@@ -61,6 +62,7 @@ describe('collaborative SongMap cue fields', () => {
   it('keeps shared cue data but strips local render paths before upload', () => {
     const collab = toCollabSongMap(mapWithRenderedCue())
     expect(collab.audio?.originalPath).toBeUndefined()
+    expect(collab.transpose).toEqual({ baseSemitones: 2 })
     expect(collab.cueTracks[0]?.events[0]?.text).toBe('Intro')
     expect(collab.cueTracks[0]?.renderExport?.fingerprint).toBe('cue-fp')
     expect(collab.cueTracks[0]?.renderExport?.relativePath).toBeUndefined()

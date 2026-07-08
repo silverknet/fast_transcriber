@@ -241,6 +241,18 @@ describe('collabMerge · applyConflictDecisions', () => {
     expect(result.expectedAudio?.sha256).toBe('aaa')
   })
 
+  it('labels and resolves transpose conflicts', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = { ...base, transpose: { baseSemitones: -2 } }
+    const cloud: SongMap = { ...base, transpose: { baseSemitones: 2 } }
+    const report = mergeForConflict(local, cloud)
+    expect(report.conflicts).toContainEqual(
+      expect.objectContaining({ path: 'transpose', label: 'Transposition' }),
+    )
+    expect(applyConflictDecisions(report, new Map()).transpose?.baseSemitones).toBe(2)
+    expect(applyConflictDecisions(report, new Map([['transpose', 'mine']])).transpose?.baseSemitones).toBe(-2)
+  })
+
   it('preserves non-conflicted local-only items regardless of decisions', () => {
     const base = createEmptySongMap()
     const local: SongMap = { ...base, harmony: [chord('h-1', 'C'), chord('h-2', 'F')] }
@@ -260,6 +272,7 @@ describe('collabMerge · invariant: no silent data loss', () => {
       harmony: [chord('h-1', 'C'), chord('h-2', 'F')],
       sections: [section('s-1', 'Verse', 0, 3)],
       countInBeats: 4,
+      transpose: { baseSemitones: -1 },
     }
     const cloud: SongMap = {
       ...base,
@@ -267,6 +280,7 @@ describe('collabMerge · invariant: no silent data loss', () => {
       harmony: [chord('h-1', 'G'), chord('h-3', 'Am')],
       sections: [section('s-1', 'Verse (cloud)', 0, 3)],
       countInBeats: 2,
+      transpose: { baseSemitones: 1 },
     }
     const { conflicts } = mergeForConflict(local, cloud)
     const paths = pathSet(conflicts)
@@ -275,6 +289,7 @@ describe('collabMerge · invariant: no silent data loss', () => {
     expect(paths.has('harmony/h-1')).toBe(true)
     expect(paths.has('sections/s-1')).toBe(true)
     expect(paths.has('countInBeats')).toBe(true)
+    expect(paths.has('transpose')).toBe(true)
     // Non-conflicting (h-2, h-3) must NOT appear.
     expect(paths.has('harmony/h-2')).toBe(false)
     expect(paths.has('harmony/h-3')).toBe(false)

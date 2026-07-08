@@ -1,5 +1,5 @@
 /**
- * SongMap v2 — persistent musical model only (no editor / transport state).
+ * SongMap v3 — persistent musical model only (no editor / transport state).
  * Bar times use half-open intervals [startSec, endSec) on the master audio timeline.
  */
 
@@ -33,6 +33,14 @@ export type SongKey = {
   root: NoteName
   accidental?: Accidental
   mode: SongKeyMode
+}
+
+export type SongTranspose = {
+  /**
+   * Shared song-level transpose in semitones. Source audio/harmony stay
+   * untransposed; playback/display derive the sounding key/chords from this.
+   */
+  baseSemitones: number
 }
 
 export type HarmonyEvent = {
@@ -405,10 +413,11 @@ export type ChordHints = {
   analyzerSource?: 'stems-other' | 'mix'
 }
 
-export type SongMapV2 = {
+export type SongMapV3 = {
   formatVersion: typeof SONGMAP_FORMAT_VERSION
   app?: SongMapAppInfo
   metadata: SongMetadata
+  transpose?: SongTranspose
   audio?: AudioReference
   timeline: SongMapTimeline
   sections: Section[]
@@ -450,10 +459,12 @@ export type SongMapV2 = {
   chordHints?: ChordHints
 }
 
-/** @deprecated Persistent runtime shape is v2; kept for older imports. */
-export type SongMapV1 = SongMapV2
+/** @deprecated Persistent runtime shape is v3; kept for older imports. */
+export type SongMapV1 = SongMapV3
+/** @deprecated Persistent runtime shape is v3; kept for older imports. */
+export type SongMapV2 = SongMapV3
 
-export type SongMap = SongMapV2
+export type SongMap = SongMapV3
 
 /** Partial timeline + optional confidence from `/api/analyze` (merge into SongMap). */
 export type SongMapAnalysisFragment = {

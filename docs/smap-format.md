@@ -1,9 +1,9 @@
 # `.smap` — file format specification
 
-**Status:** v2 — stable
+**Status:** v3 — stable
 **Container version (binary header `version`):** `2` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
 **JSON envelope version (`projectFormatVersion`):** `1` — [`SONG_PROJECT_FORMAT_VERSION`](../src/lib/songmap/smapFile.ts)
-**SongMap schema version (`formatVersion`):** `2` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
+**SongMap schema version (`formatVersion`):** `3` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
 **MIME type:** `application/vnd.barbro.smap` — [`SMAP_BLOB_TYPE`](../src/lib/songmap/smapFile.ts)
 **Extension:** `.smap`
 
@@ -59,7 +59,7 @@ The reader ([`decodeSmapFile`](../src/lib/songmap/smapFile.ts)) throws on any of
 ```jsonc
 {
   "projectFormatVersion": 1,
-  "songMap": { /* SongMapV2, §3 */ }
+  "songMap": { /* SongMapV3, §3 */ }
 }
 ```
 
@@ -69,15 +69,16 @@ Defined in [`smapFile.ts`](../src/lib/songmap/smapFile.ts). The envelope exists 
 
 ---
 
-## 3. `SongMap` v2 schema
+## 3. `SongMap` v3 schema
 
-Source of truth: [`SongMapV2`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
+Source of truth: [`SongMapV3`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
 
 ```ts
-type SongMapV2 = {
-  formatVersion: 2
+type SongMapV3 = {
+  formatVersion: 3
   app?: { name: 'BarBro'; appVersion?: string }
   metadata: SongMetadata             // required
+  transpose?: { baseSemitones: number } // shared reversible transpose, -12..12
   audio?: AudioReference             // optional (no audio = JSON-only project)
   timeline: { bars: Bar[]; beats: Beat[] }   // required (arrays can be empty)
   sections: Section[]                // required (can be empty)
@@ -107,6 +108,12 @@ type SongMapV2 = {
 | `notes` | `string` | | Free text. |
 | `createdAt`, `updatedAt` | ISO 8601 `string` | ✓ | |
 | `analyzed` | `boolean` | | `true` once beat/bar analysis has completed. Absent in legacy files = inferred analyzed iff bars exist. Routes UI to /import vs /edit. |
+
+### 3.1.1 `transpose` — shared reversible transposition
+
+| Field | Type | Required | Notes |
+|---|---|:---:|---|
+| `baseSemitones` | integer `-12..12` | ✓ | Shared song-level transpose. Missing or `0` means untransposed. Source `harmony[].chord`, `metadata.keyDetail`, and audio files remain original; display/export derives sounding key/chords from this value. Audio playback remains original in the current product path; pitch-shift caches are local/experimental only. |
 
 ### 3.2 `audio` — `AudioReference` (optional, metadata only)
 
@@ -282,7 +289,8 @@ Consequence: `decode(encode(x)) ≡ x` modulo dropped `undefined`s, and `encode(
 - **Legacy JSON-only files** (no binary wrapper): plain `SongMap` at the JSON root is accepted by [`parseImportedProjectFile`](../src/lib/songmap/persist.ts) and auto-wrapped into a `SongProject`.
 - **`.zip` bundles** (very old): explicitly rejected with a message instructing the user to re-export from BarBro as a single `.smap`.
 - **Missing optional fields** (e.g. `sectionBorderHints`, `chordHints`, `clickExport`): silently ignored — they'll be regenerated on demand.
-- **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`. New saves emit v2 only.
+- **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`.
+- **Legacy SongMap `formatVersion: 1` or `2` transpose:** absent transpose becomes untransposed. New saves emit v3 only.
 - **Legacy `cueTrackExport` / `clickTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
 
 Unknown top-level JSON keys are stripped by default during parse. (See [`parse.ts`](../src/lib/songmap/parse.ts).)

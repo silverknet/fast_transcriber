@@ -37,6 +37,7 @@ import {
 } from '$lib/audio/importedAudio'
 import { createEmptySongMap } from '$lib/songmap/factory'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
+import { effectiveTransposeSemitones } from '$lib/songmap/transposition'
 import {
   createProject,
   createProjectSong,
@@ -150,6 +151,8 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   const out: ProjectSongMetadataLite = { title: m.title }
   if (m.artist) out.artist = m.artist
   if (m.keyDetail) out.keyDetail = m.keyDetail
+  const transposeSemitones = effectiveTransposeSemitones(map)
+  if (transposeSemitones !== 0) out.transposeSemitones = transposeSemitones
   if (m.bpm !== undefined) out.bpm = m.bpm
   out.analyzed = m.analyzed ?? map.timeline.bars.length > 0
   const dk = map.chordHints?.detectedKey
@@ -175,6 +178,9 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   const out: ProjectSongMetadataLite = { title: info.title || songFolderLeaf(fallbackFolder) }
   if (info.artist) out.artist = info.artist
   if (info.keyDetail) out.keyDetail = info.keyDetail
+  if (typeof info.transposeSemitones === 'number' && info.transposeSemitones !== 0) {
+    out.transposeSemitones = info.transposeSemitones
+  }
   if (typeof info.bpm === 'number') out.bpm = info.bpm
   if (info.stemRefs && Object.keys(info.stemRefs).length > 0) out.stemRefs = info.stemRefs
   if (info.stemsByPreset && Object.keys(info.stemsByPreset).length > 0) {

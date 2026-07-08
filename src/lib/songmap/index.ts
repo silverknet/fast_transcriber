@@ -1,4 +1,14 @@
 export { SONGMAP_FORMAT_VERSION, SONGMAP_VERSION_CHANGELOG } from './version'
+export {
+  MAX_TRANSPOSE_SEMITONES,
+  MIN_TRANSPOSE_SEMITONES,
+  clampTransposeSemitones,
+  effectiveTransposeSemitones,
+  formatTransposeLabel,
+  transposeChordForDisplay,
+  transposeChordForStorage,
+  transposeSongKey,
+} from './transposition'
 export type {
   Accidental,
   AudioReference,

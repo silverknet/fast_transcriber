@@ -3,11 +3,11 @@ import { parseSongMap } from './parse'
 import { serializeSongMap } from './serialize'
 
 /**
- * The v1→v2 format bump touches the parse/serialize boundary for the WHOLE
+ * The v1→v3 format bumps touch the parse/serialize boundary for the WHOLE
  * SongMap, not just cue fields. `cueMigration.test.ts` proves the cue-side
  * migration; this proves the format bump does NOT lose any of the *non-cue*
  * data a real project carries — bars, beats, sections, chords, count-in,
- * song-start anchor, audio identity — and that a v2 file round-trips through
+ * song-start anchor, audio identity — and that a v3 file round-trips through
  * save/load unchanged.
  */
 
@@ -102,12 +102,13 @@ const legacyV1 = {
   cues: { mode: 'countIn', countInBeats: 4, useSectionLabels: true },
 }
 
-describe('SongMap v1→v2 full round-trip (no non-cue data loss)', () => {
+describe('SongMap v1→v3 full round-trip (no non-cue data loss)', () => {
   const sm = parseSongMap(JSON.stringify(legacyV1))
 
-  it('bumps to v2 and migrates the count-in to a top-level field', () => {
-    expect(sm.formatVersion).toBe(2)
+  it('bumps to v3 and migrates the count-in to a top-level field', () => {
+    expect(sm.formatVersion).toBe(3)
     expect(sm.countInBeats).toBe(4)
+    expect(sm.transpose).toBeUndefined()
   })
 
   it('preserves metadata verbatim', () => {
@@ -132,7 +133,7 @@ describe('SongMap v1→v2 full round-trip (no non-cue data loss)', () => {
     expect(sm.harmony).toEqual(legacyV1.harmony)
   })
 
-  it('is idempotent through serialize → parse (a v2 save reloads unchanged)', () => {
+  it('is idempotent through serialize → parse (a v3 save reloads unchanged)', () => {
     const reparsed = parseSongMap(serializeSongMap(sm))
     expect(reparsed).toEqual(sm)
   })

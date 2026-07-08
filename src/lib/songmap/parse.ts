@@ -1,4 +1,8 @@
-import { SONGMAP_FORMAT_VERSION, SONGMAP_LEGACY_FORMAT_VERSION } from './version'
+import {
+  SONGMAP_CUE_TRACK_FORMAT_VERSION,
+  SONGMAP_FORMAT_VERSION,
+  SONGMAP_LEGACY_FORMAT_VERSION,
+} from './version'
 import type {
   AudioReference,
   Bar,
@@ -17,6 +21,7 @@ import type {
   SongMapAppInfo,
   SongMetadata,
   SongMapTimeline,
+  SongTranspose,
 } from './types'
 import { defaultCueSettings } from './defaults'
 import { createDefaultCueTrack } from './cueTracks'
@@ -171,6 +176,14 @@ function parseSongKey(raw: unknown, path: string): SongKey | undefined {
     root: reqString(o.root, `${path}.root`) as SongKey['root'],
     accidental: optString(o.accidental) as SongKey['accidental'] | undefined,
     mode: mode as SongKey['mode'],
+  }
+}
+
+function parseTranspose(raw: unknown, path: string): SongTranspose | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  return {
+    baseSemitones: reqNum(o.baseSemitones, `${path}.baseSemitones`),
   }
 }
 
@@ -503,7 +516,8 @@ function parseTimeline(raw: unknown, path: string): SongMapTimeline {
 function extractSongMap(raw: Record<string, unknown>): SongMap {
   const formatVersion = raw.formatVersion
   const isLegacyV1 = formatVersion === SONGMAP_LEGACY_FORMAT_VERSION
-  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1) {
+  const isLegacyV2 = formatVersion === SONGMAP_CUE_TRACK_FORMAT_VERSION
+  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1 && !isLegacyV2) {
     // A file from a NEWER build (formatVersion above what we understand) gets a
     // user-facing "update BarBro" message wherever this error surfaces, instead
     // of a cryptic version number. Older/unknown versions keep the raw message.
@@ -535,6 +549,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     formatVersion: SONGMAP_FORMAT_VERSION,
     app: parseApp(raw.app, 'app'),
     metadata,
+    transpose: parseTranspose(raw.transpose, 'transpose'),
     audio: raw.audio !== undefined && raw.audio !== null ? parseAudio(raw.audio, 'audio') : undefined,
     timeline,
     sections: Array.isArray(raw.sections)
@@ -593,6 +608,7 @@ const KNOWN_TOP_KEYS = new Set([
   'formatVersion',
   'app',
   'metadata',
+  'transpose',
   'audio',
   'timeline',
   'sections',

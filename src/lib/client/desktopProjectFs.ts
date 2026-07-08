@@ -23,6 +23,7 @@ export interface ProjectSongMetadataInfo {
   title: string
   artist?: string
   keyDetail?: SongKey
+  transposeSemitones?: number
   bpm?: number
   /** Count-in beats when `cues.mode === 'countIn'`; 0/absent otherwise. */
   countInBeats?: number
@@ -342,6 +343,22 @@ export type TranscodeToWavResult =
   | { ok: true; cached: boolean }
   | { ok: false; error: string }
 
+export type PitchShiftCacheResult =
+  | {
+      ok: true
+      cached: boolean
+      relPath: string
+      sampleRate?: number
+      durationSec?: number
+      frames?: number
+      engine?: string
+      algo?: string
+      bypassed?: boolean
+      normalizedInput?: boolean
+      repaired?: boolean
+    }
+  | { ok: false; error: string }
+
 /**
  * Transcode a compressed audio file (typically MP3) to 16-bit PCM WAV
  * inside the project tree. Cache-aware via sidecar mtime check — the
@@ -361,6 +378,24 @@ export async function transcodeProjectAudioToWav(
     songFolder,
     srcSubpath,
     dstSubpath,
+  })
+}
+
+/**
+ * Build/read a local tempo-preserved pitch-shift WAV cache for project audio.
+ * Semitone 0 should bypass this helper and use the original file directly.
+ */
+export async function ensureProjectPitchShiftCache(
+  projectPath: string,
+  songFolder: string,
+  srcSubpath: string,
+  semitones: number,
+): Promise<PitchShiftCacheResult> {
+  return await postJson<PitchShiftCacheResult>(`${BASE_URL}/native/project/pitch-shift-cache`, {
+    projectPath,
+    songFolder,
+    srcSubpath,
+    semitones,
   })
 }
 

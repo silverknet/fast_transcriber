@@ -36,14 +36,19 @@
     type MixerSnapshot,
     type MixerTrack,
   } from '$lib/audio/mixerEngine'
-  import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { ensureProjectPitchShiftCache, readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
-  import { project as projectStore } from '$lib/stores/project'
+  import { project as projectStore, type ProjectStoreState } from '$lib/stores/project'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
+  import {
+    effectiveTransposeSemitones,
+    transposeChordForDisplay,
+    transposeSongKey,
+  } from '$lib/songmap/transposition'
   import type { MixState, MixTrackState } from '$lib/songmap/types'
   import { RefreshCw } from '@lucide/svelte'
 
@@ -57,6 +62,12 @@
     '#06b6d4', // cyan (fx / extra stems)
     '#f97316', // orange (cue)
   ]
+  // v1: audio pitch-shift is GATED OFF. librosa quality was below bar and the
+  // Rubber Band engine needs a licensed CLI binary that isn't bundled — so
+  // attempting it just 503s ("Rubber Band CLI not found"). Chord/key transpose
+  // still works (pure display derivation). Flip back on once a bundled,
+  // permissive stretcher lands (see AGENT_BRIDGE MSG 27).
+  const transposeAudioEnabled: boolean = false
 
   /**
    * Bump `reloadSignal` from the parent to force a full re-scan + re-load of
@@ -126,6 +137,7 @@
   let snapshot = $state<MixerSnapshot>({ state: 'stopped', positionSec: 0, durationSec: 0 })
   let mixerDurationSec = $state(0)
   let lanes = $state<LaneView[]>([])
+  const mixerCanPlay = $derived(!loading && !loadError && lanes.length > 0)
 
   /** Pull the current saved state for one track-key from songMap. */
   function savedFor(key: string): MixTrackState | undefined {
@@ -202,9 +214,11 @@
   })
 
   const songTitle = $derived($songMap?.metadata.title?.trim() || 'Untitled song')
-  const songKeyLabel = $derived(
-    $songMap?.metadata.keyDetail ? formatSongKeyLabel($songMap.metadata.keyDetail) : 'No key',
+  const transposeSemitones = $derived(effectiveTransposeSemitones($songMap))
+  const displayedSongKey = $derived(
+    $songMap?.metadata.keyDetail ? transposeSongKey($songMap.metadata.keyDetail, transposeSemitones) : null,
   )
+  const songKeyLabel = $derived(displayedSongKey ? formatSongKeyLabel(displayedSongKey) : 'No key')
   const songBpmLabel = $derived(
     $songMap?.metadata.bpm != null ? `${Math.round($songMap.metadata.bpm)} BPM` : 'No BPM',
   )
@@ -240,7 +254,8 @@
     }
 
     const resolved = resolveChordAtEachBeat(sm)
-    const preferFlats = sm.metadata.keyDetail ? songKeyPreferFlats(sm.metadata.keyDetail) : false
+    const key = displayedSongKey
+    const preferFlats = key ? songKeyPreferFlats(key) : false
     for (let i = 0; i < beats.length; i++) {
       const beat = beats[i]!
       const nextBeat = beats[i + 1]
@@ -249,8 +264,11 @@
       if (endSec <= 0 || startSec >= durationSec) continue
 
       const chord = resolved.get(beat.id)
+      const displayedChord = chord
+        ? transposeChordForDisplay(chord, transposeSemitones, key ?? undefined)
+        : null
       pushChordSegment(segments, {
-        label: chord ? formatChordSymbol(chord, { preferFlats }) : NO_CHORD_LABEL,
+        label: displayedChord ? formatChordSymbol(displayedChord, { preferFlats }) : NO_CHORD_LABEL,
         startSec: clamp(startSec, 0, durationSec),
         endSec: clamp(endSec, 0, durationSec),
         hasChord: !!chord,
@@ -439,13 +457,45 @@
     return await eng.ac.decodeAudioData(await blob.arrayBuffer())
   }
 
+  function sourceAudioSubpath(sm: NonNullable<typeof $songMap>): string | null {
+    if (sm.audio?.originalPath) return sm.audio.originalPath
+    if (sm.audio?.fileName) return `audio/${sm.audio.fileName}`
+    return null
+  }
+
+  async function maybeLoadTransposedProjectBlob(
+    ps: ProjectStoreState,
+    srcSubpath: string | null | undefined,
+    fallback: () => Promise<Blob | null>,
+  ): Promise<Blob | null> {
+    if (!transposeAudioEnabled || transposeSemitones === 0) return await fallback()
+    if (!ps.osPath || !ps.activeSongFolder || !srcSubpath) {
+      throw new Error('Transpose audio needs project audio on disk.')
+    }
+    const cache = await ensureProjectPitchShiftCache(
+      ps.osPath,
+      ps.activeSongFolder,
+      srcSubpath,
+      transposeSemitones,
+    )
+    if (!cache.ok) throw new Error(cache.error)
+    const shifted = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, cache.relPath)
+    if (!shifted.ok) throw new Error(shifted.error)
+    return shifted.blob
+  }
+
   async function loadAndRegisterTracks() {
     if (!engine) return
     const sm = get(songMap)
     const ps = get(projectStore)
     const sess = get(audioSession)
 
-    type Plan = { key: string; label: string; loader: () => Promise<Blob | null> }
+    type Plan = {
+      key: string
+      label: string
+      loader: () => Promise<Blob | null>
+      transposeSrcSubpath?: string | null
+    }
     const plan: Plan[] = []
 
     // Original audio — from the live audioSession (already decoded once into editor).
@@ -454,6 +504,7 @@
         key: 'original',
         label: 'Original',
         loader: async () => sess.file,
+        transposeSrcSubpath: sm ? sourceAudioSubpath(sm) : null,
       })
     }
 
@@ -475,6 +526,7 @@
         plan.push({
           key,
           label,
+          transposeSrcSubpath: subpath,
           loader: async () => {
             if (!ps.osPath || !ps.activeSongFolder) return null
             const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, subpath)
@@ -484,11 +536,12 @@
       }
     }
 
-    // Cue track (speech). Only a lane when the cue track is enabled AND has a
-    // rendered WAV on disk — the Overview "Play cues" toggle drives `enabled`
-    // and the render, so switching it off drops the lane on the next reload.
+    // Cue track (speech). Present whenever a rendered WAV exists on disk.
+    // Whether you HEAR it is a local mute (mixState, per-machine) — the Overview
+    // "Play cues" toggle drives that mute, never the shared `enabled` field, so
+    // toggling never causes a cloud conflict or a full reload.
     const cueTrackPath = primaryCueTrack?.renderExport?.relativePath
-    if (primaryCueTrack?.enabled && cueTrackPath) {
+    if (cueTrackPath) {
       plan.push({
         key: 'cue',
         label: primaryCueTrack?.name ? `Cue · ${primaryCueTrack.name}` : 'Cue',
@@ -546,7 +599,10 @@
     for (const p of plan) {
       loadingMsg = `Loading ${p.label}… (${done + 1} / ${plan.length})`
       try {
-        const blob = await p.loader()
+        const blob =
+          p.transposeSrcSubpath !== undefined
+            ? await maybeLoadTransposedProjectBlob(ps, p.transposeSrcSubpath, p.loader)
+            : await p.loader()
         if (!blob) continue
         let buf = await decodeBlob(engine, blob)
         const pre = computePrepend(p.key)
@@ -564,6 +620,10 @@
         syncLanesFromEngine()
       } catch (e) {
         console.warn('Failed to load', p.key, e)
+        if (transposeAudioEnabled && transposeSemitones !== 0 && p.transposeSrcSubpath !== undefined) {
+          const msg = e instanceof Error ? e.message : String(e)
+          loadError = `Could not render transposed ${p.label}: ${msg}`
+        }
       }
       done++
     }
@@ -619,6 +679,7 @@
   }
 
   function onPlayPause() {
+    if (!mixerCanPlay) return
     if (!engine) return
     if (snapshot.state === 'playing') engine.pause()
     else void engine.play()
@@ -700,14 +761,48 @@
     }
   })
 
-  // Parent-driven reload (e.g. Overview "Play cues" toggle). Skips the initial
-  // value so mount's own load isn't duplicated.
+  // Parent-driven reload — only used when a NEW lane must appear (e.g. the
+  // Overview toggle just rendered the cue WAV). Skips the initial value so
+  // mount's own load isn't duplicated.
   let lastReloadSignal = untrack(() => reloadSignal)
+  let lastTransposeForReload = untrack(() => transposeSemitones)
+  let transposeReloadGeneration = 0
   $effect(() => {
     const sig = reloadSignal
     if (sig === lastReloadSignal) return
     lastReloadSignal = sig
     void reload()
+  })
+
+  $effect(() => {
+    const semitones = transposeSemitones
+    if (semitones === lastTransposeForReload) return
+    lastTransposeForReload = semitones
+    if (!engine) return
+    transposeReloadGeneration += 1
+    const generation = transposeReloadGeneration
+    const wasPlaying = snapshot.state === 'playing'
+    const resumeAt = snapshot.positionSec
+    if (wasPlaying) engine.pause()
+    void (async () => {
+      await reload()
+      if (generation !== transposeReloadGeneration || !engine || loadError) return
+      engine.seek(resumeAt)
+      if (wasPlaying) await engine.play(resumeAt)
+    })()
+  })
+
+  // Keep the cue lane's mute in sync with mixState (per-machine, stripped from
+  // cloud sync). The Overview "Play cues" toggle flips this — applying it live
+  // here means no full reload and no cloud conflict for a local preference.
+  $effect(() => {
+    const desiredMuted = $songMap?.mixState?.tracks.find((t) => t.key === 'cue')?.muted ?? false
+    if (!engine) return
+    const t = engine.listTracks().find((x) => x.key === 'cue')
+    if (t && t.muted !== desiredMuted) {
+      engine.setMuted('cue', desiredMuted)
+      syncLanesFromEngine()
+    }
   })
 
   onMount(() => {
@@ -734,7 +829,7 @@
       size="sm"
       class="h-9 w-9 p-0"
       onclick={onPlayPause}
-      disabled={loading || lanes.length === 0}
+      disabled={!mixerCanPlay}
       aria-label={snapshot.state === 'playing' ? 'Pause' : 'Play'}
     >
       {#if snapshot.state === 'playing'}
@@ -748,7 +843,7 @@
       size="sm"
       class="h-9 w-9 p-0"
       onclick={onStop}
-      disabled={loading || lanes.length === 0}
+      disabled={!mixerCanPlay}
       aria-label="Stop"
     >
       <Square class="size-3.5" aria-hidden="true" />

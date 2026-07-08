@@ -21,16 +21,11 @@
  * Format must match `desktop/package.json#version` (semver
  * `<major>.<minor>.<patch>`).
  *
- * ── MANDATORY bump for the SongMap v2 release ──
- * The v2 cue-track migration bumped `.smap` `formatVersion` to 2, and saves now
- * emit v2. A collaborator still on a v1-only build who pulls a v2 song hits
- * `Unsupported formatVersion: 2` and can't open the shared project. Bumping
- * this constant to the v2 desktop release (following the ordering above) forces
- * every collaborator onto a v2-capable build before they can use the app, which
- * closes the mixed-version cloud break. Do NOT ship the v2 web app without this
- * bump landing together with the v2 desktop release.
+ * ── MANDATORY bump for SongMap / sidecar feature releases ──
+ * If the web app writes a newer `.smap` format or calls a newer sidecar
+ * endpoint, bump this to the matching desktop release.
  */
-export const MIN_SIDECAR_VERSION = '0.1.6'
+export const MIN_SIDECAR_VERSION = '0.1.7'
 
 export type SidecarVersionStatus = 'ok' | 'outdated' | 'unknown'
 

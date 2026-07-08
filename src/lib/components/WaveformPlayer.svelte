@@ -154,6 +154,12 @@
      */
     controller: passedController = null as PlaybackController | null,
     /**
+     * Optional playback-only buffer override. `undefined` means use the decoded
+     * source buffer; `null` means playback is intentionally unavailable
+     * (for example while a transposed cache is rendering).
+     */
+    playbackAudioBufferOverride = undefined as AudioBuffer | null | undefined,
+    /**
      * Grid mode: ghost ticks for the song's count-in beats, in
      * original-time. Each tick = one pre-song click. When the user
      * changes `countInBeats` 4 → 8 in the SongMap, this list rerenders
@@ -325,7 +331,9 @@
     controller?.setAudioElement(audioEl ?? null)
   })
   $effect(() => {
-    controller?.setAudioBuffer(decodedAudioBuffer)
+    controller?.setAudioBuffer(
+      playbackAudioBufferOverride === undefined ? decodedAudioBuffer : playbackAudioBufferOverride,
+    )
   })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */

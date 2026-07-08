@@ -7,9 +7,10 @@ appId: com.barbro.desktop
 productName: BarBro Desktop
 asar: true
 
-# Python scripts must live outside asar so subprocess can read them.
+# Python scripts and native CLIs must live outside asar so subprocess can execute/read them.
 asarUnpack:
   - native/python/**/*
+  - native/bin/**/*
 
 directories:
   output: release

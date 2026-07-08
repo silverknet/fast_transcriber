@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { app } from 'electron'
+import { rubberBandPlatformKey } from './transposeCache.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -19,6 +20,40 @@ export function getNativePythonRoot() {
     return path.join(process.resourcesPath, 'app.asar.unpacked', 'native', 'python')
   }
   return path.resolve(path.join(__dirname, '..', 'native', 'python'))
+}
+
+export function getNativeBinRoot() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'app.asar.unpacked', 'native', 'bin')
+  }
+  return path.resolve(path.join(__dirname, '..', 'native', 'bin'))
+}
+
+export function expectedRubberBandBundledPath() {
+  const key = rubberBandPlatformKey()
+  if (!key) return null
+  return path.join(
+    getNativeBinRoot(),
+    'rubberband',
+    key,
+    process.platform === 'win32' ? 'rubberband.exe' : 'rubberband',
+  )
+}
+
+/**
+ * Rubber Band CLI resolution.
+ *
+ * Packaged builds only use an explicit env override or the bundled commercial
+ * binary. Dev builds may also fall back to `rubberband` on PATH so local
+ * experiments work before the licensed bundle is installed.
+ */
+export function rubberBandExePath() {
+  const override = process.env.BARBRO_RUBBERBAND?.trim()
+  if (override) return override
+  const bundled = expectedRubberBandBundledPath()
+  if (bundled && existsSync(bundled)) return bundled
+  if (!app.isPackaged) return 'rubberband'
+  return bundled
 }
 
 export function beatsScriptPath() {

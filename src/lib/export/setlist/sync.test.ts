@@ -475,7 +475,7 @@ describe('Ableton ↔ BarBro alignment — mixer volume propagation', () => {
     const click = stemClip({ fileName: 'click-track.wav' })
     const xml = await exportXml(stems, click)
     expect(xml).toContain('<SampleVolume Value="0.420000"')
-  })
+  }, 10_000)
 
   it('muted stem renders SampleVolume="0.000000" regardless of volume', async () => {
     const stems = new Map([

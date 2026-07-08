@@ -23,6 +23,7 @@
   } from '$lib/components/ui/dropdown-menu'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
   import type { ProjectSongEntry } from '$lib/project/types'
+  import { formatTransposeLabel, transposeSongKey } from '$lib/songmap/transposition'
   import type { ProjectSongMetadataLite } from '$lib/stores/project'
   import { stemJobs, type StemJobEntry } from '$lib/stores/stemJobs'
   import {
@@ -76,10 +77,27 @@
 
   let title = $derived(metadata?.title ?? entry.folder.replace(/^songs\//, ''))
   let artist = $derived(metadata?.artist ?? '')
+  let transposeSemitones = $derived(metadata?.transposeSemitones ?? 0)
   // Show the committed key if set, otherwise the auto-detected one (rendered
   // muted so "detected" reads differently from "confirmed").
-  let keyText = $derived(formatKey(metadata?.keyDetail ?? metadata?.detectedKey))
+  let sourceKey = $derived(metadata?.keyDetail ?? metadata?.detectedKey)
+  let displayedKey = $derived(
+    sourceKey && transposeSemitones !== 0 ? transposeSongKey(sourceKey, transposeSemitones) : sourceKey,
+  )
+  let keyText = $derived.by(() => {
+    const key = formatKey(displayedKey)
+    const tr = transposeSemitones !== 0 ? formatTransposeLabel(transposeSemitones) : ''
+    return [key, tr].filter(Boolean).join(' ')
+  })
   let keyIsDetected = $derived(!metadata?.keyDetail && !!metadata?.detectedKey)
+  let keyTitle = $derived.by(() => {
+    if (!sourceKey && transposeSemitones === 0) return undefined
+    const detected = keyIsDetected ? 'Detected key' : 'Key'
+    const source = formatKey(sourceKey)
+    const displayed = formatKey(displayedKey)
+    if (transposeSemitones === 0) return keyIsDetected ? `${detected} automatically — open the song to confirm` : undefined
+    return `${detected}: ${displayed || 'unknown'} (${formatTransposeLabel(transposeSemitones)}). Original: ${source || 'unknown'}.`
+  })
   // Songs with audio but no beat grid yet — surfaced clearly so a blank
   // key/BPM doesn't look broken.
   let notAnalyzed = $derived(!!metadata?.hasAudio && metadata?.analyzed === false)
@@ -212,7 +230,7 @@
       class="min-w-0 truncate font-mono text-xs {keyIsDetected
         ? 'text-muted-foreground/60 italic'
         : 'text-muted-foreground'}"
-      title={keyIsDetected ? 'Detected automatically — open the song to confirm' : undefined}
+      title={keyTitle}
     >
       {keyText}
     </div>

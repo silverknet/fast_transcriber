@@ -30,10 +30,22 @@
   } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
+  import {
+    clampTransposeSemitones,
+    effectiveTransposeSemitones,
+    formatTransposeLabel,
+    transposeChordForDisplay,
+    transposeChordForStorage,
+    transposeSongKey,
+  } from '$lib/songmap/transposition'
   import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
-  import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import {
+    ensureProjectPitchShiftCache,
+    readProjectSongAsset,
+    writeProjectSongAsset,
+  } from '$lib/client/desktopProjectFs'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { metadataLiteFromSongMap } from '$lib/project/commit'
   import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
@@ -631,13 +643,40 @@
   const detectedKey = $derived($songMap?.chordHints?.detectedKey ?? null)
 
   /** Key label for the header: the manual key if set, else the detected key. */
-  const keyLabel = $derived.by(() => {
+  const transposeSemitones = $derived(effectiveTransposeSemitones($songMap))
+  const displayedSongKey = $derived.by(() => {
     const kd = $songMap?.metadata.keyDetail
-    if (kd) return formatSongKeyLabel(kd)
+    return kd ? transposeSongKey(kd, transposeSemitones) : null
+  })
+  const keyLabel = $derived.by(() => {
+    if (displayedSongKey) return formatSongKeyLabel(displayedSongKey)
     const dk = detectedKey
-    if (dk) return formatSongKeyLabel({ root: dk.root, accidental: dk.accidental, mode: dk.mode })
+    if (dk) {
+      return formatSongKeyLabel(
+        transposeSongKey({ root: dk.root, accidental: dk.accidental, mode: dk.mode }, transposeSemitones),
+      )
+    }
     return null
   })
+
+  function setTransposeBase(semitones: number) {
+    const next = clampTransposeSemitones(semitones)
+    const resumeSnapshot = next !== transposeSemitones ? captureTransposePlaybackResume() : null
+    const p = patchSongMap((m) => ({
+      ...m,
+      transpose: next === 0 ? undefined : { baseSemitones: next },
+    }))
+    if (!p.ok) {
+      beatEditError = p.errors.join('; ')
+      transposePlaybackResume = null
+      if (resumeSnapshot) {
+        playbackController.seek(resumeSnapshot.timeSec)
+        if (resumeSnapshot.wasPlaying) queueMicrotask(() => playbackController.play())
+      }
+    } else {
+      beatEditError = ''
+    }
+  }
 
   /**
    * True when the existing key picker matches the detected key — so we
@@ -1010,12 +1049,13 @@
   let chordLabelByBeatId = $derived.by(() => {
     const sm = $songMap
     if (!sm) return {} as Record<string, string>
-    const key = sm.metadata.keyDetail
+    const key = displayedSongKey
     const preferFlats = key ? songKeyPreferFlats(key) : false
     const out: Record<string, string> = {}
     for (const h of sm.harmony) {
       if (!h.beatId) continue
-      out[h.beatId] = formatChordSymbol(h.chord, { preferFlats })
+      const chord = transposeChordForDisplay(h.chord, transposeSemitones, key ?? undefined)
+      out[h.beatId] = formatChordSymbol(chord, { preferFlats })
     }
     return out
   })
@@ -1024,13 +1064,14 @@
   let playbackChordLabelByBeatId = $derived.by(() => {
     const sm = $songMap
     if (!sm) return {} as Record<string, string>
-    const key = sm.metadata.keyDetail
+    const key = displayedSongKey
     const preferFlats = key ? songKeyPreferFlats(key) : false
     const resolved = resolveChordAtEachBeat(sm)
     const out: Record<string, string> = {}
     for (const [beatId, chord] of resolved) {
       if (!chord) continue
-      out[beatId] = formatChordSymbol(chord, { preferFlats })
+      const displayed = transposeChordForDisplay(chord, transposeSemitones, key ?? undefined)
+      out[beatId] = formatChordSymbol(displayed, { preferFlats })
     }
     return out
   })
@@ -1048,10 +1089,12 @@
   const chordSuggestionByBeatId = $derived.by(() => {
     const out: Record<string, { label: string; confidence: number }> = {}
     const sm = $songMap
-    const preferFlats = sm?.metadata.keyDetail ? songKeyPreferFlats(sm.metadata.keyDetail) : false
+    const key = displayedSongKey
+    const preferFlats = key ? songKeyPreferFlats(key) : false
     for (const [beatId, sug] of chordSuggestions) {
+      const chord = transposeChordForDisplay(sug.chord, transposeSemitones, key ?? undefined)
       out[beatId] = {
-        label: formatChordSymbol(sug.chord, { preferFlats }),
+        label: formatChordSymbol(chord, { preferFlats }),
         confidence: sug.confidence,
       }
     }
@@ -1065,9 +1108,15 @@
     if (!sug) return null
     const label =
       sug.confidence >= 0.10 ? 'high conf' : sug.confidence >= 0.05 ? 'medium conf' : 'low conf'
+    const key = displayedSongKey
     return {
-      primary: { chord: sug.chord, confidenceLabel: label },
-      alternatives: sug.alternatives,
+      primary: {
+        chord: transposeChordForDisplay(sug.chord, transposeSemitones, key ?? undefined),
+        confidenceLabel: label,
+      },
+      alternatives: sug.alternatives.map((chord) =>
+        transposeChordForDisplay(chord, transposeSemitones, key ?? undefined),
+      ),
     }
   })
 
@@ -1106,7 +1155,11 @@
     const ids = selectedChordTargetBeatIds()
     if (ids.length === 0) return
     const resolved = resolveChordAtEachBeat(sm)
-    const chords = ids.map((id) => resolved.get(id) ?? null)
+    const key = displayedSongKey
+    const chords = ids.map((id) => {
+      const chord = resolved.get(id)
+      return chord ? transposeChordForDisplay(chord, transposeSemitones, key ?? undefined) : null
+    })
     const text = serializeChordClipboard(chords)
     void navigator.clipboard.writeText(text).catch(() => {
       beatEditError = 'Could not copy chords to the clipboard'
@@ -1142,7 +1195,8 @@
       const c = chords[i]
       if (c === null) map = clearHarmonyAtBeat(map, beat.id)
       else {
-        const out = upsertHarmonyAtBeat(map, beat.id, c, newId)
+        const sourceChord = transposeChordForStorage(c, transposeSemitones, sm.metadata.keyDetail)
+        const out = upsertHarmonyAtBeat(map, beat.id, sourceChord, newId)
         if (!out.ok) {
           beatEditError = out.error
           return
@@ -1161,8 +1215,9 @@
     const targets = selectedChordTargetBeatIds()
     if (targets.length === 0) return
     let map = sm
+    const sourceChord = transposeChordForStorage(chord, transposeSemitones, sm.metadata.keyDetail)
     for (const beatId of targets) {
-      const out = upsertHarmonyAtBeat(map, beatId, chord, newId)
+      const out = upsertHarmonyAtBeat(map, beatId, sourceChord, newId)
       if (!out.ok) {
         beatEditError = out.error
         return
@@ -1195,7 +1250,7 @@
   }
 
   /** Picker spelling + diatonic column; must track metadata so changing song key updates the column. */
-  let chordPickerSongKey = $derived(($songMap?.metadata.keyDetail ?? keyDraft) as SongKey)
+  let chordPickerSongKey = $derived((displayedSongKey ?? $songMap?.metadata.keyDetail ?? keyDraft) as SongKey)
 
   function isChordOpenKey(e: KeyboardEvent): boolean {
     if (e.metaKey || e.ctrlKey || e.altKey) return false
@@ -1281,6 +1336,24 @@
    * / stop() / seek()`.
    */
   const playbackController = new PlaybackController()
+  // v1: audio pitch-shift is GATED OFF (no bundled stretcher; Rubber Band CLI
+  // 503s). Chord/key transpose still applies as display. See AGENT_BRIDGE MSG 27.
+  const transposeAudioEnabled: boolean = false
+  let transposeAudioStatus = $state<'idle' | 'rendering' | 'ready' | 'error'>('idle')
+  let transposeAudioError = $state('')
+  let transposePlaybackBuffer = $state<AudioBuffer | null>(null)
+  let transposeAudioGeneration = 0
+  let transposePlaybackResume = $state<{ wasPlaying: boolean; timeSec: number } | null>(null)
+
+  function captureTransposePlaybackResume(): { wasPlaying: boolean; timeSec: number } {
+    const snapshot = {
+      wasPlaying: playbackController.isPlaying,
+      timeSec: playbackController.currentTime,
+    }
+    if (snapshot.wasPlaying) playbackController.pause()
+    transposePlaybackResume = snapshot
+    return snapshot
+  }
 
   // Restore the per-device click sync calibration from localStorage —
   // it's a property of the audio output chain (speakers / Bluetooth /
@@ -1325,6 +1398,94 @@
   $effect(() => {
     playbackController.rangeStart = rangeStart
     playbackController.rangeEnd = rangeEnd
+  })
+
+  async function decodePlaybackBlob(blob: Blob): Promise<AudioBuffer> {
+    const ac = new AudioContext()
+    try {
+      return await ac.decodeAudioData(await blob.arrayBuffer())
+    } finally {
+      void ac.close().catch(() => {})
+    }
+  }
+
+  function sourceAudioSubpath(sm: SongMap): string | null {
+    if (sm.audio?.originalPath) return sm.audio.originalPath
+    if (sm.audio?.fileName) return `audio/${sm.audio.fileName}`
+    return null
+  }
+
+  $effect(() => {
+    const sm = $songMap
+    const ps = $projectStore
+    const semitones = transposeSemitones
+    transposeAudioGeneration += 1
+    const generation = transposeAudioGeneration
+
+    if (!transposeAudioEnabled || semitones === 0) {
+      transposePlaybackBuffer = null
+      transposeAudioStatus = 'idle'
+      transposeAudioError = ''
+      return
+    }
+
+    if (!sm || !ps.osPath || !ps.activeSongFolder) {
+      transposePlaybackBuffer = null
+      transposeAudioStatus = 'error'
+      transposeAudioError = 'Transpose audio needs a project song on disk.'
+      return
+    }
+    const srcSubpath = sourceAudioSubpath(sm)
+    if (!srcSubpath) {
+      transposePlaybackBuffer = null
+      transposeAudioStatus = 'error'
+      transposeAudioError = 'Transpose audio needs a linked source file.'
+      return
+    }
+
+    transposePlaybackBuffer = null
+    transposeAudioStatus = 'rendering'
+    transposeAudioError = ''
+
+    void (async () => {
+      try {
+        const cache = await ensureProjectPitchShiftCache(
+          ps.osPath!,
+          ps.activeSongFolder!,
+          srcSubpath,
+          semitones,
+        )
+        if (generation !== transposeAudioGeneration) return
+        if (!cache.ok) throw new Error(cache.error)
+        const shifted = await readProjectSongAsset(ps.osPath!, ps.activeSongFolder!, cache.relPath)
+        if (generation !== transposeAudioGeneration) return
+        if (!shifted.ok) throw new Error(shifted.error)
+        const buffer = await decodePlaybackBlob(shifted.blob)
+        if (generation !== transposeAudioGeneration) return
+        transposePlaybackBuffer = buffer
+        transposeAudioStatus = 'ready'
+      } catch (e) {
+        if (generation !== transposeAudioGeneration) return
+        transposePlaybackBuffer = null
+        transposeAudioStatus = 'error'
+        transposeAudioError = e instanceof Error ? e.message : String(e)
+      }
+    })()
+  })
+
+  $effect(() => {
+    const pending = transposePlaybackResume
+    if (!pending) return
+    const readyForPlayback =
+      transposeSemitones === 0 || (transposeAudioStatus === 'ready' && transposePlaybackBuffer !== null)
+    if (!readyForPlayback) return
+    transposePlaybackResume = null
+    const resumeAt = pending.timeSec
+    const shouldPlay = pending.wasPlaying
+    queueMicrotask(() => {
+      playbackController.seek(resumeAt)
+      if (shouldPlay) playbackController.play()
+    })
   })
 
   onDestroy(() => {
@@ -1972,9 +2133,12 @@
   }
 
   // ── Overview "Play cues" toggle ──────────────────────────────────────────
-  // Drives the primary cue track's `enabled` and, on enable, auto-renders the
-  // cue WAV (desktop TTS) so the mixer's cue lane appears. `mixerReloadSignal`
-  // forces MixerView to re-scan disk + reload lanes after the render/toggle.
+  // "Play cues" is a LOCAL playback preference — the cue lane's mute in
+  // `mixState` (per-machine, stripped from cloud sync). It NEVER touches the
+  // shared `cueTracks[].enabled` field, so toggling can't cause a cloud
+  // conflict. On enable it auto-renders the cue WAV if stale (renderExport is
+  // also local) and bumps `mixerReloadSignal` once so the new lane appears;
+  // pure on/off after that is a live mute with no reload.
   let mixerReloadSignal = $state(0)
   let overviewCueTrack = $derived($songMap ? getPrimaryCueTrack($songMap) : undefined)
   let overviewHasCueContent = $derived(
@@ -1982,41 +2146,56 @@
       (overviewCueTrack.events.some((e) => e.enabled && e.text?.trim()) ||
         !!overviewCueTrack.spokenCountIn),
   )
-  let overviewCuesEnabled = $derived(!!overviewCueTrack?.enabled)
-  let overviewCuesStale = $derived.by(() => {
+  let overviewCueRendered = $derived.by(() => {
     const sm = $songMap
     const t = overviewCueTrack
-    if (!sm || !t) return true
+    if (!sm || !t) return false
     const exp = t.renderExport
-    if (!exp?.relativePath) return true
-    return exp.fingerprint !== fingerprintCueTrackInputs(sm, t)
+    if (!exp?.relativePath) return false
+    return exp.fingerprint === fingerprintCueTrackInputs(sm, t)
   })
-  /** Checkbox reflects "cues will actually play" — enabled AND freshly rendered. */
-  let overviewCuesActive = $derived(overviewCuesEnabled && !overviewCuesStale)
+  let overviewCueMuted = $derived(
+    $songMap?.mixState?.tracks.find((t) => t.key === 'cue')?.muted ?? false,
+  )
+  /** Checkbox = cues will actually be heard: rendered fresh AND not muted. */
+  let overviewCuesActive = $derived(overviewCueRendered && !overviewCueMuted)
+  /** Spoken count-in wants numbers but there's no count-in to place them on. */
+  let overviewCuesNeedCountIn = $derived(
+    !!overviewCueTrack?.spokenCountIn && cueCountInBeats === 0,
+  )
+
+  function setCueLaneMuted(muted: boolean) {
+    patchSongMap((m) => {
+      const tracks = m.mixState?.tracks ? m.mixState.tracks.map((t) => ({ ...t })) : []
+      const i = tracks.findIndex((t) => t.key === 'cue')
+      if (i >= 0) {
+        if (muted) tracks[i]!.muted = true
+        else delete tracks[i]!.muted
+      } else if (muted) {
+        tracks.push({ key: 'cue', volume: 1, muted: true })
+      }
+      return { ...m, mixState: { tracks } }
+    })
+  }
 
   async function toggleOverviewCues(on: boolean) {
-    const t0 = overviewCueTrack
-    if (!t0) return
-    const p = patchSongMap((m) => ({
-      ...m,
-      cueTracks: m.cueTracks.map((x) => (x.id === t0.id ? { ...x, enabled: on } : x)),
-    }))
-    if (!p.ok) {
-      cueGenErr = p.errors.join('; ')
-      return
-    }
     cueGenErr = ''
     if (on) {
-      // Render only when the on-disk WAV is missing or stale for the current
-      // cue content (fingerprint mismatch — e.g. the spoken count-in changed).
+      // Render the cue WAV if it's missing/stale (renderExport + the WAV are
+      // per-machine — no cloud push). A one-time reload surfaces the new lane.
       const sm = get(songMap)
       const t = sm ? getPrimaryCueTrack(sm) : undefined
       const exp = t?.renderExport
       const stale =
         !sm || !t || !exp?.relativePath || exp.fingerprint !== fingerprintCueTrackInputs(sm, t)
-      if (stale) await generateCueTrackWav()
+      if (stale) {
+        await generateCueTrackWav()
+        mixerReloadSignal++
+      }
+      setCueLaneMuted(false)
+    } else {
+      setCueLaneMuted(true)
     }
-    mixerReloadSignal++
   }
 
   function downloadCueTrackFile() {
@@ -2147,6 +2326,61 @@
               />
             </button>
           </span>
+          <span class="text-muted-foreground/40" aria-hidden="true">·</span>
+          <span
+            class="border-foreground/30 bg-background inline-flex items-center overflow-hidden rounded-[var(--radius)] border font-mono text-[11px] font-black"
+            aria-label="Song transpose"
+          >
+            <button
+              type="button"
+              class="hover:bg-foreground hover:text-background px-2 py-0.5 transition-colors disabled:opacity-35"
+              onclick={() => setTransposeBase(transposeSemitones - 1)}
+              disabled={transposeSemitones <= -12}
+              aria-label="Transpose down one semitone"
+            >
+              -1
+            </button>
+            <span class="border-foreground/20 min-w-9 border-x px-2 py-0.5 text-center">
+              {formatTransposeLabel(transposeSemitones)}
+            </span>
+            <button
+              type="button"
+              class="hover:bg-foreground hover:text-background px-2 py-0.5 transition-colors disabled:opacity-35"
+              onclick={() => setTransposeBase(transposeSemitones + 1)}
+              disabled={transposeSemitones >= 12}
+              aria-label="Transpose up one semitone"
+            >
+              +1
+            </button>
+            {#if transposeSemitones !== 0}
+              <button
+                type="button"
+                class="hover:bg-foreground hover:text-background border-foreground/20 border-l px-2 py-0.5 transition-colors"
+                onclick={() => setTransposeBase(0)}
+                aria-label="Reset transpose"
+              >
+                reset
+              </button>
+            {/if}
+          </span>
+          {#if transposeSemitones !== 0}
+            <span
+              class="font-mono text-[10px] font-bold {transposeAudioEnabled && transposeAudioStatus === 'error'
+                ? 'text-destructive'
+                : 'text-muted-foreground'}"
+              title={transposeAudioEnabled
+                ? transposeAudioError || undefined
+                : 'Chords and key are transposed for display. Pitch-shifting the audio is not available in this version.'}
+            >
+              {transposeAudioEnabled
+                ? transposeAudioStatus === 'ready'
+                  ? 'audio shifted'
+                  : transposeAudioStatus === 'rendering'
+                    ? 'preparing audio...'
+                    : 'audio unavailable'
+                : 'chords & key only'}
+            </span>
+          {/if}
         </div>
       </div>
 
@@ -2532,11 +2766,13 @@
             </label>
             {#if cueGenBusy}
               <span class="text-muted-foreground text-xs">Preparing cues…</span>
-            {:else if overviewCuesEnabled && !$desktopCompanionStatus.reachable}
-              <span class="text-muted-foreground text-xs">BarBro Desktop needed for spoken cues.</span>
             {/if}
             {#if cueGenErr}
               <span class="text-destructive text-xs">{cueGenErr}</span>
+            {:else if overviewCuesNeedCountIn}
+              <span class="text-muted-foreground text-xs" role="status">
+                Set a count-in for this song to hear the numbers (Project settings or the count-in control).
+              </span>
             {:else if cueSpeechNote}
               <span class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</span>
             {/if}
@@ -2729,6 +2965,9 @@
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
           bind:audioElement={audioEl}
+          playbackAudioBufferOverride={transposeAudioEnabled && transposeSemitones !== 0
+            ? transposePlaybackBuffer
+            : undefined}
           countInTicks={editMode === 'grid' ? countInTicksForGrid : []}
           songStartBarIndex={songStartBarIndex}
           onSetStartBar={editMode === 'grid' ? setStartBar : undefined}

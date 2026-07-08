@@ -272,6 +272,13 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   if (cibC) conflicts.push(cibC)
   const sbC = classifyScalar(local.startBeatId, cloud.startBeatId, 'startBeatId', 'Start beat')
   if (sbC) conflicts.push(sbC)
+  const trC = classifyScalar(
+    local.transpose,
+    cloud.transpose,
+    'transpose',
+    'Transposition',
+  )
+  if (trC) conflicts.push(trC)
 
   // ── expectedAudio swap is dangerous (different master) ──
   if (
@@ -404,6 +411,7 @@ export function applyConflictDecisions(
     }
     if (c.path === 'countInBeats') result = { ...result, countInBeats: c.mine as number | undefined }
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
+    else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
     // `timeline/bars-count` is informational — the per-id merges above
     // already determine which bars survive; no extra apply step.

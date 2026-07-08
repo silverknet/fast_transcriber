@@ -20,6 +20,7 @@ export interface ProjectSongMetadataLite {
   title: string
   artist?: string
   keyDetail?: SongKey
+  transposeSemitones?: number
   bpm?: number
   /**
    * Count-in beats from `cues.countInBeats` when `cues.mode === 'countIn'`.

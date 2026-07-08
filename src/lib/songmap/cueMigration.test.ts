@@ -25,7 +25,7 @@ const rendered = {
 }
 
 describe('SongMap cue v1 migration', () => {
-  it('migrates legacy spokenIntroText and render exports into v2 cueTracks', () => {
+  it('migrates legacy spokenIntroText and render exports into v3 cueTracks', () => {
     const sm = parseSongMap(
       JSON.stringify({
         ...baseLegacy,
@@ -43,7 +43,7 @@ describe('SongMap cue v1 migration', () => {
       }),
     )
 
-    expect(sm.formatVersion).toBe(2)
+    expect(sm.formatVersion).toBe(3)
     expect(sm.countInBeats).toBe(4)
     expect(sm.cueTracks).toHaveLength(1)
     expect(sm.cueTracks[0]?.events[0]).toMatchObject({
@@ -55,7 +55,7 @@ describe('SongMap cue v1 migration', () => {
     expect(sm.clickExport?.relativePath).toBe('cue/click-track.wav')
   })
 
-  it('starts v2 cueTracks empty when a v1 file has no meaningful cue data', () => {
+  it('starts v3 cueTracks empty when a v1 file has no meaningful cue data', () => {
     const sm = parseSongMap(
       JSON.stringify({
         ...baseLegacy,
@@ -71,7 +71,7 @@ describe('SongMap cue v1 migration', () => {
     expect(sm.countInBeats).toBeUndefined()
   })
 
-  it('serializes v2 only and strips legacy cue fields defensively', () => {
+  it('serializes v3 only and strips legacy cue fields defensively', () => {
     const sm = parseSongMap(
       JSON.stringify({
         ...baseLegacy,
@@ -88,7 +88,7 @@ describe('SongMap cue v1 migration', () => {
     sm.clickTrackExport = rendered
 
     const serialized = JSON.parse(serializeSongMap(sm as SongMap)) as Record<string, unknown>
-    expect(serialized.formatVersion).toBe(2)
+    expect(serialized.formatVersion).toBe(3)
     expect(serialized.cueTracks).toBeDefined()
     expect(serialized.cues).toBeUndefined()
     expect(serialized.cueTrackExport).toBeUndefined()

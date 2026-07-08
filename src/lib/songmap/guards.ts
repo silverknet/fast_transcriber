@@ -13,6 +13,6 @@ export function isSongMapV2(value: unknown): value is SongMapV2 {
 
 export function assertSongMap(value: unknown): asserts value is SongMap {
   if (!isSongMapV2(value)) {
-    throw new Error('Expected SongMap v2')
+    throw new Error(`Expected SongMap v${SONGMAP_FORMAT_VERSION}`)
   }
 }

@@ -12,7 +12,7 @@
  */
 
 import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs'
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import archiver from 'archiver'
 import yauzl from 'yauzl'
 import http from 'node:http'
@@ -64,8 +64,18 @@ import {
   beatsMadmomReady,
   invalidateBeatsMadmomCache,
   writeBeatsVenvMarker,
+  rubberBandExePath,
+  expectedRubberBandBundledPath,
 } from './nativePython.mjs'
 import { createAutoStemsDaemon } from './autoStems.mjs'
+import {
+  RUBBERBAND_RENDER_TIMEOUT_MS,
+  RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+  buildRubberBandArgs,
+  classifyDurationAlignment,
+  normalizeTransposeSemitones,
+  transposeCacheSubpath,
+} from './transposeCache.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -571,6 +581,14 @@ function extractSongMetadataLite(songProject) {
   const out = { title: typeof md.title === 'string' ? md.title : '' }
   if (typeof md.artist === 'string') out.artist = md.artist
   if (md.keyDetail) out.keyDetail = md.keyDetail
+  if (
+    map.transpose &&
+    typeof map.transpose === 'object' &&
+    Number.isInteger(map.transpose.baseSemitones) &&
+    map.transpose.baseSemitones !== 0
+  ) {
+    out.transposeSemitones = map.transpose.baseSemitones
+  }
   if (typeof md.bpm === 'number') out.bpm = md.bpm
   if (typeof map.countInBeats === 'number' && map.countInBeats > 0) out.countInBeats = map.countInBeats
   // True when the SongMap names an audio source — covers both v1 baked
@@ -1337,6 +1355,7 @@ function parseWavHeader(filePath) {
       durationSec,
       sampleRate: fmt.sampleRate,
       channels: fmt.channels,
+      frames: totalSamples,
     }
   } finally {
     closeSync(fd)
@@ -1677,6 +1696,387 @@ async function handleProjectTranscodeToWav(req, res, cors) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+async function fileHashIdentity(absPath) {
+  const st = statSync(absPath)
+  const hash = createHash('sha256')
+  await new Promise((resolve, reject) => {
+    const s = createReadStream(absPath)
+    s.on('data', (chunk) => hash.update(chunk))
+    s.on('end', resolve)
+    s.on('error', reject)
+  })
+  return {
+    sha256: hash.digest('hex'),
+    fileSize: st.size,
+  }
+}
+
+function runProcessCapture(exe, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const child = spawn(exe, args, {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill('SIGKILL')
+      resolve({ code: null, signal: 'SIGKILL', stdout, stderr, timedOut: true })
+    }, timeoutMs)
+    child.stdout?.on('data', (d) => {
+      stdout += d.toString()
+    })
+    child.stderr?.on('data', (d) => {
+      stderr += d.toString()
+    })
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code: null, signal: null, stdout, stderr, error: err, timedOut: false })
+    })
+    child.on('close', (code, signal) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code, signal: signal ?? null, stdout, stderr, timedOut: false })
+    })
+  })
+}
+
+async function resolveRubberBandExecutable() {
+  const exe = rubberBandExePath()
+  const expected = expectedRubberBandBundledPath()
+  if (!exe) {
+    return {
+      ok: false,
+      error: `Rubber Band is not supported on ${process.platform}-${process.arch}.`,
+      expectedPath: expected,
+    }
+  }
+  if (path.isAbsolute(exe) && !existsSync(exe)) {
+    return {
+      ok: false,
+      error: `Rubber Band binary not found at ${exe}. Install the licensed CLI at desktop/native/bin/rubberband/<platform>/ or set BARBRO_RUBBERBAND.`,
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  if (path.isAbsolute(exe) && process.platform !== 'win32') {
+    await chmod(exe, 0o755).catch(() => {})
+  }
+
+  const probe = await runProcessCapture(exe, ['--version'], 8_000)
+  if (probe.error) {
+    const missingLocalCli =
+      exe === 'rubberband' && /** @type {{ code?: string }} */ (probe.error).code === 'ENOENT'
+    return {
+      ok: false,
+      error: missingLocalCli
+        ? 'Rubber Band CLI not found. Install a licensed binary under desktop/native/bin/rubberband/<platform>/, set BARBRO_RUBBERBAND, or add rubberband to PATH for local development.'
+        : `Rubber Band failed to start: ${probe.error.message}`,
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  if (probe.timedOut) {
+    return {
+      ok: false,
+      error: 'Rubber Band version check timed out.',
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  if (probe.code !== 0) {
+    return {
+      ok: false,
+      error: `Rubber Band version check failed: ${(probe.stderr || probe.stdout || `exit ${probe.code}`).trim()}`,
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  return {
+    ok: true,
+    path: exe,
+    version: (probe.stdout || probe.stderr).trim().split(/\r?\n/)[0] ?? '',
+  }
+}
+
+async function handleTransposeStatus(res, cors) {
+  try {
+    const rb = await resolveRubberBandExecutable()
+    if (!rb.ok) {
+      sendJson(res, 200, {
+        ok: true,
+        available: false,
+        engine: 'rubberband',
+        algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+        error: rb.error,
+        path: rb.path ?? null,
+        expectedPath: rb.expectedPath ?? null,
+      }, cors)
+      return
+    }
+    sendJson(res, 200, {
+      ok: true,
+      available: true,
+      engine: 'rubberband',
+      algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+      path: rb.path,
+      version: rb.version,
+    }, cors)
+  } catch (e) {
+    sendJson(res, 200, {
+      ok: true,
+      available: false,
+      engine: 'rubberband',
+      algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+      error: e instanceof Error ? e.message : String(e),
+    }, cors)
+  }
+}
+
+async function normalizeTransposeInputToWav(srcAbs, tempRoot) {
+  const inputWav = path.join(tempRoot, 'transpose-input.wav')
+  const result = await runFfmpegTranscode(srcAbs, inputWav)
+  if (!result.ok) {
+    throw new Error(`Could not prepare transposed audio: ${result.error}`)
+  }
+  return {
+    inputAbs: inputWav,
+    sourceInfo: readAudioInfo(inputWav),
+  }
+}
+
+async function runRubberBandPitchShift(exe, inputAbs, outputAbs, semitones) {
+  const tmpOut = path.join(path.dirname(outputAbs), `.${path.basename(outputAbs)}.${randomUUID()}.tmp.wav`)
+  await rm(tmpOut, { force: true }).catch(() => {})
+  const args = buildRubberBandArgs(inputAbs, tmpOut, semitones)
+  const result = await runProcessCapture(exe, args, RUBBERBAND_RENDER_TIMEOUT_MS)
+  if (result.error) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    return { ok: false, error: `Rubber Band failed to start: ${result.error.message}` }
+  }
+  if (result.timedOut) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    return { ok: false, error: 'Rubber Band timed out while preparing transposed audio.' }
+  }
+  if (result.code !== 0) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    const sigPart = result.signal ? ` (signal ${result.signal})` : ''
+    const msg = (result.stderr || result.stdout || `exit ${result.code}${sigPart}`).trim()
+    return { ok: false, error: msg }
+  }
+  if (!existsSync(tmpOut) || statSync(tmpOut).size <= 44) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    return { ok: false, error: 'Rubber Band did not produce a valid WAV file.' }
+  }
+  await rename(tmpOut, outputAbs)
+  return { ok: true }
+}
+
+function runFfmpegPadTrim(srcAbs, dstAbs, durationSec, sampleRate) {
+  return new Promise((resolve) => {
+    const targetDuration = Number(durationSec)
+    if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+      resolve({ ok: false, error: 'Invalid target duration for transpose cache alignment.' })
+      return
+    }
+    const args = [
+      '-y',
+      '-i',
+      srcAbs,
+      '-af',
+      `apad,atrim=0:${targetDuration.toFixed(6)}`,
+      '-acodec',
+      'pcm_s16le',
+    ]
+    const sr = Number(sampleRate)
+    if (Number.isFinite(sr) && sr > 0) args.push('-ar', String(Math.round(sr)))
+    args.push(dstAbs)
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (b) => {
+      stderr += b.toString()
+    })
+    proc.on('error', (e) => {
+      resolve({ ok: false, error: `ffmpeg failed to start: ${e.message}. Is ffmpeg on PATH?` })
+    })
+    proc.on('close', (code) => {
+      if (code === 0) resolve({ ok: true })
+      else resolve({ ok: false, error: `ffmpeg exited ${code}: ${stderr.slice(-2000)}` })
+    })
+  })
+}
+
+async function verifyTransposeCacheDuration(sourceInfo, outputAbs, { repair = false } = {}) {
+  if (!existsSync(outputAbs) || statSync(outputAbs).size <= 44) {
+    return { ok: false, error: 'cache file is missing or empty' }
+  }
+  let outputInfo
+  try {
+    outputInfo = readAudioInfo(outputAbs)
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  let alignment
+  try {
+    alignment = classifyDurationAlignment(sourceInfo, outputInfo)
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  if (alignment.ok && !alignment.needsPadTrim) {
+    return { ok: true, info: outputInfo, repaired: false, alignment }
+  }
+  if (alignment.ok && alignment.needsPadTrim && repair) {
+    const tmpFixed = path.join(path.dirname(outputAbs), `.${path.basename(outputAbs)}.${randomUUID()}.aligned.wav`)
+    const fix = await runFfmpegPadTrim(outputAbs, tmpFixed, sourceInfo.durationSec, outputInfo.sampleRate)
+    if (!fix.ok) {
+      await rm(tmpFixed, { force: true }).catch(() => {})
+      return { ok: false, error: `Could not align transpose cache duration: ${fix.error}` }
+    }
+    await rename(tmpFixed, outputAbs)
+    const fixedInfo = readAudioInfo(outputAbs)
+    const fixedAlignment = classifyDurationAlignment(sourceInfo, fixedInfo)
+    if (!fixedAlignment.ok) {
+      return {
+        ok: false,
+        error: `Transpose cache duration drift remains too large (${fixedAlignment.driftSec.toFixed(4)}s).`,
+      }
+    }
+    return { ok: true, info: fixedInfo, repaired: true, alignment: fixedAlignment }
+  }
+  const drift = alignment.driftSec
+  return {
+    ok: false,
+    error: `Transpose cache duration drift is too large (${drift.toFixed(4)}s).`,
+  }
+}
+
+/**
+ * `POST /native/project/pitch-shift-cache` — body
+ * `{ projectPath, songFolder, srcSubpath, semitones }`.
+ *
+ * Writes a local, disposable, tempo-preserved WAV cache under
+ * `cache/transpose/rubberband-r3-v1/<source-sha-size>/<signed-semitones>.wav`. The source
+ * audio/stem is never modified, and repeated requests hit the cache.
+ */
+async function handleProjectPitchShiftCache(req, res, cors) {
+  let tempRoot = null
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const srcSubpath = validateAssetSubpath(body.srcSubpath)
+    const semitones = normalizeTransposeSemitones(body.semitones, { allowZero: true })
+    const srcAbs = path.join(projectPath, songFolder, srcSubpath)
+    if (!existsSync(srcAbs)) {
+      return sendJson(res, 404, { ok: false, error: `Source file not found: ${srcAbs}` }, cors)
+    }
+    if (semitones === 0) {
+      return sendJson(res, 200, {
+        ok: true,
+        cached: true,
+        bypassed: true,
+        relPath: srcSubpath,
+        engine: 'original',
+        algo: 'none',
+      }, cors)
+    }
+
+    const rb = await resolveRubberBandExecutable()
+    if (!rb.ok) {
+      return sendJson(res, 503, { ok: false, error: rb.error }, cors)
+    }
+
+    const sourceIdentity = await fileHashIdentity(srcAbs)
+    let sourceInfo = null
+    let renderInputAbs = srcAbs
+    let normalizedInput = false
+    try {
+      sourceInfo = readAudioInfo(srcAbs)
+    } catch {
+      tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-transpose-'))
+      const prepared = await normalizeTransposeInputToWav(srcAbs, tempRoot)
+      sourceInfo = prepared.sourceInfo
+      renderInputAbs = prepared.inputAbs
+      normalizedInput = true
+    }
+
+    const dstSubpath = validateAssetSubpath(transposeCacheSubpath(sourceIdentity, semitones), 'cache subpath')
+    const dstAbs = path.join(projectPath, songFolder, dstSubpath)
+    if (existsSync(dstAbs) && statSync(dstAbs).size > 0) {
+      const healthy = await verifyTransposeCacheDuration(sourceInfo, dstAbs, { repair: true })
+      if (healthy.ok) {
+        return sendJson(res, 200, {
+          ok: true,
+          cached: true,
+          relPath: dstSubpath,
+          engine: 'rubberband',
+          algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+          sampleRate: healthy.info.sampleRate,
+          durationSec: healthy.info.durationSec,
+          frames: healthy.info.frames,
+          repaired: healthy.repaired,
+        }, cors)
+      }
+      logWarn(`pitch-shift-cache: rejecting stale/bad cache ${dstSubpath}: ${healthy.error}`)
+      await rm(dstAbs, { force: true }).catch(() => {})
+    }
+
+    await mkdir(path.dirname(dstAbs), { recursive: true })
+    let rendered = await runRubberBandPitchShift(rb.path, renderInputAbs, dstAbs, semitones)
+    if (!rendered.ok && !normalizedInput) {
+      logWarn(`pitch-shift-cache: Rubber Band failed on source, retrying normalized WAV: ${rendered.error.slice(0, 500)}`)
+      if (!tempRoot) tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-transpose-'))
+      const prepared = await normalizeTransposeInputToWav(srcAbs, tempRoot)
+      sourceInfo = prepared.sourceInfo
+      renderInputAbs = prepared.inputAbs
+      normalizedInput = true
+      rendered = await runRubberBandPitchShift(rb.path, renderInputAbs, dstAbs, semitones)
+    }
+    if (!rendered.ok) {
+      logWarn(`pitch-shift-cache: Rubber Band failed: ${rendered.error.slice(0, 2000)}`)
+      return sendJson(res, 503, {
+        ok: false,
+        error: `Could not prepare transposed audio: ${rendered.error}`,
+      }, cors)
+    }
+
+    const healthy = await verifyTransposeCacheDuration(sourceInfo, dstAbs, { repair: true })
+    if (!healthy.ok) {
+      await rm(dstAbs, { force: true }).catch(() => {})
+      return sendJson(res, 503, { ok: false, error: `Could not prepare transposed audio: ${healthy.error}` }, cors)
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      cached: false,
+      relPath: dstSubpath,
+      engine: 'rubberband',
+      algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+      sampleRate: healthy.info.sampleRate,
+      durationSec: healthy.info.durationSec,
+      frames: healthy.info.frames,
+      repaired: healthy.repaired,
+      normalizedInput,
+    }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  } finally {
+    if (tempRoot) await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -3109,7 +3509,7 @@ async function getHealthStatus() {
       ['numpy', 'madmom'],
       BEATS_HEALTH_PROBE,
     ),
-    checkPythonImports('sections', pythonSectionsExe(), ['numpy', 'librosa']),
+    checkPythonImports('sections', pythonSectionsExe(), ['numpy', 'librosa', 'scipy']),
     // Stems is intentionally not in the auto-setup loop (too heavy),
     // so we don't report it as broken at the health level — the Stems
     // dialog handles its own missing-deps UX.
@@ -4031,11 +4431,11 @@ async function handleSetupSections(req, res, cors) {
     // ── Phase 5 — smoke test ──────────────────────────────────────────
     const smoke = await runPipelineNdjson(
       venvPython,
-      ['-c', "import librosa; print('librosa', librosa.__version__)"],
+      ['-c', "import librosa, scipy; print('librosa', librosa.__version__)"],
       emit,
     )
     if (smoke.code !== 0) {
-      emit({ type: 'error', msg: `librosa smoke test failed (exit ${smoke.code}).` })
+      emit({ type: 'error', msg: `sections audio smoke test failed (exit ${smoke.code}).` })
       emit({ type: 'state', state: 'error' })
       res.end()
       return
@@ -5013,6 +5413,14 @@ function startBeaconServer() {
       void handleProjectTranscodeToWav(req, res, cors)
       return
     }
+    if (req.method === 'POST' && req.url === '/native/project/pitch-shift-cache') {
+      void handleProjectPitchShiftCache(req, res, cors)
+      return
+    }
+    if (req.method === 'GET' && req.url === '/native/transpose/status') {
+      void handleTransposeStatus(res, cors)
+      return
+    }
 
     if (req.method === 'GET' && req.url === '/native/setup/piper-tts/status') {
       handlePiperTtsSetupStatus(res, cors)
@@ -5362,6 +5770,8 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/project/asset/write     (write file at project root, e.g. setlist .als)`)
   logInfo(`  POST   /native/project/wav-info/batch  (batched WAV header info — duration/sr/channels)`)
   logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
+  logInfo(`  GET    /native/transpose/status          (Rubber Band availability)`)
+  logInfo(`  POST   /native/project/pitch-shift-cache (Rubber Band transpose cache)`)
   logInfo(`  GET    /native/setup/youtube-import/status`)
   logInfo(`  POST   /native/setup/youtube-import (prepare YouTube audio import)`)
   logInfo(`  POST   /native/import/youtube       (queued YouTube audio import)`)
