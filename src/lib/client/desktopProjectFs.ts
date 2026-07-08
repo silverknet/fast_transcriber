@@ -23,6 +23,10 @@ export interface ProjectSongMetadataInfo {
   title: string
   artist?: string
   keyDetail?: SongKey
+  /** Auto-detected key from `chordHints` (shown dimmed until confirmed). */
+  detectedKey?: SongKey
+  /** True when the song has an analyzed beat grid (bars present). */
+  analyzed?: boolean
   transposeSemitones?: number
   bpm?: number
   /** Count-in beats when `cues.mode === 'countIn'`; 0/absent otherwise. */

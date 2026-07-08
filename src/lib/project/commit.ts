@@ -178,6 +178,14 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   const out: ProjectSongMetadataLite = { title: info.title || songFolderLeaf(fallbackFolder) }
   if (info.artist) out.artist = info.artist
   if (info.keyDetail) out.keyDetail = info.keyDetail
+  // Detected key + analyzed flag must survive the sidecar refresh — the scan
+  // REPLACES the metadata cache, and dropping these here wiped detected keys
+  // and the "Not analyzed" chip off cards on every project refresh.
+  if (info.detectedKey) {
+    out.detectedKey = info.detectedKey
+    out.keyIsDetected = !info.keyDetail
+  }
+  if (typeof info.analyzed === 'boolean') out.analyzed = info.analyzed
   if (typeof info.transposeSemitones === 'number' && info.transposeSemitones !== 0) {
     out.transposeSemitones = info.transposeSemitones
   }

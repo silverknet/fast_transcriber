@@ -295,6 +295,17 @@
     if ($project.data) renameInput = $project.data.name
   })
 
+  // Key backfill bails silently when the desktop isn't reachable — which is
+  // common right after app launch (this page mounts before the sidecar
+  // finishes booting), leaving keys blank until the next visit. Re-run it on
+  // the unreachable→reachable edge so keys fill in as soon as it's up.
+  let keyBackfillWasReachable = $desktopCompanionStatus.reachable
+  $effect(() => {
+    const reachable = $desktopCompanionStatus.reachable
+    if (reachable && !keyBackfillWasReachable) void runKeyBackfill()
+    keyBackfillWasReachable = reachable
+  })
+
   onMount(() => {
     if (!browser) return
     refreshRecents()

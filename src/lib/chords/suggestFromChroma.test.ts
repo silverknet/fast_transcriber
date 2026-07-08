@@ -34,6 +34,32 @@ describe('rankTriadFitsForChroma', () => {
     expect(ranked[0].quality).toBe('minor')
   })
 
+  it('tells Am7 apart from C major (the classic relative-major confusion)', () => {
+    // A-C-E-G: with triad templates only, Am (A,C,E) and C (C,E,G) both match
+    // 3-of-4 and it was a coin flip. The min7 template matches 4-of-4.
+    const ranked = rankTriadFitsForChroma(chromaFor([9, 0, 4, 7]), undefined)
+    expect(ranked[0].pc).toBe(9)
+    expect(ranked[0].quality).toBe('min7')
+  })
+
+  it('detects a dominant 7th (G7 = G,B,D,F)', () => {
+    const ranked = rankTriadFitsForChroma(chromaFor([7, 11, 2, 5]), undefined)
+    expect(ranked[0].pc).toBe(7)
+    expect(ranked[0].quality).toBe('7')
+  })
+
+  it('key bias is quality-aware: E beats Em in A major on ambiguous chroma', () => {
+    // Chroma with E root+5th and BOTH thirds equally present — pure signal
+    // can't decide E vs Em. In A major, E major is the diatonic V while
+    // E minor is out of key; the chord-aware bias must pick E major.
+    const ambiguous = chromaFor([4, 11, 7, 8]) // E, B, G, G#
+    const aMajor: SongKey = { root: 'A', mode: 'major' }
+    const ranked = rankTriadFitsForChroma(ambiguous, aMajor)
+    const eMajIdx = ranked.findIndex((s) => s.pc === 4 && s.quality === 'major')
+    const eMinIdx = ranked.findIndex((s) => s.pc === 4 && s.quality === 'minor')
+    expect(eMajIdx).toBeLessThan(eMinIdx)
+  })
+
   it('applies diatonic bias toward in-key chords on close calls', () => {
     // Build an ambiguous chroma evenly split between C major (0,4,7) and
     // C# major (1,5,8). Without a key, the algorithm picks one or the other

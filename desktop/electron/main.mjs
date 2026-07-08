@@ -618,6 +618,20 @@ function extractSongMetadataLite(songProject) {
   const out = { title: typeof md.title === 'string' ? md.title : '' }
   if (typeof md.artist === 'string') out.artist = md.artist
   if (md.keyDetail) out.keyDetail = md.keyDetail
+  // Auto-detected key (low-confidence detections live only in chordHints —
+  // without surfacing it here, a project refresh wipes detected keys off the
+  // cards because the scan replaces the web's metadata cache wholesale).
+  const dk = map.chordHints?.detectedKey
+  if (dk && typeof dk === 'object' && typeof dk.root === 'string' && typeof dk.mode === 'string') {
+    out.detectedKey = {
+      root: dk.root,
+      ...(dk.accidental ? { accidental: dk.accidental } : {}),
+      mode: dk.mode,
+    }
+  }
+  out.analyzed =
+    md.analyzed === true ||
+    (Array.isArray(map.timeline?.bars) && map.timeline.bars.length > 0)
   if (
     map.transpose &&
     typeof map.transpose === 'object' &&

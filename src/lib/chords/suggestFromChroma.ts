@@ -27,8 +27,34 @@ export const MAJOR_TRIAD = [0, 4, 7] as const
 /** Pitch-class offsets from the root for a minor triad. */
 export const MINOR_TRIAD = [0, 3, 7] as const
 
-/** Multiplicative score bonus for chords whose root is in the song key's diatonic scale. */
-const DIATONIC_BIAS = 1.15
+/** Qualities the chroma matcher can detect. */
+export type MatchQuality = 'major' | 'minor' | '7' | 'min7' | 'maj7'
+
+/** Template intervals per matchable quality. */
+const QUALITY_INTERVALS: Record<MatchQuality, readonly number[]> = {
+  major: MAJOR_TRIAD,
+  minor: MINOR_TRIAD,
+  '7': [0, 4, 7, 10],
+  min7: [0, 3, 7, 10],
+  maj7: [0, 4, 7, 11],
+}
+
+const MATCH_QUALITIES: readonly MatchQuality[] = ['major', 'minor', '7', 'min7', 'maj7']
+
+/** Triad family of a matchable quality (used for section bias + dedupe). */
+export function triadClassOf(q: MatchQuality): 'major' | 'minor' {
+  return q === 'minor' || q === 'min7' ? 'minor' : 'major'
+}
+
+/**
+ * Bias for a candidate whose FULL chord (root + quality) is diatonic in the
+ * song key — e.g. E major in A major, Am7 in C major. This is what separates
+ * E from Em when the chroma is ambiguous; the old root-only bias boosted both
+ * equally and never helped pick the right quality.
+ */
+const CHORD_IN_KEY_BIAS = 1.22
+/** Weaker bias when only the ROOT is in the scale (quality non-diatonic). */
+const ROOT_IN_KEY_BIAS = 1.05
 
 /**
  * Multiplicative score bonus when the matching beat in an EARLIER
@@ -68,7 +94,7 @@ export type ChordSuggestion = {
  * production behavior has all three on.
  */
 export type SuggestOptions = {
-  /** Use the song-key diatonic 1.15× bonus. Default true. */
+  /** Use the song-key diatonic bonus (chord-in-key 1.22× / root-in-key 1.05×). Default true. */
   useDiatonicBias?: boolean
   /** Use the same-kind-section 1.40× bonus. Default true. */
   useSectionBias?: boolean
@@ -85,6 +111,42 @@ function diatonicPitchClasses(key: SongKey | undefined): Set<number> | null {
   const rootPc = chordRootToPitchClass(key.root, key.accidental)
   const base = key.mode === 'major' ? MAJOR_SCALE : MINOR_SCALE
   return new Set(base.map((s) => (s + rootPc) % 12))
+}
+
+/**
+ * Diatonic CHORDS of a key (degree → allowed matcher qualities), as a map of
+ * `pc → Set<MatchQuality>`. Major keys: I ii iii IV V vi with their standard
+ * 7ths (V gets the dom7). Minor keys: natural-minor harmony plus the harmonic
+ * V/V7, which pop/rock uses constantly. Degree VII° is skipped — the matcher
+ * has no diminished template.
+ */
+function diatonicChordMap(key: SongKey | undefined): Map<number, Set<MatchQuality>> | null {
+  if (!key) return null
+  const rootPc = chordRootToPitchClass(key.root, key.accidental)
+  const out = new Map<number, Set<MatchQuality>>()
+  const add = (offset: number, ...qualities: MatchQuality[]) => {
+    const pc = (rootPc + offset) % 12
+    const set = out.get(pc) ?? new Set<MatchQuality>()
+    for (const q of qualities) set.add(q)
+    out.set(pc, set)
+  }
+  if (key.mode === 'major') {
+    add(0, 'major', 'maj7') // I
+    add(2, 'minor', 'min7') // ii
+    add(4, 'minor', 'min7') // iii
+    add(5, 'major', 'maj7') // IV
+    add(7, 'major', '7') // V
+    add(9, 'minor', 'min7') // vi
+  } else {
+    add(0, 'minor', 'min7') // i
+    add(3, 'major', 'maj7') // III
+    add(5, 'minor', 'min7') // iv
+    add(7, 'minor', 'min7') // v (natural)
+    add(7, 'major', '7') // V (harmonic — everywhere in practice)
+    add(8, 'major', 'maj7') // VI
+    add(10, 'major', '7') // VII
+  }
+  return out
 }
 
 /** Build the 12-d template vector for a triad rooted at pitch class `pc`. */
@@ -123,7 +185,7 @@ function pearson(a: readonly number[], b: readonly number[]): number {
 }
 
 /** Build a `ChordSymbol` for the given pitch class + quality, spelled per `preferFlats`. */
-function buildChord(pc: number, quality: 'major' | 'minor', preferFlats: boolean): ChordSymbol {
+function buildChord(pc: number, quality: MatchQuality, preferFlats: boolean): ChordSymbol {
   const { root, accidental } = pitchClassToRootAcc(pc, preferFlats)
   const c: ChordSymbol = {
     root,
@@ -137,19 +199,23 @@ function buildChord(pc: number, quality: 'major' | 'minor', preferFlats: boolean
 
 type ScoredCandidate = {
   pc: number
-  quality: 'major' | 'minor'
+  quality: MatchQuality
   score: number
 }
 
 /**
- * Match a chroma vector against the 24 triad templates and rank by
- * `Pearson × optional diatonic bonus × optional same-kind-section bonus`.
- * Returns descending list of all 24 with scores.
+ * Match a chroma vector against the 60 chord templates (12 roots × major /
+ * minor / dom7 / min7 / maj7) and rank by `Pearson × optional key bonus ×
+ * optional same-kind-section bonus`. Returns the descending list.
  *
- * `sameKindMatch`: when set, candidates matching its `(pc, quality)`
- * get the SECTION_BIAS multiplier — the strongest of the three biases.
- * Reflects the convention that in pop songs Verse 2 reuses Verse 1's
- * chord pattern.
+ * The 7th templates are what tells Am7 (A-C-E-G) apart from C major (C-E-G)
+ * — with triads only those two were a coin flip, the single most common
+ * mis-suggestion.
+ *
+ * Key bonus is CHORD-aware: a candidate whose root+quality is diatonic gets
+ * 1.22×; root-in-scale-with-wrong-quality only 1.05×. `sameKindMatch`
+ * candidates (same root + triad family as the chord the user placed in an
+ * earlier same-kind section) get the SECTION_BIAS multiplier.
  */
 export function rankTriadFitsForChroma(
   chroma: readonly number[],
@@ -163,15 +229,16 @@ export function rankTriadFitsForChroma(
   const useDiatonicBias = opts.useDiatonicBias !== false
   const useSectionBias = opts.useSectionBias !== false
   const inKey = useDiatonicBias ? diatonicPitchClasses(songKey) : null
+  const chordMap = useDiatonicBias ? diatonicChordMap(songKey) : null
   const section = useSectionBias ? opts.sameKindMatch ?? null : null
   const scored: ScoredCandidate[] = []
   for (let pc = 0; pc < 12; pc++) {
-    for (const quality of ['major', 'minor'] as const) {
-      const intervals = quality === 'major' ? MAJOR_TRIAD : MINOR_TRIAD
-      const template = buildTemplate(pc, intervals)
+    for (const quality of MATCH_QUALITIES) {
+      const template = buildTemplate(pc, QUALITY_INTERVALS[quality])
       let score = pearson(chroma, template)
-      if (inKey && inKey.has(pc)) score *= DIATONIC_BIAS
-      if (section && section.pc === pc && section.quality === quality) {
+      if (chordMap?.get(pc)?.has(quality)) score *= CHORD_IN_KEY_BIAS
+      else if (inKey?.has(pc)) score *= ROOT_IN_KEY_BIAS
+      if (section && section.pc === pc && section.quality === triadClassOf(quality)) {
         score *= SECTION_BIAS
       }
       scored.push({ pc, quality, score })
@@ -279,19 +346,34 @@ export function proposeChordSuggestions(
     })
     if (ranked.length < 2) continue
     const top = ranked[0]
-    const second = ranked[1]
-    const confidence = top.score - second.score
+    // Confidence = margin against the best DIFFERENT chord (different root or
+    // triad family). A triad and its own 7th (Am vs Am7) score near-identically
+    // by construction — that's agreement about the chord, not ambiguity, and
+    // must not suppress the suggestion.
+    const rival = ranked.find(
+      (c) => c.pc !== top.pc || triadClassOf(c.quality) !== triadClassOf(top.quality),
+    )
+    const confidence = top.score - (rival?.score ?? 0)
     if (confidence < MIN_SUGGESTION_CONFIDENCE) continue
+
+    // Alternates: next candidates with UNIQUE root+family (the radial's 7th
+    // variants row already covers same-root variants of the primary).
+    const alternatives: ChordSymbol[] = []
+    const seenFamily = new Set([`${top.pc}:${triadClassOf(top.quality)}`])
+    for (const c of ranked.slice(1)) {
+      if (alternatives.length >= SUGGESTION_TOP_N - 1) break
+      const fam = `${c.pc}:${triadClassOf(c.quality)}`
+      if (seenFamily.has(fam)) continue
+      seenFamily.add(fam)
+      alternatives.push(buildChord(c.pc, c.quality, preferFlats))
+    }
 
     out.set(downbeatId, {
       beatId: downbeatId,
       barIndex: bar.index,
       chord: buildChord(top.pc, top.quality, preferFlats),
       confidence,
-      // Top-5 total → 4 alternates. Wider safety net for the radial.
-      alternatives: ranked
-        .slice(1, SUGGESTION_TOP_N)
-        .map((c) => buildChord(c.pc, c.quality, preferFlats)),
+      alternatives,
     })
   }
   return out
