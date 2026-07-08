@@ -138,6 +138,7 @@ export function parseProjectJson(text: string): ProjectFile {
 
   const autoStems = parseAutoStems(o.autoStems)
   const defaults = parseDefaults(o.defaults)
+  const mastering = parseMastering(o.mastering)
 
   return {
     formatVersion: PROJECT_FILE_VERSION,
@@ -149,7 +150,28 @@ export function parseProjectJson(text: string): ProjectFile {
     ...(cloud ? { cloud } : {}),
     ...(autoStems ? { autoStems } : {}),
     ...(defaults ? { defaults } : {}),
+    ...(mastering ? { mastering } : {}),
   }
+}
+
+/** Parse the optional project-wide `mastering` (project sound) block. */
+function parseMastering(raw: unknown): ProjectFile['mastering'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  if (typeof r.enabled !== 'boolean') return undefined
+  const out: NonNullable<ProjectFile['mastering']> = { enabled: r.enabled }
+  if (typeof r.matchLoudness === 'boolean') out.matchLoudness = r.matchLoudness
+  if (typeof r.masterGlue === 'boolean') out.masterGlue = r.masterGlue
+  const stems = r.stems as Record<string, unknown> | undefined
+  if (stems && typeof stems === 'object') {
+    const parsed: NonNullable<NonNullable<ProjectFile['mastering']>['stems']> = {}
+    for (const name of AUTO_STEM_NAMES) {
+      const v = stems[name]
+      if (v === 'off' || v === 'light' || v === 'firm') parsed[name] = v
+    }
+    if (Object.keys(parsed).length > 0) out.stems = parsed
+  }
+  return out
 }
 
 /** Parse the optional project-wide `defaults` (count-in + pre-count-in cue). */

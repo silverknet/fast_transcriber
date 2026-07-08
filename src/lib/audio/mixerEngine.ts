@@ -17,6 +17,12 @@
 
 export type TrackKey = string
 
+/** A processing insert: caller wires source → input, output → track gain. */
+export interface MixerInsert {
+  input: AudioNode
+  output: AudioNode
+}
+
 export interface MixerTrack {
   key: TrackKey
   /** Display label. */
@@ -27,6 +33,11 @@ export interface MixerTrack {
   volume: number
   muted: boolean
   soloed: boolean
+  /**
+   * Optional processing chain between the source and the track gain (e.g. the
+   * project-sound compressor). Nodes must belong to this engine's context.
+   */
+  insert?: MixerInsert
 }
 
 export type TransportState = 'stopped' | 'playing'
@@ -83,6 +94,8 @@ export class MixerEngine {
   private state: TransportState = 'stopped'
   private subscribers = new Set<(s: MixerSnapshot) => void>()
   private rafId: number | null = null
+  /** Current master-bus processing chain (see setMasterChain). */
+  private masterChain: MixerInsert | null = null
 
   constructor() {
     this.ac = new AudioContext()
@@ -109,6 +122,8 @@ export class MixerEngine {
    * that key first. Re-creates per-track gain so future plays use it.
    */
   setTrack(track: MixerTrack): void {
+    const prev = this.tracks.get(track.key)
+    if (prev?.insert) prev.insert.output.disconnect()
     this.tracks.set(track.key, track)
     const existing = this.trackGains.get(track.key)
     if (existing) existing.disconnect()
@@ -116,10 +131,14 @@ export class MixerEngine {
     gain.gain.value = this.effectiveGainFor(track)
     gain.connect(this.masterGain)
     this.trackGains.set(track.key, gain)
+    // Wire the insert's tail once; play() connects each source to insert.input.
+    if (track.insert) track.insert.output.connect(gain)
     this.emitUpdate()
   }
 
   removeTrack(key: TrackKey): void {
+    const prev = this.tracks.get(key)
+    if (prev?.insert) prev.insert.output.disconnect()
     this.tracks.delete(key)
     const gain = this.trackGains.get(key)
     if (gain) {
@@ -127,6 +146,23 @@ export class MixerEngine {
       this.trackGains.delete(key)
     }
     this.emitUpdate()
+  }
+
+  /**
+   * Route the master bus through a processing chain (masterGain → chain →
+   * destination), or restore the direct connection with null. Used for the
+   * project-sound glue/limiter.
+   */
+  setMasterChain(chain: MixerInsert | null): void {
+    if (this.masterChain) this.masterChain.output.disconnect()
+    this.masterGain.disconnect()
+    this.masterChain = chain
+    if (chain) {
+      this.masterGain.connect(chain.input)
+      chain.output.connect(this.ac.destination)
+    } else {
+      this.masterGain.connect(this.ac.destination)
+    }
   }
 
   /** Returns a snapshot of current track keys + their saved per-track state. */
@@ -213,7 +249,8 @@ export class MixerEngine {
       src.buffer = t.buffer
       const gain = this.trackGains.get(t.key)
       if (!gain) continue
-      src.connect(gain)
+      // Through the insert when present (insert.output is pre-wired to gain).
+      src.connect(t.insert ? t.insert.input : gain)
       // Offset within the buffer = startAt; if startAt > buffer duration, skip.
       if (startAt < t.buffer.duration) {
         src.start(ctxStartTime, startAt)

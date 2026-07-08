@@ -17,8 +17,11 @@
     DialogHeader,
     DialogTitle,
   } from '$lib/components/ui/dialog'
+  import { get } from 'svelte/store'
   import { mixBackingTrack, type BackingMixSource } from '$lib/audio/mixBackingTrack'
+  import { stemKindForLaneKey } from '$lib/audio/mastering'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { project as projectStore } from '$lib/stores/project'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { selectBestStemSet } from '$lib/project/commit'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
@@ -202,7 +205,8 @@
           failed.push(opt.label)
           continue
         }
-        sources.push({ label: opt.label, blob })
+        // Same lane classification as the mixer — cue/click stay unprocessed.
+        sources.push({ label: opt.label, blob, stemKind: stemKindForLaneKey(opt.key) })
       }
       if (sources.length === 0) {
         status = 'error'
@@ -211,7 +215,10 @@
       }
 
       statusMsg = 'Mixing…'
-      const blob = await mixBackingTrack(sources)
+      // Project sound: the export runs the same chain the Overview mixer plays.
+      const blob = await mixBackingTrack(sources, {
+        mastering: get(projectStore).data?.mastering,
+      })
       const labelParts = picked.map((o) => o.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')).join('+')
       const filename = `${safeExportBasename(songTitle)}-${labelParts || 'backing'}.wav`
       downloadBlob(blob, filename)

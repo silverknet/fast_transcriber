@@ -474,6 +474,7 @@ function parseManifestObject(raw) {
   const autoStems = parseManifestAutoStems(raw.autoStems)
   const cloud = parseManifestCloud(raw.cloud)
   const defaults = parseManifestDefaults(raw.defaults)
+  const mastering = parseManifestMastering(raw.mastering)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -484,6 +485,7 @@ function parseManifestObject(raw) {
     ...(autoStems ? { autoStems } : {}),
     ...(cloud ? { cloud } : {}),
     ...(defaults ? { defaults } : {}),
+    ...(mastering ? { mastering } : {}),
   }
 }
 
@@ -504,6 +506,27 @@ function parseManifestDefaults(raw) {
     if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
   }
   return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * Parse the optional `mastering` block (project sound: loudness matching +
+ * per-stem dynamics). Preserved on round-trip so a sidecar manifest write
+ * never drops the shared project config (same class of bug as autoStems).
+ */
+function parseManifestMastering(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.enabled !== 'boolean') return undefined
+  const out = { enabled: raw.enabled }
+  if (typeof raw.matchLoudness === 'boolean') out.matchLoudness = raw.matchLoudness
+  if (typeof raw.masterGlue === 'boolean') out.masterGlue = raw.masterGlue
+  if (raw.stems && typeof raw.stems === 'object') {
+    const stems = {}
+    for (const name of ['vocals', 'drums', 'bass', 'other']) {
+      const v = raw.stems[name]
+      if (v === 'off' || v === 'light' || v === 'firm') stems[name] = v
+    }
+    if (Object.keys(stems).length > 0) out.stems = stems
+  }
+  return out
 }
 
 async function readProjectManifest(projectPath) {

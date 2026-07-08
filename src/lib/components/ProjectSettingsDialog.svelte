@@ -16,7 +16,12 @@
   } from '$lib/components/ui/dialog'
   import { get } from 'svelte/store'
   import { project as projectStore } from '$lib/stores/project'
-  import { setProjectAutoStems, setProjectDefaults, applyDefaultsToAllSongs } from '$lib/project/commit'
+  import {
+    setProjectAutoStems,
+    setProjectDefaults,
+    setProjectMastering,
+    applyDefaultsToAllSongs,
+  } from '$lib/project/commit'
   import {
     watchProjectForAutoStems,
     unwatchProjectForAutoStems,
@@ -27,6 +32,7 @@
     AUTO_STEM_NAMES,
     type AutoStemName,
     type AutoStemQuality,
+    type MasteringIntensity,
     type PreCountInCueMode,
   } from '$lib/project/types'
 
@@ -56,6 +62,16 @@
   let countInBeats = $state(0)
   let cueMode = $state<PreCountInCueMode>('off')
   let cueText = $state('')
+  // Project sound (mastering)
+  let soundEnabled = $state(false)
+  let soundMatchLoudness = $state(true)
+  let soundMasterGlue = $state(true)
+  let soundStems = $state<Record<AutoStemName, MasteringIntensity>>({
+    vocals: 'off',
+    drums: 'light',
+    bass: 'light',
+    other: 'off',
+  })
   /** THIS machine: auto-prepare stems locally (per-machine, not shared). */
   let localPrepare = $state(false)
   let busy = $state(false)
@@ -90,6 +106,16 @@
     const pc = snap.data?.defaults?.preCountInCue
     cueMode = pc?.mode ?? 'off'
     cueText = pc?.text ?? ''
+    const ms = snap.data?.mastering
+    soundEnabled = ms?.enabled ?? false
+    soundMatchLoudness = ms?.matchLoudness ?? true
+    soundMasterGlue = ms?.masterGlue ?? true
+    soundStems = {
+      vocals: ms?.stems?.vocals ?? 'off',
+      drums: ms?.stems?.drums ?? 'light',
+      bass: ms?.stems?.bass ?? 'light',
+      other: ms?.stems?.other ?? 'off',
+    }
     error = ''
     applyMsg = ''
     busy = false
@@ -113,6 +139,12 @@
       // Shared project config (source of truth).
       await setProjectAutoStems({ enabled, stems: chosenStems, quality })
       await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0, preCountInCue })
+      await setProjectMastering({
+        enabled: soundEnabled,
+        matchLoudness: soundMatchLoudness,
+        masterGlue: soundMasterGlue,
+        stems: { ...soundStems },
+      })
       // This machine (local): opt in/out of auto-preparing stems here.
       const osPath = $projectStore.osPath
       if (osPath) {
@@ -278,6 +310,61 @@
             The count length is taken from the count-in above. Override the spoken words per song in
             the Cue section.
           </span>
+        </div>
+
+        <!-- Project sound (mastering) -->
+        <div class="border-foreground/10 flex flex-col gap-2 border-t pt-3">
+          <label class="flex items-start gap-3">
+            <input type="checkbox" bind:checked={soundEnabled} class="accent-foreground mt-0.5 size-4" />
+            <span class="flex flex-col">
+              <span class="text-sm font-semibold">Project sound</span>
+              <span class="text-muted-foreground text-xs">
+                Keep drums, bass and the rest sitting at the same level in every song — applied in
+                the mixer and to exported mixes.
+              </span>
+            </span>
+          </label>
+
+          <fieldset
+            class="flex flex-col gap-2 pl-7 transition-opacity"
+            class:opacity-40={!soundEnabled}
+            disabled={!soundEnabled}
+          >
+            <label class="flex cursor-pointer items-center gap-2 text-sm">
+              <input type="checkbox" bind:checked={soundMatchLoudness} class="accent-foreground size-3.5" />
+              <span class="font-medium">Match loudness across songs</span>
+            </label>
+
+            <div class="mt-1 grid grid-cols-[max-content_1fr] items-center gap-x-3 gap-y-1.5">
+              {#each AUTO_STEM_NAMES as name (name)}
+                <span class="text-sm">{STEM_LABELS[name]}</span>
+                <div class="flex gap-1" role="radiogroup" aria-label={`Even out ${STEM_LABELS[name]}`}>
+                  {#each [{ v: 'off', l: 'Off' }, { v: 'light', l: 'Light' }, { v: 'firm', l: 'Firm' }] as opt (opt.v)}
+                    <button
+                      type="button"
+                      class="border-2 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider {soundStems[name] === opt.v
+                        ? 'border-foreground bg-foreground text-background'
+                        : 'border-foreground/30 hover:border-foreground'}"
+                      onclick={() => (soundStems[name] = opt.v as MasteringIntensity)}
+                      aria-pressed={soundStems[name] === opt.v}
+                    >
+                      {opt.l}
+                    </button>
+                  {/each}
+                </div>
+              {/each}
+            </div>
+            <span class="text-muted-foreground text-[11px]">
+              Light / Firm evens out each stem’s levels (compression) so e.g. every bass note lands
+              with a similar weight.
+            </span>
+
+            <label class="flex cursor-pointer items-center gap-2 text-sm">
+              <input type="checkbox" bind:checked={soundMasterGlue} class="accent-foreground size-3.5" />
+              <span class="font-medium">Glue &amp; protect the master</span>
+              <span class="text-muted-foreground text-xs">— gentle bus compression + limiter</span>
+            </label>
+          </fieldset>
         </div>
       </section>
 

@@ -59,6 +59,30 @@ export interface ProjectFile {
    * point, overridable per song. Only ever written via `setProjectDefaults`.
    */
   defaults?: ProjectDefaults
+  /**
+   * Project-wide "sound" (shared config): loudness matching + per-stem
+   * dynamics so drums/bass sit consistently across every song. Applied live in
+   * the mixer and to backing-track exports. Only written via
+   * `setProjectMastering`.
+   */
+  mastering?: ProjectMastering
+}
+
+/** How firmly a stem's levels are evened out (compression preset intensity). */
+export type MasteringIntensity = 'off' | 'light' | 'firm'
+
+export interface ProjectMastering {
+  /** Master switch — false/absent = fully bypassed everywhere. */
+  enabled: boolean
+  /**
+   * Bring each stem toward a fixed per-type loudness target so the same stem
+   * sits at the same level in every song of the project.
+   */
+  matchLoudness?: boolean
+  /** Per-stem envelope evening. Absent = 'off'. */
+  stems?: Partial<Record<AutoStemName, MasteringIntensity>>
+  /** Gentle glue compression + a safety limiter on the summed master bus. */
+  masterGlue?: boolean
 }
 
 export interface ProjectDefaults {

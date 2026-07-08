@@ -33,9 +33,16 @@
   import {
     bufferWithPrepend,
     MixerEngine,
+    type MixerInsert,
     type MixerSnapshot,
     type MixerTrack,
   } from '$lib/audio/mixerEngine'
+  import {
+    bufferRmsDb,
+    buildMasterChain,
+    buildStemChain,
+    stemKindForLaneKey,
+  } from '$lib/audio/mastering'
   import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
@@ -608,8 +615,51 @@
       }
       done++
     }
+    applyProjectSound()
     loading = false
   }
+
+  // ── Project sound (mastering) ────────────────────────────────────────────
+  // Builds per-stem inserts + the master glue/limiter from the shared project
+  // config. RMS is cached per decoded buffer (WeakMap → stale-proof across
+  // reloads). Re-applying mid-play re-schedules sources at the same position.
+  const laneRms = new WeakMap<AudioBuffer, number>()
+  let lastAppliedSoundJson = '"__unset__"'
+
+  function applyProjectSound() {
+    if (!engine) return
+    const cfg = get(projectStore).data?.mastering
+    const wasPlaying = snapshot.state === 'playing'
+    const pos = snapshot.positionSec
+    engine.setMasterChain(cfg ? buildMasterChain(engine.ac, cfg) : null)
+    for (const t of engine.listTracks()) {
+      const kind = stemKindForLaneKey(t.key)
+      let insert: MixerInsert | undefined
+      if (cfg?.enabled && kind) {
+        let rms = laneRms.get(t.buffer)
+        if (rms === undefined) {
+          rms = bufferRmsDb(t.buffer)
+          laneRms.set(t.buffer, rms)
+        }
+        insert = buildStemChain(engine.ac, kind, cfg, rms) ?? undefined
+      }
+      engine.setTrack({ ...t, insert })
+    }
+    syncLanesFromEngine()
+    lastAppliedSoundJson = JSON.stringify(cfg ?? null)
+    if (wasPlaying) void engine.play(pos)
+  }
+
+  // Live re-apply when the SHARED config actually changes (JSON-compared so
+  // unrelated project-store ticks — autosave, cloud status — don't restart
+  // playback; see the settings-dialog re-seeding bug).
+  $effect(() => {
+    const cfg = $projectStore.data?.mastering
+    const json = JSON.stringify(cfg ?? null)
+    if (!engine || loading) return
+    if (json === lastAppliedSoundJson) return
+    untrack(() => applyProjectSound())
+  })
 
   /** Persist current track state into songMap.mixState (debounced). */
   let persistTimer: ReturnType<typeof setTimeout> | null = null

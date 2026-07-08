@@ -13,7 +13,7 @@
  * manifest, with rollback if anything in between fails.
  */
 import { get } from 'svelte/store'
-import type { ProjectAutoStems, ProjectDefaults, ProjectFile, ProjectSongEntry } from './types'
+import type { ProjectAutoStems, ProjectDefaults, ProjectFile, ProjectMastering, ProjectSongEntry } from './types'
 import { AUTO_STEM_NAMES } from './types'
 import { createDefaultCueTrack } from '$lib/songmap/cueTracks'
 import {
@@ -1255,6 +1255,20 @@ export async function setProjectDefaults(patch: Partial<ProjectDefaults>): Promi
   const next: ProjectFile = {
     ...snap.data,
     defaults: { ...snap.data.defaults, ...patch },
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/** The ONLY writer of the shared project-sound (mastering) config. */
+export async function setProjectMastering(mastering: ProjectMastering): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    mastering,
     updatedAt: nowIso(),
   }
   const w = await writeProjectManifest(snap.osPath, next)
