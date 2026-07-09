@@ -22,6 +22,16 @@ import { songKeyPreferFlats } from './diatonic'
 import { formatChordSymbol } from './formatChordSymbol'
 import { sameKindChordAtMatchingBeat } from './autoFill'
 
+/**
+ * Version of the chroma analyzer whose output the matcher trusts. Keep in
+ * sync with `ANALYZER_VERSION` in `desktop/native/python/sections/
+ * chord_chroma.py`. Hints from older versions were computed with the broken
+ * bass-weighted chroma and are WORSE than nothing — consumers must refuse
+ * them and re-analyze (the editor's chords tab and the project background
+ * backfill both do).
+ */
+export const CHORD_ANALYZER_VERSION = 4
+
 /** Pitch-class offsets from the root for a major triad. */
 export const MAJOR_TRIAD = [0, 4, 7] as const
 /** Pitch-class offsets from the root for a minor triad. */
@@ -309,6 +319,10 @@ export function proposeChordSuggestions(
   const hints = songMap.chordHints
   if (!hints || hints.beatChroma.length === 0) return out
   if (hints.beatChroma.length !== songMap.timeline.beats.length) return out
+  // Refuse stale chroma outright — hints from an older analyzer (bass-weighted
+  // chroma bug) produce confidently WRONG suggestions. No suggestions is
+  // better; the chords tab / background backfill re-analyze automatically.
+  if (hints.analyzerVersion !== CHORD_ANALYZER_VERSION) return out
 
   // beatChroma is in `sortBeatsByTime(beats)` order — build a lookup
   // beatId → chroma index that matches.

@@ -78,7 +78,7 @@
     analyzeChordChromaViaDesktopWithStem,
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
-  import { proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
+  import { CHORD_ANALYZER_VERSION, proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
     applyBarGridAction,
@@ -507,7 +507,9 @@
   // v3: stem-aware input — when demucs "other" stem is on disk, the
   //     analyzer reads the harmonic stem instead of the full mix.
   //     Strips drum + vocal bleed; biggest single accuracy unlock.
-  const CHORD_ANALYZER_VERSION = 4
+  // v4: flat weighting + 100–2000 Hz band (the 1/f bass weighting was
+  //     mis-detecting keys/chords). Version lives in suggestFromChroma so
+  //     the matcher can refuse stale chroma.
 
   let chordChromaStatus = $state<
     'idle' | 'installing' | 'analyzing' | 'ready' | 'cached' | 'error' | 'unavailable'

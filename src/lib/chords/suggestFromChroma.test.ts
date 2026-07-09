@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 import {
   aggregateBarChroma,
+  CHORD_ANALYZER_VERSION,
   proposeChordSuggestions,
   rankTriadFitsForChroma,
 } from './suggestFromChroma'
@@ -162,6 +163,23 @@ describe('proposeChordSuggestions', () => {
     expect(proposeChordSuggestions(map).size).toBe(0)
   })
 
+  it('refuses stale chroma from an older analyzer version', () => {
+    const bars: Bar[] = [bar(0, ['b0_0', 'b0_1', 'b0_2', 'b0_3'])]
+    const beats: Beat[] = [beat(0, 0), beat(0, 1), beat(0, 2), beat(0, 3)]
+    const cMaj = chromaFor([0, 4, 7])
+    const hints: ChordHints = {
+      beatChroma: [cMaj, cMaj, cMaj, cMaj],
+      detectedKey: null,
+      audioFingerprint: 'fake',
+      generatedAt: '',
+      // Pre-v4 chroma had the bass-weighting bug — confidently wrong
+      // suggestions. Must yield NOTHING until re-analysis.
+      analyzerVersion: CHORD_ANALYZER_VERSION - 1,
+    }
+    const map = buildSongMap({ bars, beats, hints })
+    expect(proposeChordSuggestions(map).size).toBe(0)
+  })
+
   it('returns one suggestion per bar keyed by the downbeat id', () => {
     const bars: Bar[] = [
       bar(0, ['b0_0', 'b0_1', 'b0_2', 'b0_3']),
@@ -180,7 +198,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({ bars, beats, hints })
     const out = proposeChordSuggestions(map)
@@ -201,7 +219,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({ bars, beats, hints })
     expect(proposeChordSuggestions(map).size).toBe(0)
@@ -216,7 +234,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({ bars, beats, hints })
     const s = proposeChordSuggestions(map).get('b0_0')
@@ -241,7 +259,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({
       bars,
@@ -287,7 +305,7 @@ describe('proposeChordSuggestions — section bias', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 3,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const sections: import('$lib/songmap/types').Section[] = [
       { id: 'v1', kind: 'verse', label: 'verse', barRange: { startBarIndex: 0, endBarIndex: 1 } },
