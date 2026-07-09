@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseSongMap } from './parse'
+import { SONGMAP_FORMAT_VERSION } from './version'
 import { serializeSongMap } from './serialize'
 
 /**
@@ -106,7 +107,7 @@ describe('SongMap v1→v3 full round-trip (no non-cue data loss)', () => {
   const sm = parseSongMap(JSON.stringify(legacyV1))
 
   it('bumps to v3 and migrates the count-in to a top-level field', () => {
-    expect(sm.formatVersion).toBe(3)
+    expect(sm.formatVersion).toBe(SONGMAP_FORMAT_VERSION)
     expect(sm.countInBeats).toBe(4)
     expect(sm.transpose).toBeUndefined()
   })

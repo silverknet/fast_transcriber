@@ -1,7 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
-  import { onDestroy, onMount } from 'svelte'
+  import { onDestroy, onMount, untrack } from 'svelte'
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import MixerView from '$lib/components/MixerView.svelte'
@@ -79,6 +79,7 @@
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
   import { CHORD_ANALYZER_VERSION, proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
+  import { cleanLyricsText } from '$lib/lyrics/clean'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
     applyBarGridAction,
@@ -1004,7 +1005,7 @@
   }
 
   /** Main workspace mode. */
-  let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'leadsheet'>(
+  let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'>(
     'overview',
   )
 
@@ -2164,6 +2165,55 @@
     }
   }
 
+  // ── Lyrics tab ─────────────────────────────────────────────────────────
+  // Paste → clean ([Chorus] markers etc.) → save into `sm.lyrics.sourceText`.
+  // Timing (`lyrics.words`) comes from "Fit to song" (Phase C); editing the
+  // text after an alignment clears the words — their timing is stale.
+  let lyricsDraft = $state('')
+  /** Which song the draft was seeded for — re-seed on song switch, never on ticks. */
+  let lyricsSeededFor = ''
+  $effect(() => {
+    if (editMode !== 'lyrics') return
+    const sm = $songMap
+    if (!sm) return
+    const key = `${$projectStore.activeSongId ?? 'session'}::${sm.metadata.title}`
+    if (lyricsSeededFor === key) return
+    lyricsSeededFor = key
+    lyricsDraft = untrack(() => sm.lyrics?.sourceText ?? '')
+  })
+
+  const lyricsCleanedPreview = $derived(cleanLyricsText(lyricsDraft))
+  const lyricsSaved = $derived($songMap?.lyrics ?? null)
+  const lyricsDraftMatchesSaved = $derived(
+    (lyricsSaved?.sourceText ?? '') === lyricsCleanedPreview.text,
+  )
+  let lyricsSaveMsg = $state('')
+
+  function saveLyrics() {
+    const cleaned = cleanLyricsText(lyricsDraft)
+    const p = patchSongMap((m) => {
+      if (!cleaned.text) {
+        const { lyrics: _lyrics, ...rest } = m
+        return rest as typeof m
+      }
+      const sameText = m.lyrics?.sourceText === cleaned.text
+      return {
+        ...m,
+        lyrics: sameText && m.lyrics
+          ? m.lyrics // unchanged text keeps existing word timing
+          : { words: [], sourceText: cleaned.text },
+      }
+    })
+    if (!p.ok) {
+      lyricsSaveMsg = p.errors.join('; ')
+      return
+    }
+    lyricsDraft = cleaned.text
+    lyricsSaveMsg = cleaned.text
+      ? `Saved ${cleaned.lines.length} line${cleaned.lines.length === 1 ? '' : 's'}.`
+      : 'Lyrics removed.'
+  }
+
   // ── Overview "Play cues" toggle ──────────────────────────────────────────
   // "Play cues" is a LOCAL playback preference — the cue lane's mute in
   // `mixState` (per-machine, stripped from cloud sync). It NEVER touches the
@@ -2417,7 +2467,7 @@
       </div>
 
       <div
-        class="border-foreground bg-muted inline-grid grid-cols-6 gap-0 self-start overflow-hidden border-2 sm:self-auto"
+        class="border-foreground bg-muted inline-grid grid-cols-7 gap-0 self-start overflow-hidden border-2 sm:self-auto"
         role="tablist"
         aria-label="Edit mode"
       >
@@ -2485,6 +2535,19 @@
           onclick={() => (editMode = 'cue')}
         >
           Cue
+        </Button>
+        <Button
+          type="button"
+          role="tab"
+          aria-selected={editMode === 'lyrics'}
+          variant="ghost"
+          size="sm"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'lyrics'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
+          onclick={() => (editMode = 'lyrics')}
+        >
+          Lyrics
         </Button>
         <Button
           type="button"
@@ -2812,6 +2875,75 @@
         {/if}
 
         <MixerView reloadSignal={mixerReloadSignal} />
+      </section>
+    {/if}
+
+    {#if editMode === 'lyrics'}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Lyrics"
+      >
+        <div class="grid gap-4 md:grid-cols-2">
+          <div class="flex flex-col gap-2">
+            <label class="text-muted-foreground text-xs font-medium uppercase tracking-wide" for="lyrics-paste">
+              Paste lyrics
+            </label>
+            <textarea
+              id="lyrics-paste"
+              bind:value={lyricsDraft}
+              rows="18"
+              placeholder={'Paste the full lyrics here…\n\nSection markers like [Chorus] or (Verse 2) are removed automatically.'}
+              class="border-foreground bg-background min-h-[24rem] w-full resize-y border-2 px-3 py-2 font-mono text-sm leading-relaxed focus:outline-none"
+              spellcheck="false"
+            ></textarea>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+                onclick={saveLyrics}
+                disabled={lyricsDraftMatchesSaved && !!lyricsSaved}
+              >
+                Save lyrics
+              </button>
+              {#if lyricsSaveMsg}
+                <span class="text-muted-foreground text-xs" role="status">{lyricsSaveMsg}</span>
+              {/if}
+            </div>
+            {#if lyricsSaved && lyricsSaved.words.length > 0 && !lyricsDraftMatchesSaved}
+              <p class="text-amber-600 text-xs">
+                Changing the words clears the current timing — run “Fit to song” again after saving.
+              </p>
+            {/if}
+          </div>
+
+          <div class="flex min-w-0 flex-col gap-2">
+            <span class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+              Cleaned preview · {lyricsCleanedPreview.lines.length} line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
+            </span>
+            <div class="border-foreground/30 bg-muted/40 min-h-[24rem] overflow-auto border-2 px-3 py-2">
+              {#if lyricsCleanedPreview.text}
+                {#each lyricsCleanedPreview.text.split('\n') as line, i (i)}
+                  {#if line}
+                    <p class="text-sm leading-relaxed">{line}</p>
+                  {:else}
+                    <div class="h-3"></div>
+                  {/if}
+                {/each}
+              {:else}
+                <p class="text-muted-foreground text-sm italic">Nothing yet — paste lyrics on the left.</p>
+              {/if}
+            </div>
+            <p class="text-muted-foreground text-xs">
+              {#if lyricsSaved?.words.length}
+                Fitted to the song ({lyricsSaved.words.length} timed words).
+              {:else if lyricsSaved}
+                Saved — not fitted to the song yet.
+              {:else}
+                Lyrics are shown in playback mode once saved and fitted to the song.
+              {/if}
+            </p>
+          </div>
+        </div>
       </section>
     {/if}
 
@@ -3287,7 +3419,7 @@
     color: var(--foreground);
   }
 
-  .edit-page :global(.inline-grid.grid-cols-6.border-foreground.bg-muted) {
+  .edit-page :global(.inline-grid.grid-cols-7.border-foreground.bg-muted) {
     background: var(--card);
     box-shadow: 4px 4px 0 var(--ink);
   }

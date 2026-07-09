@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseSongMap, SongMapParseError } from './parse'
+import { SONGMAP_FORMAT_VERSION } from './version'
 import { serializeSongMap } from './serialize'
 
 const baseV2 = {
@@ -18,9 +19,9 @@ const baseV2 = {
 describe('SongMap transpose schema', () => {
   it('loads v2 files as v3 with no transpose', () => {
     const sm = parseSongMap(JSON.stringify(baseV2))
-    expect(sm.formatVersion).toBe(3)
+    expect(sm.formatVersion).toBe(SONGMAP_FORMAT_VERSION)
     expect(sm.transpose).toBeUndefined()
-    expect(JSON.parse(serializeSongMap(sm)).formatVersion).toBe(3)
+    expect(JSON.parse(serializeSongMap(sm)).formatVersion).toBe(SONGMAP_FORMAT_VERSION)
   })
 
   it('persists a valid shared base transposition', () => {

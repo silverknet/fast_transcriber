@@ -6,6 +6,7 @@ import type {
   CueEvent,
   CueTrack,
   HarmonyEvent,
+  Lyrics,
   Section,
   SongKey,
   SongMap,
@@ -45,6 +46,24 @@ function validateTranspose(t: SongTranspose | undefined, path: string, errors: s
     errors.push(`${path}.baseSemitones must be an integer`)
   } else if (t.baseSemitones < -12 || t.baseSemitones > 12) {
     errors.push(`${path}.baseSemitones must be between -12 and 12`)
+  }
+}
+
+function validateLyrics(l: Lyrics | undefined, path: string, errors: string[]) {
+  if (l === undefined) return
+  if (typeof l.sourceText !== 'string') errors.push(`${path}.sourceText must be a string`)
+  if (!Array.isArray(l.words)) {
+    errors.push(`${path}.words must be an array`)
+    return
+  }
+  for (let i = 0; i < l.words.length; i++) {
+    const w = l.words[i]!
+    const p = `${path}.words[${i}]`
+    if (typeof w.text !== 'string' || !w.text) errors.push(`${p}.text required`)
+    if (!isFiniteNumber(w.startSec) || w.startSec < 0) errors.push(`${p}.startSec invalid`)
+    if (!isFiniteNumber(w.endSec)) errors.push(`${p}.endSec invalid`)
+    else if (w.endSec <= w.startSec) errors.push(`${p}.endSec must be > startSec`)
+    if (!Number.isInteger(w.line) || w.line < 0) errors.push(`${p}.line invalid`)
   }
 }
 
@@ -211,6 +230,7 @@ export function validateSongMap(map: SongMap): ValidationResult {
 
   validateMetadata(map.metadata, 'metadata', errors)
   validateTranspose(map.transpose, 'transpose', errors)
+  validateLyrics(map.lyrics, 'lyrics', errors)
 
   const bars = map.timeline?.bars
   const beats = map.timeline?.beats

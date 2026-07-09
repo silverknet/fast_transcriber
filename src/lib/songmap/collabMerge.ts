@@ -279,6 +279,10 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     'Transposition',
   )
   if (trC) conflicts.push(trC)
+  // Whole-field LWW for lyrics (like transpose) — lyric edits are wholesale
+  // (paste / re-align), so per-word merging isn't worth the complexity.
+  const lyC = classifyScalar(local.lyrics, cloud.lyrics, 'lyrics', 'Lyrics')
+  if (lyC) conflicts.push(lyC)
 
   // ── expectedAudio swap is dangerous (different master) ──
   if (
@@ -412,6 +416,7 @@ export function applyConflictDecisions(
     if (c.path === 'countInBeats') result = { ...result, countInBeats: c.mine as number | undefined }
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
     else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
+    else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
     // `timeline/bars-count` is informational — the per-id merges above
     // already determine which bars survive; no extra apply step.

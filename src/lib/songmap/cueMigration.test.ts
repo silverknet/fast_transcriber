@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseSongMap } from './parse'
+import { SONGMAP_FORMAT_VERSION } from './version'
 import { serializeSongMap } from './serialize'
 import type { SongMap } from './types'
 
@@ -43,7 +44,7 @@ describe('SongMap cue v1 migration', () => {
       }),
     )
 
-    expect(sm.formatVersion).toBe(3)
+    expect(sm.formatVersion).toBe(SONGMAP_FORMAT_VERSION)
     expect(sm.countInBeats).toBe(4)
     expect(sm.cueTracks).toHaveLength(1)
     expect(sm.cueTracks[0]?.events[0]).toMatchObject({
@@ -88,7 +89,7 @@ describe('SongMap cue v1 migration', () => {
     sm.clickTrackExport = rendered
 
     const serialized = JSON.parse(serializeSongMap(sm as SongMap)) as Record<string, unknown>
-    expect(serialized.formatVersion).toBe(3)
+    expect(serialized.formatVersion).toBe(SONGMAP_FORMAT_VERSION)
     expect(serialized.cueTracks).toBeDefined()
     expect(serialized.cues).toBeUndefined()
     expect(serialized.cueTrackExport).toBeUndefined()

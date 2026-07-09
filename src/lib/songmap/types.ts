@@ -43,6 +43,32 @@ export type SongTranspose = {
   baseSemitones: number
 }
 
+export type LyricWord = {
+  /** Display text as imported (original casing/punctuation). */
+  text: string
+  /** ORIGINAL audio time (same base as `Beat.timeSec`). Convert at display boundaries only. */
+  startSec: number
+  endSec: number
+  /** 0-based line index into the cleaned lyrics (`Lyrics.sourceText`). */
+  line: number
+  /** True = timed from a matched recognized word; false/absent = interpolated between anchors. */
+  aligned?: boolean
+}
+
+export type Lyrics = {
+  /**
+   * Word-level timing. Empty until "Fit to song" has run — `sourceText` alone
+   * means "imported but not aligned yet".
+   */
+  words: LyricWord[]
+  /** Cleaned, line-preserving lyrics text (display fallback + re-align input). */
+  sourceText: string
+  /** ISO timestamp of the last successful alignment. */
+  alignedAt?: string
+  /** Version of the transcriber whose output produced `words`. */
+  transcriberVersion?: number
+}
+
 export type HarmonyEvent = {
   id: string
   barId: string
@@ -418,6 +444,8 @@ export type SongMapV3 = {
   app?: SongMapAppInfo
   metadata: SongMetadata
   transpose?: SongTranspose
+  /** Imported lyrics + word-level timing aligned to the audio (v4). */
+  lyrics?: Lyrics
   audio?: AudioReference
   timeline: SongMapTimeline
   sections: Section[]
@@ -459,9 +487,13 @@ export type SongMapV3 = {
   chordHints?: ChordHints
 }
 
-/** @deprecated Persistent runtime shape is v3; kept for older imports. */
+/** Current persistent shape (formatVersion 4). Name kept from the v3 era to
+ * avoid churn; the `formatVersion` literal tracks `SONGMAP_FORMAT_VERSION`. */
+export type SongMapV4 = SongMapV3
+
+/** @deprecated Persistent runtime shape is v4; kept for older imports. */
 export type SongMapV1 = SongMapV3
-/** @deprecated Persistent runtime shape is v3; kept for older imports. */
+/** @deprecated Persistent runtime shape is v4; kept for older imports. */
 export type SongMapV2 = SongMapV3
 
 export type SongMap = SongMapV3

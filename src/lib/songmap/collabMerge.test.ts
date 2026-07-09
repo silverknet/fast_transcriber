@@ -253,6 +253,33 @@ describe('collabMerge · applyConflictDecisions', () => {
     expect(applyConflictDecisions(report, new Map([['transpose', 'mine']])).transpose?.baseSemitones).toBe(-2)
   })
 
+  it('labels and resolves lyrics conflicts (whole-field LWW)', () => {
+    const base = createEmptySongMap()
+    const mine = {
+      words: [{ text: 'Hey', startSec: 1, endSec: 1.4, line: 0 }],
+      sourceText: 'Hey',
+    }
+    const theirs = {
+      words: [{ text: 'Yo', startSec: 2, endSec: 2.3, line: 0 }],
+      sourceText: 'Yo',
+    }
+    const local: SongMap = { ...base, lyrics: mine }
+    const cloud: SongMap = { ...base, lyrics: theirs }
+    const report = mergeForConflict(local, cloud)
+    expect(report.conflicts).toContainEqual(
+      expect.objectContaining({ path: 'lyrics', label: 'Lyrics' }),
+    )
+    expect(applyConflictDecisions(report, new Map()).lyrics?.sourceText).toBe('Yo')
+    expect(applyConflictDecisions(report, new Map([['lyrics', 'mine']])).lyrics?.sourceText).toBe('Hey')
+  })
+
+  it('identical lyrics on both sides produce no conflict', () => {
+    const base = createEmptySongMap()
+    const same = { words: [], sourceText: 'La la' }
+    const report = mergeForConflict({ ...base, lyrics: same }, { ...base, lyrics: { ...same } })
+    expect(report.conflicts.some((c) => c.path === 'lyrics')).toBe(false)
+  })
+
   it('preserves non-conflicted local-only items regardless of decisions', () => {
     const base = createEmptySongMap()
     const local: SongMap = { ...base, harmony: [chord('h-1', 'C'), chord('h-2', 'F')] }

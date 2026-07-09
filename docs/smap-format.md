@@ -1,9 +1,9 @@
 # `.smap` — file format specification
 
-**Status:** v3 — stable
+**Status:** v4 — stable
 **Container version (binary header `version`):** `2` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
 **JSON envelope version (`projectFormatVersion`):** `1` — [`SONG_PROJECT_FORMAT_VERSION`](../src/lib/songmap/smapFile.ts)
-**SongMap schema version (`formatVersion`):** `3` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
+**SongMap schema version (`formatVersion`):** `4` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
 **MIME type:** `application/vnd.barbro.smap` — [`SMAP_BLOB_TYPE`](../src/lib/songmap/smapFile.ts)
 **Extension:** `.smap`
 
@@ -74,11 +74,12 @@ Defined in [`smapFile.ts`](../src/lib/songmap/smapFile.ts). The envelope exists 
 Source of truth: [`SongMapV3`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
 
 ```ts
-type SongMapV3 = {
-  formatVersion: 3
+type SongMapV4 = {
+  formatVersion: 4
   app?: { name: 'BarBro'; appVersion?: string }
   metadata: SongMetadata             // required
   transpose?: { baseSemitones: number } // shared reversible transpose, -12..12
+  lyrics?: Lyrics                    // imported lyrics + word timing (v4)
   audio?: AudioReference             // optional (no audio = JSON-only project)
   timeline: { bars: Bar[]; beats: Beat[] }   // required (arrays can be empty)
   sections: Section[]                // required (can be empty)
@@ -114,6 +115,29 @@ type SongMapV3 = {
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
 | `baseSemitones` | integer `-12..12` | ✓ | Shared song-level transpose. Missing or `0` means untransposed. Source `harmony[].chord`, `metadata.keyDetail`, and audio files remain original; display/export derives sounding key/chords from this value. Audio playback remains original in the current product path; pitch-shift caches are local/experimental only. |
+
+### 3.1.2 `lyrics` — imported lyrics + word-level timing (v4)
+
+```ts
+type Lyrics = {
+  words: LyricWord[]      // empty until "Fit to song" has aligned them
+  sourceText: string      // cleaned, line-preserving lyrics text
+  alignedAt?: string      // ISO timestamp of last successful alignment
+  transcriberVersion?: number
+}
+type LyricWord = {
+  text: string            // display text as imported
+  startSec: number        // ORIGINAL audio time (same base as Beat.timeSec)
+  endSec: number          // > startSec
+  line: number            // 0-based line index into sourceText
+  aligned?: boolean       // true = timed from a matched recognized word
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|:---:|---|
+| `sourceText` | `string` | ✓ | Cleaned import ([Chorus] markers stripped). `sourceText` with empty `words` = imported but not yet fitted to the song. |
+| `words[]` | `LyricWord[]` | ✓ | Word times are **original audio time**; convert at display boundaries only. Whole-field LWW on collab conflicts. |
 
 ### 3.2 `audio` — `AudioReference` (optional, metadata only)
 
@@ -290,7 +314,8 @@ Consequence: `decode(encode(x)) ≡ x` modulo dropped `undefined`s, and `encode(
 - **`.zip` bundles** (very old): explicitly rejected with a message instructing the user to re-export from BarBro as a single `.smap`.
 - **Missing optional fields** (e.g. `sectionBorderHints`, `chordHints`, `clickExport`): silently ignored — they'll be regenerated on demand.
 - **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`.
-- **Legacy SongMap `formatVersion: 1` or `2` transpose:** absent transpose becomes untransposed. New saves emit v3 only.
+- **Legacy SongMap `formatVersion: 1` or `2` transpose:** absent transpose becomes untransposed.
+- **Legacy SongMap `formatVersion: 1`–`3` lyrics:** absent lyrics stay absent. New saves emit v4 only; builds older than v4 refuse newer files ("saved by a newer version of BarBro") instead of stripping lyrics on save.
 - **Legacy `cueTrackExport` / `clickTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
 
 Unknown top-level JSON keys are stripped by default during parse. (See [`parse.ts`](../src/lib/songmap/parse.ts).)

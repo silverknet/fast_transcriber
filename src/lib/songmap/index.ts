@@ -26,6 +26,8 @@ export type {
   CueTrack,
   CueTrackExport,
   HarmonyEvent,
+  LyricWord,
+  Lyrics,
   Meter,
   NoteName,
   Section,
