@@ -154,6 +154,128 @@ describe('alignLyricsToTranscription', () => {
     assertMonotone(words)
   })
 
+  it('rejects a wrong-occurrence anchor that stretches a row (the stuck-"hej" case)', () => {
+    // One row: "sommartider hej hej sommartider". The recognizer's words for
+    // the FIRST chorus lost the final word, and the aligner's last anchor
+    // grabbed the SECOND chorus 14s later. Row consensus must reject it and
+    // interpolate the last word next to its rowmates instead of holding a
+    // 10-second word.
+    const tokens = tokensFrom(['sommartider hej hej sommartider'])
+    const asr: AsrWord[] = [
+      { text: 'sommartider', startSec: 2.0, endSec: 2.6 },
+      { text: 'hej', startSec: 2.7, endSec: 2.9 },
+      { text: 'hej', startSec: 3.0, endSec: 3.2 },
+      // …instrumental… second chorus far away:
+      { text: 'sommartider', startSec: 16.0, endSec: 16.6 },
+    ]
+    const { words } = alignLyricsToTranscription(tokens, asr)
+    const last = words[3]!
+    // Without rejection this word sat at 16s; with row consensus it must sit
+    // right after its rowmates.
+    expect(last.startSec).toBeLessThan(6)
+    // And no word in the row may last for seconds.
+    for (const w of words) expect(w.endSec - w.startSec).toBeLessThan(2)
+    assertMonotone(words)
+  })
+
+  it('interpolated words hug their own row across a long between-row gap', () => {
+    // Row 0 anchored only at its first word; row 1 anchored only at its last.
+    // The 10s gap belongs BETWEEN the rows: row 0's missing words chain right
+    // after its anchor, row 1's missing words chain right before its anchor.
+    const tokens = tokensFrom(['alpha beta gamma', 'delta epsilon zeta'])
+    const asr: AsrWord[] = [
+      { text: 'alpha', startSec: 2.0, endSec: 2.4 },
+      { text: 'zeta', startSec: 14.0, endSec: 14.4 },
+    ]
+    const { words } = alignLyricsToTranscription(tokens, asr)
+    const beta = words[1]!
+    const gamma = words[2]!
+    const delta = words[3]!
+    const epsilon = words[4]!
+    // Row 0 stays together near 2s…
+    expect(gamma.endSec).toBeLessThan(5)
+    expect(beta.startSec).toBeGreaterThanOrEqual(2.4)
+    // …row 1 stays together near 14s.
+    expect(delta.startSec).toBeGreaterThan(11)
+    expect(epsilon.endSec).toBeLessThanOrEqual(14.0 + 1e-9)
+    assertMonotone(words)
+  })
+
+  it('sparse anchors in one row scaffold the rest ("Where … when … you")', () => {
+    const tokens = tokensFrom(['where are you now when i need you'])
+    const asr: AsrWord[] = [
+      { text: 'where', startSec: 5.0, endSec: 5.3 },
+      { text: 'when', startSec: 6.6, endSec: 6.9 },
+      { text: 'you', startSec: 7.6, endSec: 7.9 },
+    ]
+    const { words } = alignLyricsToTranscription(tokens, asr)
+    // "are you now" interpolate between where(5.3) and when(6.6)…
+    for (const w of words.slice(1, 4)) {
+      expect(w.startSec).toBeGreaterThanOrEqual(5.3)
+      expect(w.endSec).toBeLessThanOrEqual(6.6 + 1e-9)
+    }
+    // …"i need" between when(6.9) and the final you(7.6).
+    for (const w of words.slice(5, 7)) {
+      expect(w.startSec).toBeGreaterThanOrEqual(6.9)
+      expect(w.endSec).toBeLessThanOrEqual(7.6 + 1e-9)
+    }
+    assertMonotone(words)
+  })
+
+  it('ad-lib intro words do not steal the first line (Love Never Felt So Good case)', () => {
+    // The vocal track opens with ad-libs NOT in the lyrics ("uh let me see
+    // you movin uh…") that exact-match common lyric words. The real first
+    // line is sung later and matches as a full run — the line must anchor
+    // THERE, not spread into the ad-libs.
+    const tokens = tokensFrom(['love never felt so good', 'and I doubt it ever could'])
+    const asr: AsrWord[] = [
+      // ad-libs at 1-4s — "so" and "good" appear but isolated/out of context
+      { text: 'uh', startSec: 1.0, endSec: 1.2 },
+      { text: 'let', startSec: 1.4, endSec: 1.6 },
+      { text: 'me', startSec: 1.7, endSec: 1.85 },
+      { text: 'see', startSec: 2.0, endSec: 2.2 },
+      { text: 'you', startSec: 2.3, endSec: 2.5 },
+      { text: 'movin', startSec: 2.6, endSec: 2.9 },
+      { text: 'so', startSec: 3.4, endSec: 3.55 },
+      { text: 'uh', startSec: 3.8, endSec: 3.95 },
+      // the real first line at 12s, sung as a run
+      ...asrFrom('love never felt so good', 12),
+      ...asrFrom('and I doubt it ever could', 16),
+    ]
+    const { words, matchedRatio } = alignLyricsToTranscription(tokens, asr)
+    // Every word of line 0 must sit at the sung occurrence (≥ 11s), none in
+    // the ad-lib zone.
+    for (const w of words.filter((w) => w.line === 0)) {
+      expect(w.startSec).toBeGreaterThan(11)
+    }
+    expect(words[0]!.startSec).toBeCloseTo(12, 1)
+    expect(matchedRatio).toBeGreaterThan(0.9)
+    assertMonotone(words)
+  })
+
+  it('recovers a row whose words the recognizer garbled (multi-pass lift)', () => {
+    // Row 2's words are all near-misses — the global pass may anchor only
+    // some; the row-local recovery pass must lift the rest from the window.
+    const tokens = tokensFrom(['clean opening line here', 'muddy middle words sung', 'clean closing line too'])
+    const asr: AsrWord[] = [
+      ...asrFrom('clean opening line here', 5),
+      // garbled middle: each word lev-distance ≤ 2 from the lyric
+      { text: 'muddi', startSec: 9.0, endSec: 9.3 },
+      { text: 'midle', startSec: 9.4, endSec: 9.7 },
+      { text: 'words', startSec: 9.8, endSec: 10.1 },
+      { text: 'sang', startSec: 10.2, endSec: 10.5 },
+      ...asrFrom('clean closing line too', 13),
+    ]
+    const { words, matchedRatio } = alignLyricsToTranscription(tokens, asr)
+    expect(matchedRatio).toBeGreaterThan(0.8)
+    const middle = words.filter((w) => w.line === 1)
+    for (const w of middle) {
+      expect(w.startSec).toBeGreaterThanOrEqual(8.5)
+      expect(w.endSec).toBeLessThanOrEqual(11)
+    }
+    assertMonotone(words)
+  })
+
   it('property: random word drops keep output monotone and in-bounds', () => {
     const line = 'one two three four five six seven eight nine ten eleven twelve'
     const tokens = tokensFrom([line, line, line])
