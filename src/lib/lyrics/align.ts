@@ -91,7 +91,9 @@ function wordScore(a: string, b: string): number {
   if (a === b) return SCORE_EXACT
   const minLen = Math.min(a.length, b.length)
   if (minLen >= 3 && levenshtein(a, b, 1) <= 1) return SCORE_FUZZY
-  if (minLen >= 6 && levenshtein(a, b, 2) <= 2) return SCORE_FUZZY
+  // Inflected languages (Swedish "sommartider"/"sommartiden") often differ by
+  // a 2-char ending — allow it once the words are long enough to be distinctive.
+  if (minLen >= 5 && levenshtein(a, b, 2) <= 2) return SCORE_FUZZY
   return SCORE_MISMATCH
 }
 

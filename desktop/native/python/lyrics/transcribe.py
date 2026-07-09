@@ -28,7 +28,10 @@ import sys
 import threading
 
 # Bump when transcription params change enough to invalidate cached results.
-TRANSCRIBER_VERSION = 1
+# v2: condition_on_previous_text=False (whisper skips REPEATED lyric lines
+#     when conditioning — fatal for choruses) + softer VAD threshold so quiet
+#     opening phrases over the intro aren't dropped.
+TRANSCRIBER_VERSION = 2
 
 DEFAULT_MODEL = "small"
 
@@ -122,6 +125,17 @@ def main() -> None:
             audio_path,
             word_timestamps=True,
             vad_filter=True,
+            # Softer than the 0.5 default: sung vocals over an intro bed are
+            # quieter than speech, and the default drops short opening phrases
+            # ("Sommartider, hej hej" at 0:01 vanished entirely).
+            vad_parameters={
+                "threshold": 0.35,
+                "min_silence_duration_ms": 500,
+                "speech_pad_ms": 400,
+            },
+            # CRITICAL for lyrics: with conditioning on, whisper deduplicates
+            # repeated lines (choruses!) and can skip whole occurrences.
+            condition_on_previous_text=False,
             language=str(language) if language else None,
             beam_size=5,
         )

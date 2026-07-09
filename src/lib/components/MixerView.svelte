@@ -458,15 +458,33 @@
     return [...byLine.values()].sort((a, b) => a.line - b.line)
   })
 
-  const lyricsSongTime = $derived(snapshot.positionSec - mixerSongOffsetSec)
+  /**
+   * Forgiveness lead: highlight slightly EARLY. Aligned times mark the sung
+   * onset; readers want the word lit a beat before it lands, and a small lead
+   * also absorbs alignment error without ever feeling "behind".
+   */
+  const LYRIC_LEAD_SEC = 0.18
+  /** After a line has been over this long, promote the NEXT line to the main slot. */
+  const LYRIC_GAP_PROMOTE_SEC = 0.4
 
-  /** Index of the line being sung (last line started); -1 before the first. */
+  const lyricsSongTime = $derived(snapshot.positionSec - mixerSongOffsetSec + LYRIC_LEAD_SEC)
+
+  /**
+   * Index of the line in the MAIN display slot. Usually the line being sung;
+   * during instrumental gaps the finished line steps aside and the upcoming
+   * line takes the slot (unhighlighted until its first word starts) so the
+   * singer preps the entry instead of staring at a stale line.
+   */
   const currentLyricIdx = $derived.by(() => {
     const t = lyricsSongTime
     let idx = -1
     for (let i = 0; i < lyricLines.length; i++) {
       if (lyricLines[i]!.startSec <= t) idx = i
       else break
+    }
+    if (idx >= 0 && idx < lyricLines.length - 1) {
+      const cur = lyricLines[idx]!
+      if (t > cur.endSec + LYRIC_GAP_PROMOTE_SEC) return idx + 1
     }
     return idx
   })
@@ -1200,7 +1218,9 @@
                     ? 'bg-primary text-primary-foreground rounded px-1'
                     : wi < activeIdx
                       ? 'text-foreground/60'
-                      : 'text-foreground'}
+                      : activeIdx === -1
+                        ? 'text-foreground/70'
+                        : 'text-foreground'}
                 >{w.text}</span
                 >{#if wi < cur.words.length - 1}{' '}{/if}{/each}
             {:else if next}

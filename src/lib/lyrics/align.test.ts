@@ -124,6 +124,16 @@ describe('alignLyricsToTranscription', () => {
     expect(words[0]!.startSec).toBeCloseTo(34.5, 5)
   })
 
+  it('fuzzy-matches 2-char inflection differences on 5+ letter words (Swedish endings)', () => {
+    const tokens = tokensFrom(['solen skiner alltid'])
+    // Recognizer garbled "solen" → "sulan" (lev 2) and "skiner" → "skinner" (lev 1).
+    const asr = asrFrom('sulan skinner alltid', 3)
+    const { words, matchedRatio } = alignLyricsToTranscription(tokens, asr)
+    expect(matchedRatio).toBe(1)
+    expect(words[0]!.aligned).toBe(true)
+    expect(words[0]!.startSec).toBeCloseTo(3, 5)
+  })
+
   it('fuzzy-matches near misses but never short words', () => {
     const tokens = tokensFrom(['colour of a mind'])
     // Recognizer heard "color" (lev 1) and "mine" (lev 1 of "mind");
