@@ -76,10 +76,17 @@
     suggestSectionBordersViaDesktop,
     analyzeChordChromaViaDesktop,
     analyzeChordChromaViaDesktopWithStem,
+    getLyricsSetupStatus,
+    setupLyricsDeps,
+    enqueueLyricsTranscription,
+    subscribeToJobEvents,
+    type LyricsTranscriptionEvent,
+    type LyricsTranscriptionWord,
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
   import { CHORD_ANALYZER_VERSION, proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
   import { cleanLyricsText } from '$lib/lyrics/clean'
+  import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
     applyBarGridAction,
@@ -2214,6 +2221,166 @@
       : 'Lyrics removed.'
   }
 
+  // ── "Fit to song": transcribe the vocal → align imported words to it ──
+  let lyricsFitBusy = $state(false)
+  let lyricsFitMsg = $state('')
+  let lyricsFitErr = $state('')
+  let lyricsMatchedPct = $state<number | null>(null)
+
+  /** Vocals stem if on disk (cleanest recognition), else the original audio. */
+  function resolveLyricsAudioAbsPath(): { abs: string; usedStem: boolean } | null {
+    const ps = get(projectStore)
+    const sm = get(songMap)
+    if (!ps.osPath || !ps.activeSongFolder || !sm) return null
+    const meta = ps.metadataByFolder[ps.activeSongFolder]
+    const best = selectBestStemSet(meta)
+    const vocalsFile = best?.files.find((f) => /^vocals\.(wav|mp3)$/i.test(f))
+    if (vocalsFile) {
+      return {
+        abs: `${ps.osPath}/${ps.activeSongFolder}/${best!.pathPrefix}${vocalsFile}`,
+        usedStem: true,
+      }
+    }
+    const rel = sm.audio?.originalPath
+    if (!rel) return null
+    return { abs: `${ps.osPath}/${ps.activeSongFolder}/${rel}`, usedStem: false }
+  }
+
+  async function fitLyricsToSong() {
+    if (lyricsFitBusy) return
+    const sm = get(songMap)
+    const sourceText = sm?.lyrics?.sourceText
+    if (!sm || !sourceText) {
+      lyricsFitErr = 'Save the lyrics first.'
+      return
+    }
+    const src = resolveLyricsAudioAbsPath()
+    if (!src) {
+      lyricsFitErr = 'This song needs its audio in the project to fit lyrics.'
+      return
+    }
+    lyricsFitBusy = true
+    lyricsFitErr = ''
+    lyricsMatchedPct = null
+    try {
+      // 1. Lyrics engine ready? (one-time install, user-triggered)
+      lyricsFitMsg = 'Checking the lyrics engine…'
+      const status = await getLyricsSetupStatus()
+      if (!status) {
+        lyricsFitErr = 'BarBro Desktop is not reachable (or needs an update).'
+        return
+      }
+      if (!status.ready) {
+        lyricsFitMsg = 'Preparing the lyrics engine (one-time)…'
+        const setup = await setupLyricsDeps((ev) => {
+          if (ev.type === 'progress') lyricsFitMsg = ev.label
+        })
+        if (!setup.ok) {
+          lyricsFitErr = setup.error
+          return
+        }
+      }
+
+      // 2. Transcribe (the model downloads on the very first run).
+      lyricsFitMsg = src.usedStem ? 'Listening to the vocal track…' : 'Listening to the song…'
+      const enq = await enqueueLyricsTranscription(src.abs)
+      if (!enq.ok) {
+        lyricsFitErr = enq.error
+        return
+      }
+      const words = await new Promise<LyricsTranscriptionWord[]>((resolve, reject) => {
+        const disconnect = subscribeToJobEvents<LyricsTranscriptionEvent>(
+          enq.jobId,
+          (ev) => {
+            if (ev.type === 'progress' && typeof ev.ratio === 'number') {
+              lyricsFitMsg = `Listening… ${Math.round(ev.ratio * 100)}%`
+            } else if (ev.type === 'done') {
+              disconnect()
+              resolve(ev.words ?? [])
+            } else if (ev.type === 'error') {
+              disconnect()
+              reject(new Error(ev.msg || 'Transcription failed.'))
+            } else if (ev.type === 'state' && (ev.state === 'error' || ev.state === 'cancelled')) {
+              disconnect()
+              reject(new Error('Transcription did not finish.'))
+            }
+          },
+          (err) => reject(err),
+        )
+      })
+
+      // 3. Align imported lyrics against the recognized words.
+      lyricsFitMsg = 'Fitting the words…'
+      const tokens = tokenizeLyrics(sourceText)
+      const { words: timed, matchedRatio } = alignLyricsToTranscription(tokens, words)
+      if (matchedRatio === 0) {
+        lyricsFitErr = 'Could not match the lyrics to this recording.'
+        return
+      }
+      const p = patchSongMap((m) => ({
+        ...m,
+        lyrics: {
+          words: timed,
+          sourceText,
+          alignedAt: new Date().toISOString(),
+          transcriberVersion: 1,
+        },
+      }))
+      if (!p.ok) {
+        lyricsFitErr = p.errors.join('; ')
+        return
+      }
+      lyricsMatchedPct = Math.round(matchedRatio * 100)
+      lyricsFitMsg = ''
+    } catch (e) {
+      lyricsFitErr = e instanceof Error ? e.message : String(e)
+    } finally {
+      lyricsFitBusy = false
+      if (lyricsFitErr) lyricsFitMsg = ''
+    }
+  }
+
+  /** Aligned lines (index + first-word time) for the nudge list. */
+  const lyricsAlignedLines = $derived.by(() => {
+    const words = $songMap?.lyrics?.words ?? []
+    if (words.length === 0) return []
+    const byLine = new Map<number, { line: number; text: string[]; startSec: number }>()
+    for (const w of words) {
+      const cur = byLine.get(w.line)
+      if (cur) {
+        cur.text.push(w.text)
+        cur.startSec = Math.min(cur.startSec, w.startSec)
+      } else {
+        byLine.set(w.line, { line: w.line, text: [w.text], startSec: w.startSec })
+      }
+    }
+    return [...byLine.values()]
+      .sort((a, b) => a.line - b.line)
+      .map((l) => ({ line: l.line, text: l.text.join(' '), startSec: l.startSec }))
+  })
+
+  /** Shift one line's words by ±deltaSec (manual fix-up for a misfit line). */
+  function nudgeLyricsLine(line: number, deltaSec: number) {
+    const p = patchSongMap((m) => {
+      if (!m.lyrics) return m
+      const lineWords = m.lyrics.words.filter((w) => w.line === line)
+      if (lineWords.length === 0) return m
+      // Clamp so the line's earliest word never goes below 0.
+      const minStart = Math.min(...lineWords.map((w) => w.startSec))
+      const d = Math.max(deltaSec, -minStart)
+      return {
+        ...m,
+        lyrics: {
+          ...m.lyrics,
+          words: m.lyrics.words.map((w) =>
+            w.line === line ? { ...w, startSec: w.startSec + d, endSec: w.endSec + d } : w,
+          ),
+        },
+      }
+    })
+    if (!p.ok) lyricsFitErr = p.errors.join('; ')
+  }
+
   // ── Overview "Play cues" toggle ──────────────────────────────────────────
   // "Play cues" is a LOCAL playback preference — the cue lane's mute in
   // `mixState` (per-machine, stripped from cloud sync). It NEVER touches the
@@ -2905,10 +3072,36 @@
               >
                 Save lyrics
               </button>
-              {#if lyricsSaveMsg}
+              <button
+                type="button"
+                class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+                onclick={() => void fitLyricsToSong()}
+                disabled={lyricsFitBusy || !lyricsSaved?.sourceText || !lyricsDraftMatchesSaved || !$desktopCompanionStatus.reachable}
+                title={!$desktopCompanionStatus.reachable
+                  ? 'BarBro Desktop must be running.'
+                  : !lyricsDraftMatchesSaved
+                    ? 'Save the lyrics first.'
+                    : 'Listen to the song and time every word'}
+              >
+                {lyricsFitBusy ? 'Fitting…' : lyricsSaved?.words.length ? 'Fit to song again' : 'Fit to song'}
+              </button>
+              {#if lyricsSaveMsg && !lyricsFitBusy}
                 <span class="text-muted-foreground text-xs" role="status">{lyricsSaveMsg}</span>
               {/if}
             </div>
+            {#if lyricsFitBusy && lyricsFitMsg}
+              <p class="text-muted-foreground text-xs" role="status">✨ {lyricsFitMsg}</p>
+            {/if}
+            {#if lyricsFitErr}
+              <p class="text-destructive text-xs">{lyricsFitErr}</p>
+            {/if}
+            {#if lyricsMatchedPct !== null}
+              <p class="text-xs {lyricsMatchedPct < 40 ? 'text-amber-600' : 'text-muted-foreground'}">
+                Matched {lyricsMatchedPct}% of words to the recording{lyricsMatchedPct < 40
+                  ? ' — that looks rough. Splitting stems first usually helps a lot.'
+                  : '.'}
+              </p>
+            {/if}
             {#if lyricsSaved && lyricsSaved.words.length > 0 && !lyricsDraftMatchesSaved}
               <p class="text-amber-600 text-xs">
                 Changing the words clears the current timing — run “Fit to song” again after saving.
@@ -2942,6 +3135,42 @@
                 Lyrics are shown in playback mode once saved and fitted to the song.
               {/if}
             </p>
+
+            {#if lyricsAlignedLines.length > 0}
+              <div class="border-foreground/20 flex flex-col border-t pt-2">
+                <span class="text-muted-foreground mb-1 text-[11px] font-semibold uppercase tracking-wider">
+                  Timing · nudge a line if it sits early/late
+                </span>
+                <div class="max-h-64 overflow-auto">
+                  {#each lyricsAlignedLines as l (l.line)}
+                    <div class="flex items-center gap-2 py-0.5 text-xs">
+                      <span class="text-muted-foreground w-12 shrink-0 text-right font-mono tabular-nums">
+                        {Math.floor(l.startSec / 60)}:{String(Math.floor(l.startSec % 60)).padStart(2, '0')}
+                      </span>
+                      <button
+                        type="button"
+                        class="border-foreground/40 hover:border-foreground border px-1.5 font-mono leading-4"
+                        onclick={() => nudgeLyricsLine(l.line, -0.25)}
+                        title="Earlier (−0.25 s)"
+                        aria-label={`Line ${l.line + 1} earlier`}
+                      >
+                        −
+                      </button>
+                      <button
+                        type="button"
+                        class="border-foreground/40 hover:border-foreground border px-1.5 font-mono leading-4"
+                        onclick={() => nudgeLyricsLine(l.line, 0.25)}
+                        title="Later (+0.25 s)"
+                        aria-label={`Line ${l.line + 1} later`}
+                      >
+                        +
+                      </button>
+                      <span class="min-w-0 truncate">{l.text}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
           </div>
         </div>
       </section>
