@@ -425,6 +425,62 @@
     })
   })
 
+  // ── Karaoke lyrics (playback mode) ────────────────────────────────────────
+  // Word times are ORIGINAL audio time; the mixer timeline adds
+  // `mixerSongOffsetSec` (prelude + count-in prepend − trim), so the song-time
+  // playhead is `positionSec − mixerSongOffsetSec`. Same conversion the chord
+  // segments use — lyrics, chords and waveform stay in lockstep by sharing it.
+  type LyricLineView = {
+    line: number
+    words: { text: string; startSec: number; endSec: number }[]
+    startSec: number
+    endSec: number
+  }
+  const lyricLines = $derived.by<LyricLineView[]>(() => {
+    const words = $songMap?.lyrics?.words ?? []
+    if (words.length === 0) return []
+    const byLine = new Map<number, LyricLineView>()
+    for (const w of words) {
+      const cur = byLine.get(w.line)
+      if (cur) {
+        cur.words.push(w)
+        cur.startSec = Math.min(cur.startSec, w.startSec)
+        cur.endSec = Math.max(cur.endSec, w.endSec)
+      } else {
+        byLine.set(w.line, {
+          line: w.line,
+          words: [w],
+          startSec: w.startSec,
+          endSec: w.endSec,
+        })
+      }
+    }
+    return [...byLine.values()].sort((a, b) => a.line - b.line)
+  })
+
+  const lyricsSongTime = $derived(snapshot.positionSec - mixerSongOffsetSec)
+
+  /** Index of the line being sung (last line started); -1 before the first. */
+  const currentLyricIdx = $derived.by(() => {
+    const t = lyricsSongTime
+    let idx = -1
+    for (let i = 0; i < lyricLines.length; i++) {
+      if (lyricLines[i]!.startSec <= t) idx = i
+      else break
+    }
+    return idx
+  })
+
+  /** Sticky active word: the last word of the current line that has started. */
+  function activeWordIndex(line: LyricLineView, t: number): number {
+    let idx = -1
+    for (let i = 0; i < line.words.length; i++) {
+      if (line.words[i]!.startSec <= t) idx = i
+      else break
+    }
+    return idx
+  }
+
   /**
    * Song sections mapped onto the mixer timeline as fractions [0..1]. Uses the
    * SAME silence offset the stems/original get (`computePrepend('original')`)
@@ -1123,6 +1179,39 @@
           </div>
         </div>
       </div>
+
+      {#if lyricLines.length > 0}
+        {@const prev = currentLyricIdx > 0 ? lyricLines[currentLyricIdx - 1] : null}
+        {@const cur = currentLyricIdx >= 0 ? lyricLines[currentLyricIdx] : null}
+        {@const next = lyricLines[currentLyricIdx + 1] ?? null}
+        {@const activeIdx = cur ? activeWordIndex(cur, lyricsSongTime) : -1}
+        <div
+          class="bg-background ring-foreground/10 flex flex-col items-center gap-1 rounded-[var(--radius)] px-4 py-3 text-center ring-1"
+          aria-label="Lyrics"
+          aria-live="polite"
+        >
+          <div class="text-muted-foreground/70 min-h-5 truncate text-sm">
+            {prev ? prev.words.map((w) => w.text).join(' ') : ' '}
+          </div>
+          <div class="min-h-10 text-2xl font-black leading-snug sm:text-3xl">
+            {#if cur}
+              {#each cur.words as w, wi (wi)}<span
+                  class={wi === activeIdx
+                    ? 'bg-primary text-primary-foreground rounded px-1'
+                    : wi < activeIdx
+                      ? 'text-foreground/60'
+                      : 'text-foreground'}
+                >{w.text}</span
+                >{#if wi < cur.words.length - 1}{' '}{/if}{/each}
+            {:else if next}
+              <span class="text-muted-foreground">{next.words.map((w) => w.text).join(' ')}</span>
+            {/if}
+          </div>
+          <div class="text-muted-foreground min-h-5 truncate text-sm">
+            {cur && next ? next.words.map((w) => w.text).join(' ') : ' '}
+          </div>
+        </div>
+      {/if}
 
       <MixerStageWaveform
         buffer={stageWaveformLane?.buffer ?? null}
