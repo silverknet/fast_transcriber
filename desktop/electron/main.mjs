@@ -169,8 +169,10 @@ const PIPER_DEFAULT_VOICE_ID = 'en_US-lessac-medium'
 const PIPER_VOICE_DOWNLOAD_BASE =
   'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium'
 
-/** Currently-running job id (concurrency=1). null when idle. */
+/** Currently-running HEAVY job id (stems/youtube — concurrency=1). null when idle. */
 let activeJobId = null
+/** Currently-running LYRICS job id — its own lane, concurrent with the heavy lane. */
+let activeLyricsJobId = null
 
 function isTerminalState(state) {
   return state === 'done' || state === 'cancelled' || state === 'error'
@@ -3446,17 +3448,30 @@ async function runQueuedYoutubeImportJob(job) {
 }
 
 /**
- * Drain the queue serially. Safe to call concurrently — only the first
- * caller actually runs jobs; subsequent calls are no-ops while busy.
+ * Drain the queues. Two independent serial lanes:
+ *  - HEAVY lane (stems, youtube import) — gated by `activeJobId`.
+ *  - LYRICS lane — gated by `activeLyricsJobId`, runs CONCURRENTLY with the
+ *    heavy lane. Auto-stems keeps the heavy lane busy for long stretches;
+ *    a 1–3 min transcription must not starve behind hours of stem prep.
+ *    Whisper (int8 CPU) alongside Demucs just shares cores — both proceed.
+ * Safe to call concurrently — only the first caller actually runs jobs.
  */
 function tryRunNext() {
-  if (activeJobId !== null) return
-  for (const job of stemsJobs.values()) {
-    if (job.state === 'queued') {
-      if (job.kind === 'youtube-import') void runQueuedYoutubeImportJob(job)
-      else if (job.kind === 'lyrics-transcribe') void runQueuedLyricsJob(job)
-      else void runQueuedJob(job)
-      return
+  if (activeJobId === null) {
+    for (const job of stemsJobs.values()) {
+      if (job.state === 'queued' && job.kind !== 'lyrics-transcribe') {
+        if (job.kind === 'youtube-import') void runQueuedYoutubeImportJob(job)
+        else void runQueuedJob(job)
+        break
+      }
+    }
+  }
+  if (activeLyricsJobId === null) {
+    for (const job of stemsJobs.values()) {
+      if (job.state === 'queued' && job.kind === 'lyrics-transcribe') {
+        void runQueuedLyricsJob(job)
+        break
+      }
     }
   }
 }
@@ -3668,7 +3683,7 @@ async function createStemsJob(args) {
   emitJobEvent(job, { type: 'state', state: 'queued' })
 
   const queuedAhead = [...stemsJobs.values()].filter(
-    (j) => j.state === 'queued' && j.jobId !== jobId,
+    (j) => j.state === 'queued' && j.kind !== 'lyrics-transcribe' && j.jobId !== jobId,
   ).length
   const runningAhead = activeJobId !== null ? 1 : 0
   tryRunNext()
@@ -3806,7 +3821,7 @@ async function handleYoutubeImport(req, res, cors) {
     emitJobEvent(job, { type: 'state', state: 'queued' })
 
     const queuedAhead = [...stemsJobs.values()].filter(
-      (j) => j.state === 'queued' && j.jobId !== jobId,
+      (j) => j.state === 'queued' && j.kind !== 'lyrics-transcribe' && j.jobId !== jobId,
     ).length
     const runningAhead = activeJobId !== null ? 1 : 0
     sendJson(
@@ -4651,7 +4666,7 @@ async function handleSetupLyrics(req, res, cors) {
 async function runQueuedLyricsJob(job) {
   job.state = 'running'
   job.startedAt = Date.now()
-  activeJobId = job.jobId
+  activeLyricsJobId = job.jobId
   emitJobEvent(job, { type: 'state', state: 'running' })
   logInfo(`lyrics: job ${job.jobId.slice(0, 8)} started`)
 
@@ -4662,7 +4677,7 @@ async function runQueuedLyricsJob(job) {
     job.finishedAt = Date.now()
     emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
     emitJobEvent(job, { type: 'state', state: 'error' })
-    activeJobId = null
+    activeLyricsJobId = null
     scheduleJobCleanup(job.jobId)
     tryRunNext()
     return
@@ -4788,7 +4803,7 @@ async function runQueuedLyricsJob(job) {
     logWarn(`lyrics: job ${job.jobId.slice(0, 8)} finished as ${job.state}${job.lastErrorMsg ? ' — ' + job.lastErrorMsg : ''}`)
   }
 
-  activeJobId = null
+  activeLyricsJobId = null
   scheduleJobCleanup(job.jobId)
   tryRunNext()
 }
@@ -4849,10 +4864,12 @@ async function handleTranscribeLyrics(req, res, cors) {
     stemsJobs.set(jobId, job)
     emitJobEvent(job, { type: 'state', state: 'queued' })
 
+    // Lyrics run in their OWN lane (concurrent with stems), so the queue
+    // position only counts other lyrics work.
     const queuedAhead = [...stemsJobs.values()].filter(
-      (j) => j.state === 'queued' && j.jobId !== jobId,
+      (j) => j.state === 'queued' && j.kind === 'lyrics-transcribe' && j.jobId !== jobId,
     ).length
-    const runningAhead = activeJobId !== null ? 1 : 0
+    const runningAhead = activeLyricsJobId !== null ? 1 : 0
     sendJson(res, 202, { ok: true, jobId, state: 'queued', queuePosition: queuedAhead + runningAhead }, cors)
     tryRunNext()
   } catch (e) {
