@@ -124,6 +124,44 @@ export function pythonPiperTtsExe() {
   return process.env.BARBRO_PYTHON?.trim() || 'python3'
 }
 
+/** Lyrics transcription — isolated venv (`desktop/native/python/lyrics/`).
+ * faster-whisper pulls ctranslate2/tokenizers/av, which conflict with the
+ * sections venv's numpy<2 pins — keep it separate (same rationale as piper). */
+export function transcribeLyricsScriptPath() {
+  return path.join(getNativePythonRoot(), 'lyrics', 'transcribe.py')
+}
+
+export function getLyricsVenvDir() {
+  return path.join(app.getPath('userData'), 'python', 'lyrics-venv')
+}
+
+export function getLyricsVenvPythonExe() {
+  const venv = getLyricsVenvDir()
+  if (process.platform === 'win32') {
+    return path.join(venv, 'Scripts', 'python.exe')
+  }
+  return path.join(venv, 'bin', 'python3')
+}
+
+export function lyricsVenvIsReady() {
+  return existsSync(getLyricsVenvPythonExe())
+}
+
+/** Speech models live next to the venv (downloaded on first transcription). */
+export function getLyricsModelDir() {
+  return path.join(app.getPath('userData'), 'python', 'lyrics', 'models')
+}
+
+/**
+ * Interpreter for lyrics: `BARBRO_PYTHON_LYRICS` → venv → `BARBRO_PYTHON` → python3.
+ */
+export function pythonLyricsExe() {
+  const override = process.env.BARBRO_PYTHON_LYRICS?.trim()
+  if (override) return override
+  if (lyricsVenvIsReady()) return getLyricsVenvPythonExe()
+  return process.env.BARBRO_PYTHON?.trim() || 'python3'
+}
+
 /**
  * Standardized beats venv path under userData. Same shape as the
  * sections / stems venvs — auto-created via `/native/setup/beats`, hosts

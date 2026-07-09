@@ -66,6 +66,12 @@ import {
   writeBeatsVenvMarker,
   rubberBandExePath,
   expectedRubberBandBundledPath,
+  getLyricsVenvDir,
+  getLyricsVenvPythonExe,
+  getLyricsModelDir,
+  lyricsVenvIsReady,
+  pythonLyricsExe,
+  transcribeLyricsScriptPath,
 } from './nativePython.mjs'
 import { createAutoStemsDaemon } from './autoStems.mjs'
 import {
@@ -3442,6 +3448,7 @@ function tryRunNext() {
   for (const job of stemsJobs.values()) {
     if (job.state === 'queued') {
       if (job.kind === 'youtube-import') void runQueuedYoutubeImportJob(job)
+      else if (job.kind === 'lyrics-transcribe') void runQueuedLyricsJob(job)
       else void runQueuedJob(job)
       return
     }
@@ -4508,6 +4515,348 @@ async function handleSetupSections(req, res, cors) {
   }
 }
 
+// ── Lyrics transcription (isolated `lyrics/` module) ─────────────────────────
+
+/**
+ * `GET /native/setup/lyrics/status` — is the lyrics venv (speech recognizer)
+ * installed? The model itself downloads on first transcription (into
+ * `getLyricsModelDir()`), so `ready` here means "venv importable".
+ */
+async function handleLyricsSetupStatus(res, cors) {
+  const ready = lyricsVenvIsReady()
+  sendJson(
+    res,
+    200,
+    {
+      ok: true,
+      ready,
+      venvDir: getLyricsVenvDir(),
+      venvPython: ready ? getLyricsVenvPythonExe() : null,
+      modelDir: getLyricsModelDir(),
+    },
+    cors,
+  )
+}
+
+/**
+ * `POST /native/setup/lyrics` — create the lyrics venv and install
+ * faster-whisper. NDJSON stream, same shape as `/native/setup/sections`.
+ * The speech model (~250 MB) is NOT downloaded here — it downloads on the
+ * first transcription so setup stays quick.
+ */
+async function handleSetupLyrics(req, res, cors) {
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  })
+  const emit = (ev) => {
+    try {
+      res.write(JSON.stringify(ev) + '\n')
+    } catch {
+      /* socket closed */
+    }
+  }
+
+  const venvDir = getLyricsVenvDir()
+  const venvPython = getLyricsVenvPythonExe()
+  const reqPath = path.join(getNativePythonRoot(), 'lyrics', 'requirements.txt')
+
+  emit({ type: 'log', msg: `Lyrics venv target: ${venvDir}` })
+
+  try {
+    if (!uvBinaryIsReady()) {
+      emit({ type: 'progress', label: `Downloading uv ${UV_PINNED_VERSION} (~14 MB)…`, current: 0, overall: 5 })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+    const uvBin = getUvBinaryPath()
+    emit({ type: 'progress', label: 'uv ready', current: 100, overall: 15 })
+
+    if (!existsSync(venvPython)) {
+      emit({ type: 'progress', label: 'Setting up Python 3.12 (uv downloads it if missing)…', current: 0, overall: 25 })
+      const v = await runPipelineNdjson(uvBin, ['venv', '--python', '3.12', venvDir], emit)
+      if (v.code !== 0 || !existsSync(venvPython)) {
+        emit({ type: 'error', msg: `uv venv failed (exit ${v.code}).` })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+      emit({ type: 'progress', label: 'Venv ready', current: 100, overall: 45 })
+    } else {
+      emit({ type: 'log', msg: 'Venv already exists — re-using.' })
+    }
+
+    if (!existsSync(reqPath)) {
+      emit({ type: 'error', msg: `Missing requirements.txt at ${reqPath}` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Installing speech recognizer (≈ 150 MB)…', current: 0, overall: 55 })
+    const inst = await runPipelineNdjson(uvBin, ['pip', 'install', '--python', venvPython, '-r', reqPath], emit)
+    if (inst.code !== 0) {
+      emit({ type: 'error', msg: `uv pip install failed (exit ${inst.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Dependencies installed', current: 100, overall: 90 })
+
+    const smoke = await runPipelineNdjson(
+      venvPython,
+      ['-c', "import faster_whisper; print('faster-whisper ok')"],
+      emit,
+    )
+    if (smoke.code !== 0) {
+      emit({ type: 'error', msg: `lyrics smoke test failed (exit ${smoke.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    emit({ type: 'progress', label: 'Done', current: 100, overall: 100 })
+    emit({ type: 'done', venvPython })
+    emit({ type: 'state', state: 'done' })
+    logInfo(`setup/lyrics: venv ready at ${venvPython}`)
+    res.end()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`setup/lyrics: ${msg}`)
+    emit({ type: 'error', msg })
+    emit({ type: 'state', state: 'error' })
+    res.end()
+  }
+}
+
+/**
+ * Run a queued lyrics-transcription job: spawn the recognizer with
+ * `--stream-progress`, pipe params via stdin, drain NDJSON to the job's
+ * event buffer. The final `done` event carries the recognized words —
+ * clients read them from the event stream (no separate result endpoint).
+ */
+async function runQueuedLyricsJob(job) {
+  job.state = 'running'
+  job.startedAt = Date.now()
+  activeJobId = job.jobId
+  emitJobEvent(job, { type: 'state', state: 'running' })
+  logInfo(`lyrics: job ${job.jobId.slice(0, 8)} started`)
+
+  const script = transcribeLyricsScriptPath()
+  if (!existsSync(script) || !existsSync(job.inputPath)) {
+    job.state = 'error'
+    job.lastErrorMsg = !existsSync(script) ? `Missing script: ${script}` : `Input not found: ${job.inputPath}`
+    job.finishedAt = Date.now()
+    emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
+    emitJobEvent(job, { type: 'state', state: 'error' })
+    activeJobId = null
+    scheduleJobCleanup(job.jobId)
+    tryRunNext()
+    return
+  }
+
+  const child = spawn(pythonLyricsExe(), [script, job.inputPath, '--stream-progress'], {
+    env: process.env,
+  })
+  job.child = child
+  try {
+    child.stdin.write(JSON.stringify({ modelDir: getLyricsModelDir(), model: 'small' }))
+    child.stdin.end()
+  } catch {
+    /* child gone already — close handler settles the job */
+  }
+
+  // Stall watchdog (model download on first run can take a while; transcription
+  // itself streams segments steadily).
+  const STALL_TIMEOUT_MS = 20 * 60 * 1000
+  let stallTimer = null
+  let timedOut = false
+  const armStall = () => {
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => {
+      timedOut = true
+      logWarn(`lyrics[${job.jobId.slice(0, 8)}] no progress for 20 min — killing (assumed stuck)`)
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+    }, STALL_TIMEOUT_MS)
+  }
+  const disarmStall = () => {
+    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null }
+  }
+  child.stdout.on('data', armStall)
+  child.stderr.on('data', armStall)
+  armStall()
+
+  let buffer = ''
+  let lastDone = null
+  let lastError = null
+
+  child.stdout.setEncoding('utf-8')
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk
+    let idx = buffer.indexOf('\n')
+    while (idx !== -1) {
+      const line = buffer.slice(0, idx).trim()
+      buffer = buffer.slice(idx + 1)
+      idx = buffer.indexOf('\n')
+      if (!line) continue
+      let obj
+      try {
+        obj = JSON.parse(line)
+      } catch {
+        emitJobEvent(job, { type: 'log', msg: line })
+        continue
+      }
+      if (obj && typeof obj === 'object') {
+        if (obj.type === 'done') lastDone = obj
+        else if (obj.type === 'error') lastError = obj
+        emitJobEvent(job, obj)
+      }
+    }
+  })
+  child.stderr.setEncoding('utf-8')
+  child.stderr.on('data', (chunk) => {
+    for (const raw of String(chunk).split('\n')) {
+      const line = raw.trim()
+      if (line) {
+        emitJobEvent(job, { type: 'log', msg: line })
+        logWarn(`lyrics[${job.jobId.slice(0, 8)}] ${line}`)
+      }
+    }
+  })
+
+  await new Promise((resolve) => {
+    child.on('error', (err) => {
+      disarmStall()
+      lastError = { msg: err instanceof Error ? err.message : String(err) }
+      emitJobEvent(job, { type: 'error', msg: lastError.msg })
+      resolve()
+    })
+    child.on('close', (code) => {
+      disarmStall()
+      if (timedOut && !lastError) {
+        lastError = { msg: 'Transcription timed out (no progress for 20 min).' }
+      }
+      const tail = buffer.trim()
+      if (tail) {
+        try {
+          const obj = JSON.parse(tail)
+          if (obj && typeof obj === 'object') {
+            if (obj.type === 'done') lastDone = obj
+            else if (obj.type === 'error') lastError = obj
+            emitJobEvent(job, obj)
+          }
+        } catch {
+          emitJobEvent(job, { type: 'log', msg: tail })
+        }
+      }
+      if (job.state === 'cancelled') {
+        /* already settled */
+      } else if (lastError) {
+        job.state = 'error'
+        job.lastErrorMsg = lastError.msg ?? null
+      } else if (code !== 0) {
+        job.state = 'error'
+        job.lastErrorMsg = `Python exited ${code}`
+        emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
+      } else {
+        job.state = 'done'
+      }
+      job.finishedAt = Date.now()
+      job.child = null
+      emitJobEvent(job, { type: 'state', state: job.state })
+      resolve()
+    })
+  })
+
+  if (job.state === 'done') {
+    const wordCount = Array.isArray(lastDone?.words) ? lastDone.words.length : 0
+    logInfo(`lyrics: job ${job.jobId.slice(0, 8)} done — ${wordCount} words`)
+  } else {
+    logWarn(`lyrics: job ${job.jobId.slice(0, 8)} finished as ${job.state}${job.lastErrorMsg ? ' — ' + job.lastErrorMsg : ''}`)
+  }
+
+  activeJobId = null
+  scheduleJobCleanup(job.jobId)
+  tryRunNext()
+}
+
+/**
+ * `POST /native/transcribe-lyrics` — enqueue a word-timestamp transcription
+ * of an on-disk audio file (vocals stem preferred). Body:
+ * `{ audioAbsPath: string }`. Responds `202 { ok, jobId, state:'queued' }`;
+ * progress + the final `done` event (carrying `words`) stream from
+ * `GET /native/jobs/:jobId/events`.
+ */
+async function handleTranscribeLyrics(req, res, cors) {
+  let tempRoot = null
+  try {
+    const body = await readRequestJson(req)
+    if (!body || typeof body.audioAbsPath !== 'string' || !body.audioAbsPath.trim()) {
+      sendJson(res, 400, { ok: false, error: 'Body must be JSON with audioAbsPath' }, cors)
+      return
+    }
+    const audioAbsPath = body.audioAbsPath.trim()
+    ensureAbsolutePath(audioAbsPath, 'audioAbsPath')
+    if (!existsSync(audioAbsPath)) {
+      sendJson(res, 404, { ok: false, error: `audio not found: ${audioAbsPath}` }, cors)
+      return
+    }
+    if (!lyricsVenvIsReady() && !process.env.BARBRO_PYTHON_LYRICS) {
+      sendJson(
+        res,
+        409,
+        { ok: false, code: 'LYRICS_NOT_READY', error: 'Lyrics engine is not prepared yet.', hint: 'POST /native/setup/lyrics' },
+        cors,
+      )
+      return
+    }
+
+    tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-lyrics-'))
+    const jobId = randomUUID()
+    const job = {
+      kind: 'lyrics-transcribe',
+      jobId,
+      songId: null,
+      state: 'queued',
+      tempRoot,
+      inputPath: audioAbsPath,
+      outDir: tempRoot,
+      files: [],
+      options: { audioAbsPath },
+      artifact: null,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+      events: [],
+      subscribers: new Set(),
+      lastErrorMsg: null,
+      child: null,
+      cleanupTimer: null,
+    }
+    stemsJobs.set(jobId, job)
+    emitJobEvent(job, { type: 'state', state: 'queued' })
+
+    const queuedAhead = [...stemsJobs.values()].filter(
+      (j) => j.state === 'queued' && j.jobId !== jobId,
+    ).length
+    const runningAhead = activeJobId !== null ? 1 : 0
+    sendJson(res, 202, { ok: true, jobId, state: 'queued', queuePosition: queuedAhead + runningAhead }, cors)
+    tryRunNext()
+  } catch (e) {
+    if (tempRoot) rm(tempRoot, { recursive: true, force: true }).catch(() => {})
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`transcribe-lyrics: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  }
+}
+
 // ── Piper TTS (isolated `piper_tts/` module) ─────────────────────────────────
 
 /**
@@ -5340,6 +5689,21 @@ function startBeaconServer() {
 
     if (req.method === 'POST' && req.url === '/native/setup/sections') {
       void handleSetupSections(req, res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/native/setup/lyrics/status') {
+      void handleLyricsSetupStatus(res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/setup/lyrics') {
+      void handleSetupLyrics(req, res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/transcribe-lyrics') {
+      void handleTranscribeLyrics(req, res, cors)
       return
     }
 
