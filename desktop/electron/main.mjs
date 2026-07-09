@@ -3097,6 +3097,7 @@ async function runQueuedJob(job) {
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
 
@@ -3121,6 +3122,7 @@ async function runQueuedJob(job) {
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
 
@@ -3271,6 +3273,7 @@ async function runQueuedJob(job) {
 
   activeJobId = null
   scheduleJobCleanup(job.jobId)
+  tryRunNext()
 }
 
 async function runQueuedYoutubeImportJob(job) {
@@ -3289,6 +3292,7 @@ async function runQueuedYoutubeImportJob(job) {
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
   if (!youtubeImportVenvIsReady()) {
@@ -3299,6 +3303,7 @@ async function runQueuedYoutubeImportJob(job) {
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
 
@@ -3437,6 +3442,7 @@ async function runQueuedYoutubeImportJob(job) {
 
   activeJobId = null
   scheduleJobCleanup(job.jobId)
+  tryRunNext()
 }
 
 /**
@@ -4722,7 +4728,7 @@ async function runQueuedLyricsJob(job) {
   })
   child.stderr.setEncoding('utf-8')
   child.stderr.on('data', (chunk) => {
-    for (const raw of String(chunk).split('\n')) {
+    for (const raw of String(chunk).split(/\r|\n/)) {
       const line = raw.trim()
       if (line) {
         emitJobEvent(job, { type: 'log', msg: line })

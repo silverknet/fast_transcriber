@@ -2289,11 +2289,27 @@
         return
       }
       const words = await new Promise<LyricsTranscriptionWord[]>((resolve, reject) => {
+        const userFacingTranscriptionLog = (msg: string): string | null => {
+          const normalized = msg.toLowerCase()
+          if (normalized.includes('downloading speech model')) {
+            return 'Downloading the voice model — first time only (a few minutes)…'
+          }
+          return null
+        }
         const disconnect = subscribeToJobEvents<LyricsTranscriptionEvent>(
           enq.jobId,
           (ev) => {
             if (ev.type === 'progress' && typeof ev.ratio === 'number') {
               lyricsFitMsg = `Listening… ${Math.round(ev.ratio * 100)}%`
+            } else if (ev.type === 'log') {
+              const msg = userFacingTranscriptionLog(ev.msg)
+              if (msg) lyricsFitMsg = msg
+            } else if (ev.type === 'state' && ev.state === 'queued') {
+              // The sidecar runs one heavy job at a time — be honest that
+              // we're behind stem prep instead of pretending to listen.
+              lyricsFitMsg = 'Waiting for other audio work to finish (stems in progress)…'
+            } else if (ev.type === 'state' && ev.state === 'running') {
+              lyricsFitMsg = src.usedStem ? 'Listening to the vocal track…' : 'Listening to the song…'
             } else if (ev.type === 'done') {
               disconnect()
               resolve(ev.words ?? [])

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 
 # Bump when transcription params change enough to invalidate cached results.
 TRANSCRIBER_VERSION = 1
@@ -82,9 +83,21 @@ def main() -> None:
         emit({"type": "error", "msg": "Speech engine not installed yet."})
         sys.exit(4)
 
+    keepalive_stop = None
+    keepalive_thread = None
     try:
         _log(f"loading model '{model_name}' (dir={model_dir})")
         emit({"type": "log", "msg": "loading speech model (downloads on first use)"})
+        if stream:
+            keepalive_stop = threading.Event()
+
+            def _download_keepalive() -> None:
+                while keepalive_stop is not None and not keepalive_stop.is_set():
+                    emit({"type": "log", "msg": "downloading speech model…"})
+                    keepalive_stop.wait(5.0)
+
+            keepalive_thread = threading.Thread(target=_download_keepalive, daemon=True)
+            keepalive_thread.start()
         model = WhisperModel(
             model_name,
             device="cpu",
@@ -95,6 +108,11 @@ def main() -> None:
         print(f"Could not load speech model: {exc}", file=sys.stderr)
         emit({"type": "error", "msg": f"Could not load speech model: {exc}"})
         sys.exit(5)
+    finally:
+        if keepalive_stop is not None:
+            keepalive_stop.set()
+        if keepalive_thread is not None:
+            keepalive_thread.join(timeout=1.0)
 
     try:
         _log(f"transcribing: {audio_path}")
