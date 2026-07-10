@@ -917,6 +917,40 @@ async function listStemSets(songFolderAbs) {
   return out
 }
 
+/**
+ * Read `stems/<slug>/provenance.json` for every preset subfolder — the stamp
+ * demucs_separate.py writes recording HOW the stems were made (model, shifts,
+ * overlap). The auto-stems daemon uses this to detect stems that were split
+ * with weaker/unknown settings and quietly re-split them in the background.
+ *
+ * Returns `Record<slug, payload|null>` — `null` for a preset dir with no (or
+ * unparseable) stamp, so the daemon treats those stems as unproven.
+ */
+async function readStemProvenance(songFolderAbs) {
+  const stemsDir = path.join(songFolderAbs, 'stems')
+  /** @type {Record<string, object|null>} */
+  const out = {}
+  let entries
+  try {
+    const { readdir } = await import('node:fs/promises')
+    entries = await readdir(stemsDir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  const { readFile } = await import('node:fs/promises')
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue
+    try {
+      const raw = await readFile(path.join(stemsDir, ent.name, 'provenance.json'), 'utf8')
+      const parsed = JSON.parse(raw)
+      out[ent.name] = parsed && typeof parsed === 'object' ? parsed : null
+    } catch {
+      out[ent.name] = null // missing/corrupt stamp → stems are unproven
+    }
+  }
+  return out
+}
+
 async function hasRenderedCueTrack(songFolderAbs) {
   if (existsSync(path.join(songFolderAbs, 'cue', 'cue-track.wav'))) return true
   const tracksDir = path.join(songFolderAbs, 'cue', 'tracks')
@@ -6211,6 +6245,7 @@ function setupAutoStemsDaemon() {
     readManifest: (projectPath) => readProjectManifest(projectPath),
     readSmapHeader: (smapPath) => readSmapHeaderJson(smapPath),
     listStemSets: (folderAbs) => listStemSets(folderAbs),
+    readStemProvenance: (folderAbs) => readStemProvenance(folderAbs),
     wavInfo: (abs) => {
       try {
         if (!existsSync(abs)) return null

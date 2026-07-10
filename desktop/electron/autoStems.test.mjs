@@ -13,6 +13,7 @@ import {
   isStemWavHealthy,
   isSongAnalyzed,
   normalizeAutoStems,
+  provenanceSatisfiesPreset,
   stemSubpath,
 } from './autoStems.mjs'
 
@@ -36,6 +37,54 @@ test('computeNeededStems: missing + below-target + satisfied', () => {
     computeNeededStems({ best: ['drums.wav'] }, { stems: ['drums'], quality: 'balanced' }),
     [],
   )
+})
+
+test('provenanceSatisfiesPreset: proof required for defined presets', () => {
+  const bestProv = { engine: 'demucs', model: 'htdemucs_ft', shifts: 10, overlap: 0.5 }
+  assert.equal(provenanceSatisfiesPreset('best', bestProv), true)
+  // Better-than-required settings still satisfy.
+  assert.equal(provenanceSatisfiesPreset('balanced', bestProv), true)
+  assert.equal(provenanceSatisfiesPreset('preview', bestProv), true) // _ft outranks plain
+  // Weaker settings in a "best" folder do NOT satisfy.
+  assert.equal(
+    provenanceSatisfiesPreset('best', { engine: 'demucs', model: 'htdemucs_ft', shifts: 5, overlap: 0.25 }),
+    false,
+  )
+  assert.equal(
+    provenanceSatisfiesPreset('best', { engine: 'demucs', model: 'htdemucs', shifts: 10, overlap: 0.5 }),
+    false,
+  )
+  // No stamp at all → unproven.
+  assert.equal(provenanceSatisfiesPreset('best', null), false)
+  assert.equal(provenanceSatisfiesPreset('best', undefined), false)
+  // Legacy/unknown slugs carry no promise — always pass.
+  assert.equal(provenanceSatisfiesPreset('legacy', null), true)
+  assert.equal(provenanceSatisfiesPreset('whatever', undefined), true)
+})
+
+test('bestStemOnDisk: unproven preset stems demote to unknown rank', () => {
+  const stems = { best: ['vocals.wav'], preview: ['vocals.wav'] }
+  const prov = {
+    best: null, // pre-provenance split — unproven
+    preview: { engine: 'demucs', model: 'htdemucs', shifts: 1, overlap: 0.25 },
+  }
+  const m = bestStemOnDisk(stems, prov)
+  // Proven preview beats unproven "best".
+  assert.deepEqual(m.get('vocals'), { rank: 2, slug: 'preview', filename: 'vocals.wav' })
+  // Without provenance info the folder name is trusted (back-compat).
+  assert.equal(bestStemOnDisk(stems).get('vocals').slug, 'best')
+})
+
+test('computeNeededStems: unproven stems get re-queued at target quality', () => {
+  const stems = { best: ['vocals.wav', 'drums.wav'] }
+  const config = { stems: ['vocals', 'drums'], quality: 'best' }
+  // No provenance map → trust folder names (old behavior).
+  assert.deepEqual(computeNeededStems(stems, config), [])
+  // Provenance map present but no stamp → re-split both.
+  assert.deepEqual(computeNeededStems(stems, config, { best: null }), ['vocals', 'drums'])
+  // Valid stamp → satisfied.
+  const prov = { best: { engine: 'demucs', model: 'htdemucs_ft', shifts: 10, overlap: 0.5 } }
+  assert.deepEqual(computeNeededStems(stems, config, prov), [])
 })
 
 test('isStemWavHealthy flags truncated / empty files', () => {

@@ -31,6 +31,40 @@ export const PRESET_RANK = { best: 0, balanced: 1, preview: 2, legacy: 3 }
 const UNKNOWN_RANK = 99
 const STEM_NAMES = ['vocals', 'drums', 'bass', 'other']
 
+/**
+ * What each preset slug is DEFINED to mean (mirrors AUTO_STEM_PRESET_ARGS in
+ * main.mjs and STEM_QUALITY_PRESETS on the web side). Stems in a preset folder
+ * only earn that preset's rank when their provenance proves at-least-equal
+ * settings — a folder merely NAMED "best" proves nothing.
+ */
+export const PRESET_DEFINITIONS = {
+  best: { model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
+  balanced: { model: 'htdemucs_ft', shifts: 5, overlap: 0.25 },
+  preview: { model: 'htdemucs', shifts: 1, overlap: 0.25 },
+}
+
+/**
+ * Does a `provenance.json` payload prove the slug's definition (or better)?
+ * `_ft` bag models outrank their plain variants; more shifts/overlap ≥ fewer.
+ */
+export function provenanceSatisfiesPreset(slug, provenance) {
+  const def = PRESET_DEFINITIONS[slug]
+  if (!def) return true // legacy/unknown slugs carry no promise to verify
+  if (!provenance || typeof provenance !== 'object') return false
+  if (provenance.engine !== 'demucs') return false
+  const model = String(provenance.model ?? '')
+  const modelOk = model === def.model || (def.model === 'htdemucs' && model === 'htdemucs_ft')
+  const shifts = Number(provenance.shifts)
+  const overlap = Number(provenance.overlap)
+  return (
+    modelOk &&
+    Number.isFinite(shifts) &&
+    shifts >= def.shifts &&
+    Number.isFinite(overlap) &&
+    overlap >= def.overlap
+  )
+}
+
 /** `stems/<slug>/` for tagged presets, `stems/` for flat legacy files. */
 export function pathPrefixForSlug(slug) {
   return slug === 'legacy' ? 'stems/' : `stems/${slug}/`
@@ -44,12 +78,24 @@ export function stemSubpath(loc) {
 /**
  * Best (highest-quality) on-disk copy of each demucs stem from a
  * `stemsByPreset` map. Returns `Map<stemName, {rank, slug, filename}>`.
+ *
+ * When `provenanceBySlug` (Record<slug, provenance.json payload|null>) is
+ * provided, stems in a defined preset folder only earn that preset's rank if
+ * their provenance proves matching-or-better settings; unproven stems demote
+ * to UNKNOWN_RANK so the daemon quietly re-splits them in the background (the
+ * old files stay playable until the fresh split overwrites them).
  */
-export function bestStemOnDisk(stemsByPreset) {
+export function bestStemOnDisk(stemsByPreset, provenanceBySlug = undefined) {
   const out = new Map()
   for (const [slug, files] of Object.entries(stemsByPreset ?? {})) {
     if (!Array.isArray(files)) continue
-    const rank = PRESET_RANK[slug] ?? UNKNOWN_RANK
+    let rank = PRESET_RANK[slug] ?? UNKNOWN_RANK
+    if (
+      provenanceBySlug !== undefined &&
+      !provenanceSatisfiesPreset(slug, provenanceBySlug?.[slug])
+    ) {
+      rank = UNKNOWN_RANK
+    }
     for (const filename of files) {
       const base = String(filename).toLowerCase().replace(/\.[^.]+$/, '')
       if (!STEM_NAMES.includes(base)) continue
@@ -61,9 +107,9 @@ export function bestStemOnDisk(stemsByPreset) {
 }
 
 /** Configured stems that are missing or only present below the target quality. */
-export function computeNeededStems(stemsByPreset, config) {
+export function computeNeededStems(stemsByPreset, config, provenanceBySlug = undefined) {
   const target = PRESET_RANK[config.quality] ?? UNKNOWN_RANK
-  const have = bestStemOnDisk(stemsByPreset)
+  const have = bestStemOnDisk(stemsByPreset, provenanceBySlug)
   return (config.stems ?? []).filter((s) => {
     const h = have.get(s)
     return !h || h.rank > target
@@ -108,6 +154,7 @@ const MAX_ATTEMPTS = 3
  * @param {(projectPath: string) => Promise<any>} deps.readManifest
  * @param {(smapPath: string) => Promise<any>} deps.readSmapHeader  // {metadata,audio,timeline}|null
  * @param {(songFolderAbs: string) => Promise<Record<string,string[]>>} deps.listStemSets
+ * @param {(songFolderAbs: string) => Promise<Record<string,object|null>>} [deps.readStemProvenance]
  * @param {(absPath: string) => Promise<{durationSec,sampleRate,channels,fileSize}|null>} deps.wavInfo
  * @param {(args: {inputPath,outputDir,stems:string[],quality:string,songId:string|null}) => string|null} deps.enqueueJob
  * @param {(songId: string) => boolean} deps.hasInflightJobForSong
@@ -283,10 +330,23 @@ export function createAutoStemsDaemon(deps) {
       return
     }
 
-    const needed = computeNeededStems(stemsByPreset, policy)
+    // Provenance gate: stems in a preset folder must PROVE their settings
+    // (stems/<slug>/provenance.json) or they count as unknown quality and get
+    // re-split. Old splits (pre-provenance) stay on disk and playable until
+    // the fresh, verified files overwrite them.
+    let provenanceBySlug
+    if (deps.readStemProvenance) {
+      try {
+        provenanceBySlug = await deps.readStemProvenance(folderAbs)
+      } catch {
+        provenanceBySlug = undefined // fail open — don't re-split on read errors
+      }
+    }
+
+    const needed = computeNeededStems(stemsByPreset, policy, provenanceBySlug)
 
     // Corruption check on the stems we believe are satisfied.
-    const have = bestStemOnDisk(stemsByPreset)
+    const have = bestStemOnDisk(stemsByPreset, provenanceBySlug)
     for (const stem of policy.stems) {
       if (needed.includes(stem)) continue
       const loc = have.get(stem)
