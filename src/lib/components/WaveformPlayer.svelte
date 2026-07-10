@@ -134,6 +134,10 @@
     onChordBeatInteract = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
+    /** Chords mode: context menu request on the beat strip. */
+    onChordContextMenu = undefined as
+      | ((detail: { clientX: number; clientY: number }) => void)
+      | undefined,
     /**
      * Two-way bind: lets the parent reach the underlying <audio>
      * element so volume slider / click-overlay scheduling can target
@@ -1566,6 +1570,22 @@
     controller.play()
   }
 
+  function playFromSelectedChordBeat() {
+    if (!mediaReady || !(timelineSec > 0) || timelineStripMode !== 'chords' || !selectedBeatId) {
+      togglePlay()
+      return
+    }
+    const beat = beatGrid?.beats.find((b) => b.id === selectedBeatId)
+    if (!beat) {
+      togglePlay()
+      return
+    }
+    const t = Math.max(rangeStart, Math.min(beat.timeSec, rangeEnd > rangeStart ? rangeEnd - 0.02 : timelineSec))
+    if (isPlaying) controller.pause()
+    controller.seek(t)
+    controller.play()
+  }
+
   function keyTargetIsEditable(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false
     if (target.isContentEditable) return true
@@ -1579,7 +1599,7 @@
       if (e.key !== ' ' || e.repeat) return
       if (keyTargetIsEditable(e.target)) return
       e.preventDefault()
-      togglePlay()
+      playFromSelectedChordBeat()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -1878,8 +1898,8 @@
       </summary>
       <p class="text-muted-foreground mt-2 text-left leading-relaxed">
         {#if isEditorVariant}
-          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select; click a beat to edit
-          chords. Esc clears selection.
+          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select. In chord mode,
+          double-click/tap edits and Space plays from the selected beat. Esc clears selection.
         {:else}
           Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag handles to adjust the selection; drag the minimap
           to move around.
@@ -1913,6 +1933,7 @@
           onSectionsSeekCommit={timelineStripMode === 'sections' ? seekToSectionsSelection : undefined}
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}
           onChordBeatInteract={onChordBeatInteract}
+          onChordContextMenu={onChordContextMenu}
           suggestionPreview={suggestionPreview}
           onAcceptSuggestion={onAcceptSuggestion}
           onDismissSuggestion={onDismissSuggestion}

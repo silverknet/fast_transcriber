@@ -37,7 +37,7 @@
 
 {#if proposal || dismissedCount > 0}
   <div
-    class="border-foreground bg-muted/40 mb-2 flex flex-col gap-2 border-2 px-3 py-2 text-xs sm:text-sm"
+    class="mb-2 flex flex-col gap-1 px-1 py-1 text-xs sm:text-sm"
     role="status"
     aria-live="polite"
     aria-label="Chord auto-fill suggestion"
@@ -68,7 +68,7 @@
           type="button"
           variant="default"
           size="sm"
-          class="h-8 shrink-0 text-xs font-bold"
+          class="h-7 shrink-0 text-xs font-bold"
           onclick={onAccept}
         >
           Accept
@@ -81,7 +81,7 @@
       </div>
     {/if}
 
-    <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+    <div class="flex flex-wrap items-center gap-1 text-[11px]">
       {#if proposal && total > 1}
         <Button
           type="button"

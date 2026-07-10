@@ -137,7 +137,7 @@
       // user navigates here intentionally to look at typography, etc.
       const onDebugRoute = here?.startsWith('/debug')
       if (onAuthRoute || onDebugRoute) return
-      if (openedSong && here !== '/edit') {
+      if (openedSong && here !== '/edit' && here !== '/project/playback') {
         await goto('/edit', { replaceState: true })
       } else if (!openedSong && here === '/') {
         await goto('/project', { replaceState: true })
@@ -227,7 +227,7 @@
   // their own self-contained chrome: /download (sidecar install CTA),
   // /welcome (landing), /login, /pending. These pages should fill the
   // viewport without the app's regular menus floating on top.
-  let bareRouteIds = ['/download', '/welcome', '/login', '/pending']
+  let bareRouteIds = ['/download', '/welcome', '/login', '/pending', '/project/playback']
   let onBareRoute = $derived(bareRouteIds.includes($page.route?.id ?? ''))
   let showChrome = $derived(!onBareRoute)
 

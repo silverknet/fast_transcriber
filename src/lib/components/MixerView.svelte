@@ -17,10 +17,12 @@
    */
   import { onDestroy, onMount, untrack } from 'svelte'
   import { get } from 'svelte/store'
+  import ApcKey25Control from '$lib/components/ApcKey25Control.svelte'
   import { Button } from '$lib/components/ui/button'
+  import LiveHardwareStrip from '$lib/components/LiveHardwareStrip.svelte'
   import MixerTrackLane from '$lib/components/MixerTrackLane.svelte'
   import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
-  import { Pause, Play, Square } from '@lucide/svelte'
+  import { Pause, Play, Repeat1, RotateCcw, Square } from '@lucide/svelte'
   import {
     formatChordSymbol,
     formatSongKeyLabel,
@@ -45,7 +47,7 @@
   } from '$lib/audio/mastering'
   import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
-  import { refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
+  import { loadProjectSongIntoEditor, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
@@ -80,7 +82,17 @@
    * WAV). Changing it re-runs `reload()`; the initial value is ignored so mount
    * doesn't double-load.
    */
-  let { reloadSignal = 0 } = $props<{ reloadSignal?: number }>()
+  let {
+    reloadSignal = 0,
+    initialPlaybackMode = false,
+    lockPlaybackMode = false,
+    liveMode = false,
+  } = $props<{
+    reloadSignal?: number
+    initialPlaybackMode?: boolean
+    lockPlaybackMode?: boolean
+    liveMode?: boolean
+  }>()
 
   /** What we hand to MixerTrackLane for rendering. */
   interface LaneView {
@@ -134,9 +146,13 @@
   let loadingMsg = $state('Loading tracks…')
   let loadError = $state<string | null>(null)
   let playbackMode = $state(false)
+  let initialPlaybackModeSeeded = false
   let repeatSectionEnabled = $state(false)
   let repeatSectionId = $state<string | null>(null)
   let repeatSeekGuard = false
+  let replayOnceSectionId = $state<string | null>(null)
+  let replayOnceConsumed = $state(false)
+  let projectSongSwitching = $state(false)
 
   let engine: MixerEngine | null = null
   let snapshot = $state<MixerSnapshot>({ state: 'stopped', positionSec: 0, durationSec: 0 })
@@ -226,6 +242,24 @@
   const songKeyLabel = $derived(displayedSongKey ? formatSongKeyLabel(displayedSongKey) : 'No key')
   const songBpmLabel = $derived(
     $songMap?.metadata.bpm != null ? `${Math.round($songMap.metadata.bpm)} BPM` : 'No BPM',
+  )
+  const projectSongNavItems = $derived.by(() => {
+    const project = $projectStore.data
+    if (!project) return []
+    return project.songs
+      .filter((entry) => !entry.hidden)
+      .map((entry) => ({
+        id: entry.id,
+        title: $projectStore.metadataByFolder[entry.folder]?.title?.trim() || 'Untitled song',
+      }))
+  })
+  const activeProjectSongIndex = $derived(
+    projectSongNavItems.findIndex((entry) => entry.id === $projectStore.activeSongId),
+  )
+  const projectSongSwitchAvailable = $derived(activeProjectSongIndex >= 0 && !projectSongSwitching)
+  const canGoPreviousProjectSong = $derived(projectSongSwitchAvailable && activeProjectSongIndex > 0)
+  const canGoNextProjectSong = $derived(
+    projectSongSwitchAvailable && activeProjectSongIndex < projectSongNavItems.length - 1,
   )
 
   const chordTimelineSegments = $derived.by<ChordTimelineSegment[]>(() => {
@@ -397,6 +431,17 @@
     if (currentSectionRange) return `Repeat ${currentSectionRange.label}`
     return 'Repeat section'
   })
+  const replayOnceSectionRange = $derived.by(() => {
+    if (!replayOnceSectionId) return null
+    return sectionTimelineRanges.find((section) => section.id === replayOnceSectionId) ?? null
+  })
+  const replayOnceButtonLabel = $derived.by(() => {
+    if (replayOnceSectionRange) {
+      return replayOnceConsumed ? `Replaying ${replayOnceSectionRange.label}` : `Replay ${replayOnceSectionRange.label} once`
+    }
+    if (currentSectionRange) return `Replay ${currentSectionRange.label} once`
+    return 'Replay once'
+  })
 
   const stageWaveformLane = $derived(
     lanes.find((lane) => lane.key === 'original') ??
@@ -424,6 +469,16 @@
       }
     })
   })
+
+  const liveHardwareLanes = $derived(
+    lanes.map((lane) => ({
+      key: lane.key,
+      label: lane.label,
+      volume: lane.volume,
+      muted: lane.muted,
+      soloed: lane.soloed,
+    })),
+  )
 
   // ── Karaoke lyrics (playback mode) ────────────────────────────────────────
   // Word times are ORIGINAL audio time; the mixer timeline adds
@@ -809,6 +864,46 @@
     engine.stop()
   }
 
+  function onRestartSong() {
+    if (!mixerCanPlay || !engine) return
+    replayOnceSectionId = null
+    replayOnceConsumed = false
+    if (snapshot.state === 'playing') {
+      engine.seek(0)
+    } else {
+      void engine.play(0)
+    }
+  }
+
+  async function loadProjectSongAt(index: number) {
+    const target = projectSongNavItems[index]
+    if (!target || projectSongSwitching) return
+    if (target.id === $projectStore.activeSongId) return
+    projectSongSwitching = true
+    try {
+      loading = true
+      loadError = null
+      loadingMsg = `Loading ${target.title}…`
+      onStop()
+      await loadProjectSongIntoEditor(target.id)
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e)
+      loading = false
+    } finally {
+      projectSongSwitching = false
+    }
+  }
+
+  function onPreviousProjectSong() {
+    if (!canGoPreviousProjectSong) return
+    void loadProjectSongAt(activeProjectSongIndex - 1)
+  }
+
+  function onNextProjectSong() {
+    if (!canGoNextProjectSong) return
+    void loadProjectSongAt(activeProjectSongIndex + 1)
+  }
+
   function toggleRepeatSection() {
     if (repeatSectionEnabled) {
       repeatSectionEnabled = false
@@ -816,8 +911,31 @@
       return
     }
     if (!currentSectionRange) return
+    replayOnceSectionId = null
+    replayOnceConsumed = false
     repeatSectionId = currentSectionRange.id
     repeatSectionEnabled = true
+  }
+
+  function replayCurrentSectionOnce() {
+    if (!engine || !currentSectionRange) return
+    repeatSectionEnabled = false
+    repeatSectionId = null
+    replayOnceSectionId = currentSectionRange.id
+    replayOnceConsumed = false
+    if (snapshot.state !== 'playing') {
+      engine.seek(currentSectionRange.startSec)
+      void engine.play(currentSectionRange.startSec)
+    }
+  }
+
+  function seekSectionStartWithGuard(startSec: number) {
+    if (!engine) return
+    repeatSeekGuard = true
+    engine.seek(startSec)
+    window.setTimeout(() => {
+      repeatSeekGuard = false
+    }, 120)
   }
 
   function handleTransportUpdate(s: MixerSnapshot) {
@@ -825,15 +943,32 @@
     if (Math.abs(mixerDurationSec - s.durationSec) > 1e-4) {
       mixerDurationSec = s.durationSec
     }
-    if (!engine || !repeatSectionEnabled || repeatSeekGuard || s.state !== 'playing') return
-    const range = repeatSectionRange
-    if (!range || range.endSec - range.startSec < 0.1) return
-    if (s.positionSec >= range.endSec - 0.035) {
-      repeatSeekGuard = true
-      engine.seek(range.startSec)
-      window.setTimeout(() => {
-        repeatSeekGuard = false
-      }, 120)
+    if (!engine || repeatSeekGuard || s.state !== 'playing') return
+
+    const continuousRange = repeatSectionRange
+    if (
+      repeatSectionEnabled &&
+      continuousRange &&
+      continuousRange.endSec - continuousRange.startSec >= 0.1 &&
+      s.positionSec >= continuousRange.endSec - 0.035
+    ) {
+      seekSectionStartWithGuard(continuousRange.startSec)
+      return
+    }
+
+    const onceRange = replayOnceSectionRange
+    if (
+      onceRange &&
+      onceRange.endSec - onceRange.startSec >= 0.1 &&
+      s.positionSec >= onceRange.endSec - 0.035
+    ) {
+      if (!replayOnceConsumed) {
+        replayOnceConsumed = true
+        seekSectionStartWithGuard(onceRange.startSec)
+      } else {
+        replayOnceSectionId = null
+        replayOnceConsumed = false
+      }
     }
   }
 
@@ -878,6 +1013,18 @@
       repeatSectionEnabled = false
       repeatSectionId = null
     }
+    if (replayOnceSectionId && !replayOnceSectionRange) {
+      replayOnceSectionId = null
+      replayOnceConsumed = false
+    }
+  })
+
+  $effect(() => {
+    if (!initialPlaybackModeSeeded) {
+      initialPlaybackModeSeeded = true
+      if (initialPlaybackMode) playbackMode = true
+    }
+    if (lockPlaybackMode && !playbackMode) playbackMode = true
   })
 
   // Parent-driven reload — only used when a NEW lane must appear (e.g. the
@@ -885,6 +1032,7 @@
   // mount's own load isn't duplicated.
   let lastReloadSignal = untrack(() => reloadSignal)
   let lastTransposeForReload = untrack(() => transposeSemitones)
+  let lastActiveProjectSongId = untrack(() => get(projectStore).activeSongId)
   let transposeReloadGeneration = 0
   $effect(() => {
     const sig = reloadSignal
@@ -909,6 +1057,14 @@
       engine.seek(resumeAt)
       if (wasPlaying) await engine.play(resumeAt)
     })()
+  })
+
+  $effect(() => {
+    const activeId = $projectStore.activeSongId
+    if (activeId === lastActiveProjectSongId) return
+    lastActiveProjectSongId = activeId
+    if (!engine) return
+    void reload()
   })
 
   // Keep the cue lane's mute in sync with mixState (per-machine, stripped from
@@ -940,7 +1096,7 @@
   })
 </script>
 
-<div class="border-foreground bg-background border-2 px-3 py-3 space-y-3">
+<div class="{liveMode ? 'min-h-full bg-transparent px-0 py-0' : 'border-foreground bg-background border-2 px-3 py-3'} space-y-3">
   <!-- Transport bar -->
   <div class="border-foreground/30 flex flex-wrap items-center gap-2 border-b-2 pb-2">
     <Button
@@ -961,22 +1117,52 @@
       variant="outline"
       size="sm"
       class="h-9 w-9 p-0"
+      onclick={onRestartSong}
+      disabled={!mixerCanPlay}
+      aria-label="Restart song"
+      title="Restart song"
+    >
+      <RotateCcw class="size-3.5" aria-hidden="true" />
+    </Button>
+    <Button
+      variant="outline"
+      size="sm"
+      class="h-9 w-9 p-0"
       onclick={onStop}
       disabled={!mixerCanPlay}
       aria-label="Stop"
     >
       <Square class="size-3.5" aria-hidden="true" />
     </Button>
+    <Button
+      variant={replayOnceSectionRange ? 'default' : 'outline'}
+      size="sm"
+      class="h-8 gap-1.5"
+      onclick={replayCurrentSectionOnce}
+      disabled={!currentSectionRange}
+      title={replayOnceSectionRange
+        ? replayOnceConsumed
+          ? `Replaying ${replayOnceSectionRange.label} one time`
+          : `Will replay ${replayOnceSectionRange.label} once at the end`
+        : currentSectionRange
+          ? `Replay ${currentSectionRange.label} once`
+          : 'No section at the playhead'}
+    >
+      <Repeat1 class="size-3.5" aria-hidden="true" />
+      {replayOnceButtonLabel}
+    </Button>
     <div class="font-mono text-sm tabular-nums">
       {fmtTime(snapshot.positionSec)} / {fmtTime(snapshot.durationSec)}
     </div>
-    <label
-      class="border-foreground bg-background inline-flex h-8 items-center gap-2 rounded-[var(--radius)] border-2 px-2 text-xs font-bold"
-      title="Show a minimal band playback view"
-    >
-      <input type="checkbox" bind:checked={playbackMode} class="accent-foreground size-3.5" />
-      Playback mode
-    </label>
+    {#if !lockPlaybackMode}
+      <label
+        class="border-foreground bg-background inline-flex h-8 items-center gap-2 rounded-[var(--radius)] border-2 px-2 text-xs font-bold"
+        title="Show a minimal band playback view"
+      >
+        <input type="checkbox" bind:checked={playbackMode} class="accent-foreground size-3.5" />
+        Playback mode
+      </label>
+    {/if}
     {#if projectSoundOn}
       <button
         type="button"
@@ -1084,6 +1270,28 @@
       </Button>
     {/if}
   </div>
+
+  <LiveHardwareStrip
+    lanes={liveHardwareLanes}
+    projectId={$projectStore.data?.id ?? null}
+  />
+  <ApcKey25Control
+    lanes={liveHardwareLanes}
+    isPlaying={snapshot.state === 'playing'}
+    onPlayPause={onPlayPause}
+    onStop={onStop}
+    onRestartSong={onRestartSong}
+    onReplaySectionOnce={replayCurrentSectionOnce}
+    onLaneVolumeChange={onVolume}
+    onToggleLaneMuted={onToggleMuted}
+    canRestartSong={mixerCanPlay}
+    canReplaySectionOnce={!!currentSectionRange}
+    sectionReplayOnceArmed={!!replayOnceSectionRange}
+    canGoPreviousSong={canGoPreviousProjectSong}
+    canGoNextSong={canGoNextProjectSong}
+    onPreviousSong={onPreviousProjectSong}
+    onNextSong={onNextProjectSong}
+  />
 
   {#if loadError}
     <p class="text-destructive text-sm" role="status">{loadError}</p>

@@ -29,7 +29,7 @@
   import NewSongDialog from '$lib/components/NewSongDialog.svelte'
   import RenameSongDialog from '$lib/components/RenameSongDialog.svelte'
   import JoinCloudProjectDialog from '$lib/components/JoinCloudProjectDialog.svelte'
-  import { Cloud, FolderOpen, FolderPlus, ListPlus, MailOpen, Plus, RefreshCw, Music4, Settings, Share2 } from '@lucide/svelte'
+  import { Cloud, FolderOpen, FolderPlus, ListPlus, MailOpen, Plus, RefreshCw, Music4, Play, Settings, Share2 } from '@lucide/svelte'
   import {
     acceptPendingInvite,
     listCloudProjects,
@@ -811,7 +811,7 @@
     <div class="flex flex-wrap items-center gap-2">
       <input
         type="text"
-        class="min-w-[8rem] flex-1 border-b-2 border-transparent bg-transparent pb-0.5 text-3xl font-bold tracking-tight focus:border-foreground focus:outline-none"
+        class="min-w-[8rem] flex-1 border-b-2 border-transparent bg-transparent pb-0.5 text-4xl font-bold tracking-tight focus:border-foreground focus:outline-none"
         placeholder="Untitled project"
         bind:value={renameInput}
         onblur={commitNameRename}
@@ -819,6 +819,16 @@
           if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
         }}
       />
+      <Button
+        variant="ghost"
+        size="sm"
+        class="h-9 gap-1 border-transparent px-2"
+        onclick={() => void goto('/project/playback')}
+        title="Open the full-screen live playback page"
+      >
+        <Play class="size-3.5" aria-hidden="true" />
+        Live
+      </Button>
       <Button
         variant="ghost"
         size="sm"

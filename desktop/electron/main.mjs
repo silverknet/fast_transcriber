@@ -82,6 +82,7 @@ import {
   normalizeTransposeSemitones,
   transposeCacheSubpath,
 } from './transposeCache.mjs'
+import { createXAirClient } from './xairOsc.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -95,6 +96,12 @@ const LOG_PREFIX = '[barbro-desktop]'
 const logInfo = (...args) => console.info(LOG_PREFIX, ...args)
 const logWarn = (...args) => console.warn(LOG_PREFIX, ...args)
 const logError = (...args) => console.error(LOG_PREFIX, ...args)
+
+/** @type {ReturnType<typeof createXAirClient> | null} */
+let xairClient = null
+let xairLastMessageAt = null
+let xairLastMessage = null
+let xairLastError = null
 
 // Resilience net: this is a HEADLESS background sidecar. A crash takes down
 // the user's desktop client for every feature (analyze, stems, cloud FS), so
@@ -279,6 +286,194 @@ async function readRequestJson(req) {
     return JSON.parse(buf.toString('utf-8'))
   } catch {
     return null
+  }
+}
+
+function publicXAirStatus() {
+  const status = xairClient ? xairClient.status() : { connected: false }
+  return {
+    kind: 'behringer-xair',
+    ...status,
+    lastMessageAt: xairLastMessageAt,
+    lastMessage: xairLastMessage,
+    lastError: xairLastError,
+  }
+}
+
+function parseXAirPort(value, fallback = undefined) {
+  if (value === undefined || value === null || value === '') return fallback
+  const port = Number.parseInt(String(value), 10)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('XR18 port must be 1..65535')
+  }
+  return port
+}
+
+function requireXAirClient() {
+  if (!xairClient || !xairClient.status().connected) {
+    throw new Error('XR18 is not connected')
+  }
+  return xairClient
+}
+
+function attachXAirEventLogging(client) {
+  client.events.on('message', (message) => {
+    xairLastMessageAt = new Date().toISOString()
+    xairLastMessage = {
+      address: message.address,
+      args: message.args,
+      remote: message.remote,
+    }
+    xairLastError = null
+  })
+  client.events.on('error', (e) => {
+    xairLastError = e instanceof Error ? e.message : String(e)
+    logWarn('xair: event error:', xairLastError)
+  })
+  client.events.on('state', (state) => {
+    logInfo(`xair: ${state.connected ? 'connected' : 'disconnected'} ${state.host}:${state.port}`)
+  })
+}
+
+function closeXAirClient() {
+  if (!xairClient) return
+  try {
+    xairClient.close()
+  } catch (e) {
+    logWarn('xair: close failed:', e instanceof Error ? e.message : String(e))
+  }
+  xairClient = null
+}
+
+function sendHardwareError(res, cors, e, status = 400) {
+  sendJson(
+    res,
+    status,
+    {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      xair: publicXAirStatus(),
+    },
+    cors,
+  )
+}
+
+/** `GET /native/hardware/status` — current sidecar hardware bridge state. */
+function handleHardwareStatus(res, cors) {
+  sendJson(
+    res,
+    200,
+    {
+      ok: true,
+      midi: { supported: false, devices: [] },
+      xair: publicXAirStatus(),
+    },
+    cors,
+  )
+}
+
+/** `POST /native/hardware/xair/connect` — body `{ host, port? }`. */
+async function handleXAirConnect(req, res, cors) {
+  const body = await readRequestJson(req)
+  if (!body || typeof body !== 'object') {
+    return sendHardwareError(res, cors, new Error('Expected JSON body `{ host, port? }`'))
+  }
+  if (typeof body.host !== 'string' || body.host.trim().length === 0) {
+    return sendHardwareError(res, cors, new Error('XR18 host is required'))
+  }
+  const host = body.host.trim()
+  let port
+  try {
+    port = parseXAirPort(body.port)
+  } catch (e) {
+    return sendHardwareError(res, cors, e)
+  }
+
+  const nextClient = createXAirClient({ host, ...(port ? { port } : {}) })
+  attachXAirEventLogging(nextClient)
+  try {
+    closeXAirClient()
+    xairLastMessageAt = null
+    xairLastMessage = null
+    xairLastError = null
+    await nextClient.open()
+    xairClient = nextClient
+    nextClient.requestInfo()
+    logInfo(`xair: requested /xinfo from ${host}:${nextClient.port}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    try {
+      nextClient.close()
+    } catch {
+      /* ignore cleanup failure */
+    }
+    xairLastError = e instanceof Error ? e.message : String(e)
+    sendHardwareError(res, cors, e, 500)
+  }
+}
+
+/** `POST /native/hardware/xair/disconnect` — close XR18 UDP control. */
+async function handleXAirDisconnect(req, res, cors) {
+  await readRequestBody(req).catch(() => Buffer.alloc(0))
+  closeXAirClient()
+  sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+}
+
+/** `POST /native/hardware/xair/main-fader` — body `{ value }`, clamped 0..1. */
+async function handleXAirMainFader(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object' || body.value === undefined) throw new Error('Expected JSON body `{ value }`')
+    client.setMainFader(body.value)
+    logInfo(`xair write: /lr/mix/fader ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/channel-fader` — body `{ channel, value }`, clamped 0..1. */
+async function handleXAirChannelFader(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object') throw new Error('Expected JSON body `{ channel, value }`')
+    client.setChannelFader(body.channel, body.value)
+    logInfo(`xair write: channel ${body.channel} fader ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/channel-on` — body `{ channel, on }`. */
+async function handleXAirChannelOn(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object' || typeof body.on !== 'boolean') {
+      throw new Error('Expected JSON body `{ channel, on }`')
+    }
+    client.setChannelOn(body.channel, body.on)
+    logInfo(`xair write: channel ${body.channel} ${body.on ? 'on' : 'off'}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/bus-send` — body `{ channel, bus, value }`, clamped 0..1. */
+async function handleXAirBusSend(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object') throw new Error('Expected JSON body `{ channel, bus, value }`')
+    client.setChannelBusSend(body.channel, body.bus, body.value)
+    logInfo(`xair write: channel ${body.channel} bus ${body.bus} send ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
   }
 }
 
@@ -5766,6 +5961,35 @@ function startBeaconServer() {
       return
     }
 
+    if (req.method === 'GET' && req.url === '/native/hardware/status') {
+      handleHardwareStatus(res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/connect') {
+      void handleXAirConnect(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/disconnect') {
+      void handleXAirDisconnect(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/main-fader') {
+      void handleXAirMainFader(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/channel-fader') {
+      void handleXAirChannelFader(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/channel-on') {
+      void handleXAirChannelOn(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/bus-send') {
+      void handleXAirBusSend(req, res, cors)
+      return
+    }
+
     if (req.method === 'POST' && req.url === '/native/pick-folder') {
       void handlePickFolder(req, res, cors)
       return
@@ -6210,6 +6434,13 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
   logInfo(`  GET    /native/transpose/status          (Rubber Band availability)`)
   logInfo(`  POST   /native/project/pitch-shift-cache (Rubber Band transpose cache)`)
+  logInfo(`  GET    /native/hardware/status           (MIDI/XR18 bridge state)`)
+  logInfo(`  POST   /native/hardware/xair/connect     (JSON {host, port?})`)
+  logInfo(`  POST   /native/hardware/xair/disconnect`)
+  logInfo(`  POST   /native/hardware/xair/main-fader`)
+  logInfo(`  POST   /native/hardware/xair/channel-fader`)
+  logInfo(`  POST   /native/hardware/xair/channel-on`)
+  logInfo(`  POST   /native/hardware/xair/bus-send`)
   logInfo(`  GET    /native/setup/youtube-import/status`)
   logInfo(`  POST   /native/setup/youtube-import (prepare YouTube audio import)`)
   logInfo(`  POST   /native/import/youtube       (queued YouTube audio import)`)
@@ -6228,6 +6459,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   logInfo('Shutting down')
+  closeXAirClient()
   if (autoStemsDaemon) autoStemsDaemon.stop()
   stopBeaconServer()
   // Wipe any pending stems temp dirs synchronously-ish — fire-and-forget,

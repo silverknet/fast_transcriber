@@ -4,8 +4,10 @@ import {
   applyChordAutoFill,
   beatsInSection,
   proposeChordAutoFillCandidates,
+  proposeChordSectionCopy,
   sameKindChordAtMatchingBeat,
 } from './autoFill'
+import { chordSuggestionVisibilityState } from './suggestionVisibility'
 import type {
   Bar,
   Beat,
@@ -289,6 +291,66 @@ describe('applyChordAutoFill', () => {
     expect(proposalsAfter).toEqual([])
     // And harmony count is exactly source (1) + target (1).
     expect(map.harmony).toHaveLength(2)
+  })
+})
+
+describe('proposeChordSectionCopy', () => {
+  it('builds an explicit source to target copy even across different section kinds', () => {
+    const map = buildMap({
+      barCount: 8,
+      sections: [section('verse-a', 'verse', 0, 3), section('bridge-a', 'bridge', 4, 7)],
+      harmony: [
+        harmony('b0_0', 'bar0', chord('C')),
+        harmony('b2_0', 'bar2', chord('G')),
+      ],
+    })
+    const proposal = proposeChordSectionCopy(map, 'verse-a', 'bridge-a')
+    expect(proposal?.sourceSection.id).toBe('verse-a')
+    expect(proposal?.targetSection.id).toBe('bridge-a')
+    expect(proposal?.entries.map((e) => e.targetBeatId)).toEqual(['b4_0', 'b6_0'])
+  })
+
+  it('returns null for missing or identical sections', () => {
+    const map = buildMap({
+      barCount: 4,
+      sections: [section('verse-a', 'verse', 0, 3)],
+      harmony: [harmony('b0_0', 'bar0', chord('C'))],
+    })
+    expect(proposeChordSectionCopy(map, 'verse-a', 'verse-a')).toBe(null)
+    expect(proposeChordSectionCopy(map, 'verse-a', 'missing')).toBe(null)
+    expect(proposeChordSectionCopy(map, 'missing', 'verse-a')).toBe(null)
+  })
+})
+
+describe('chordSuggestionVisibilityState', () => {
+  it('hides suggestions after the first explicit chord inside a section', () => {
+    const map = buildMap({
+      barCount: 4,
+      sections: [section('verse-a', 'verse', 0, 3)],
+      harmony: [harmony('b1_0', 'bar1', chord('C'))],
+    })
+
+    const state = chordSuggestionVisibilityState(map)
+
+    expect(state.coveredBeatIds.has('b0_0')).toBe(false)
+    expect(state.coveredBeatIds.has('b1_0')).toBe(true)
+    expect(state.coveredBeatIds.has('b2_0')).toBe(true)
+    expect(state.coveredBeatIds.has('b3_3')).toBe(true)
+    expect(state.coveredFromStartSectionIds.has('verse-a')).toBe(false)
+  })
+
+  it('marks a section covered from start when its first beat has a chord', () => {
+    const map = buildMap({
+      barCount: 5,
+      sections: [section('verse-a', 'verse', 0, 3), section('chorus-a', 'chorus', 4, 4)],
+      harmony: [harmony('b0_0', 'bar0', chord('C'))],
+    })
+
+    const state = chordSuggestionVisibilityState(map)
+
+    expect(state.coveredFromStartSectionIds.has('verse-a')).toBe(true)
+    expect(state.coveredBeatIds.has('b3_0')).toBe(true)
+    expect(state.coveredBeatIds.has('b4_0')).toBe(false)
   })
 })
 

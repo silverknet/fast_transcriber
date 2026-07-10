@@ -84,7 +84,12 @@
     type LyricsTranscriptionWord,
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
-  import { CHORD_ANALYZER_VERSION, proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
+  import {
+    CHORD_ANALYZER_VERSION,
+    proposeChordSuggestions,
+    type ChordSuggestion,
+  } from '$lib/chords/suggestFromChroma'
+  import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
   import { cleanLyricsText } from '$lib/lyrics/clean'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { selectBestStemSet } from '$lib/project/commit'
@@ -101,6 +106,7 @@
     CueEvent,
     CueTrack,
     NoteName,
+    Section,
     SectionKind,
     SongKey,
     SongMap,
@@ -1020,6 +1026,10 @@
 
   let selectedBeatId = $state<string | null>(null)
   let chordsSelectionBeatIds = $state<string[]>([])
+  let showChordSuggestions = $state(true)
+  let finishedChordSectionIds = $state<string[]>([])
+  let reopenedChordSectionIds = $state<string[]>([])
+  let chordContextMenu = $state<{ x: number; y: number } | null>(null)
   /** Chord UI: nested radial quick select (`ChordRadialQuickSelect.svelte`; legacy: `ChordPickerPopover.svelte`, `ChordMarkingMenu.svelte`) */
   let chordPickerOpen = $state(false)
   let chordAnchorX = $state(0)
@@ -1053,6 +1063,30 @@
   function focusOnMount(el: HTMLElement) {
     el.focus()
     if (el instanceof HTMLInputElement) el.select()
+  }
+
+  function sectionDisplayLabel(section: Section, ordinal?: number): string {
+    const defaultLabel = defaultSectionLabel(section.kind)
+    const explicitLabel = section.label?.trim()
+    const base = explicitLabel || defaultLabel
+    const hasCustomLabel =
+      !!explicitLabel && explicitLabel.toLowerCase() !== defaultLabel.toLowerCase()
+    return ordinal === undefined || hasCustomLabel ? base : `${base} ${ordinal}`
+  }
+
+  function sectionForBeatId(sm: SongMap, beatId: string | null | undefined): Section | null {
+    if (!beatId) return null
+    const beat = sm.timeline.beats.find((b) => b.id === beatId)
+    if (!beat) return null
+    const bar = sm.timeline.bars.find((b) => b.id === beat.barId)
+    if (!bar) return null
+    return (
+      sm.sections.find(
+        (s) =>
+          bar.index >= s.barRange.startBarIndex &&
+          bar.index <= s.barRange.endBarIndex,
+      ) ?? null
+    )
   }
 
   /** Strip labels only on beats with an explicit harmony row (no carry-forward repeat). */
@@ -1089,11 +1123,85 @@
   /**
    * Per-bar chord suggestions derived from cached chroma. Pure function;
    * recomputes when songMap mutates (key change, section edits, beats edits,
-   * or new chroma from the analyzer). Bars whose downbeat already has a
-   * user-placed chord are filtered out at render time in the strip (ghosts
-   * only show when no real chord is present).
+   * or new chroma from the analyzer). Suggestions only show in un-chorded
+   * space, so analyzer ghosts do not compete with user-entered chord spans.
    */
-  const chordSuggestions = $derived(proposeChordSuggestions($songMap))
+  const rawChordSuggestions = $derived(proposeChordSuggestions($songMap))
+
+  const chordSuggestionVisibility = $derived.by(() => {
+    const sm = $songMap
+    return sm ? chordSuggestionVisibilityState(sm) : null
+  })
+
+  const currentChordSection = $derived.by<Section | null>(() => {
+    const sm = $songMap
+    if (!sm) return null
+    const beatId = selectedBeatId ?? chordsSelectionBeatIds[0] ?? null
+    return sectionForBeatId(sm, beatId)
+  })
+
+  const autoFinishedChordSectionIds = $derived.by(() => {
+    return chordSuggestionVisibility
+      ? [...chordSuggestionVisibility.coveredFromStartSectionIds]
+      : ([] as string[])
+  })
+
+  const suppressedChordSectionIds = $derived.by(() => {
+    const reopened = new Set(reopenedChordSectionIds)
+    return new Set(
+      [...finishedChordSectionIds, ...autoFinishedChordSectionIds].filter((id) => !reopened.has(id)),
+    )
+  })
+
+  const currentChordSectionDone = $derived(
+    currentChordSection ? suppressedChordSectionIds.has(currentChordSection.id) : false,
+  )
+
+  const chordSuggestions = $derived.by(() => {
+    if (!showChordSuggestions) return new Map<string, ChordSuggestion>()
+    const sm = $songMap
+    if (!sm) return new Map(rawChordSuggestions)
+    const filtered = new Map(rawChordSuggestions)
+    for (const [beatId] of rawChordSuggestions) {
+      if (chordSuggestionVisibility?.coveredBeatIds.has(beatId)) {
+        filtered.delete(beatId)
+        continue
+      }
+      const section = sectionForBeatId(sm, beatId)
+      if (section && suppressedChordSectionIds.has(section.id)) filtered.delete(beatId)
+    }
+    return filtered
+  })
+
+  $effect(() => {
+    const sm = $songMap
+    if (!sm) return
+    const validIds = new Set(sm.sections.map((s) => s.id))
+    const nextFinished = finishedChordSectionIds.filter((id) => validIds.has(id))
+    if (
+      nextFinished.length !== finishedChordSectionIds.length ||
+      nextFinished.some((id, index) => id !== finishedChordSectionIds[index])
+    ) {
+      finishedChordSectionIds = nextFinished
+    }
+    const nextReopened = reopenedChordSectionIds.filter((id) => validIds.has(id))
+    if (
+      nextReopened.length !== reopenedChordSectionIds.length ||
+      nextReopened.some((id, index) => id !== reopenedChordSectionIds[index])
+    ) {
+      reopenedChordSectionIds = nextReopened
+    }
+  })
+
+  const currentSectionSuggestionEntries = $derived.by(() => {
+    const section = currentChordSection
+    if (!section) return [] as Array<[string, ChordSuggestion]>
+    return [...chordSuggestions.entries()].filter(
+      ([, sug]) =>
+        sug.barIndex >= section.barRange.startBarIndex &&
+        sug.barIndex <= section.barRange.endBarIndex,
+    )
+  })
 
   /** Map shape consumed by TimelineBeatGrid for ghost rendering. */
   const chordSuggestionByBeatId = $derived.by(() => {
@@ -1165,16 +1273,25 @@
     const ids = selectedChordTargetBeatIds()
     if (ids.length === 0) return
     const resolved = resolveChordAtEachBeat(sm)
+    const explicitByBeat = new Map(sm.harmony.filter((h) => h.beatId).map((h) => [h.beatId!, h.chord]))
     const key = displayedSongKey
-    const chords = ids.map((id) => {
-      const chord = resolved.get(id)
+    const chords = ids.map((id, index) => {
+      const chord = explicitByBeat.get(id) ?? (index === 0 ? resolved.get(id) : null)
       return chord ? transposeChordForDisplay(chord, transposeSemitones, key ?? undefined) : null
     })
+    if (!chords.some(Boolean)) {
+      beatEditError = 'Selection has no chord changes to copy'
+      return
+    }
     const text = serializeChordClipboard(chords)
-    void navigator.clipboard.writeText(text).catch(() => {
-      beatEditError = 'Could not copy chords to the clipboard'
-    })
-    beatEditError = ''
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        beatEditError = ''
+      })
+      .catch(() => {
+        beatEditError = 'Could not copy chords to the clipboard'
+      })
   }
 
   async function pasteChordsFromClipboard() {
@@ -1199,24 +1316,62 @@
     if (anchorIdx < 0) return
 
     let map = sm
+    let pastedCount = 0
     for (let i = 0; i < chords.length; i++) {
       const beat = sorted[anchorIdx + i]
       if (!beat) break
       const c = chords[i]
-      if (c === null) map = clearHarmonyAtBeat(map, beat.id)
-      else {
-        const sourceChord = transposeChordForStorage(c, transposeSemitones, sm.metadata.keyDetail)
-        const out = upsertHarmonyAtBeat(map, beat.id, sourceChord, newId)
-        if (!out.ok) {
-          beatEditError = out.error
-          return
-        }
-        map = out.map
+      if (c === null) continue
+      const sourceChord = transposeChordForStorage(c, transposeSemitones, sm.metadata.keyDetail)
+      const out = upsertHarmonyAtBeat(map, beat.id, sourceChord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
       }
+      map = out.map
+      pastedCount += 1
+    }
+    if (pastedCount === 0) {
+      beatEditError = 'Clipboard has no chord changes to paste'
+      return
     }
     const p = patchSongMap(() => map)
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
+  }
+
+  function handleAcceptCurrentSectionSuggestions() {
+    const sm = get(songMap)
+    const section = currentChordSection
+    if (!sm || !section || currentSectionSuggestionEntries.length === 0) return
+    let map = sm
+    for (const [beatId, suggestion] of currentSectionSuggestionEntries) {
+      const out = upsertHarmonyAtBeat(map, beatId, suggestion.chord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
+      }
+      map = out.map
+    }
+    const p = patchSongMap(() => map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else {
+      beatEditError = ''
+      finishedChordSectionIds = [...new Set([...finishedChordSectionIds, section.id])]
+      reopenedChordSectionIds = reopenedChordSectionIds.filter((id) => id !== section.id)
+    }
+  }
+
+  function toggleCurrentChordSectionDone() {
+    const section = currentChordSection
+    if (!section) return
+    if (currentChordSectionDone) {
+      finishedChordSectionIds = finishedChordSectionIds.filter((id) => id !== section.id)
+      reopenedChordSectionIds = [...new Set([...reopenedChordSectionIds, section.id])]
+    } else {
+      finishedChordSectionIds = [...finishedChordSectionIds, section.id]
+      reopenedChordSectionIds = reopenedChordSectionIds.filter((id) => id !== section.id)
+    }
   }
 
   function commitChord(chord: ChordSymbol) {
@@ -1303,10 +1458,11 @@
       if (chordPickerOpen) return
       const mod = e.metaKey || e.ctrlKey
       if (!mod) return
-      if (e.key === 'c') {
+      const key = e.key.toLowerCase()
+      if (key === 'c') {
         e.preventDefault()
         copyChordsSelection()
-      } else if (e.key === 'v') {
+      } else if (key === 'v') {
         e.preventDefault()
         void pasteChordsFromClipboard()
       }
@@ -1318,16 +1474,81 @@
   $effect(() => {
     if (editMode !== 'chords') {
       chordPickerOpen = false
+      chordContextMenu = null
       selectedBeatId = null
       chordsSelectionBeatIds = []
     }
   })
 
   function onChordBeatInteract(detail: { clientX: number; clientY: number }) {
+    chordContextMenu = null
     chordAnchorX = detail.clientX
     chordAnchorY = detail.clientY
     chordPickerOpen = true
   }
+
+  function onChordContextMenu(detail: { clientX: number; clientY: number }) {
+    chordPickerOpen = false
+    chordContextMenu = { x: detail.clientX, y: detail.clientY }
+  }
+
+  function chordContextMenuStyle(): string {
+    if (!chordContextMenu) return ''
+    const left = browser
+      ? Math.max(8, Math.min(chordContextMenu.x, window.innerWidth - 216))
+      : chordContextMenu.x
+    const top = browser
+      ? Math.max(8, Math.min(chordContextMenu.y, window.innerHeight - 190))
+      : chordContextMenu.y
+    return `left: ${left}px; top: ${top}px;`
+  }
+
+  function closeChordContextMenu() {
+    chordContextMenu = null
+  }
+
+  function copyChordsFromContextMenu() {
+    copyChordsSelection()
+    closeChordContextMenu()
+  }
+
+  function pasteChordsFromContextMenu() {
+    void pasteChordsFromClipboard()
+    closeChordContextMenu()
+  }
+
+  function clearChordsFromContextMenu() {
+    clearChordAtBeat()
+    closeChordContextMenu()
+  }
+
+  function acceptSectionSuggestionsFromContextMenu() {
+    handleAcceptCurrentSectionSuggestions()
+    closeChordContextMenu()
+  }
+
+  function toggleSectionDoneFromContextMenu() {
+    toggleCurrentChordSectionDone()
+    closeChordContextMenu()
+  }
+
+  $effect(() => {
+    if (!browser || !chordContextMenu) return
+    const close = () => {
+      chordContextMenu = null
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  })
 
   let objectUrl = $state<string | null>(null)
   let audioEl = $state<HTMLAudioElement | null>(null)
@@ -3228,7 +3449,8 @@
               </p>
             {:else}
               <p>
-                Select beats on the chord strip, then click a beat to edit. ⌘/Ctrl+C and ⌘/Ctrl+V copy and paste chords.
+                Select beats on the chord strip, double-click/tap to edit, and press Space to play from the selected beat.
+                ⌘/Ctrl+C and ⌘/Ctrl+V copy and paste chords.
               </p>
             {/if}
           </div>
@@ -3256,6 +3478,40 @@
             onDismiss={handleDismissAutoFill}
             onUndoDismiss={handleUndoDismissAutoFill}
           />
+          <div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs">
+            <label class="inline-flex items-center gap-2 font-bold">
+              <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
+              Suggestions
+            </label>
+            <span class="text-muted-foreground">
+              {currentChordSection
+                ? sectionDisplayLabel(currentChordSection)
+                : 'Select a beat in a section'}
+            </span>
+            {#if currentChordSection && currentChordSectionDone}
+              <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase">done</span>
+            {/if}
+            <button
+              type="button"
+              class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+              onclick={handleAcceptCurrentSectionSuggestions}
+              disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
+              title="Write every visible suggestion in the selected section"
+            >
+              Use section suggestions ({currentSectionSuggestionEntries.length})
+            </button>
+            <button
+              type="button"
+              class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+              onclick={toggleCurrentChordSectionDone}
+              disabled={!currentChordSection}
+              title={currentChordSectionDone
+                ? 'Show chord suggestions in this section again'
+                : 'Hide chord suggestions in this section'}
+            >
+              {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
+            </button>
+          </div>
           <div
             data-song-key-picker
             class="border-foreground bg-muted mb-4 flex flex-wrap items-center gap-2 border-2 px-3 py-2"
@@ -3373,6 +3629,7 @@
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
+          onChordContextMenu={onChordContextMenu}
           bind:audioElement={audioEl}
           playbackAudioBufferOverride={transposeAudioEnabled && transposeSemitones !== 0
             ? transposePlaybackBuffer
@@ -3388,6 +3645,65 @@
       </section>
       <!-- Radial menu stays outside container ancestors for stable fixed-position clientX/Y alignment. -->
       {#if editMode === 'chords' && $songMap}
+        {#if chordContextMenu}
+          <div
+            class="bg-popover text-popover-foreground border-foreground/15 fixed z-[90] w-52 rounded-[var(--radius)] border p-1 text-sm shadow-lg"
+            style={chordContextMenuStyle()}
+            role="menu"
+            tabindex="-1"
+            aria-label="Chord actions"
+            onpointerdown={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              class="hover:bg-muted flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={selectedChordTargetBeatIds().length === 0}
+              onclick={copyChordsFromContextMenu}
+            >
+              <span>Copy chords</span>
+              <span class="text-muted-foreground font-mono text-[10px]">Ctrl/⌘C</span>
+            </button>
+            <button
+              type="button"
+              class="hover:bg-muted flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!chordPasteAnchorBeatId()}
+              onclick={pasteChordsFromContextMenu}
+            >
+              <span>Paste chords here</span>
+              <span class="text-muted-foreground font-mono text-[10px]">Ctrl/⌘V</span>
+            </button>
+            <button
+              type="button"
+              class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={selectedChordTargetBeatIds().length === 0}
+              onclick={clearChordsFromContextMenu}
+            >
+              Clear selected chords
+            </button>
+            <div class="bg-border/70 my-1 h-px"></div>
+            <button
+              type="button"
+              class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
+              onclick={acceptSectionSuggestionsFromContextMenu}
+            >
+              Use section suggestions ({currentSectionSuggestionEntries.length})
+            </button>
+            <button
+              type="button"
+              class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!currentChordSection}
+              onclick={toggleSectionDoneFromContextMenu}
+            >
+              {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
+            </button>
+          </div>
+        {/if}
         <ChordRadialQuickSelect
           bind:open={chordPickerOpen}
           anchorX={chordAnchorX}
