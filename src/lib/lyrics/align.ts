@@ -254,7 +254,18 @@ function acceptCandidate(
 ): c is RowCandidate {
   if (!c) return false
   if (c.score < minScore) return false
-  if (c.hits.length >= 2) return true
+  if (c.hits.length >= 2) {
+    // Short common words can't carry a candidate alone: "me" + "you" exact-
+    // matching an ad-lib ("let ME see YOU move") anchored a whole row into
+    // the intro on real data. At least one hit must be DISTINCTIVE — an
+    // exact word of 4+ letters ("you"/"the"/"and" are exactly the ambiguity
+    // class), or a fuzzy match of 5+.
+    return c.hits.some(
+      (h) =>
+        (h.exact && lyr[h.tokenIdx]!.length >= 4) ||
+        (!h.exact && lyr[h.tokenIdx]!.length >= 5),
+    )
+  }
   // A lone hit only counts when it's self-evident: exact + distinctive word.
   const h = c.hits[0]!
   return h.exact && lyr[h.tokenIdx]!.length >= 4

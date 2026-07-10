@@ -310,6 +310,30 @@ describe('alignLyricsToTranscription', () => {
     assertMonotone(words)
   })
 
+  it('rescue cannot anchor a row on short common words alone (the "me/you" ad-lib trap)', () => {
+    // Real-data bug: "Tell me, if you really love me" got rescued onto the
+    // intro ad-lib "let ME see YOU move" via two short exact hits, dragging
+    // the whole top of the sheet into the intro. Short common words can't
+    // carry a candidate — at least one distinctive hit is required.
+    const tokens = tokensFrom([
+      'intro anchored line here',
+      'tell me if you really love me', // NOT sung in the recording
+      'closing anchored line lands',
+    ])
+    const asr: AsrWord[] = [
+      ...asrFrom('intro anchored line here', 10),
+      // ad-libs: short common words only
+      { text: 'me', startSec: 13.0, endSec: 13.2 },
+      { text: 'you', startSec: 14.0, endSec: 14.2 },
+      ...asrFrom('closing anchored line lands', 40),
+    ]
+    const { words } = alignLyricsToTranscription(tokens, asr)
+    const middle = words.filter((w) => w.line === 1)
+    for (const w of middle) expect(w.aligned).toBeUndefined()
+    // The unheard row interpolates in the long gap, not glued to the ad-libs.
+    assertMonotone(words)
+  })
+
   it('property: random word drops keep output monotone and in-bounds', () => {
     const line = 'one two three four five six seven eight nine ten eleven twelve'
     const tokens = tokensFrom([line, line, line])
