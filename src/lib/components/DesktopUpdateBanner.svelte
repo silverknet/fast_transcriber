@@ -81,7 +81,7 @@
 
 {#if show}
   <div
-    class="desktop-update-banner border-foreground flex flex-wrap items-center gap-x-3 gap-y-1 border-b-2 px-3 py-2 text-sm"
+    class="desktop-update-banner border-foreground flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 text-sm"
     role="status"
     aria-label="Desktop update available"
   >
