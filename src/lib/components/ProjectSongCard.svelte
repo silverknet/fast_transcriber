@@ -255,26 +255,40 @@
     </span>
 
     <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). While a
-         stem job is in flight for this song, not-yet-present stems glow amber
-         ("in progress") instead of grey ("not generated"). -->
+         stem job is in flight for this song: not-yet-present stems glow amber
+         ("in progress") instead of grey ("not generated"); already-present
+         stems being re-rendered at higher quality show half green / half
+         amber ("ready, upgrading"). -->
     {#each stemPresence as s (s.name)}
       {@const demucs = SLOT_TO_DEMUCS[s.name]}
-      {@const stemInProgress = !s.present && !!demucs && inProgressStems.has(demucs)}
+      {@const stemInProgress = !!demucs && inProgressStems.has(demucs)}
       <span
         class="flex min-w-0 justify-center"
         title={s.present
-          ? `${s.name}: ready`
+          ? stemInProgress
+            ? `${s.name}: ready — a better version is rendering…`
+            : `${s.name}: ready`
           : stemInProgress
             ? `${s.name}: in progress…`
             : `${s.name}: not generated`}
       >
         <span
           class="studio-light {s.present
-            ? 'bg-emerald-500'
+            ? stemInProgress
+              ? 'studio-light-upgrading animate-pulse'
+              : 'bg-emerald-500'
             : stemInProgress
               ? 'animate-pulse bg-amber-400'
               : 'bg-foreground/20'}"
-          aria-label={`${s.name}: ${s.present ? 'ready' : stemInProgress ? 'in progress' : 'not generated'}`}
+          aria-label={`${s.name}: ${
+            s.present
+              ? stemInProgress
+                ? 'ready, better version rendering'
+                : 'ready'
+              : stemInProgress
+                ? 'in progress'
+                : 'not generated'
+          }`}
         ></span>
       </span>
     {/each}
@@ -395,6 +409,14 @@
     border: 1px solid color-mix(in oklch, var(--ink) 70%, transparent);
     border-radius: 2px;
     box-shadow: 1px 1px 0 var(--ink);
+  }
+
+  /* "Ready, but a better version is rendering": half green (you can play the
+     current stem) / half amber (work in flight). Diagonal split so it reads
+     at 0.58rem. Hex over theme vars: these match Tailwind's emerald-500 /
+     amber-400 used by the other dot states. */
+  .studio-light-upgrading {
+    background: linear-gradient(135deg, #10b981 0 50%, #fbbf24 50% 100%);
   }
 
   :global(.project-song-row [data-slot='button']) {
