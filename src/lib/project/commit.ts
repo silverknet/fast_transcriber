@@ -13,8 +13,9 @@
  * manifest, with rollback if anything in between fails.
  */
 import { get } from 'svelte/store'
-import type { ProjectAutoStems, ProjectFile, ProjectSongEntry } from './types'
+import type { ProjectAutoStems, ProjectDefaults, ProjectFile, ProjectMastering, ProjectSongEntry } from './types'
 import { AUTO_STEM_NAMES } from './types'
+import { createDefaultCueTrack } from '$lib/songmap/cueTracks'
 import {
   PROJECT_FILE_VERSION,
   PROJECT_SONGS_DIR,
@@ -36,12 +37,12 @@ import {
 } from '$lib/audio/importedAudio'
 import { createEmptySongMap } from '$lib/songmap/factory'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
+import { effectiveTransposeSemitones } from '$lib/songmap/transposition'
 import {
   createProject,
   createProjectSong,
   getProjectInfo,
   getProjectWavInfoBatch,
-  watchProjectForAutoStems,
   readProjectSong,
   readProjectSongAsset,
   removeProjectSong,
@@ -150,7 +151,15 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   const out: ProjectSongMetadataLite = { title: m.title }
   if (m.artist) out.artist = m.artist
   if (m.keyDetail) out.keyDetail = m.keyDetail
+  const transposeSemitones = effectiveTransposeSemitones(map)
+  if (transposeSemitones !== 0) out.transposeSemitones = transposeSemitones
   if (m.bpm !== undefined) out.bpm = m.bpm
+  out.analyzed = m.analyzed ?? map.timeline.bars.length > 0
+  const dk = map.chordHints?.detectedKey
+  if (dk) {
+    out.detectedKey = { root: dk.root, ...(dk.accidental ? { accidental: dk.accidental } : {}), mode: dk.mode }
+    out.keyIsDetected = !m.keyDetail
+  }
   const countIn = effectiveCountInBeats(map)
   if (countIn > 0) {
     out.countInBeats = countIn
@@ -169,6 +178,17 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   const out: ProjectSongMetadataLite = { title: info.title || songFolderLeaf(fallbackFolder) }
   if (info.artist) out.artist = info.artist
   if (info.keyDetail) out.keyDetail = info.keyDetail
+  // Detected key + analyzed flag must survive the sidecar refresh — the scan
+  // REPLACES the metadata cache, and dropping these here wiped detected keys
+  // and the "Not analyzed" chip off cards on every project refresh.
+  if (info.detectedKey) {
+    out.detectedKey = info.detectedKey
+    out.keyIsDetected = !info.keyDetail
+  }
+  if (typeof info.analyzed === 'boolean') out.analyzed = info.analyzed
+  if (typeof info.transposeSemitones === 'number' && info.transposeSemitones !== 0) {
+    out.transposeSemitones = info.transposeSemitones
+  }
   if (typeof info.bpm === 'number') out.bpm = info.bpm
   if (info.stemRefs && Object.keys(info.stemRefs).length > 0) out.stemRefs = info.stemRefs
   if (info.stemsByPreset && Object.keys(info.stemsByPreset).length > 0) {
@@ -178,6 +198,9 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   if (info.hasCueTrack) out.hasCueTrack = true
   if (info.hasClickTrack) out.hasClickTrack = true
   if (info.hasAudio) out.hasAudio = true
+  if (typeof info.audioDurationSec === 'number' && info.audioDurationSec > 0) {
+    out.audioDurationSec = info.audioDurationSec
+  }
   if (typeof info.countInBeats === 'number' && info.countInBeats > 0) {
     out.countInBeats = info.countInBeats
   }
@@ -239,7 +262,9 @@ export async function createProjectOnDisk(parentPath: string, name: string): Pro
   setActiveProject(r.projectPath, r.manifest, {})
   writeLastProjectPath(r.projectPath)
   recordRecentProjectPath(r.projectPath)
-  void watchProjectForAutoStems(r.projectPath).catch(() => {})
+  // Auto stem-prep is a per-MACHINE opt-in now (the "Prepare stems on this
+  // computer" toggle in Project settings) — NOT started automatically on open,
+  // so a collaborator's machine never grinds on splits it didn't ask for.
   return r.manifest
 }
 
@@ -263,10 +288,10 @@ export async function openProjectByPath(projectPath: string): Promise<ProjectFil
   setActiveProject(projectPath, r.manifest, meta)
   writeLastProjectPath(projectPath)
   recordRecentProjectPath(projectPath)
-  // Hand the project to the sidecar's background stem daemon. Best-effort:
-  // the daemon only acts if the manifest opts in (`autoStems.enabled`), and a
-  // failure here must never block opening the project.
-  void watchProjectForAutoStems(projectPath).catch(() => {})
+  // NOTE: no longer auto-registers the project for background stem prep on
+  // open — that's now an explicit per-machine opt-in (Project settings →
+  // "Prepare stems on this computer"). Prevents a collaborator's machine from
+  // auto-splitting stems it didn't choose to.
 
   const migrated = await migrateProjectSongsToV2(projectPath, r.manifest).catch((e) => {
     console.warn('[project] migration sweep failed:', e)
@@ -1087,6 +1112,13 @@ export async function replaceImportedAudioForSong(
   const oldTitle = oldMap.metadata?.title ?? ''
   const oldAudioPath = oldMap.audio?.originalPath ?? null
 
+  // Best-effort snapshot before the wipe — the grid, chords and sections are
+  // about to be dropped, so keep a recoverable copy of the previous .smap.
+  {
+    const bakBytes = r.bytes instanceof Uint8Array ? r.bytes : new Uint8Array(r.bytes as ArrayBuffer)
+    await writeProjectSongAsset(osPath, entry.folder, 'song.smap.bak', bakBytes).catch(() => {})
+  }
+
   // Write the new audio bytes.
   const fileName = sanitizeAudioFilename(artifact.fileName || artifact.file?.name || 'audio.bin')
   const subpath = artifact.alreadyWrittenSubpath ?? `audio/${fileName}`
@@ -1221,6 +1253,129 @@ export async function setProjectAutoStems(config: ProjectAutoStems): Promise<voi
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)
+}
+
+/**
+ * Set the project-wide shared defaults (count-in + pre-count-in cue). The ONLY
+ * writer of this config block — it is never mutated as a side effect anywhere
+ * else, so casual actions can't corrupt the project's source of truth.
+ */
+export async function setProjectDefaults(patch: Partial<ProjectDefaults>): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    defaults: { ...snap.data.defaults, ...patch },
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/** The ONLY writer of the shared project-sound (mastering) config. */
+export async function setProjectMastering(mastering: ProjectMastering): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    mastering,
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/**
+ * Write the project defaults into EVERY non-hidden song's `.smap` (count-in
+ * now; the pre-count-in cue in Phase B) — the "Apply to all songs" action.
+ * Per-song edits in the editor still override afterward. Serial + best-effort.
+ */
+export async function applyDefaultsToAllSongs(): Promise<{ updated: number; errors: number }> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const osPath = snap.osPath
+  const defaults = snap.data.defaults ?? {}
+  let updated = 0
+  let errors = 0
+  for (const entry of snap.data.songs) {
+    if (entry.hidden) continue
+    try {
+      const r = await readProjectSong(osPath, entry.folder)
+      if (!r.ok) {
+        errors++
+        continue
+      }
+      const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+      const data = await decodeSmapFile(blob)
+      const sm = data.project.songMap
+      const nextMap: SongMap = { ...sm, metadata: { ...sm.metadata } }
+      let changed = false
+      if (defaults.countInBeats !== undefined) {
+        const cib = defaults.countInBeats > 0 ? defaults.countInBeats : undefined
+        if (nextMap.countInBeats !== cib) {
+          nextMap.countInBeats = cib
+          changed = true
+        }
+      }
+      // Pre-count-in spoken cue: set the primary cue track's spokenCountIn flag
+      // (and, for a fixed custom phrase, seed an intro event). Per-song edits in
+      // the Cue section still override afterward.
+      const pc = defaults.preCountInCue
+      if (pc) {
+        const spoken = pc.mode !== 'off'
+        const tracks =
+          nextMap.cueTracks && nextMap.cueTracks.length > 0
+            ? nextMap.cueTracks.map((t) => ({ ...t, events: [...t.events] }))
+            : [createDefaultCueTrack()]
+        const primaryIdx = Math.max(
+          0,
+          tracks.findIndex((t) => t.enabled),
+        )
+        const primary = tracks[primaryIdx]!
+        if (primary.spokenCountIn !== spoken) {
+          primary.spokenCountIn = spoken
+          changed = true
+        }
+        if (pc.mode === 'custom' && pc.text?.trim()) {
+          const text = pc.text.trim()
+          const introIdx = primary.events.findIndex((e) => e.kind === 'intro')
+          if (introIdx >= 0) {
+            const cur = primary.events[introIdx]!
+            if (cur.text !== text || !cur.enabled) {
+              primary.events[introIdx] = { ...cur, text, enabled: true, edited: true }
+              changed = true
+            }
+          } else {
+            primary.events.unshift({
+              id: `cue_intro_${crypto.randomUUID().slice(0, 8)}`,
+              kind: 'intro',
+              enabled: true,
+              anchor: { kind: 'time', timeSec: 0 },
+              text,
+              source: 'custom',
+              edited: true,
+            })
+            changed = true
+          }
+        }
+        nextMap.cueTracks = tracks
+      }
+      if (!changed) continue
+      const enc = await encodeSmapFile({ project: { ...data.project, songMap: nextMap } })
+      const w = await writeProjectSong(osPath, entry.folder, new Uint8Array(await enc.arrayBuffer()))
+      if (!w.ok) {
+        errors++
+        continue
+      }
+      patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(nextMap))
+      updated++
+    } catch {
+      errors++
+    }
+  }
+  return { updated, errors }
 }
 
 export async function removeSongFromProject(

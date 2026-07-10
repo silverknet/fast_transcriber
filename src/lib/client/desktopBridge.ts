@@ -386,7 +386,7 @@ export type YoutubeImportEvent =
   | { type: 'state'; state: StemJobState }
   | { type: 'cleanup'; jobId: string }
 
-export type DesktopJobEvent = StemSeparationEvent | YoutubeImportEvent
+export type DesktopJobEvent = StemSeparationEvent | YoutubeImportEvent | LyricsTranscriptionEvent
 
 export type YoutubeImportOutput =
   | { kind: 'temp' }
@@ -1139,6 +1139,149 @@ export async function setupSectionsDeps(
   if (errorMsg) return { ok: false, error: errorMsg }
   if (!venvPython) return { ok: false, error: 'Setup did not report a venv path' }
   return { ok: true, venvPython }
+}
+
+// ── Lyrics transcription (desktop `lyrics/` module) ─────────────────────────
+
+export type LyricsSetupStatus = {
+  ok: boolean
+  ready: boolean
+  venvDir?: string
+  venvPython?: string | null
+  modelDir?: string
+}
+
+/** Null when the sidecar is unreachable OR too old to know the endpoint. */
+export async function getLyricsSetupStatus(): Promise<LyricsSetupStatus | null> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/setup/lyrics/status`, { cache: 'no-store' })
+    if (!res.ok) return null
+    return (await res.json()) as LyricsSetupStatus
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Create the lyrics venv (speech recognizer) on the sidecar. Same NDJSON
+ * stream + result shape as `setupSectionsDeps`. The speech model itself
+ * downloads on the first transcription, not here.
+ */
+export async function setupLyricsDeps(
+  onEvent: (ev: SectionsSetupEvent) => void,
+  signal?: AbortSignal,
+): Promise<SetupSectionsResult> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/native/setup/lyrics`, {
+      method: 'POST',
+      cache: 'no-store',
+      signal,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+  if (!res.ok || !res.body) {
+    return { ok: false, error: `Setup failed (HTTP ${res.status})` }
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let venvPython: string | null = null
+  let errorMsg: string | null = null
+
+  const handle = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let ev: SectionsSetupEvent
+    try {
+      ev = JSON.parse(trimmed) as SectionsSetupEvent
+    } catch {
+      ev = { type: 'log', msg: trimmed }
+    }
+    if (ev.type === 'done') venvPython = ev.venvPython
+    else if (ev.type === 'error') errorMsg = ev.msg
+    onEvent(ev)
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx = buffer.indexOf('\n')
+      while (idx !== -1) {
+        handle(buffer.slice(0, idx))
+        buffer = buffer.slice(idx + 1)
+        idx = buffer.indexOf('\n')
+      }
+    }
+    if (buffer.trim()) handle(buffer)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Setup stream interrupted: ${msg}` }
+  }
+
+  if (errorMsg) return { ok: false, error: errorMsg }
+  if (!venvPython) return { ok: false, error: 'Setup did not report a venv path' }
+  return { ok: true, venvPython }
+}
+
+/** One recognized word (times = seconds into the transcribed file). */
+export type LyricsTranscriptionWord = {
+  text: string
+  startSec: number
+  endSec: number
+  conf?: number
+}
+
+export type LyricsTranscriptionEvent =
+  | { type: 'state'; state: 'queued' | 'running' | 'done' | 'error' | 'cancelled' }
+  | { type: 'log'; msg: string }
+  | { type: 'progress'; ratio: number }
+  | {
+      type: 'done'
+      words: LyricsTranscriptionWord[]
+      language?: string
+      transcriberVersion?: number
+    }
+  | { type: 'error'; msg: string }
+
+/**
+ * Enqueue a word-timestamp transcription of an on-disk audio file (vocals
+ * stem preferred). Progress + the final `done` event (carrying the words)
+ * stream via `subscribeToJobEvents<LyricsTranscriptionEvent>(jobId, …)`.
+ * A 404 means the sidecar predates the endpoint → "update BarBro Desktop".
+ */
+export async function enqueueLyricsTranscription(
+  audioAbsPath: string,
+): Promise<{ ok: true; jobId: string } | { ok: false; error: string; code?: string }> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/transcribe-lyrics`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audioAbsPath }),
+      cache: 'no-store',
+    })
+    if (res.status === 404) {
+      return { ok: false, error: 'Update BarBro Desktop to use lyrics.', code: 'OUTDATED_DESKTOP' }
+    }
+    const data = (await res.json().catch(() => null)) as
+      | { ok: boolean; jobId?: string; error?: string; code?: string }
+      | null
+    if (!res.ok || !data?.ok || !data.jobId) {
+      return {
+        ok: false,
+        error: data?.error || `Transcription request failed (HTTP ${res.status})`,
+        ...(data?.code ? { code: data.code } : {}),
+      }
+    }
+    return { ok: true, jobId: data.jobId }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
 }
 
 // ── Piper TTS (desktop `piper_tts/` module) ─────────────────────────────────

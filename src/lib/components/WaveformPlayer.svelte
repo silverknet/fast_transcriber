@@ -21,12 +21,13 @@
     clientXToTimeInView,
     timeToPxInView,
   } from '$lib/audio/timeGeometry'
+  import type { BlockWaveformData } from '$lib/audio/waveformBlocks'
   import { drawPeaksToCanvas } from '$lib/audio/waveformDraw'
   import {
     hitTestSelectionTarget,
     hitTestViewportTarget,
   } from '$lib/audio/waveformInteraction'
-  import { computePeaks, computePeaksForTimeRange } from '$lib/audio/waveformPeaks'
+  import { computeStablePeaksForTimeRange } from '$lib/audio/waveformPeaks'
   import {
     clampSelectionToTimeline,
     MIN_SELECTION_SPAN_SEC,
@@ -125,10 +126,16 @@
     selectedBeatId = $bindable<string | null>(null),
     /** Resolved + formatted chord label per beat (carry-forward included). */
     chordLabelByBeatId = {} as Record<string, string>,
+    /** Playback overview: formatted current chord per beat, usually carry-forward resolved. */
+    currentChordLabelByBeatId = {} as Record<string, string>,
     /** Per-bar chord suggestions from cached chroma, keyed by downbeat id (chords mode only). */
     chordSuggestionByBeatId = {} as Record<string, { label: string; confidence: number }>,
     /** Chords mode: pointer position when user picks a beat (popover anchor). */
     onChordBeatInteract = undefined as
+      | ((detail: { clientX: number; clientY: number }) => void)
+      | undefined,
+    /** Chords mode: context menu request on the beat strip. */
+    onChordContextMenu = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
     /**
@@ -150,6 +157,12 @@
      * local fallback so the binding still has a target.
      */
     controller: passedController = null as PlaybackController | null,
+    /**
+     * Optional playback-only buffer override. `undefined` means use the decoded
+     * source buffer; `null` means playback is intentionally unavailable
+     * (for example while a transposed cache is rendering).
+     */
+    playbackAudioBufferOverride = undefined as AudioBuffer | null | undefined,
     /**
      * Grid mode: ghost ticks for the song's count-in beats, in
      * original-time. Each tick = one pre-song click. When the user
@@ -273,12 +286,14 @@
   // —— Waveform assets ——
   /** Kept for recomputing peaks when the container resizes (full file → fit width). */
   let decodedAudioBuffer = $state<AudioBuffer | null>(null)
-  let peaks = $state<Float32Array | null>(null)
+  let peaks = $state<BlockWaveformData | null>(null)
   /** Detail canvas width in CSS px — fits available viewport width. */
   let waveWidth = $state(0)
   /** Full-timeline overview for minimap (low bucket count). */
-  let overviewPeaks = $state<Float32Array | null>(null)
+  let overviewPeaks = $state<BlockWaveformData | null>(null)
   let overviewWidth = $state(0)
+  let mainFramesPerBlock = $state(0)
+  let overviewFramesPerBlock = $state(0)
   /** Visible time window [viewStart, viewEnd] (sec). Sub-range = zoomed detail; full file = [0, duration]. */
   let viewStart = $state(0)
   let viewEnd = $state(0)
@@ -320,7 +335,26 @@
     controller?.setAudioElement(audioEl ?? null)
   })
   $effect(() => {
-    controller?.setAudioBuffer(decodedAudioBuffer)
+    // Depend ONLY on the buffer inputs. Transport state is read inside
+    // `untrack` — tracking `isPlaying` here is the documented anti-pattern that
+    // killed the source `play()` had just started.
+    const nextBuf =
+      playbackAudioBufferOverride === undefined ? decodedAudioBuffer : playbackAudioBufferOverride
+    if (!controller) return
+    untrack(() => {
+      const prev = controller.audioBuffer
+      if (prev === nextBuf) return // no real change (e.g. re-run with same buffer)
+      const wasPlaying = controller.isPlaying
+      const resumeAt = wasPlaying ? controller.currentTime : 0
+      controller.setAudioBuffer(nextBuf) // stops playback if this was a mid-play swap
+      // Seamless transpose: resume where we were instead of silently stopping,
+      // so changing semitones (or resetting to 0) doesn't look like "nothing
+      // happened" while playing.
+      if (wasPlaying && nextBuf) {
+        controller.seek(resumeAt)
+        controller.play()
+      }
+    })
   })
 
   /** @type {'idle' | 'maybe-seek' | 'create-selection' | 'move-selection' | 'resize-selection-left' | 'resize-selection-right'} */
@@ -341,7 +375,7 @@
     downClientX: 0,
     viewAtDown: { start: 0, end: 0 },
   }
-  /** Coalesce `computePeaksForTimeRange` during rapid zoom/pan (wheel can fire far above display refresh). */
+  /** Coalesce stable waveform recomputes during rapid zoom/pan (wheel can fire far above display refresh). */
   let mainPeaksRafId = 0
   /** Past this, empty-area drag becomes “new selection” instead of tap-to-seek (jitter tolerance). */
   const TAP_VS_SELECT_PX = 22
@@ -498,7 +532,9 @@
     const d = buf.duration
     const vs = viewEnd > viewStart ? viewStart : 0
     const ve = viewEnd > viewStart ? viewEnd : d
-    peaks = computePeaksForTimeRange(buf, vs, ve, w)
+    const next = computeStablePeaksForTimeRange(buf, vs, ve, w, mainFramesPerBlock)
+    peaks = next.waveform
+    mainFramesPerBlock = next.framesPerBlock
     redrawCanvas()
   }
 
@@ -524,6 +560,25 @@
     const next = clampSelectionToTimeline(timelineSec, start, end, MIN_SELECTION_SPAN_SEC)
     rangeStart = next.start
     rangeEnd = next.end
+  }
+
+  function beatIdAtTime(beats: Beat[], timeSec: number): string | null {
+    if (beats.length === 0) return null
+    let lo = 0
+    let hi = beats.length - 1
+    let best = -1
+    const t = Math.max(0, timeSec)
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2)
+      const beat = beats[mid]!
+      if (beat.timeSec <= t + 1e-4) {
+        best = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    return best >= 0 ? beats[best]!.id : null
   }
 
   function setViewport(start, end) {
@@ -574,6 +629,36 @@
       ? (Math.max(0, Math.min(currentTime, timelineSec)) / timelineSec) * 100
       : 0,
   )
+  let playbackBeats = $derived.by(() => (beatGrid ? sortBeatsByTime(beatGrid.beats) : []))
+  let overviewChordDataCount = $derived.by(
+    () =>
+      Object.keys(currentChordLabelByBeatId).length + Object.keys(chordLabelByBeatId).length,
+  )
+  let hasOverviewChordData = $derived(overviewChordDataCount > 0)
+  let showOverviewChordReadout = $derived(
+    isEditorVariant && playbackBeats.length > 0 && (hasOverviewChordData || isPlaying),
+  )
+  let overviewChordTimeCandidates = $derived.by(() => {
+    const offset = controller.mediaTimeOffsetSec
+    const candidates = [currentTime]
+    if (Math.abs(offset) > 1e-6) {
+      candidates.push(currentTime - offset, currentTime + offset)
+    }
+    return candidates
+  })
+  let currentOverviewChordLabel = $derived.by(() => {
+    if (!showOverviewChordReadout || !hasOverviewChordData || playbackBeats.length === 0) return ''
+    for (const timeSec of overviewChordTimeCandidates) {
+      if (!Number.isFinite(timeSec)) continue
+      const beatId = beatIdAtTime(playbackBeats, timeSec)
+      if (!beatId) continue
+      const label = currentChordLabelByBeatId[beatId] ?? chordLabelByBeatId[beatId] ?? ''
+      if (label) return label
+    }
+    return ''
+  })
+  let overviewChordDisplayLabel = $derived(currentOverviewChordLabel || '-')
+  let overviewChordStatusLabel = $derived(isPlaying ? 'Playing chord' : 'Current chord')
 
   /** Time range [startSec, endSec) of the current edit-mode selection (sections or chords). */
   let editSelectionTimeSec = $derived.by((): { startSec: number; endSec: number } | null => {
@@ -938,6 +1023,10 @@
     error = ''
     peaks = null
     waveWidth = 0
+    overviewPeaks = null
+    overviewWidth = 0
+    mainFramesPerBlock = 0
+    overviewFramesPerBlock = 0
     decodedAudioBuffer = null
     timelineSec = 0
     decodedDuration = 0
@@ -1019,6 +1108,8 @@
       waveWidth = 0
       overviewPeaks = null
       overviewWidth = 0
+      mainFramesPerBlock = 0
+      overviewFramesPerBlock = 0
       decodedAudioBuffer = null
       viewStart = 0
       viewEnd = 0
@@ -1097,7 +1188,9 @@
       /** Must match minimap inner width: a hard cap (previously 800px) left empty space on wide layouts so the viewport box did not align with the overview waveform. */
       const w = Math.max(120, Math.min(raw, MAX_WAVE_WIDTH_PX))
       overviewWidth = w
-      overviewPeaks = computePeaks(buf, w)
+      const next = computeStablePeaksForTimeRange(buf, 0, buf.duration, w, overviewFramesPerBlock)
+      overviewPeaks = next.waveform
+      overviewFramesPerBlock = next.framesPerBlock
       redrawOverviewCanvas()
     }
 
@@ -1477,6 +1570,22 @@
     controller.play()
   }
 
+  function playFromSelectedChordBeat() {
+    if (!mediaReady || !(timelineSec > 0) || timelineStripMode !== 'chords' || !selectedBeatId) {
+      togglePlay()
+      return
+    }
+    const beat = beatGrid?.beats.find((b) => b.id === selectedBeatId)
+    if (!beat) {
+      togglePlay()
+      return
+    }
+    const t = Math.max(rangeStart, Math.min(beat.timeSec, rangeEnd > rangeStart ? rangeEnd - 0.02 : timelineSec))
+    if (isPlaying) controller.pause()
+    controller.seek(t)
+    controller.play()
+  }
+
   function keyTargetIsEditable(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false
     if (target.isContentEditable) return true
@@ -1490,7 +1599,7 @@
       if (e.key !== ' ' || e.repeat) return
       if (keyTargetIsEditable(e.target)) return
       e.preventDefault()
-      togglePlay()
+      playFromSelectedChordBeat()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -1789,8 +1898,8 @@
       </summary>
       <p class="text-muted-foreground mt-2 text-left leading-relaxed">
         {#if isEditorVariant}
-          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select; click a beat to edit
-          chords. Esc clears selection.
+          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select. In chord mode,
+          double-click/tap edits and Space plays from the selected beat. Esc clears selection.
         {:else}
           Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag handles to adjust the selection; drag the minimap
           to move around.
@@ -1824,6 +1933,7 @@
           onSectionsSeekCommit={timelineStripMode === 'sections' ? seekToSectionsSelection : undefined}
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}
           onChordBeatInteract={onChordBeatInteract}
+          onChordContextMenu={onChordContextMenu}
           suggestionPreview={suggestionPreview}
           onAcceptSuggestion={onAcceptSuggestion}
           onDismissSuggestion={onDismissSuggestion}
@@ -2123,14 +2233,26 @@
     </div>
 
     <div class="flex flex-col gap-1.5">
-      <p class="text-muted-foreground text-[10px]">
-        {#if isEditorVariant}
-          Overview — full timeline · shaded = selection · bright box = detail viewport (same navigation as import)
-        {:else}
-          Overview — full file · shaded = selection · bright box = detail viewport (drag body, resize grips, click outside
-          to recenter)
+      <div class="flex min-h-5 items-center justify-between gap-3">
+        <p class="text-muted-foreground text-[10px]">
+          {#if isEditorVariant}
+            Overview — full timeline · shaded = selection · bright box = detail viewport (same navigation as import)
+          {:else}
+            Overview — full file · shaded = selection · bright box = detail viewport (drag body, resize grips, click outside
+            to recenter)
+          {/if}
+        </p>
+        {#if showOverviewChordReadout}
+          <div
+            class="border-foreground bg-primary text-primary-foreground brutalist-shadow-sm inline-flex shrink-0 items-center gap-2 rounded-[var(--radius)] border-2 px-2.5 py-1 text-[11px] font-black"
+            aria-live="polite"
+            aria-label={`Current chord: ${overviewChordDisplayLabel}`}
+          >
+            <span class="opacity-80">{overviewChordStatusLabel}</span>
+            <span class="font-mono text-sm tabular-nums">{overviewChordDisplayLabel}</span>
+          </div>
         {/if}
-      </p>
+      </div>
       <div
         bind:this={minimapEl}
         class="text-foreground border-foreground/15 bg-foreground/5 relative h-[52px] w-full overflow-hidden overscroll-x-contain rounded-md border {minimapCursorClass}"

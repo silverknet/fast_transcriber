@@ -23,6 +23,11 @@ export interface ProjectSongMetadataInfo {
   title: string
   artist?: string
   keyDetail?: SongKey
+  /** Auto-detected key from `chordHints` (shown dimmed until confirmed). */
+  detectedKey?: SongKey
+  /** True when the song has an analyzed beat grid (bars present). */
+  analyzed?: boolean
+  transposeSemitones?: number
   bpm?: number
   /** Count-in beats when `cues.mode === 'countIn'`; 0/absent otherwise. */
   countInBeats?: number
@@ -32,6 +37,7 @@ export interface ProjectSongMetadataInfo {
    * `audio` block at all — these report `hasAudio !== true`.
    */
   hasAudio?: boolean
+  audioDurationSec?: number
   stemRefs?: StemRefs
   hasSmap: boolean
   hasAls: boolean
@@ -108,6 +114,30 @@ export async function getProjectInfo(projectPath: string): Promise<ProjectInfoRe
  */
 export async function watchProjectForAutoStems(projectPath: string): Promise<ProjectOkResult> {
   return await postJson<ProjectOkResult>(`${BASE_URL}/native/auto-stems/watch`, { projectPath })
+}
+
+/**
+ * Per-machine opt-out: stop auto-preparing stems for a project on THIS device.
+ * The shared project config is untouched.
+ */
+export async function unwatchProjectForAutoStems(projectPath: string): Promise<ProjectOkResult> {
+  return await postJson<ProjectOkResult>(`${BASE_URL}/native/auto-stems/unwatch`, { projectPath })
+}
+
+/**
+ * Whether this machine is currently auto-preparing stems for `projectPath`
+ * (reads the sidecar's per-machine watch list). Used to seed the settings
+ * toggle. Best-effort — returns false if the sidecar is unreachable.
+ */
+export async function isProjectAutoStemsWatched(projectPath: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/auto-stems/status`, { cache: 'no-store' })
+    if (!res.ok) return false
+    const data = (await res.json()) as { watched?: string[] }
+    return Array.isArray(data.watched) && data.watched.includes(projectPath)
+  } catch {
+    return false
+  }
 }
 
 export async function writeProjectManifest(
@@ -318,6 +348,22 @@ export type TranscodeToWavResult =
   | { ok: true; cached: boolean }
   | { ok: false; error: string }
 
+export type PitchShiftCacheResult =
+  | {
+      ok: true
+      cached: boolean
+      relPath: string
+      sampleRate?: number
+      durationSec?: number
+      frames?: number
+      engine?: string
+      algo?: string
+      bypassed?: boolean
+      normalizedInput?: boolean
+      repaired?: boolean
+    }
+  | { ok: false; error: string }
+
 /**
  * Transcode a compressed audio file (typically MP3) to 16-bit PCM WAV
  * inside the project tree. Cache-aware via sidecar mtime check — the
@@ -337,6 +383,24 @@ export async function transcodeProjectAudioToWav(
     songFolder,
     srcSubpath,
     dstSubpath,
+  })
+}
+
+/**
+ * Build/read a local tempo-preserved pitch-shift WAV cache for project audio.
+ * Semitone 0 should bypass this helper and use the original file directly.
+ */
+export async function ensureProjectPitchShiftCache(
+  projectPath: string,
+  songFolder: string,
+  srcSubpath: string,
+  semitones: number,
+): Promise<PitchShiftCacheResult> {
+  return await postJson<PitchShiftCacheResult>(`${BASE_URL}/native/project/pitch-shift-cache`, {
+    projectPath,
+    songFolder,
+    srcSubpath,
+    semitones,
   })
 }
 

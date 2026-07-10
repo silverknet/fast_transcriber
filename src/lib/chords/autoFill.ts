@@ -146,6 +146,26 @@ function buildProposal(
 }
 
 /**
+ * Build an explicit source-section → target-section copy proposal.
+ *
+ * This is the user-driven sibling of `proposeChordAutoFillCandidates`: same
+ * mapping rules, but no ranking or section-kind restriction. It still keeps
+ * the non-destructive behavior of skipping target beats that already have an
+ * explicit chord.
+ */
+export function proposeChordSectionCopy(
+  songMap: SongMap,
+  sourceSectionId: string,
+  targetSectionId: string,
+): ChordAutoFillProposal | null {
+  if (sourceSectionId === targetSectionId) return null
+  const source = songMap.sections.find((s) => s.id === sourceSectionId)
+  const target = songMap.sections.find((s) => s.id === targetSectionId)
+  if (!source || !target) return null
+  return buildProposal(songMap, source, target)
+}
+
+/**
  * For a given beat in the song, look up the chord placed at the
  * matching `(barOffsetWithinSection, indexInBar)` of an EARLIER same-kind
  * section. Returns null when:

@@ -34,7 +34,7 @@
 
 {#if visible}
   <div
-    class="bg-foreground text-background flex h-11 items-center gap-3 px-3 text-sm"
+    class="project-context-bar text-foreground flex h-8 items-center gap-3 px-3 text-sm"
     role="navigation"
     aria-label="Project context"
   >
@@ -46,7 +46,7 @@
     -->
     <button
       type="button"
-      class="text-background hover:bg-background/10 -my-1 inline-flex shrink-0 items-center gap-1.5 px-2 py-1 text-sm font-semibold transition-colors"
+      class="hover:bg-accent inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[var(--radius)] px-2 text-sm font-bold transition-colors"
       onclick={() => void backToProject()}
       aria-label="Back to project {projectName}"
     >
@@ -56,7 +56,7 @@
 
     <!-- Vertical divider — inset top/bottom so it doesn't touch the bar edges. -->
     <span
-      class="bg-background/30 h-5 w-px shrink-0"
+      class="bg-foreground/25 h-5 w-px shrink-0"
       aria-hidden="true"
     ></span>
 
@@ -65,8 +65,18 @@
       <span class="truncate font-semibold tracking-tight">{projectName}</span>
       {#if songTitle}
         <span class="opacity-50" aria-hidden="true">/</span>
-        <span class="text-background/80 truncate font-mono text-xs">{songTitle}</span>
+        <span class="text-muted-foreground truncate font-mono text-xs">{songTitle}</span>
       {/if}
     </div>
   </div>
 {/if}
+
+<style>
+  .project-context-bar {
+    background: color-mix(in oklch, var(--studio-orange) 5%, var(--card));
+  }
+
+  :global(.dark) .project-context-bar {
+    background: color-mix(in oklch, var(--studio-orange) 8%, var(--card));
+  }
+</style>

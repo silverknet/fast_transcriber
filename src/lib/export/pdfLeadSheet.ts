@@ -5,6 +5,11 @@ import {
   harmonyByBarId,
   sectionAtBar,
 } from '$lib/leadsheet/iterate'
+import {
+  effectiveTransposeSemitones,
+  transposeChordForDisplay,
+  transposeSongKey,
+} from '$lib/songmap/transposition'
 
 const PAGE_W = 210
 const PAGE_H = 297
@@ -96,6 +101,10 @@ export async function renderLeadSheetPdf(songMap: SongMap): Promise<Blob> {
 
   const beats = beatById(songMap)
   const harmonies = harmonyByBarId(songMap)
+  const transposeSemitones = effectiveTransposeSemitones(songMap)
+  const displayedKey = songMap.metadata.keyDetail
+    ? transposeSongKey(songMap.metadata.keyDetail, transposeSemitones)
+    : null
 
   const pdf = new jsPDF('p', 'mm', [PAGE_W, PAGE_H])
   const usableWidth = PAGE_W - MARGIN_L - MARGIN_R
@@ -120,8 +129,8 @@ export async function renderLeadSheetPdf(songMap: SongMap): Promise<Blob> {
         y += 5
       }
 
-      const keyStr = songMap.metadata.keyDetail
-        ? `${songMap.metadata.keyDetail.root}${songMap.metadata.keyDetail.accidental === 'sharp' ? '#' : songMap.metadata.keyDetail.accidental === 'flat' ? 'b' : ''} ${songMap.metadata.keyDetail.mode}`
+      const keyStr = displayedKey
+        ? `${displayedKey.root}${displayedKey.accidental === 'sharp' ? '#' : displayedKey.accidental === 'flat' ? 'b' : ''} ${displayedKey.mode}`
         : songMap.metadata.key || ''
       const bpmStr = songMap.metadata.bpm ? `${Math.round(songMap.metadata.bpm)} BPM` : ''
       const meta = [keyStr, bpmStr].filter(Boolean).join('  |  ')
@@ -182,7 +191,8 @@ export async function renderLeadSheetPdf(songMap: SongMap): Promise<Blob> {
           const offset = harmonyBeatOffset(h, beats)
           const ratio = offset / Math.max(1, bar.meter.numerator)
           const chordX = barX + 2 + ratio * (barWidth - 4)
-          pdf.text(h.chord.displayRaw || h.chord.root, chordX, staffY - CHORD_Y_ABOVE)
+          const chord = transposeChordForDisplay(h.chord, transposeSemitones, displayedKey ?? undefined)
+          pdf.text(chord.displayRaw || chord.root, chordX, staffY - CHORD_Y_ABOVE)
         }
 
         const numSlashes = Math.max(1, bar.beatCount || bar.meter.numerator)

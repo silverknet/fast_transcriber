@@ -16,9 +16,12 @@ the local chord README.
 - Cached analyzer output lives in `SongMapV1.chordHints`.
 - Client-side suggestion ranking lives in
   [`../../src/lib/chords/suggestFromChroma.ts`](../../src/lib/chords/suggestFromChroma.ts):
-  triad-only chroma fit × 1.15 diatonic bias × 1.40 same-kind-section
-  bias (the section bias copies an earlier same-kind section's
-  user-placed chord). Each bias is toggleable via `SuggestOptions`.
+  60-template chroma fit (12 roots × major/minor/dom7/min7/maj7) ×
+  quality-aware key bias (chord-in-key 1.22×, root-only 1.05×) × 1.40
+  same-kind-section bias (the section bias copies an earlier same-kind
+  section's user-placed chord). Confidence gates on the margin against
+  the best *different* chord (a triad vs its own 7th counts as
+  agreement). Each bias is toggleable via `SuggestOptions`.
 - Suggestions are surfaced in the timeline and chord radial picker
   (primary + up to 4 alternates + a 7th-variants row).
 - [`/debug/chord-bias`](../../src/routes/debug/chord-bias/+page.svelte)
@@ -36,13 +39,14 @@ acceptance. Treat it as a manual chord placement accelerator:
 ## Highest-Value Next Work
 
 Done since last revision: stem-aware chroma, same-kind-section bias,
-7th *variants* in the radial, and the `/debug/chord-bias` A/B harness.
-Remaining:
+7th *variants* in the radial, the `/debug/chord-bias` A/B harness,
+**7th templates in the matcher (maj7/min7/dom7)**, and the
+**quality-aware diatonic bias**. Remaining:
 
 1. Detect half-bar two-chord cases.
 2. Add one-click ghost commit affordances.
-3. Add maj7/min7/dom7/sus templates **to the matcher** (the radial only
-   offers variants of the suggested root; the model can't detect a 7th).
+3. Add sus2/sus4/dim templates to the matcher (7ths landed; sus/dim
+   still only reachable via the radial variants / search).
 4. Revisit section-level accept with clear preview.
 5. Per-section key fit / modulation detection (the section bias reuses
    patterns but does not detect modulation).

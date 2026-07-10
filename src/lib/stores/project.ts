@@ -20,6 +20,7 @@ export interface ProjectSongMetadataLite {
   title: string
   artist?: string
   keyDetail?: SongKey
+  transposeSemitones?: number
   bpm?: number
   /**
    * Count-in beats from `cues.countInBeats` when `cues.mode === 'countIn'`.
@@ -59,6 +60,25 @@ export interface ProjectSongMetadataLite {
    * the project card until the user opens them in the editor and uploads.
    */
   hasAudio?: boolean
+  /**
+   * True once the song has a beat grid (`metadata.analyzed` or bars present).
+   * Drives the "Not analyzed" state on the project card so users can tell an
+   * un-analyzed song apart from an analyzed one that just has no key yet.
+   */
+  analyzed?: boolean
+  /**
+   * Key from the cached chord-chroma analysis (`chordHints.detectedKey`).
+   * Shown on the card when there's no committed `keyDetail`, and populated
+   * for every analyzed song by the background key-detection pass
+   * (`keyBackfill.ts`).
+   */
+  detectedKey?: SongKey
+  /**
+   * True when the key shown on the card is the DETECTED one (no committed
+   * `keyDetail`) — the card renders it in a muted style to distinguish
+   * "detected" from "set".
+   */
+  keyIsDetected?: boolean
 }
 
 export type ProjectEditingMode = 'project-song' | 'standalone' | null

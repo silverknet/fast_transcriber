@@ -41,6 +41,14 @@ export interface CloudMemberRow {
   added_at: string
 }
 
+export interface CloudMemberProfile {
+  display_name: string | null
+  email: string | null
+  avatar_url: string | null
+}
+
+export type CloudMemberViewRow = CloudMemberRow & CloudMemberProfile
+
 // ── Reads ──────────────────────────────────────────────────────────────
 
 export async function listMemberProjects(
@@ -101,6 +109,52 @@ export async function listCloudMembers(
     .order('added_at', { ascending: true })
   if (error) throw new Error(error.message)
   return (data ?? []) as CloudMemberRow[]
+}
+
+function metadataString(metadata: unknown, key: string): string | null {
+  if (!metadata || typeof metadata !== 'object') return null
+  const value = (metadata as Record<string, unknown>)[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+/**
+ * Enrich membership rows with Supabase Auth profile data. This must use
+ * the service-role client; the public members table intentionally stores
+ * only `user_id`.
+ */
+export async function resolveCloudMemberProfiles(
+  service: SupabaseClient,
+  members: CloudMemberRow[],
+): Promise<CloudMemberViewRow[]> {
+  if (members.length === 0) return []
+
+  return Promise.all(
+    members.map(async (member) => {
+      const fallback: CloudMemberViewRow = {
+        ...member,
+        display_name: null,
+        email: null,
+        avatar_url: null,
+      }
+
+      try {
+        const { data, error } = await service.auth.admin.getUserById(member.user_id)
+        if (error || !data?.user) return fallback
+
+        const user = data.user
+        return {
+          ...member,
+          display_name:
+            metadataString(user.user_metadata, 'full_name') ??
+            metadataString(user.user_metadata, 'name'),
+          email: user.email?.trim() || null,
+          avatar_url: metadataString(user.user_metadata, 'avatar_url'),
+        }
+      } catch {
+        return fallback
+      }
+    }),
+  )
 }
 
 // ── Writes via RPC (atomic with revision bump + log) ───────────────────

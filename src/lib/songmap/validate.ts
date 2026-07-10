@@ -6,10 +6,12 @@ import type {
   CueEvent,
   CueTrack,
   HarmonyEvent,
+  Lyrics,
   Section,
   SongKey,
   SongMap,
   SongMetadata,
+  SongTranspose,
 } from './types'
 
 export type ValidationResult = {
@@ -36,6 +38,33 @@ function validateMetadata(m: SongMetadata, path: string, errors: string[]) {
   if (typeof m.createdAt !== 'string') errors.push(`${path}.createdAt must be ISO string`)
   if (typeof m.updatedAt !== 'string') errors.push(`${path}.updatedAt must be ISO string`)
   if (m.keyDetail != null) validateSongKey(m.keyDetail, `${path}.keyDetail`, errors)
+}
+
+function validateTranspose(t: SongTranspose | undefined, path: string, errors: string[]) {
+  if (t === undefined) return
+  if (!Number.isInteger(t.baseSemitones)) {
+    errors.push(`${path}.baseSemitones must be an integer`)
+  } else if (t.baseSemitones < -12 || t.baseSemitones > 12) {
+    errors.push(`${path}.baseSemitones must be between -12 and 12`)
+  }
+}
+
+function validateLyrics(l: Lyrics | undefined, path: string, errors: string[]) {
+  if (l === undefined) return
+  if (typeof l.sourceText !== 'string') errors.push(`${path}.sourceText must be a string`)
+  if (!Array.isArray(l.words)) {
+    errors.push(`${path}.words must be an array`)
+    return
+  }
+  for (let i = 0; i < l.words.length; i++) {
+    const w = l.words[i]!
+    const p = `${path}.words[${i}]`
+    if (typeof w.text !== 'string' || !w.text) errors.push(`${p}.text required`)
+    if (!isFiniteNumber(w.startSec) || w.startSec < 0) errors.push(`${p}.startSec invalid`)
+    if (!isFiniteNumber(w.endSec)) errors.push(`${p}.endSec invalid`)
+    else if (w.endSec <= w.startSec) errors.push(`${p}.endSec must be > startSec`)
+    if (!Number.isInteger(w.line) || w.line < 0) errors.push(`${p}.line invalid`)
+  }
 }
 
 function validateBar(bar: Bar, path: string, errors: string[]) {
@@ -200,6 +229,8 @@ export function validateSongMap(map: SongMap): ValidationResult {
   }
 
   validateMetadata(map.metadata, 'metadata', errors)
+  validateTranspose(map.transpose, 'transpose', errors)
+  validateLyrics(map.lyrics, 'lyrics', errors)
 
   const bars = map.timeline?.bars
   const beats = map.timeline?.beats

@@ -23,6 +23,7 @@
   } from '$lib/components/ui/dropdown-menu'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
   import type { ProjectSongEntry } from '$lib/project/types'
+  import { formatTransposeLabel, transposeSongKey } from '$lib/songmap/transposition'
   import type { ProjectSongMetadataLite } from '$lib/stores/project'
   import { stemJobs, type StemJobEntry } from '$lib/stores/stemJobs'
   import {
@@ -76,7 +77,30 @@
 
   let title = $derived(metadata?.title ?? entry.folder.replace(/^songs\//, ''))
   let artist = $derived(metadata?.artist ?? '')
-  let keyText = $derived(formatKey(metadata?.keyDetail))
+  let transposeSemitones = $derived(metadata?.transposeSemitones ?? 0)
+  // Show the committed key if set, otherwise the auto-detected one (rendered
+  // muted so "detected" reads differently from "confirmed").
+  let sourceKey = $derived(metadata?.keyDetail ?? metadata?.detectedKey)
+  let displayedKey = $derived(
+    sourceKey && transposeSemitones !== 0 ? transposeSongKey(sourceKey, transposeSemitones) : sourceKey,
+  )
+  let keyText = $derived.by(() => {
+    const key = formatKey(displayedKey)
+    const tr = transposeSemitones !== 0 ? formatTransposeLabel(transposeSemitones) : ''
+    return [key, tr].filter(Boolean).join(' ')
+  })
+  let keyIsDetected = $derived(!metadata?.keyDetail && !!metadata?.detectedKey)
+  let keyTitle = $derived.by(() => {
+    if (!sourceKey && transposeSemitones === 0) return undefined
+    const detected = keyIsDetected ? 'Detected key' : 'Key'
+    const source = formatKey(sourceKey)
+    const displayed = formatKey(displayedKey)
+    if (transposeSemitones === 0) return keyIsDetected ? `${detected} automatically — open the song to confirm` : undefined
+    return `${detected}: ${displayed || 'unknown'} (${formatTransposeLabel(transposeSemitones)}). Original: ${source || 'unknown'}.`
+  })
+  // Songs with audio but no beat grid yet — surfaced clearly so a blank
+  // key/BPM doesn't look broken.
+  let notAnalyzed = $derived(!!metadata?.hasAudio && metadata?.analyzed === false)
   // BPM column is narrow (~40 px), so we display the rounded integer and put
   // the precise value in `title` for hover — keeps "120" or "92" visible
   // without truncating songs whose detector returned "120.5", "91.73", etc.
@@ -137,7 +161,7 @@
 -->
 <li
   data-song-id={entry.id}
-  class="border-foreground border-b-2 last:border-b-0 py-1.5 {entry.hidden ? 'opacity-60' : ''}"
+  class="project-song-row border-foreground border-b-2 last:border-b-0 py-1.5 {entry.hidden ? 'opacity-60' : ''}"
 >
   <!-- ── Thin row aligned to the column header ──────────────────────────── -->
   <!--
@@ -178,6 +202,13 @@
       {#if entry.hidden}
         <span class="border-foreground/40 text-muted-foreground shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider">hidden</span>
       {/if}
+      {#if notAnalyzed}
+        <!-- Has audio but no beat grid yet — make it obvious the blanks aren't a bug. -->
+        <span
+          class="border-amber-500/60 text-amber-700 dark:text-amber-400 shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider"
+          title="This song has audio but hasn't been analyzed yet — open it to detect beats, bars and key."
+        >Not analyzed</span>
+      {/if}
       {#if !hasAudio}
         <!-- Inline upload affordance for stub songs. Triggers the project-level
              hidden file input via `onAttachAudio`; one click → file picker →
@@ -194,8 +225,13 @@
       {/if}
     </div>
 
-    <!-- Key column: musical key text, left-aligned, truncated. -->
-    <div class="text-muted-foreground min-w-0 truncate font-mono text-xs">
+    <!-- Key column: committed key, or the auto-detected key rendered muted. -->
+    <div
+      class="min-w-0 truncate font-mono text-xs {keyIsDetected
+        ? 'text-muted-foreground/60 italic'
+        : 'text-muted-foreground'}"
+      title={keyTitle}
+    >
       {keyText}
     </div>
     <!-- BPM column: rounded integer for column fit; precise value in tooltip. -->
@@ -213,32 +249,46 @@
       title={hasAudio ? 'Audio file: ready' : 'Audio file: not added yet'}
     >
       <span
-        class="size-2 shrink-0 rounded-full {hasAudio ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        class="studio-light {hasAudio ? 'bg-emerald-500' : 'bg-foreground/20'}"
         aria-label={`audio: ${hasAudio ? 'ready' : 'not added yet'}`}
       ></span>
     </span>
 
     <!-- Per-stem dots (one per STEM_TRACKS entry, in column order). While a
-         stem job is in flight for this song, not-yet-present stems glow amber
-         ("in progress") instead of grey ("not generated"). -->
+         stem job is in flight for this song: not-yet-present stems glow amber
+         ("in progress") instead of grey ("not generated"); already-present
+         stems being re-rendered at higher quality show half green / half
+         amber ("ready, upgrading"). -->
     {#each stemPresence as s (s.name)}
       {@const demucs = SLOT_TO_DEMUCS[s.name]}
-      {@const stemInProgress = !s.present && !!demucs && inProgressStems.has(demucs)}
+      {@const stemInProgress = !!demucs && inProgressStems.has(demucs)}
       <span
         class="flex min-w-0 justify-center"
         title={s.present
-          ? `${s.name}: ready`
+          ? stemInProgress
+            ? `${s.name}: ready — a better version is rendering…`
+            : `${s.name}: ready`
           : stemInProgress
             ? `${s.name}: in progress…`
             : `${s.name}: not generated`}
       >
         <span
-          class="size-2 shrink-0 rounded-full {s.present
-            ? 'bg-emerald-500'
+          class="studio-light {s.present
+            ? stemInProgress
+              ? 'studio-light-upgrading animate-pulse'
+              : 'bg-emerald-500'
             : stemInProgress
               ? 'animate-pulse bg-amber-400'
               : 'bg-foreground/20'}"
-          aria-label={`${s.name}: ${s.present ? 'ready' : stemInProgress ? 'in progress' : 'not generated'}`}
+          aria-label={`${s.name}: ${
+            s.present
+              ? stemInProgress
+                ? 'ready, better version rendering'
+                : 'ready'
+              : stemInProgress
+                ? 'in progress'
+                : 'not generated'
+          }`}
         ></span>
       </span>
     {/each}
@@ -249,7 +299,7 @@
       title={hasCueTrack ? 'Cue track: ready' : 'Cue track: not generated'}
     >
       <span
-        class="size-2 shrink-0 rounded-full {hasCueTrack ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        class="studio-light {hasCueTrack ? 'bg-emerald-500' : 'bg-foreground/20'}"
         aria-label={`cue: ${hasCueTrack ? 'ready' : 'not generated'}`}
       ></span>
     </span>
@@ -336,3 +386,40 @@
     </div>
   {/if}
 </li>
+
+<style>
+  .project-song-row {
+    background: var(--card);
+    transition: background-color 120ms ease;
+  }
+
+  .project-song-row:nth-child(even) {
+    background: color-mix(in oklch, var(--card) 78%, var(--muted));
+  }
+
+  .project-song-row:hover {
+    background: color-mix(in oklch, var(--studio-orange) 10%, var(--card));
+  }
+
+  .studio-light {
+    display: block;
+    width: 0.58rem;
+    height: 0.58rem;
+    flex-shrink: 0;
+    border: 1px solid color-mix(in oklch, var(--ink) 70%, transparent);
+    border-radius: 2px;
+    box-shadow: 1px 1px 0 var(--ink);
+  }
+
+  /* "Ready, but a better version is rendering": half green (you can play the
+     current stem) / half amber (work in flight). Diagonal split so it reads
+     at 0.58rem. Hex over theme vars: these match Tailwind's emerald-500 /
+     amber-400 used by the other dot states. */
+  .studio-light-upgrading {
+    background: linear-gradient(135deg, #10b981 0 50%, #fbbf24 50% 100%);
+  }
+
+  :global(.project-song-row [data-slot='button']) {
+    box-shadow: none;
+  }
+</style>

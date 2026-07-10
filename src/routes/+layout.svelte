@@ -137,7 +137,7 @@
       // user navigates here intentionally to look at typography, etc.
       const onDebugRoute = here?.startsWith('/debug')
       if (onAuthRoute || onDebugRoute) return
-      if (openedSong && here !== '/edit') {
+      if (openedSong && here !== '/edit' && here !== '/project/playback') {
         await goto('/edit', { replaceState: true })
       } else if (!openedSong && here === '/') {
         await goto('/project', { replaceState: true })
@@ -227,7 +227,7 @@
   // their own self-contained chrome: /download (sidecar install CTA),
   // /welcome (landing), /login, /pending. These pages should fill the
   // viewport without the app's regular menus floating on top.
-  let bareRouteIds = ['/download', '/welcome', '/login', '/pending']
+  let bareRouteIds = ['/download', '/welcome', '/login', '/pending', '/project/playback']
   let onBareRoute = $derived(bareRouteIds.includes($page.route?.id ?? ''))
   let showChrome = $derived(!onBareRoute)
 
@@ -262,6 +262,8 @@
     if (here?.startsWith('/auth')) return
     // /debug/* is for inspection — doesn't need the sidecar.
     if (here?.startsWith('/debug')) return
+    // /analyzing?preview is a standalone animation preview — no sidecar needed.
+    if (here === '/analyzing' && $page.url.searchParams.has('preview')) return
     // Four reasons to lock the user to /download:
     //   1. Sidecar unreachable (no companion running)
     //   2. Sidecar reachable but its version is below the web app's
@@ -287,7 +289,7 @@
 </svelte:head>
 
 <!--
-  App frame: a rounded black outline that is static against the viewport.
+  App frame: a black studio outline that is static against the viewport.
   The body itself doesn't scroll; the `.app-scroll` div below the chrome
   is the only scrollable area. That way the frame and the chrome stay
   pinned no matter how long the page content gets.
@@ -296,9 +298,9 @@
   scroll area — no per-bar `top-N` offsets anywhere. Adding or removing
   a chrome row never requires touching another component.
 -->
-<div class="app-frame bg-background font-sans">
+<div class="app-frame bg-background font-sans" class:no-grid={onBareRoute}>
   {#if showChrome}
-    <div class="shrink-0">
+    <div class="relative z-20 shrink-0">
       <AppMenuBar />
       <DesktopUpdateBanner />
       <ProjectContextBar />
@@ -317,20 +319,59 @@
     overflow: hidden;
   }
   :global(body) {
-    /* The visible matte around the frame. */
-    background-color: var(--foreground);
-    padding: 12px;
+    /* Frame matte + edge padding REMOVED (kept for restore) — content now runs
+       edge-to-edge. Restore: padding: 10px; background-color: var(--ink); */
+    /* background-color: var(--ink); */
+    background-color: var(--background);
+    padding: 0;
   }
 
   .app-frame {
-    /* Static rounded outline around the entire app. Fills the body's
-       content area (viewport minus body padding) and is the flex column
-       that contains the chrome stack + scrollable content area. */
-    height: calc(100dvh - 24px);
+    /* App-frame outline REMOVED (kept for restore): the whole app now fills the
+       viewport edge-to-edge with no border/rounding. To bring the frame back,
+       restore the three commented values below (height, border, radius) and the
+       body padding + matte above. */
+    /* height: calc(100dvh - 20px); */
+    height: 100dvh;
     display: flex;
     flex-direction: column;
-    border: 2px solid var(--foreground);
-    border-radius: 14px;
+    /* border: 3px solid var(--ink); */
+    border: none;
+    /* border-radius: calc(var(--radius) * 1.5); */
+    border-radius: 0;
+    background-color: var(--background);
+    /* Subtle grid texture. Uses --foreground (NOT --ink) so it adapts per
+       theme: faint dark lines on light paper, faint light lines on the dark
+       background — otherwise the dark-mode grid vanishes into the bg. */
+    background-image:
+      repeating-linear-gradient(
+        90deg,
+        color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px,
+        transparent 1px 42px
+      ),
+      repeating-linear-gradient(
+        0deg,
+        color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px,
+        transparent 1px 42px
+      );
     overflow: clip;
+  }
+
+  /* Self-contained full-page routes (welcome / login / pending / download) have
+     their own backgrounds, so drop the frame's grid texture to avoid a double
+     grid. */
+  .app-frame.no-grid {
+    background-image: none;
+  }
+
+  @media (max-width: 640px) {
+    :global(body) {
+      padding: 6px;
+    }
+
+    .app-frame {
+      height: calc(100dvh - 12px);
+      border-width: 2px;
+    }
   }
 </style>

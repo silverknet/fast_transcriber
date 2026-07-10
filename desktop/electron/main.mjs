@@ -11,8 +11,8 @@
  * Port must stay in sync with `src/lib/client/desktopBeacon.ts`.
  */
 
-import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs'
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import archiver from 'archiver'
 import yauzl from 'yauzl'
 import http from 'node:http'
@@ -64,8 +64,25 @@ import {
   beatsMadmomReady,
   invalidateBeatsMadmomCache,
   writeBeatsVenvMarker,
+  rubberBandExePath,
+  expectedRubberBandBundledPath,
+  getLyricsVenvDir,
+  getLyricsVenvPythonExe,
+  getLyricsModelDir,
+  lyricsVenvIsReady,
+  pythonLyricsExe,
+  transcribeLyricsScriptPath,
 } from './nativePython.mjs'
-import { createAutoStemsDaemon } from './autoStems.mjs'
+import { createAutoStemsDaemon, isStemWavHealthy } from './autoStems.mjs'
+import {
+  RUBBERBAND_RENDER_TIMEOUT_MS,
+  RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+  buildRubberBandArgs,
+  classifyDurationAlignment,
+  normalizeTransposeSemitones,
+  transposeCacheSubpath,
+} from './transposeCache.mjs'
+import { createXAirClient } from './xairOsc.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -79,6 +96,12 @@ const LOG_PREFIX = '[barbro-desktop]'
 const logInfo = (...args) => console.info(LOG_PREFIX, ...args)
 const logWarn = (...args) => console.warn(LOG_PREFIX, ...args)
 const logError = (...args) => console.error(LOG_PREFIX, ...args)
+
+/** @type {ReturnType<typeof createXAirClient> | null} */
+let xairClient = null
+let xairLastMessageAt = null
+let xairLastMessage = null
+let xairLastError = null
 
 // Resilience net: this is a HEADLESS background sidecar. A crash takes down
 // the user's desktop client for every feature (analyze, stems, cloud FS), so
@@ -147,14 +170,199 @@ const MAX_REQUEST_BYTES = 200 * 1024 * 1024
  */
 const stemsJobs = new Map()
 const STEMS_JOB_TTL_MS = 30 * 60 * 1000
+const STEMS_JOB_RECOVERY_VERSION = 1
+const RECOVERABLE_STEM_NAMES = new Set(['vocals', 'drums', 'bass', 'other'])
+let stemsRecoveryInProgress = false
+
+function stemsJobRecoveryFilePath() {
+  return path.join(app.getPath('userData'), 'stems-job-recovery.json')
+}
+
+function normalizeRecoverableStemList(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : []
+  const stems = []
+  for (const item of raw) {
+    const stem = String(item ?? '').trim().toLowerCase()
+    if (RECOVERABLE_STEM_NAMES.has(stem) && !stems.includes(stem)) stems.push(stem)
+  }
+  return stems.length > 0 ? stems : ['vocals', 'drums', 'bass', 'other']
+}
+
+function normalizeRecoverableStemRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const inputPath = typeof raw.inputPath === 'string' ? raw.inputPath.trim() : ''
+  const outputDir = typeof raw.outputDir === 'string' ? raw.outputDir.trim() : ''
+  if (!path.isAbsolute(inputPath) || !path.isAbsolute(outputDir)) return null
+  const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : 'htdemucs_ft'
+  const shifts = Math.max(1, Math.min(20, Number.parseInt(String(raw.shifts ?? 5), 10) || 5))
+  const overlap = Math.max(0, Math.min(0.95, Number.parseFloat(String(raw.overlap ?? 0.25)) || 0.25))
+  const createdAt = Number.isFinite(raw.createdAt) ? Number(raw.createdAt) : Date.now()
+  return {
+    jobId: typeof raw.jobId === 'string' && raw.jobId ? raw.jobId : randomUUID(),
+    inputPath,
+    outputDir,
+    model,
+    shifts,
+    overlap,
+    stems: normalizeRecoverableStemList(raw.stems),
+    songId: typeof raw.songId === 'string' && raw.songId.trim() ? raw.songId.trim() : null,
+    createdAt,
+  }
+}
+
+function readRecoverableStemJobs() {
+  try {
+    const raw = JSON.parse(readFileSync(stemsJobRecoveryFilePath(), 'utf8'))
+    const jobs = Array.isArray(raw) ? raw : Array.isArray(raw?.jobs) ? raw.jobs : []
+    return jobs.map(normalizeRecoverableStemRecord).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function writeRecoverableStemJobs(records) {
+  try {
+    const file = stemsJobRecoveryFilePath()
+    mkdirSync(path.dirname(file), { recursive: true })
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(
+      tmp,
+      JSON.stringify({ version: STEMS_JOB_RECOVERY_VERSION, jobs: records }, null, 2),
+    )
+    renameSync(tmp, file)
+  } catch (e) {
+    logWarn(`stems: could not persist recovery state: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+function isRecoverableStemJob(job) {
+  return job && (!job.kind || job.kind === 'stems')
+}
+
+function rememberRecoverableStemJob(job) {
+  if (!isRecoverableStemJob(job)) return
+  const record = normalizeRecoverableStemRecord({
+    jobId: job.jobId,
+    inputPath: job.inputPath,
+    outputDir: job.outDir,
+    model: job.options?.model,
+    shifts: job.options?.shifts,
+    overlap: job.options?.overlap,
+    stems: job.options?.stems,
+    songId: job.songId,
+    createdAt: job.createdAt,
+  })
+  if (!record) return
+  const records = readRecoverableStemJobs().filter((r) => r.jobId !== record.jobId)
+  records.push(record)
+  writeRecoverableStemJobs(records)
+}
+
+function forgetRecoverableStemJob(jobOrId) {
+  const jobId = typeof jobOrId === 'string' ? jobOrId : jobOrId?.jobId
+  if (!jobId) return
+  const records = readRecoverableStemJobs()
+  const next = records.filter((r) => r.jobId !== jobId)
+  if (next.length !== records.length) writeRecoverableStemJobs(next)
+}
+
+function isRecoverableStemJobActive(record) {
+  const job = stemsJobs.get(record.jobId)
+  return isRecoverableStemJob(job) && (job.state === 'queued' || job.state === 'running' || job.state === 'paused')
+}
+
+function isRecoveredStemFileHealthy(filePath) {
+  try {
+    if (!existsSync(filePath)) return false
+    const info = readAudioInfo(filePath)
+    return isStemWavHealthy({ ...info, fileSize: statSync(filePath).size })
+  } catch {
+    return false
+  }
+}
+
+function missingRecoverableStemNames(record) {
+  return record.stems.filter((stem) => !isRecoveredStemFileHealthy(path.join(record.outputDir, `${stem}.wav`)))
+}
+
+async function recoverInterruptedStemJobs() {
+  if (stemsRecoveryInProgress) return
+  const allRecords = readRecoverableStemJobs()
+  if (allRecords.length === 0) return
+  if (!stemsVenvIsReady()) {
+    logInfo(`stems: ${allRecords.length} interrupted job(s) waiting for Demucs setup`)
+    return
+  }
+
+  stemsRecoveryInProgress = true
+  try {
+    const activeRecords = []
+    const staleRecords = []
+    for (const record of allRecords) {
+      if (isRecoverableStemJobActive(record)) activeRecords.push(record)
+      else staleRecords.push(record)
+    }
+    if (staleRecords.length === 0) return
+
+    const retryRecords = []
+    for (const record of staleRecords) {
+      if (!existsSync(record.inputPath)) {
+        logWarn(`stems: dropping interrupted job; source is missing: ${record.inputPath}`)
+        continue
+      }
+      const missing = missingRecoverableStemNames(record)
+      if (missing.length === 0) {
+        logInfo(`stems: interrupted job already has healthy output at ${record.outputDir}`)
+        continue
+      }
+      retryRecords.push({ ...record, stems: missing })
+    }
+
+    writeRecoverableStemJobs(activeRecords)
+    if (retryRecords.length === 0) return
+
+    const failed = []
+    let requeued = 0
+    for (const record of retryRecords) {
+      try {
+        const { jobId } = await createStemsJob({
+          inputPath: record.inputPath,
+          outputDir: record.outputDir,
+          model: record.model,
+          shifts: record.shifts,
+          overlap: record.overlap,
+          stems: record.stems.join(','),
+          songId: record.songId,
+        })
+        requeued += 1
+        logInfo(`stems: recovered interrupted job ${jobId.slice(0, 8)} (${record.stems.join(', ')})`)
+      } catch (e) {
+        failed.push(record)
+        logWarn(`stems: could not recover interrupted job: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    if (failed.length > 0) {
+      writeRecoverableStemJobs([...readRecoverableStemJobs(), ...failed])
+    }
+    if (requeued > 0) logInfo(`stems: requeued ${requeued} interrupted job(s)`)
+  } finally {
+    stemsRecoveryInProgress = false
+  }
+}
 
 /** Default Piper voice for debug + future cue tracks (`rhasspy/piper-voices` v1.0.0). */
 const PIPER_DEFAULT_VOICE_ID = 'en_US-lessac-medium'
 const PIPER_VOICE_DOWNLOAD_BASE =
   'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium'
 
-/** Currently-running job id (concurrency=1). null when idle. */
+/** Currently-running HEAVY job id (stems/youtube — concurrency=1). null when idle. */
 let activeJobId = null
+/** Currently-running LYRICS job id — its own lane, concurrent with the heavy lane. */
+let activeLyricsJobId = null
 
 function isTerminalState(state) {
   return state === 'done' || state === 'cancelled' || state === 'error'
@@ -261,6 +469,194 @@ async function readRequestJson(req) {
     return JSON.parse(buf.toString('utf-8'))
   } catch {
     return null
+  }
+}
+
+function publicXAirStatus() {
+  const status = xairClient ? xairClient.status() : { connected: false }
+  return {
+    kind: 'behringer-xair',
+    ...status,
+    lastMessageAt: xairLastMessageAt,
+    lastMessage: xairLastMessage,
+    lastError: xairLastError,
+  }
+}
+
+function parseXAirPort(value, fallback = undefined) {
+  if (value === undefined || value === null || value === '') return fallback
+  const port = Number.parseInt(String(value), 10)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('XR18 port must be 1..65535')
+  }
+  return port
+}
+
+function requireXAirClient() {
+  if (!xairClient || !xairClient.status().connected) {
+    throw new Error('XR18 is not connected')
+  }
+  return xairClient
+}
+
+function attachXAirEventLogging(client) {
+  client.events.on('message', (message) => {
+    xairLastMessageAt = new Date().toISOString()
+    xairLastMessage = {
+      address: message.address,
+      args: message.args,
+      remote: message.remote,
+    }
+    xairLastError = null
+  })
+  client.events.on('error', (e) => {
+    xairLastError = e instanceof Error ? e.message : String(e)
+    logWarn('xair: event error:', xairLastError)
+  })
+  client.events.on('state', (state) => {
+    logInfo(`xair: ${state.connected ? 'connected' : 'disconnected'} ${state.host}:${state.port}`)
+  })
+}
+
+function closeXAirClient() {
+  if (!xairClient) return
+  try {
+    xairClient.close()
+  } catch (e) {
+    logWarn('xair: close failed:', e instanceof Error ? e.message : String(e))
+  }
+  xairClient = null
+}
+
+function sendHardwareError(res, cors, e, status = 400) {
+  sendJson(
+    res,
+    status,
+    {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      xair: publicXAirStatus(),
+    },
+    cors,
+  )
+}
+
+/** `GET /native/hardware/status` — current sidecar hardware bridge state. */
+function handleHardwareStatus(res, cors) {
+  sendJson(
+    res,
+    200,
+    {
+      ok: true,
+      midi: { supported: false, devices: [] },
+      xair: publicXAirStatus(),
+    },
+    cors,
+  )
+}
+
+/** `POST /native/hardware/xair/connect` — body `{ host, port? }`. */
+async function handleXAirConnect(req, res, cors) {
+  const body = await readRequestJson(req)
+  if (!body || typeof body !== 'object') {
+    return sendHardwareError(res, cors, new Error('Expected JSON body `{ host, port? }`'))
+  }
+  if (typeof body.host !== 'string' || body.host.trim().length === 0) {
+    return sendHardwareError(res, cors, new Error('XR18 host is required'))
+  }
+  const host = body.host.trim()
+  let port
+  try {
+    port = parseXAirPort(body.port)
+  } catch (e) {
+    return sendHardwareError(res, cors, e)
+  }
+
+  const nextClient = createXAirClient({ host, ...(port ? { port } : {}) })
+  attachXAirEventLogging(nextClient)
+  try {
+    closeXAirClient()
+    xairLastMessageAt = null
+    xairLastMessage = null
+    xairLastError = null
+    await nextClient.open()
+    xairClient = nextClient
+    nextClient.requestInfo()
+    logInfo(`xair: requested /xinfo from ${host}:${nextClient.port}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    try {
+      nextClient.close()
+    } catch {
+      /* ignore cleanup failure */
+    }
+    xairLastError = e instanceof Error ? e.message : String(e)
+    sendHardwareError(res, cors, e, 500)
+  }
+}
+
+/** `POST /native/hardware/xair/disconnect` — close XR18 UDP control. */
+async function handleXAirDisconnect(req, res, cors) {
+  await readRequestBody(req).catch(() => Buffer.alloc(0))
+  closeXAirClient()
+  sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+}
+
+/** `POST /native/hardware/xair/main-fader` — body `{ value }`, clamped 0..1. */
+async function handleXAirMainFader(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object' || body.value === undefined) throw new Error('Expected JSON body `{ value }`')
+    client.setMainFader(body.value)
+    logInfo(`xair write: /lr/mix/fader ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/channel-fader` — body `{ channel, value }`, clamped 0..1. */
+async function handleXAirChannelFader(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object') throw new Error('Expected JSON body `{ channel, value }`')
+    client.setChannelFader(body.channel, body.value)
+    logInfo(`xair write: channel ${body.channel} fader ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/channel-on` — body `{ channel, on }`. */
+async function handleXAirChannelOn(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object' || typeof body.on !== 'boolean') {
+      throw new Error('Expected JSON body `{ channel, on }`')
+    }
+    client.setChannelOn(body.channel, body.on)
+    logInfo(`xair write: channel ${body.channel} ${body.on ? 'on' : 'off'}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/bus-send` — body `{ channel, bus, value }`, clamped 0..1. */
+async function handleXAirBusSend(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object') throw new Error('Expected JSON body `{ channel, bus, value }`')
+    client.setChannelBusSend(body.channel, body.bus, body.value)
+    logInfo(`xair write: channel ${body.channel} bus ${body.bus} send ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
   }
 }
 
@@ -456,10 +852,15 @@ function parseManifestObject(raw) {
     if (typeof e.lastSyncedRevision === 'number' && Number.isFinite(e.lastSyncedRevision)) {
       entry.lastSyncedRevision = e.lastSyncedRevision
     }
+    if (typeof e.lastSyncedContentHash === 'string' && e.lastSyncedContentHash.length > 0) {
+      entry.lastSyncedContentHash = e.lastSyncedContentHash
+    }
     songs.push(entry)
   }
   const autoStems = parseManifestAutoStems(raw.autoStems)
   const cloud = parseManifestCloud(raw.cloud)
+  const defaults = parseManifestDefaults(raw.defaults)
+  const mastering = parseManifestMastering(raw.mastering)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -469,7 +870,63 @@ function parseManifestObject(raw) {
     songs,
     ...(autoStems ? { autoStems } : {}),
     ...(cloud ? { cloud } : {}),
+    ...(defaults ? { defaults } : {}),
+    ...(mastering ? { mastering } : {}),
   }
+}
+
+/**
+ * Parse the optional `defaults` block (project-wide count-in + pre-count-in
+ * cue). Preserved on round-trip so a sidecar manifest write never drops the
+ * shared project config (same class of bug as autoStems/cloud stripping).
+ */
+function parseManifestDefaults(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const out = {}
+  if (typeof raw.countInBeats === 'number' && Number.isInteger(raw.countInBeats) && raw.countInBeats >= 0) {
+    out.countInBeats = raw.countInBeats
+  }
+  const pc = raw.preCountInCue
+  if (pc && typeof pc === 'object' && (pc.mode === 'off' || pc.mode === 'title' || pc.mode === 'custom')) {
+    out.preCountInCue = { mode: pc.mode }
+    if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * Parse the optional `mastering` block (project sound: loudness matching +
+ * per-stem dynamics). Preserved on round-trip so a sidecar manifest write
+ * never drops the shared project config (same class of bug as autoStems).
+ */
+function parseManifestMastering(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.enabled !== 'boolean') return undefined
+  const out = { enabled: raw.enabled }
+  if (typeof raw.matchLoudness === 'boolean') out.matchLoudness = raw.matchLoudness
+  if (typeof raw.masterGlue === 'boolean') out.masterGlue = raw.masterGlue
+  if (raw.stems && typeof raw.stems === 'object') {
+    const stems = {}
+    for (const name of ['vocals', 'drums', 'bass', 'other']) {
+      const v = raw.stems[name]
+      // Legacy shape: bare intensity string.
+      if (v === 'off' || v === 'light' || v === 'firm') {
+        stems[name] = { intensity: v }
+        continue
+      }
+      if (!v || typeof v !== 'object') continue
+      const entry = {}
+      if (v.intensity === 'off' || v.intensity === 'light' || v.intensity === 'firm') {
+        entry.intensity = v.intensity
+      }
+      if (typeof v.trimDb === 'number' && Number.isFinite(v.trimDb)) {
+        entry.trimDb = Math.max(-9, Math.min(9, v.trimDb))
+      }
+      if (v.tone === 'natural' || v.tone === 'shaped') entry.tone = v.tone
+      if (Object.keys(entry).length > 0) stems[name] = entry
+    }
+    if (Object.keys(stems).length > 0) out.stems = stems
+  }
+  return out
 }
 
 async function readProjectManifest(projectPath) {
@@ -547,6 +1004,28 @@ function extractSongMetadataLite(songProject) {
   const out = { title: typeof md.title === 'string' ? md.title : '' }
   if (typeof md.artist === 'string') out.artist = md.artist
   if (md.keyDetail) out.keyDetail = md.keyDetail
+  // Auto-detected key (low-confidence detections live only in chordHints —
+  // without surfacing it here, a project refresh wipes detected keys off the
+  // cards because the scan replaces the web's metadata cache wholesale).
+  const dk = map.chordHints?.detectedKey
+  if (dk && typeof dk === 'object' && typeof dk.root === 'string' && typeof dk.mode === 'string') {
+    out.detectedKey = {
+      root: dk.root,
+      ...(dk.accidental ? { accidental: dk.accidental } : {}),
+      mode: dk.mode,
+    }
+  }
+  out.analyzed =
+    md.analyzed === true ||
+    (Array.isArray(map.timeline?.bars) && map.timeline.bars.length > 0)
+  if (
+    map.transpose &&
+    typeof map.transpose === 'object' &&
+    Number.isInteger(map.transpose.baseSemitones) &&
+    map.transpose.baseSemitones !== 0
+  ) {
+    out.transposeSemitones = map.transpose.baseSemitones
+  }
   if (typeof md.bpm === 'number') out.bpm = md.bpm
   if (typeof map.countInBeats === 'number' && map.countInBeats > 0) out.countInBeats = map.countInBeats
   // True when the SongMap names an audio source — covers both v1 baked
@@ -555,6 +1034,9 @@ function extractSongMetadataLite(songProject) {
   const a = map.audio
   if (a && typeof a === 'object' && (typeof a.fileName === 'string' || typeof a.originalPath === 'string')) {
     out.hasAudio = true
+    if (typeof a.durationSec === 'number' && Number.isFinite(a.durationSec) && a.durationSec > 0) {
+      out.audioDurationSec = a.durationSec
+    }
   }
   if (map.stemRefs && typeof map.stemRefs === 'object') out.stemRefs = { ...map.stemRefs }
   return out
@@ -618,6 +1100,40 @@ async function listStemSets(songFolderAbs) {
     }
   }
   if (flatAudio.length > 0) out['legacy'] = dedupeStemsByLowerCase(flatAudio)
+  return out
+}
+
+/**
+ * Read `stems/<slug>/provenance.json` for every preset subfolder — the stamp
+ * demucs_separate.py writes recording HOW the stems were made (model, shifts,
+ * overlap). The auto-stems daemon uses this to detect stems that were split
+ * with weaker/unknown settings and quietly re-split them in the background.
+ *
+ * Returns `Record<slug, payload|null>` — `null` for a preset dir with no (or
+ * unparseable) stamp, so the daemon treats those stems as unproven.
+ */
+async function readStemProvenance(songFolderAbs) {
+  const stemsDir = path.join(songFolderAbs, 'stems')
+  /** @type {Record<string, object|null>} */
+  const out = {}
+  let entries
+  try {
+    const { readdir } = await import('node:fs/promises')
+    entries = await readdir(stemsDir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  const { readFile } = await import('node:fs/promises')
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue
+    try {
+      const raw = await readFile(path.join(stemsDir, ent.name, 'provenance.json'), 'utf8')
+      const parsed = JSON.parse(raw)
+      out[ent.name] = parsed && typeof parsed === 'object' ? parsed : null
+    } catch {
+      out[ent.name] = null // missing/corrupt stamp → stems are unproven
+    }
+  }
   return out
 }
 
@@ -1313,6 +1829,7 @@ function parseWavHeader(filePath) {
       durationSec,
       sampleRate: fmt.sampleRate,
       channels: fmt.channels,
+      frames: totalSamples,
     }
   } finally {
     closeSync(fd)
@@ -1653,6 +2170,387 @@ async function handleProjectTranscodeToWav(req, res, cors) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
+async function fileHashIdentity(absPath) {
+  const st = statSync(absPath)
+  const hash = createHash('sha256')
+  await new Promise((resolve, reject) => {
+    const s = createReadStream(absPath)
+    s.on('data', (chunk) => hash.update(chunk))
+    s.on('end', resolve)
+    s.on('error', reject)
+  })
+  return {
+    sha256: hash.digest('hex'),
+    fileSize: st.size,
+  }
+}
+
+function runProcessCapture(exe, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const child = spawn(exe, args, {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill('SIGKILL')
+      resolve({ code: null, signal: 'SIGKILL', stdout, stderr, timedOut: true })
+    }, timeoutMs)
+    child.stdout?.on('data', (d) => {
+      stdout += d.toString()
+    })
+    child.stderr?.on('data', (d) => {
+      stderr += d.toString()
+    })
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code: null, signal: null, stdout, stderr, error: err, timedOut: false })
+    })
+    child.on('close', (code, signal) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code, signal: signal ?? null, stdout, stderr, timedOut: false })
+    })
+  })
+}
+
+async function resolveRubberBandExecutable() {
+  const exe = rubberBandExePath()
+  const expected = expectedRubberBandBundledPath()
+  if (!exe) {
+    return {
+      ok: false,
+      error: `Rubber Band is not supported on ${process.platform}-${process.arch}.`,
+      expectedPath: expected,
+    }
+  }
+  if (path.isAbsolute(exe) && !existsSync(exe)) {
+    return {
+      ok: false,
+      error: `Rubber Band binary not found at ${exe}. Install the licensed CLI at desktop/native/bin/rubberband/<platform>/ or set BARBRO_RUBBERBAND.`,
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  if (path.isAbsolute(exe) && process.platform !== 'win32') {
+    await chmod(exe, 0o755).catch(() => {})
+  }
+
+  const probe = await runProcessCapture(exe, ['--version'], 8_000)
+  if (probe.error) {
+    const missingLocalCli =
+      exe === 'rubberband' && /** @type {{ code?: string }} */ (probe.error).code === 'ENOENT'
+    return {
+      ok: false,
+      error: missingLocalCli
+        ? 'Rubber Band CLI not found. Install a licensed binary under desktop/native/bin/rubberband/<platform>/, set BARBRO_RUBBERBAND, or add rubberband to PATH for local development.'
+        : `Rubber Band failed to start: ${probe.error.message}`,
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  if (probe.timedOut) {
+    return {
+      ok: false,
+      error: 'Rubber Band version check timed out.',
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  if (probe.code !== 0) {
+    return {
+      ok: false,
+      error: `Rubber Band version check failed: ${(probe.stderr || probe.stdout || `exit ${probe.code}`).trim()}`,
+      path: exe,
+      expectedPath: expected,
+    }
+  }
+  return {
+    ok: true,
+    path: exe,
+    version: (probe.stdout || probe.stderr).trim().split(/\r?\n/)[0] ?? '',
+  }
+}
+
+async function handleTransposeStatus(res, cors) {
+  try {
+    const rb = await resolveRubberBandExecutable()
+    if (!rb.ok) {
+      sendJson(res, 200, {
+        ok: true,
+        available: false,
+        engine: 'rubberband',
+        algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+        error: rb.error,
+        path: rb.path ?? null,
+        expectedPath: rb.expectedPath ?? null,
+      }, cors)
+      return
+    }
+    sendJson(res, 200, {
+      ok: true,
+      available: true,
+      engine: 'rubberband',
+      algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+      path: rb.path,
+      version: rb.version,
+    }, cors)
+  } catch (e) {
+    sendJson(res, 200, {
+      ok: true,
+      available: false,
+      engine: 'rubberband',
+      algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+      error: e instanceof Error ? e.message : String(e),
+    }, cors)
+  }
+}
+
+async function normalizeTransposeInputToWav(srcAbs, tempRoot) {
+  const inputWav = path.join(tempRoot, 'transpose-input.wav')
+  const result = await runFfmpegTranscode(srcAbs, inputWav)
+  if (!result.ok) {
+    throw new Error(`Could not prepare transposed audio: ${result.error}`)
+  }
+  return {
+    inputAbs: inputWav,
+    sourceInfo: readAudioInfo(inputWav),
+  }
+}
+
+async function runRubberBandPitchShift(exe, inputAbs, outputAbs, semitones) {
+  const tmpOut = path.join(path.dirname(outputAbs), `.${path.basename(outputAbs)}.${randomUUID()}.tmp.wav`)
+  await rm(tmpOut, { force: true }).catch(() => {})
+  const args = buildRubberBandArgs(inputAbs, tmpOut, semitones)
+  const result = await runProcessCapture(exe, args, RUBBERBAND_RENDER_TIMEOUT_MS)
+  if (result.error) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    return { ok: false, error: `Rubber Band failed to start: ${result.error.message}` }
+  }
+  if (result.timedOut) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    return { ok: false, error: 'Rubber Band timed out while preparing transposed audio.' }
+  }
+  if (result.code !== 0) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    const sigPart = result.signal ? ` (signal ${result.signal})` : ''
+    const msg = (result.stderr || result.stdout || `exit ${result.code}${sigPart}`).trim()
+    return { ok: false, error: msg }
+  }
+  if (!existsSync(tmpOut) || statSync(tmpOut).size <= 44) {
+    await rm(tmpOut, { force: true }).catch(() => {})
+    return { ok: false, error: 'Rubber Band did not produce a valid WAV file.' }
+  }
+  await rename(tmpOut, outputAbs)
+  return { ok: true }
+}
+
+function runFfmpegPadTrim(srcAbs, dstAbs, durationSec, sampleRate) {
+  return new Promise((resolve) => {
+    const targetDuration = Number(durationSec)
+    if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+      resolve({ ok: false, error: 'Invalid target duration for transpose cache alignment.' })
+      return
+    }
+    const args = [
+      '-y',
+      '-i',
+      srcAbs,
+      '-af',
+      `apad,atrim=0:${targetDuration.toFixed(6)}`,
+      '-acodec',
+      'pcm_s16le',
+    ]
+    const sr = Number(sampleRate)
+    if (Number.isFinite(sr) && sr > 0) args.push('-ar', String(Math.round(sr)))
+    args.push(dstAbs)
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (b) => {
+      stderr += b.toString()
+    })
+    proc.on('error', (e) => {
+      resolve({ ok: false, error: `ffmpeg failed to start: ${e.message}. Is ffmpeg on PATH?` })
+    })
+    proc.on('close', (code) => {
+      if (code === 0) resolve({ ok: true })
+      else resolve({ ok: false, error: `ffmpeg exited ${code}: ${stderr.slice(-2000)}` })
+    })
+  })
+}
+
+async function verifyTransposeCacheDuration(sourceInfo, outputAbs, { repair = false } = {}) {
+  if (!existsSync(outputAbs) || statSync(outputAbs).size <= 44) {
+    return { ok: false, error: 'cache file is missing or empty' }
+  }
+  let outputInfo
+  try {
+    outputInfo = readAudioInfo(outputAbs)
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  let alignment
+  try {
+    alignment = classifyDurationAlignment(sourceInfo, outputInfo)
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  if (alignment.ok && !alignment.needsPadTrim) {
+    return { ok: true, info: outputInfo, repaired: false, alignment }
+  }
+  if (alignment.ok && alignment.needsPadTrim && repair) {
+    const tmpFixed = path.join(path.dirname(outputAbs), `.${path.basename(outputAbs)}.${randomUUID()}.aligned.wav`)
+    const fix = await runFfmpegPadTrim(outputAbs, tmpFixed, sourceInfo.durationSec, outputInfo.sampleRate)
+    if (!fix.ok) {
+      await rm(tmpFixed, { force: true }).catch(() => {})
+      return { ok: false, error: `Could not align transpose cache duration: ${fix.error}` }
+    }
+    await rename(tmpFixed, outputAbs)
+    const fixedInfo = readAudioInfo(outputAbs)
+    const fixedAlignment = classifyDurationAlignment(sourceInfo, fixedInfo)
+    if (!fixedAlignment.ok) {
+      return {
+        ok: false,
+        error: `Transpose cache duration drift remains too large (${fixedAlignment.driftSec.toFixed(4)}s).`,
+      }
+    }
+    return { ok: true, info: fixedInfo, repaired: true, alignment: fixedAlignment }
+  }
+  const drift = alignment.driftSec
+  return {
+    ok: false,
+    error: `Transpose cache duration drift is too large (${drift.toFixed(4)}s).`,
+  }
+}
+
+/**
+ * `POST /native/project/pitch-shift-cache` — body
+ * `{ projectPath, songFolder, srcSubpath, semitones }`.
+ *
+ * Writes a local, disposable, tempo-preserved WAV cache under
+ * `cache/transpose/rubberband-r3-v1/<source-sha-size>/<signed-semitones>.wav`. The source
+ * audio/stem is never modified, and repeated requests hit the cache.
+ */
+async function handleProjectPitchShiftCache(req, res, cors) {
+  let tempRoot = null
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const srcSubpath = validateAssetSubpath(body.srcSubpath)
+    const semitones = normalizeTransposeSemitones(body.semitones, { allowZero: true })
+    const srcAbs = path.join(projectPath, songFolder, srcSubpath)
+    if (!existsSync(srcAbs)) {
+      return sendJson(res, 404, { ok: false, error: `Source file not found: ${srcAbs}` }, cors)
+    }
+    if (semitones === 0) {
+      return sendJson(res, 200, {
+        ok: true,
+        cached: true,
+        bypassed: true,
+        relPath: srcSubpath,
+        engine: 'original',
+        algo: 'none',
+      }, cors)
+    }
+
+    const rb = await resolveRubberBandExecutable()
+    if (!rb.ok) {
+      return sendJson(res, 503, { ok: false, error: rb.error }, cors)
+    }
+
+    const sourceIdentity = await fileHashIdentity(srcAbs)
+    let sourceInfo = null
+    let renderInputAbs = srcAbs
+    let normalizedInput = false
+    try {
+      sourceInfo = readAudioInfo(srcAbs)
+    } catch {
+      tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-transpose-'))
+      const prepared = await normalizeTransposeInputToWav(srcAbs, tempRoot)
+      sourceInfo = prepared.sourceInfo
+      renderInputAbs = prepared.inputAbs
+      normalizedInput = true
+    }
+
+    const dstSubpath = validateAssetSubpath(transposeCacheSubpath(sourceIdentity, semitones), 'cache subpath')
+    const dstAbs = path.join(projectPath, songFolder, dstSubpath)
+    if (existsSync(dstAbs) && statSync(dstAbs).size > 0) {
+      const healthy = await verifyTransposeCacheDuration(sourceInfo, dstAbs, { repair: true })
+      if (healthy.ok) {
+        return sendJson(res, 200, {
+          ok: true,
+          cached: true,
+          relPath: dstSubpath,
+          engine: 'rubberband',
+          algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+          sampleRate: healthy.info.sampleRate,
+          durationSec: healthy.info.durationSec,
+          frames: healthy.info.frames,
+          repaired: healthy.repaired,
+        }, cors)
+      }
+      logWarn(`pitch-shift-cache: rejecting stale/bad cache ${dstSubpath}: ${healthy.error}`)
+      await rm(dstAbs, { force: true }).catch(() => {})
+    }
+
+    await mkdir(path.dirname(dstAbs), { recursive: true })
+    let rendered = await runRubberBandPitchShift(rb.path, renderInputAbs, dstAbs, semitones)
+    if (!rendered.ok && !normalizedInput) {
+      logWarn(`pitch-shift-cache: Rubber Band failed on source, retrying normalized WAV: ${rendered.error.slice(0, 500)}`)
+      if (!tempRoot) tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-transpose-'))
+      const prepared = await normalizeTransposeInputToWav(srcAbs, tempRoot)
+      sourceInfo = prepared.sourceInfo
+      renderInputAbs = prepared.inputAbs
+      normalizedInput = true
+      rendered = await runRubberBandPitchShift(rb.path, renderInputAbs, dstAbs, semitones)
+    }
+    if (!rendered.ok) {
+      logWarn(`pitch-shift-cache: Rubber Band failed: ${rendered.error.slice(0, 2000)}`)
+      return sendJson(res, 503, {
+        ok: false,
+        error: `Could not prepare transposed audio: ${rendered.error}`,
+      }, cors)
+    }
+
+    const healthy = await verifyTransposeCacheDuration(sourceInfo, dstAbs, { repair: true })
+    if (!healthy.ok) {
+      await rm(dstAbs, { force: true }).catch(() => {})
+      return sendJson(res, 503, { ok: false, error: `Could not prepare transposed audio: ${healthy.error}` }, cors)
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      cached: false,
+      relPath: dstSubpath,
+      engine: 'rubberband',
+      algo: RUBBERBAND_TRANSPOSE_ALGO_VERSION,
+      sampleRate: healthy.info.sampleRate,
+      durationSec: healthy.info.durationSec,
+      frames: healthy.info.frames,
+      repaired: healthy.repaired,
+      normalizedInput,
+    }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  } finally {
+    if (tempRoot) await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -2615,7 +3513,9 @@ async function runQueuedJob(job) {
     emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
+    forgetRecoverableStemJob(job)
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
 
@@ -2639,7 +3539,9 @@ async function runQueuedJob(job) {
     emitJobEvent(job, { type: 'error', msg })
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
+    forgetRecoverableStemJob(job)
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
 
@@ -2776,8 +3678,22 @@ async function runQueuedJob(job) {
     logWarn(`stems: job ${job.jobId.slice(0, 8)} finished as ${job.state}${job.lastErrorMsg ? ' — ' + job.lastErrorMsg : ''}`)
   }
 
+  // Feed the outcome back to the auto-stems daemon so it can clear a song's
+  // attempt budget on success, or record WHY it failed (surfaced to the user
+  // as the "abandoned" reason instead of a silent stall). Only for jobs whose
+  // output follows the `<songFolder>/stems/<quality>` convention.
+  if (autoStemsDaemon && job.outDir && path.basename(path.dirname(job.outDir)) === 'stems') {
+    const songFolderAbs = path.dirname(path.dirname(job.outDir))
+    if (job.state === 'done') autoStemsDaemon.noteSongSatisfied(songFolderAbs)
+    else if (job.state === 'error') {
+      autoStemsDaemon.noteSongFailed(songFolderAbs, job.lastErrorMsg ?? 'Stem split failed.')
+    }
+  }
+
+  forgetRecoverableStemJob(job)
   activeJobId = null
   scheduleJobCleanup(job.jobId)
+  tryRunNext()
 }
 
 async function runQueuedYoutubeImportJob(job) {
@@ -2796,6 +3712,7 @@ async function runQueuedYoutubeImportJob(job) {
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
   if (!youtubeImportVenvIsReady()) {
@@ -2806,6 +3723,7 @@ async function runQueuedYoutubeImportJob(job) {
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
     scheduleJobCleanup(job.jobId)
+    tryRunNext()
     return
   }
 
@@ -2944,19 +3862,34 @@ async function runQueuedYoutubeImportJob(job) {
 
   activeJobId = null
   scheduleJobCleanup(job.jobId)
+  tryRunNext()
 }
 
 /**
- * Drain the queue serially. Safe to call concurrently — only the first
- * caller actually runs jobs; subsequent calls are no-ops while busy.
+ * Drain the queues. Two independent serial lanes:
+ *  - HEAVY lane (stems, youtube import) — gated by `activeJobId`.
+ *  - LYRICS lane — gated by `activeLyricsJobId`, runs CONCURRENTLY with the
+ *    heavy lane. Auto-stems keeps the heavy lane busy for long stretches;
+ *    a 1–3 min transcription must not starve behind hours of stem prep.
+ *    Whisper (int8 CPU) alongside Demucs just shares cores — both proceed.
+ * Safe to call concurrently — only the first caller actually runs jobs.
  */
 function tryRunNext() {
-  if (activeJobId !== null) return
-  for (const job of stemsJobs.values()) {
-    if (job.state === 'queued') {
-      if (job.kind === 'youtube-import') void runQueuedYoutubeImportJob(job)
-      else void runQueuedJob(job)
-      return
+  if (activeJobId === null) {
+    for (const job of stemsJobs.values()) {
+      if (job.state === 'queued' && job.kind !== 'lyrics-transcribe') {
+        if (job.kind === 'youtube-import') void runQueuedYoutubeImportJob(job)
+        else void runQueuedJob(job)
+        break
+      }
+    }
+  }
+  if (activeLyricsJobId === null) {
+    for (const job of stemsJobs.values()) {
+      if (job.state === 'queued' && job.kind === 'lyrics-transcribe') {
+        void runQueuedLyricsJob(job)
+        break
+      }
     }
   }
 }
@@ -3073,7 +4006,7 @@ async function getHealthStatus() {
       ['numpy', 'madmom'],
       BEATS_HEALTH_PROBE,
     ),
-    checkPythonImports('sections', pythonSectionsExe(), ['numpy', 'librosa']),
+    checkPythonImports('sections', pythonSectionsExe(), ['numpy', 'librosa', 'scipy']),
     // Stems is intentionally not in the auto-setup loop (too heavy),
     // so we don't report it as broken at the health level — the Stems
     // dialog handles its own missing-deps UX.
@@ -3165,10 +4098,11 @@ async function createStemsJob(args) {
     cleanupTimer: null,
   }
   stemsJobs.set(jobId, job)
+  rememberRecoverableStemJob(job)
   emitJobEvent(job, { type: 'state', state: 'queued' })
 
   const queuedAhead = [...stemsJobs.values()].filter(
-    (j) => j.state === 'queued' && j.jobId !== jobId,
+    (j) => j.state === 'queued' && j.kind !== 'lyrics-transcribe' && j.jobId !== jobId,
   ).length
   const runningAhead = activeJobId !== null ? 1 : 0
   tryRunNext()
@@ -3306,7 +4240,7 @@ async function handleYoutubeImport(req, res, cors) {
     emitJobEvent(job, { type: 'state', state: 'queued' })
 
     const queuedAhead = [...stemsJobs.values()].filter(
-      (j) => j.state === 'queued' && j.jobId !== jobId,
+      (j) => j.state === 'queued' && j.kind !== 'lyrics-transcribe' && j.jobId !== jobId,
     ).length
     const runningAhead = activeJobId !== null ? 1 : 0
     sendJson(
@@ -3436,6 +4370,7 @@ async function handleCancelJob(res, cors, jobId) {
     job.finishedAt = Date.now()
     job.lastErrorMsg = 'Cancelled before start'
     emitJobEvent(job, { type: 'state', state: 'cancelled' })
+    forgetRecoverableStemJob(job)
     scheduleJobCleanup(jobId)
     logInfo(`${job.kind ?? 'stems'}: job ${jobId.slice(0, 8)} cancelled (was queued)`)
     sendJson(res, 200, { ok: true, state: 'cancelled' }, cors)
@@ -3447,6 +4382,7 @@ async function handleCancelJob(res, cors, jobId) {
     job.state = 'cancelled'
     job.lastErrorMsg = 'Cancelled mid-run'
     emitJobEvent(job, { type: 'state', state: 'cancelled' })
+    forgetRecoverableStemJob(job)
     try {
       // A SIGSTOPped process won't act on SIGTERM until it's resumed —
       // SIGCONT first, then SIGTERM, otherwise cancel-from-paused hangs.
@@ -3684,6 +4620,9 @@ async function handleSetupStems(req, res, cors) {
     emit({ type: 'done', venvPython })
     emit({ type: 'state', state: 'done' })
     logInfo(`setup/stems: venv ready at ${venvPython}`)
+    void recoverInterruptedStemJobs().catch((e) => {
+      logWarn(`stems: recovery after setup failed: ${e instanceof Error ? e.message : String(e)}`)
+    })
     res.end()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -3995,11 +4934,11 @@ async function handleSetupSections(req, res, cors) {
     // ── Phase 5 — smoke test ──────────────────────────────────────────
     const smoke = await runPipelineNdjson(
       venvPython,
-      ['-c', "import librosa; print('librosa', librosa.__version__)"],
+      ['-c', "import librosa, scipy; print('librosa', librosa.__version__)"],
       emit,
     )
     if (smoke.code !== 0) {
-      emit({ type: 'error', msg: `librosa smoke test failed (exit ${smoke.code}).` })
+      emit({ type: 'error', msg: `sections audio smoke test failed (exit ${smoke.code}).` })
       emit({ type: 'state', state: 'error' })
       res.end()
       return
@@ -4018,6 +4957,350 @@ async function handleSetupSections(req, res, cors) {
     emit({ type: 'error', msg })
     emit({ type: 'state', state: 'error' })
     res.end()
+  }
+}
+
+// ── Lyrics transcription (isolated `lyrics/` module) ─────────────────────────
+
+/**
+ * `GET /native/setup/lyrics/status` — is the lyrics venv (speech recognizer)
+ * installed? The model itself downloads on first transcription (into
+ * `getLyricsModelDir()`), so `ready` here means "venv importable".
+ */
+async function handleLyricsSetupStatus(res, cors) {
+  const ready = lyricsVenvIsReady()
+  sendJson(
+    res,
+    200,
+    {
+      ok: true,
+      ready,
+      venvDir: getLyricsVenvDir(),
+      venvPython: ready ? getLyricsVenvPythonExe() : null,
+      modelDir: getLyricsModelDir(),
+    },
+    cors,
+  )
+}
+
+/**
+ * `POST /native/setup/lyrics` — create the lyrics venv and install
+ * faster-whisper. NDJSON stream, same shape as `/native/setup/sections`.
+ * The speech model (~250 MB) is NOT downloaded here — it downloads on the
+ * first transcription so setup stays quick.
+ */
+async function handleSetupLyrics(req, res, cors) {
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  })
+  const emit = (ev) => {
+    try {
+      res.write(JSON.stringify(ev) + '\n')
+    } catch {
+      /* socket closed */
+    }
+  }
+
+  const venvDir = getLyricsVenvDir()
+  const venvPython = getLyricsVenvPythonExe()
+  const reqPath = path.join(getNativePythonRoot(), 'lyrics', 'requirements.txt')
+
+  emit({ type: 'log', msg: `Lyrics venv target: ${venvDir}` })
+
+  try {
+    if (!uvBinaryIsReady()) {
+      emit({ type: 'progress', label: `Downloading uv ${UV_PINNED_VERSION} (~14 MB)…`, current: 0, overall: 5 })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+    const uvBin = getUvBinaryPath()
+    emit({ type: 'progress', label: 'uv ready', current: 100, overall: 15 })
+
+    if (!existsSync(venvPython)) {
+      emit({ type: 'progress', label: 'Setting up Python 3.12 (uv downloads it if missing)…', current: 0, overall: 25 })
+      const v = await runPipelineNdjson(uvBin, ['venv', '--python', '3.12', venvDir], emit)
+      if (v.code !== 0 || !existsSync(venvPython)) {
+        emit({ type: 'error', msg: `uv venv failed (exit ${v.code}).` })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+      emit({ type: 'progress', label: 'Venv ready', current: 100, overall: 45 })
+    } else {
+      emit({ type: 'log', msg: 'Venv already exists — re-using.' })
+    }
+
+    if (!existsSync(reqPath)) {
+      emit({ type: 'error', msg: `Missing requirements.txt at ${reqPath}` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Installing speech recognizer (≈ 150 MB)…', current: 0, overall: 55 })
+    const inst = await runPipelineNdjson(uvBin, ['pip', 'install', '--python', venvPython, '-r', reqPath], emit)
+    if (inst.code !== 0) {
+      emit({ type: 'error', msg: `uv pip install failed (exit ${inst.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+    emit({ type: 'progress', label: 'Dependencies installed', current: 100, overall: 90 })
+
+    const smoke = await runPipelineNdjson(
+      venvPython,
+      ['-c', "import faster_whisper; print('faster-whisper ok')"],
+      emit,
+    )
+    if (smoke.code !== 0) {
+      emit({ type: 'error', msg: `lyrics smoke test failed (exit ${smoke.code}).` })
+      emit({ type: 'state', state: 'error' })
+      res.end()
+      return
+    }
+
+    emit({ type: 'progress', label: 'Done', current: 100, overall: 100 })
+    emit({ type: 'done', venvPython })
+    emit({ type: 'state', state: 'done' })
+    logInfo(`setup/lyrics: venv ready at ${venvPython}`)
+    res.end()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`setup/lyrics: ${msg}`)
+    emit({ type: 'error', msg })
+    emit({ type: 'state', state: 'error' })
+    res.end()
+  }
+}
+
+/**
+ * Run a queued lyrics-transcription job: spawn the recognizer with
+ * `--stream-progress`, pipe params via stdin, drain NDJSON to the job's
+ * event buffer. The final `done` event carries the recognized words —
+ * clients read them from the event stream (no separate result endpoint).
+ */
+async function runQueuedLyricsJob(job) {
+  job.state = 'running'
+  job.startedAt = Date.now()
+  activeLyricsJobId = job.jobId
+  emitJobEvent(job, { type: 'state', state: 'running' })
+  logInfo(`lyrics: job ${job.jobId.slice(0, 8)} started`)
+
+  const script = transcribeLyricsScriptPath()
+  if (!existsSync(script) || !existsSync(job.inputPath)) {
+    job.state = 'error'
+    job.lastErrorMsg = !existsSync(script) ? `Missing script: ${script}` : `Input not found: ${job.inputPath}`
+    job.finishedAt = Date.now()
+    emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
+    emitJobEvent(job, { type: 'state', state: 'error' })
+    activeLyricsJobId = null
+    scheduleJobCleanup(job.jobId)
+    tryRunNext()
+    return
+  }
+
+  const child = spawn(pythonLyricsExe(), [script, job.inputPath, '--stream-progress'], {
+    env: process.env,
+  })
+  job.child = child
+  try {
+    child.stdin.write(JSON.stringify({ modelDir: getLyricsModelDir(), model: 'small' }))
+    child.stdin.end()
+  } catch {
+    /* child gone already — close handler settles the job */
+  }
+
+  // Stall watchdog (model download on first run can take a while; transcription
+  // itself streams segments steadily).
+  const STALL_TIMEOUT_MS = 20 * 60 * 1000
+  let stallTimer = null
+  let timedOut = false
+  const armStall = () => {
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => {
+      timedOut = true
+      logWarn(`lyrics[${job.jobId.slice(0, 8)}] no progress for 20 min — killing (assumed stuck)`)
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+    }, STALL_TIMEOUT_MS)
+  }
+  const disarmStall = () => {
+    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null }
+  }
+  child.stdout.on('data', armStall)
+  child.stderr.on('data', armStall)
+  armStall()
+
+  let buffer = ''
+  let lastDone = null
+  let lastError = null
+
+  child.stdout.setEncoding('utf-8')
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk
+    let idx = buffer.indexOf('\n')
+    while (idx !== -1) {
+      const line = buffer.slice(0, idx).trim()
+      buffer = buffer.slice(idx + 1)
+      idx = buffer.indexOf('\n')
+      if (!line) continue
+      let obj
+      try {
+        obj = JSON.parse(line)
+      } catch {
+        emitJobEvent(job, { type: 'log', msg: line })
+        continue
+      }
+      if (obj && typeof obj === 'object') {
+        if (obj.type === 'done') lastDone = obj
+        else if (obj.type === 'error') lastError = obj
+        emitJobEvent(job, obj)
+      }
+    }
+  })
+  child.stderr.setEncoding('utf-8')
+  child.stderr.on('data', (chunk) => {
+    for (const raw of String(chunk).split(/\r|\n/)) {
+      const line = raw.trim()
+      if (line) {
+        emitJobEvent(job, { type: 'log', msg: line })
+        logWarn(`lyrics[${job.jobId.slice(0, 8)}] ${line}`)
+      }
+    }
+  })
+
+  await new Promise((resolve) => {
+    child.on('error', (err) => {
+      disarmStall()
+      lastError = { msg: err instanceof Error ? err.message : String(err) }
+      emitJobEvent(job, { type: 'error', msg: lastError.msg })
+      resolve()
+    })
+    child.on('close', (code) => {
+      disarmStall()
+      if (timedOut && !lastError) {
+        lastError = { msg: 'Transcription timed out (no progress for 20 min).' }
+      }
+      const tail = buffer.trim()
+      if (tail) {
+        try {
+          const obj = JSON.parse(tail)
+          if (obj && typeof obj === 'object') {
+            if (obj.type === 'done') lastDone = obj
+            else if (obj.type === 'error') lastError = obj
+            emitJobEvent(job, obj)
+          }
+        } catch {
+          emitJobEvent(job, { type: 'log', msg: tail })
+        }
+      }
+      if (job.state === 'cancelled') {
+        /* already settled */
+      } else if (lastError) {
+        job.state = 'error'
+        job.lastErrorMsg = lastError.msg ?? null
+      } else if (code !== 0) {
+        job.state = 'error'
+        job.lastErrorMsg = `Python exited ${code}`
+        emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
+      } else {
+        job.state = 'done'
+      }
+      job.finishedAt = Date.now()
+      job.child = null
+      emitJobEvent(job, { type: 'state', state: job.state })
+      resolve()
+    })
+  })
+
+  if (job.state === 'done') {
+    const wordCount = Array.isArray(lastDone?.words) ? lastDone.words.length : 0
+    logInfo(`lyrics: job ${job.jobId.slice(0, 8)} done — ${wordCount} words`)
+  } else {
+    logWarn(`lyrics: job ${job.jobId.slice(0, 8)} finished as ${job.state}${job.lastErrorMsg ? ' — ' + job.lastErrorMsg : ''}`)
+  }
+
+  activeLyricsJobId = null
+  scheduleJobCleanup(job.jobId)
+  tryRunNext()
+}
+
+/**
+ * `POST /native/transcribe-lyrics` — enqueue a word-timestamp transcription
+ * of an on-disk audio file (vocals stem preferred). Body:
+ * `{ audioAbsPath: string }`. Responds `202 { ok, jobId, state:'queued' }`;
+ * progress + the final `done` event (carrying `words`) stream from
+ * `GET /native/jobs/:jobId/events`.
+ */
+async function handleTranscribeLyrics(req, res, cors) {
+  let tempRoot = null
+  try {
+    const body = await readRequestJson(req)
+    if (!body || typeof body.audioAbsPath !== 'string' || !body.audioAbsPath.trim()) {
+      sendJson(res, 400, { ok: false, error: 'Body must be JSON with audioAbsPath' }, cors)
+      return
+    }
+    const audioAbsPath = body.audioAbsPath.trim()
+    ensureAbsolutePath(audioAbsPath, 'audioAbsPath')
+    if (!existsSync(audioAbsPath)) {
+      sendJson(res, 404, { ok: false, error: `audio not found: ${audioAbsPath}` }, cors)
+      return
+    }
+    if (!lyricsVenvIsReady() && !process.env.BARBRO_PYTHON_LYRICS) {
+      sendJson(
+        res,
+        409,
+        { ok: false, code: 'LYRICS_NOT_READY', error: 'Lyrics engine is not prepared yet.', hint: 'POST /native/setup/lyrics' },
+        cors,
+      )
+      return
+    }
+
+    tempRoot = await mkdtemp(path.join(tmpdir(), 'barbro-lyrics-'))
+    const jobId = randomUUID()
+    const job = {
+      kind: 'lyrics-transcribe',
+      jobId,
+      songId: null,
+      state: 'queued',
+      tempRoot,
+      inputPath: audioAbsPath,
+      outDir: tempRoot,
+      files: [],
+      options: { audioAbsPath },
+      artifact: null,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+      events: [],
+      subscribers: new Set(),
+      lastErrorMsg: null,
+      child: null,
+      cleanupTimer: null,
+    }
+    stemsJobs.set(jobId, job)
+    emitJobEvent(job, { type: 'state', state: 'queued' })
+
+    // Lyrics run in their OWN lane (concurrent with stems), so the queue
+    // position only counts other lyrics work.
+    const queuedAhead = [...stemsJobs.values()].filter(
+      (j) => j.state === 'queued' && j.kind === 'lyrics-transcribe' && j.jobId !== jobId,
+    ).length
+    const runningAhead = activeLyricsJobId !== null ? 1 : 0
+    sendJson(res, 202, { ok: true, jobId, state: 'queued', queuePosition: queuedAhead + runningAhead }, cors)
+    tryRunNext()
+  } catch (e) {
+    if (tempRoot) rm(tempRoot, { recursive: true, force: true }).catch(() => {})
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`transcribe-lyrics: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
   }
 }
 
@@ -4810,6 +6093,24 @@ function startBeaconServer() {
       void handleAutoStemsWatch(req, res, cors)
       return
     }
+    if (req.method === 'POST' && req.url === '/native/auto-stems/unwatch') {
+      void handleAutoStemsUnwatch(req, res, cors)
+      return
+    }
+    if (req.method === 'GET' && req.url === '/native/auto-stems/status') {
+      const statuses = autoStemsDaemon ? autoStemsDaemon.getStatuses() : []
+      const watched = autoStemsDaemon ? [...autoStemsDaemon._watched] : []
+      sendJson(res, 200, { ok: true, statuses, watched }, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/auto-stems/retry') {
+      void handleAutoStemsRetry(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/auto-stems/restart') {
+      void handleAutoStemsRestart(req, res, cors)
+      return
+    }
     if (req.method === 'POST' && req.url === '/native/update/install') {
       void handleUpdateInstall(req, res, cors)
       return
@@ -4835,6 +6136,21 @@ function startBeaconServer() {
 
     if (req.method === 'POST' && req.url === '/native/setup/sections') {
       void handleSetupSections(req, res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/native/setup/lyrics/status') {
+      void handleLyricsSetupStatus(res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/setup/lyrics') {
+      void handleSetupLyrics(req, res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/transcribe-lyrics') {
+      void handleTranscribeLyrics(req, res, cors)
       return
     }
 
@@ -4871,6 +6187,35 @@ function startBeaconServer() {
     // missing venvs at sidecar boot.
     if (req.method === 'GET' && req.url === '/native/setup/status') {
       handleAutoSetupStatus(res, cors)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/native/hardware/status') {
+      handleHardwareStatus(res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/connect') {
+      void handleXAirConnect(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/disconnect') {
+      void handleXAirDisconnect(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/main-fader') {
+      void handleXAirMainFader(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/channel-fader') {
+      void handleXAirChannelFader(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/channel-on') {
+      void handleXAirChannelOn(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/bus-send') {
+      void handleXAirBusSend(req, res, cors)
       return
     }
 
@@ -4957,6 +6302,14 @@ function startBeaconServer() {
     }
     if (req.method === 'POST' && req.url === '/native/project/transcode-to-wav') {
       void handleProjectTranscodeToWav(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/pitch-shift-cache') {
+      void handleProjectPitchShiftCache(req, res, cors)
+      return
+    }
+    if (req.method === 'GET' && req.url === '/native/transpose/status') {
+      void handleTransposeStatus(res, cors)
       return
     }
 
@@ -5087,6 +6440,7 @@ function setupAutoStemsDaemon() {
     readManifest: (projectPath) => readProjectManifest(projectPath),
     readSmapHeader: (smapPath) => readSmapHeaderJson(smapPath),
     listStemSets: (folderAbs) => listStemSets(folderAbs),
+    readStemProvenance: (folderAbs) => readStemProvenance(folderAbs),
     wavInfo: (abs) => {
       try {
         if (!existsSync(abs)) return null
@@ -5163,6 +6517,65 @@ async function handleAutoStemsWatch(req, res, cors) {
     }
     if (!autoStemsDaemon) setupAutoStemsDaemon()
     autoStemsDaemon.watchProject(projectPath)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/auto-stems/unwatch` — body `{ projectPath }`. Per-machine
+ * opt-OUT: this device stops auto-preparing stems for the project (the shared
+ * project config is untouched). Lets a collaborator wait for a package instead
+ * of grinding on splits.
+ */
+async function handleAutoStemsUnwatch(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (autoStemsDaemon) autoStemsDaemon.unwatchProject(projectPath)
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/auto-stems/retry` — body `{ projectPath, folder }`. Clears one
+ * song's attempt budget + status so the daemon re-evaluates it on the next
+ * pass (used by the per-song "Retry" button after an abandon/failure).
+ */
+async function handleAutoStemsRetry(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    const folder = typeof body.folder === 'string' ? body.folder.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!folder) return sendJson(res, 400, { ok: false, error: 'folder is required' }, cors)
+    if (!autoStemsDaemon) setupAutoStemsDaemon()
+    autoStemsDaemon.retrySong(path.join(projectPath, folder))
+    sendJson(res, 200, { ok: true }, cors)
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/auto-stems/restart` — body `{ projectPath }`. Clears every
+ * attempt budget for a project + re-scans, so all abandoned songs get another
+ * shot ("Restart auto-split").
+ */
+async function handleAutoStemsRestart(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!autoStemsDaemon) setupAutoStemsDaemon()
+    autoStemsDaemon.resetAttempts(projectPath)
     sendJson(res, 200, { ok: true }, cors)
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
@@ -5249,6 +6662,15 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/project/asset/write     (write file at project root, e.g. setlist .als)`)
   logInfo(`  POST   /native/project/wav-info/batch  (batched WAV header info — duration/sr/channels)`)
   logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
+  logInfo(`  GET    /native/transpose/status          (Rubber Band availability)`)
+  logInfo(`  POST   /native/project/pitch-shift-cache (Rubber Band transpose cache)`)
+  logInfo(`  GET    /native/hardware/status           (MIDI/XR18 bridge state)`)
+  logInfo(`  POST   /native/hardware/xair/connect     (JSON {host, port?})`)
+  logInfo(`  POST   /native/hardware/xair/disconnect`)
+  logInfo(`  POST   /native/hardware/xair/main-fader`)
+  logInfo(`  POST   /native/hardware/xair/channel-fader`)
+  logInfo(`  POST   /native/hardware/xair/channel-on`)
+  logInfo(`  POST   /native/hardware/xair/bus-send`)
   logInfo(`  GET    /native/setup/youtube-import/status`)
   logInfo(`  POST   /native/setup/youtube-import (prepare YouTube audio import)`)
   logInfo(`  POST   /native/import/youtube       (queued YouTube audio import)`)
@@ -5263,10 +6685,14 @@ app.whenReady().then(() => {
   logInfo(`Piper TTS ${piperTtsVenvIsReady() ? 'venv OK' : 'venv missing'} · ${getPiperTtsVenvDir()}`)
   // Resume background stem prep for projects watched in a previous session.
   setupAutoStemsDaemon()
+  void recoverInterruptedStemJobs().catch((e) => {
+    logWarn(`stems: recovery failed: ${e instanceof Error ? e.message : String(e)}`)
+  })
 })
 
 app.on('before-quit', () => {
   logInfo('Shutting down')
+  closeXAirClient()
   if (autoStemsDaemon) autoStemsDaemon.stop()
   stopBeaconServer()
   // Wipe any pending stems temp dirs synchronously-ish — fire-and-forget,

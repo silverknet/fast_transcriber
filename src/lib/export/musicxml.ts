@@ -1,4 +1,9 @@
 import type { Accidental, Bar, Beat, ChordSymbol, HarmonyEvent, SongMap } from '$lib/songmap'
+import {
+  effectiveTransposeSemitones,
+  transposeChordForDisplay,
+  transposeSongKey,
+} from '$lib/songmap/transposition'
 import { chordQualityToMusicXmlKind, songKeyToFifths } from './chordMapping'
 
 const DIVISIONS_PER_QUARTER = 24
@@ -105,8 +110,12 @@ export function songMapToMusicXml(songMap: SongMap): string {
 
   const title = xmlEscape(songMap.metadata.title || 'Untitled')
   const composer = songMap.metadata.composer ? xmlEscape(songMap.metadata.composer) : ''
-  const hasKey = Boolean(songMap.metadata.keyDetail)
-  const keyFifths = hasKey && songMap.metadata.keyDetail ? songKeyToFifths(songMap.metadata.keyDetail) : 0
+  const transposeSemitones = effectiveTransposeSemitones(songMap)
+  const displayedKey = songMap.metadata.keyDetail
+    ? transposeSongKey(songMap.metadata.keyDetail, transposeSemitones)
+    : null
+  const hasKey = Boolean(displayedKey)
+  const keyFifths = displayedKey ? songKeyToFifths(displayedKey) : 0
   const bpm = songMap.metadata.bpm
 
   const measureXml = bars
@@ -124,7 +133,7 @@ export function songMapToMusicXml(songMap: SongMap): string {
         if (hasKey) {
           measureParts.push('<key>')
           measureParts.push(`<fifths>${keyFifths}</fifths>`)
-          measureParts.push(`<mode>${songMap.metadata.keyDetail?.mode ?? 'major'}</mode>`)
+          measureParts.push(`<mode>${displayedKey?.mode ?? 'major'}</mode>`)
           measureParts.push('</key>')
         }
         measureParts.push('<time>')
@@ -159,7 +168,11 @@ export function songMapToMusicXml(songMap: SongMap): string {
         if (offset > cursor) {
           measureParts.push(`<forward><duration>${offset - cursor}</duration></forward>`)
         }
-        measureParts.push(chordToHarmonyXml(harmony.chord))
+        measureParts.push(
+          chordToHarmonyXml(
+            transposeChordForDisplay(harmony.chord, transposeSemitones, displayedKey ?? undefined),
+          ),
+        )
         cursor = offset
       }
       if (cursor < totalDuration) {

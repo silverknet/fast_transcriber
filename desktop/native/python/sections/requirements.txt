@@ -1,5 +1,5 @@
 # Lightweight section-border suggester (no madmom).
-# librosa = ISC, numpy / scipy / soundfile = BSD.
+# librosa = ISC, numpy / scipy = BSD.
 #
 # Why these pins (don't loosen without testing):
 #   - numpy 2.x broke ABI for several native operations librosa wraps;

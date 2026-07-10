@@ -76,7 +76,7 @@
 </script>
 
 {#if proj && cloud}
-  <section class="border-foreground/40 flex flex-wrap items-center gap-3 border-2 px-3 py-2 text-xs">
+  <section class="cloud-collab-strip flex flex-wrap items-center gap-3 px-3 py-2 text-xs">
     <Cloud class="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
     <span class="font-mono">
       Cloud · rev {cloud.lastSyncedRevision}
@@ -105,7 +105,7 @@
   {/if}
 
   {#if conflict}
-    <div class="border-amber-500/60 bg-amber-500/10 space-y-2 border-2 px-3 py-2 text-xs">
+    <div class="cloud-merge-panel space-y-2 px-3 py-2 text-xs">
       <div class="flex items-center gap-2">
         <Sparkles class="size-3.5 shrink-0" aria-hidden="true" />
         <span class="font-semibold">
@@ -142,3 +142,32 @@
     </div>
   {/if}
 {/if}
+
+<style>
+  .cloud-collab-strip,
+  .cloud-merge-panel {
+    border: 2px solid var(--ink);
+    border-radius: var(--radius);
+    background: var(--card);
+    overflow: hidden;
+    box-shadow: 4px 4px 0 var(--ink);
+  }
+
+  .cloud-collab-strip {
+    position: relative;
+  }
+
+  .cloud-collab-strip::before {
+    content: "";
+    width: 0.42rem;
+    align-self: stretch;
+    border-right: 2px solid var(--ink);
+    background: var(--studio-orange);
+    margin: -0.5rem 0 -0.5rem -0.75rem;
+  }
+
+  .cloud-merge-panel {
+    border-color: color-mix(in oklch, var(--studio-orange) 72%, var(--ink));
+    background: color-mix(in oklch, var(--studio-orange) 12%, var(--card));
+  }
+</style>

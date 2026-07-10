@@ -308,6 +308,26 @@ def main() -> None:
                 else:
                     print(f"warning: missing {stem}.wav in Demucs output", file=sys.stderr)
 
+        # Stamp HOW these stems were made. Without provenance, a folder named
+        # "best" proves nothing — the auto-stems daemon uses this to detect
+        # stems produced with weaker/unknown settings and quietly re-split.
+        if exported:
+            try:
+                import datetime
+
+                provenance = {
+                    "engine": "demucs",
+                    "model": args.model,
+                    "shifts": args.shifts,
+                    "overlap": args.overlap,
+                    "version": 1,
+                    "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "files": exported,
+                }
+                (out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2))
+            except OSError as exc:
+                print(f"warning: could not write provenance.json: {exc}", file=sys.stderr)
+
         result = {"outputDir": str(out_dir), "files": exported}
         if args.stream_progress:
             emit({"type": "done", **result})

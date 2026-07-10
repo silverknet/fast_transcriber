@@ -1,7 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
-  import { onDestroy, onMount } from 'svelte'
+  import { onDestroy, onMount, untrack } from 'svelte'
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import MixerView from '$lib/components/MixerView.svelte'
@@ -30,10 +30,22 @@
   } from '$lib/audio/cueTrackSpeechSchedule'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
+  import {
+    clampTransposeSemitones,
+    effectiveTransposeSemitones,
+    formatTransposeLabel,
+    transposeChordForDisplay,
+    transposeChordForStorage,
+    transposeSongKey,
+  } from '$lib/songmap/transposition'
   import { PlaybackController } from '$lib/audio/playbackController.svelte'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
-  import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import {
+    readProjectSongAsset,
+    writeProjectSongAsset,
+  } from '$lib/client/desktopProjectFs'
+  import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { metadataLiteFromSongMap } from '$lib/project/commit'
   import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
@@ -64,9 +76,22 @@
     suggestSectionBordersViaDesktop,
     analyzeChordChromaViaDesktop,
     analyzeChordChromaViaDesktopWithStem,
+    getLyricsSetupStatus,
+    setupLyricsDeps,
+    enqueueLyricsTranscription,
+    subscribeToJobEvents,
+    type LyricsTranscriptionEvent,
+    type LyricsTranscriptionWord,
   } from '$lib/client/desktopBridge'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
-  import { proposeChordSuggestions } from '$lib/chords/suggestFromChroma'
+  import {
+    CHORD_ANALYZER_VERSION,
+    proposeChordSuggestions,
+    type ChordSuggestion,
+  } from '$lib/chords/suggestFromChroma'
+  import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
+  import { cleanLyricsText } from '$lib/lyrics/clean'
+  import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
     applyBarGridAction,
@@ -81,6 +106,7 @@
     CueEvent,
     CueTrack,
     NoteName,
+    Section,
     SectionKind,
     SongKey,
     SongMap,
@@ -95,7 +121,7 @@
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, Music, Pause, Pencil, Play } from '@lucide/svelte'
+  import { ArrowLeft, Pause, Pencil, Play, RefreshCw } from '@lucide/svelte'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { trimAudioFileToWav } from '$lib/audio/trimAudio'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
@@ -495,7 +521,9 @@
   // v3: stem-aware input — when demucs "other" stem is on disk, the
   //     analyzer reads the harmonic stem instead of the full mix.
   //     Strips drum + vocal bleed; biggest single accuracy unlock.
-  const CHORD_ANALYZER_VERSION = 3
+  // v4: flat weighting + 100–2000 Hz band (the 1/f bass weighting was
+  //     mis-detecting keys/chords). Version lives in suggestFromChroma so
+  //     the matcher can refuse stale chroma.
 
   let chordChromaStatus = $state<
     'idle' | 'installing' | 'analyzing' | 'ready' | 'cached' | 'error' | 'unavailable'
@@ -630,6 +658,42 @@
   /** Derived: the detected key from the cached chord hints, or null. */
   const detectedKey = $derived($songMap?.chordHints?.detectedKey ?? null)
 
+  /** Key label for the header: the manual key if set, else the detected key. */
+  const transposeSemitones = $derived(effectiveTransposeSemitones($songMap))
+  const displayedSongKey = $derived.by(() => {
+    const kd = $songMap?.metadata.keyDetail
+    return kd ? transposeSongKey(kd, transposeSemitones) : null
+  })
+  const keyLabel = $derived.by(() => {
+    if (displayedSongKey) return formatSongKeyLabel(displayedSongKey)
+    const dk = detectedKey
+    if (dk) {
+      return formatSongKeyLabel(
+        transposeSongKey({ root: dk.root, accidental: dk.accidental, mode: dk.mode }, transposeSemitones),
+      )
+    }
+    return null
+  })
+
+  function setTransposeBase(semitones: number) {
+    const next = clampTransposeSemitones(semitones)
+    const resumeSnapshot = next !== transposeSemitones ? captureTransposePlaybackResume() : null
+    const p = patchSongMap((m) => ({
+      ...m,
+      transpose: next === 0 ? undefined : { baseSemitones: next },
+    }))
+    if (!p.ok) {
+      beatEditError = p.errors.join('; ')
+      transposePlaybackResume = null
+      if (resumeSnapshot) {
+        playbackController.seek(resumeSnapshot.timeSec)
+        if (resumeSnapshot.wasPlaying) queueMicrotask(() => playbackController.play())
+      }
+    } else {
+      beatEditError = ''
+    }
+  }
+
   /**
    * True when the existing key picker matches the detected key — so we
    * can hide the "Use" hint once it's been accepted (or the user picked
@@ -692,6 +756,32 @@
       ...(dk.accidental ? { accidental: dk.accidental } : {}),
       mode: dk.mode,
     })
+  }
+
+  /**
+   * Force a fresh key detection from the audio and OVERWRITE the current key.
+   * The normal auto-fill only sets the key when it's empty (it never corrects
+   * an already-set one), so old songs keep a stale/wrong key forever. This
+   * re-runs the chroma analyzer (bypassing the cache) and applies whatever it
+   * detects.
+   */
+  let redetectingKey = $state(false)
+  async function redetectKey() {
+    if (redetectingKey) return
+    redetectingKey = true
+    try {
+      await runChordChromaAnalysis(true)
+      const dk = detectedKey
+      if (dk) {
+        applyKeyPatch({
+          root: dk.root,
+          ...(dk.accidental ? { accidental: dk.accidental } : {}),
+          mode: dk.mode,
+        })
+      }
+    } finally {
+      redetectingKey = false
+    }
   }
 
   function suggestionSig(sm: SongMap | null, sug: { kind: string; bars: number } | null): string | null {
@@ -928,12 +1018,18 @@
   }
 
   /** Main workspace mode. */
-  let editMode = $state<'grid' | 'sections' | 'chords' | 'cue' | 'mix' | 'leadsheet'>('grid')
+  let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'>(
+    'overview',
+  )
 
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 
   let selectedBeatId = $state<string | null>(null)
   let chordsSelectionBeatIds = $state<string[]>([])
+  let showChordSuggestions = $state(true)
+  let finishedChordSectionIds = $state<string[]>([])
+  let reopenedChordSectionIds = $state<string[]>([])
+  let chordContextMenu = $state<{ x: number; y: number } | null>(null)
   /** Chord UI: nested radial quick select (`ChordRadialQuickSelect.svelte`; legacy: `ChordPickerPopover.svelte`, `ChordMarkingMenu.svelte`) */
   let chordPickerOpen = $state(false)
   let chordAnchorX = $state(0)
@@ -969,16 +1065,57 @@
     if (el instanceof HTMLInputElement) el.select()
   }
 
+  function sectionDisplayLabel(section: Section, ordinal?: number): string {
+    const defaultLabel = defaultSectionLabel(section.kind)
+    const explicitLabel = section.label?.trim()
+    const base = explicitLabel || defaultLabel
+    const hasCustomLabel =
+      !!explicitLabel && explicitLabel.toLowerCase() !== defaultLabel.toLowerCase()
+    return ordinal === undefined || hasCustomLabel ? base : `${base} ${ordinal}`
+  }
+
+  function sectionForBeatId(sm: SongMap, beatId: string | null | undefined): Section | null {
+    if (!beatId) return null
+    const beat = sm.timeline.beats.find((b) => b.id === beatId)
+    if (!beat) return null
+    const bar = sm.timeline.bars.find((b) => b.id === beat.barId)
+    if (!bar) return null
+    return (
+      sm.sections.find(
+        (s) =>
+          bar.index >= s.barRange.startBarIndex &&
+          bar.index <= s.barRange.endBarIndex,
+      ) ?? null
+    )
+  }
+
   /** Strip labels only on beats with an explicit harmony row (no carry-forward repeat). */
   let chordLabelByBeatId = $derived.by(() => {
     const sm = $songMap
     if (!sm) return {} as Record<string, string>
-    const key = sm.metadata.keyDetail
+    const key = displayedSongKey
     const preferFlats = key ? songKeyPreferFlats(key) : false
     const out: Record<string, string> = {}
     for (const h of sm.harmony) {
       if (!h.beatId) continue
-      out[h.beatId] = formatChordSymbol(h.chord, { preferFlats })
+      const chord = transposeChordForDisplay(h.chord, transposeSemitones, key ?? undefined)
+      out[h.beatId] = formatChordSymbol(chord, { preferFlats })
+    }
+    return out
+  })
+
+  /** Playback/overview labels carry the last defined chord forward until the next change. */
+  let playbackChordLabelByBeatId = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return {} as Record<string, string>
+    const key = displayedSongKey
+    const preferFlats = key ? songKeyPreferFlats(key) : false
+    const resolved = resolveChordAtEachBeat(sm)
+    const out: Record<string, string> = {}
+    for (const [beatId, chord] of resolved) {
+      if (!chord) continue
+      const displayed = transposeChordForDisplay(chord, transposeSemitones, key ?? undefined)
+      out[beatId] = formatChordSymbol(displayed, { preferFlats })
     }
     return out
   })
@@ -986,20 +1123,96 @@
   /**
    * Per-bar chord suggestions derived from cached chroma. Pure function;
    * recomputes when songMap mutates (key change, section edits, beats edits,
-   * or new chroma from the analyzer). Bars whose downbeat already has a
-   * user-placed chord are filtered out at render time in the strip (ghosts
-   * only show when no real chord is present).
+   * or new chroma from the analyzer). Suggestions only show in un-chorded
+   * space, so analyzer ghosts do not compete with user-entered chord spans.
    */
-  const chordSuggestions = $derived(proposeChordSuggestions($songMap))
+  const rawChordSuggestions = $derived(proposeChordSuggestions($songMap))
+
+  const chordSuggestionVisibility = $derived.by(() => {
+    const sm = $songMap
+    return sm ? chordSuggestionVisibilityState(sm) : null
+  })
+
+  const currentChordSection = $derived.by<Section | null>(() => {
+    const sm = $songMap
+    if (!sm) return null
+    const beatId = selectedBeatId ?? chordsSelectionBeatIds[0] ?? null
+    return sectionForBeatId(sm, beatId)
+  })
+
+  const autoFinishedChordSectionIds = $derived.by(() => {
+    return chordSuggestionVisibility
+      ? [...chordSuggestionVisibility.coveredFromStartSectionIds]
+      : ([] as string[])
+  })
+
+  const suppressedChordSectionIds = $derived.by(() => {
+    const reopened = new Set(reopenedChordSectionIds)
+    return new Set(
+      [...finishedChordSectionIds, ...autoFinishedChordSectionIds].filter((id) => !reopened.has(id)),
+    )
+  })
+
+  const currentChordSectionDone = $derived(
+    currentChordSection ? suppressedChordSectionIds.has(currentChordSection.id) : false,
+  )
+
+  const chordSuggestions = $derived.by(() => {
+    if (!showChordSuggestions) return new Map<string, ChordSuggestion>()
+    const sm = $songMap
+    if (!sm) return new Map(rawChordSuggestions)
+    const filtered = new Map(rawChordSuggestions)
+    for (const [beatId] of rawChordSuggestions) {
+      if (chordSuggestionVisibility?.coveredBeatIds.has(beatId)) {
+        filtered.delete(beatId)
+        continue
+      }
+      const section = sectionForBeatId(sm, beatId)
+      if (section && suppressedChordSectionIds.has(section.id)) filtered.delete(beatId)
+    }
+    return filtered
+  })
+
+  $effect(() => {
+    const sm = $songMap
+    if (!sm) return
+    const validIds = new Set(sm.sections.map((s) => s.id))
+    const nextFinished = finishedChordSectionIds.filter((id) => validIds.has(id))
+    if (
+      nextFinished.length !== finishedChordSectionIds.length ||
+      nextFinished.some((id, index) => id !== finishedChordSectionIds[index])
+    ) {
+      finishedChordSectionIds = nextFinished
+    }
+    const nextReopened = reopenedChordSectionIds.filter((id) => validIds.has(id))
+    if (
+      nextReopened.length !== reopenedChordSectionIds.length ||
+      nextReopened.some((id, index) => id !== reopenedChordSectionIds[index])
+    ) {
+      reopenedChordSectionIds = nextReopened
+    }
+  })
+
+  const currentSectionSuggestionEntries = $derived.by(() => {
+    const section = currentChordSection
+    if (!section) return [] as Array<[string, ChordSuggestion]>
+    return [...chordSuggestions.entries()].filter(
+      ([, sug]) =>
+        sug.barIndex >= section.barRange.startBarIndex &&
+        sug.barIndex <= section.barRange.endBarIndex,
+    )
+  })
 
   /** Map shape consumed by TimelineBeatGrid for ghost rendering. */
   const chordSuggestionByBeatId = $derived.by(() => {
     const out: Record<string, { label: string; confidence: number }> = {}
     const sm = $songMap
-    const preferFlats = sm?.metadata.keyDetail ? songKeyPreferFlats(sm.metadata.keyDetail) : false
+    const key = displayedSongKey
+    const preferFlats = key ? songKeyPreferFlats(key) : false
     for (const [beatId, sug] of chordSuggestions) {
+      const chord = transposeChordForDisplay(sug.chord, transposeSemitones, key ?? undefined)
       out[beatId] = {
-        label: formatChordSymbol(sug.chord, { preferFlats }),
+        label: formatChordSymbol(chord, { preferFlats }),
         confidence: sug.confidence,
       }
     }
@@ -1013,9 +1226,15 @@
     if (!sug) return null
     const label =
       sug.confidence >= 0.10 ? 'high conf' : sug.confidence >= 0.05 ? 'medium conf' : 'low conf'
+    const key = displayedSongKey
     return {
-      primary: { chord: sug.chord, confidenceLabel: label },
-      alternatives: sug.alternatives,
+      primary: {
+        chord: transposeChordForDisplay(sug.chord, transposeSemitones, key ?? undefined),
+        confidenceLabel: label,
+      },
+      alternatives: sug.alternatives.map((chord) =>
+        transposeChordForDisplay(chord, transposeSemitones, key ?? undefined),
+      ),
     }
   })
 
@@ -1054,12 +1273,25 @@
     const ids = selectedChordTargetBeatIds()
     if (ids.length === 0) return
     const resolved = resolveChordAtEachBeat(sm)
-    const chords = ids.map((id) => resolved.get(id) ?? null)
-    const text = serializeChordClipboard(chords)
-    void navigator.clipboard.writeText(text).catch(() => {
-      beatEditError = 'Could not copy chords to the clipboard'
+    const explicitByBeat = new Map(sm.harmony.filter((h) => h.beatId).map((h) => [h.beatId!, h.chord]))
+    const key = displayedSongKey
+    const chords = ids.map((id, index) => {
+      const chord = explicitByBeat.get(id) ?? (index === 0 ? resolved.get(id) : null)
+      return chord ? transposeChordForDisplay(chord, transposeSemitones, key ?? undefined) : null
     })
-    beatEditError = ''
+    if (!chords.some(Boolean)) {
+      beatEditError = 'Selection has no chord changes to copy'
+      return
+    }
+    const text = serializeChordClipboard(chords)
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        beatEditError = ''
+      })
+      .catch(() => {
+        beatEditError = 'Could not copy chords to the clipboard'
+      })
   }
 
   async function pasteChordsFromClipboard() {
@@ -1084,23 +1316,62 @@
     if (anchorIdx < 0) return
 
     let map = sm
+    let pastedCount = 0
     for (let i = 0; i < chords.length; i++) {
       const beat = sorted[anchorIdx + i]
       if (!beat) break
       const c = chords[i]
-      if (c === null) map = clearHarmonyAtBeat(map, beat.id)
-      else {
-        const out = upsertHarmonyAtBeat(map, beat.id, c, newId)
-        if (!out.ok) {
-          beatEditError = out.error
-          return
-        }
-        map = out.map
+      if (c === null) continue
+      const sourceChord = transposeChordForStorage(c, transposeSemitones, sm.metadata.keyDetail)
+      const out = upsertHarmonyAtBeat(map, beat.id, sourceChord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
       }
+      map = out.map
+      pastedCount += 1
+    }
+    if (pastedCount === 0) {
+      beatEditError = 'Clipboard has no chord changes to paste'
+      return
     }
     const p = patchSongMap(() => map)
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
+  }
+
+  function handleAcceptCurrentSectionSuggestions() {
+    const sm = get(songMap)
+    const section = currentChordSection
+    if (!sm || !section || currentSectionSuggestionEntries.length === 0) return
+    let map = sm
+    for (const [beatId, suggestion] of currentSectionSuggestionEntries) {
+      const out = upsertHarmonyAtBeat(map, beatId, suggestion.chord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
+      }
+      map = out.map
+    }
+    const p = patchSongMap(() => map)
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else {
+      beatEditError = ''
+      finishedChordSectionIds = [...new Set([...finishedChordSectionIds, section.id])]
+      reopenedChordSectionIds = reopenedChordSectionIds.filter((id) => id !== section.id)
+    }
+  }
+
+  function toggleCurrentChordSectionDone() {
+    const section = currentChordSection
+    if (!section) return
+    if (currentChordSectionDone) {
+      finishedChordSectionIds = finishedChordSectionIds.filter((id) => id !== section.id)
+      reopenedChordSectionIds = [...new Set([...reopenedChordSectionIds, section.id])]
+    } else {
+      finishedChordSectionIds = [...finishedChordSectionIds, section.id]
+      reopenedChordSectionIds = reopenedChordSectionIds.filter((id) => id !== section.id)
+    }
   }
 
   function commitChord(chord: ChordSymbol) {
@@ -1109,8 +1380,9 @@
     const targets = selectedChordTargetBeatIds()
     if (targets.length === 0) return
     let map = sm
+    const sourceChord = transposeChordForStorage(chord, transposeSemitones, sm.metadata.keyDetail)
     for (const beatId of targets) {
-      const out = upsertHarmonyAtBeat(map, beatId, chord, newId)
+      const out = upsertHarmonyAtBeat(map, beatId, sourceChord, newId)
       if (!out.ok) {
         beatEditError = out.error
         return
@@ -1143,7 +1415,7 @@
   }
 
   /** Picker spelling + diatonic column; must track metadata so changing song key updates the column. */
-  let chordPickerSongKey = $derived(($songMap?.metadata.keyDetail ?? keyDraft) as SongKey)
+  let chordPickerSongKey = $derived((displayedSongKey ?? $songMap?.metadata.keyDetail ?? keyDraft) as SongKey)
 
   function isChordOpenKey(e: KeyboardEvent): boolean {
     if (e.metaKey || e.ctrlKey || e.altKey) return false
@@ -1186,10 +1458,11 @@
       if (chordPickerOpen) return
       const mod = e.metaKey || e.ctrlKey
       if (!mod) return
-      if (e.key === 'c') {
+      const key = e.key.toLowerCase()
+      if (key === 'c') {
         e.preventDefault()
         copyChordsSelection()
-      } else if (e.key === 'v') {
+      } else if (key === 'v') {
         e.preventDefault()
         void pasteChordsFromClipboard()
       }
@@ -1201,16 +1474,81 @@
   $effect(() => {
     if (editMode !== 'chords') {
       chordPickerOpen = false
+      chordContextMenu = null
       selectedBeatId = null
       chordsSelectionBeatIds = []
     }
   })
 
   function onChordBeatInteract(detail: { clientX: number; clientY: number }) {
+    chordContextMenu = null
     chordAnchorX = detail.clientX
     chordAnchorY = detail.clientY
     chordPickerOpen = true
   }
+
+  function onChordContextMenu(detail: { clientX: number; clientY: number }) {
+    chordPickerOpen = false
+    chordContextMenu = { x: detail.clientX, y: detail.clientY }
+  }
+
+  function chordContextMenuStyle(): string {
+    if (!chordContextMenu) return ''
+    const left = browser
+      ? Math.max(8, Math.min(chordContextMenu.x, window.innerWidth - 216))
+      : chordContextMenu.x
+    const top = browser
+      ? Math.max(8, Math.min(chordContextMenu.y, window.innerHeight - 190))
+      : chordContextMenu.y
+    return `left: ${left}px; top: ${top}px;`
+  }
+
+  function closeChordContextMenu() {
+    chordContextMenu = null
+  }
+
+  function copyChordsFromContextMenu() {
+    copyChordsSelection()
+    closeChordContextMenu()
+  }
+
+  function pasteChordsFromContextMenu() {
+    void pasteChordsFromClipboard()
+    closeChordContextMenu()
+  }
+
+  function clearChordsFromContextMenu() {
+    clearChordAtBeat()
+    closeChordContextMenu()
+  }
+
+  function acceptSectionSuggestionsFromContextMenu() {
+    handleAcceptCurrentSectionSuggestions()
+    closeChordContextMenu()
+  }
+
+  function toggleSectionDoneFromContextMenu() {
+    toggleCurrentChordSectionDone()
+    closeChordContextMenu()
+  }
+
+  $effect(() => {
+    if (!browser || !chordContextMenu) return
+    const close = () => {
+      chordContextMenu = null
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  })
 
   let objectUrl = $state<string | null>(null)
   let audioEl = $state<HTMLAudioElement | null>(null)
@@ -1229,6 +1567,24 @@
    * / stop() / seek()`.
    */
   const playbackController = new PlaybackController()
+  // Audio pitch-shift runs CLIENT-SIDE via signalsmith-stretch (MIT, WASM) —
+  // free to ship, no sidecar dependency. See $lib/audio/clientPitchShift.
+  const transposeAudioEnabled: boolean = true
+  let transposeAudioStatus = $state<'idle' | 'rendering' | 'ready' | 'error'>('idle')
+  let transposeAudioError = $state('')
+  let transposePlaybackBuffer = $state<AudioBuffer | null>(null)
+  let transposeAudioGeneration = 0
+  let transposePlaybackResume = $state<{ wasPlaying: boolean; timeSec: number } | null>(null)
+
+  function captureTransposePlaybackResume(): { wasPlaying: boolean; timeSec: number } {
+    const snapshot = {
+      wasPlaying: playbackController.isPlaying,
+      timeSec: playbackController.currentTime,
+    }
+    if (snapshot.wasPlaying) playbackController.pause()
+    transposePlaybackResume = snapshot
+    return snapshot
+  }
 
   // Restore the per-device click sync calibration from localStorage —
   // it's a property of the audio output chain (speakers / Bluetooth /
@@ -1273,6 +1629,124 @@
   $effect(() => {
     playbackController.rangeStart = rangeStart
     playbackController.rangeEnd = rangeEnd
+  })
+
+  async function decodePlaybackBlob(blob: Blob): Promise<AudioBuffer> {
+    const ac = new AudioContext()
+    try {
+      return await ac.decodeAudioData(await blob.arrayBuffer())
+    } finally {
+      void ac.close().catch(() => {})
+    }
+  }
+
+  function sourceAudioSubpath(sm: SongMap): string | null {
+    if (sm.audio?.originalPath) return sm.audio.originalPath
+    if (sm.audio?.fileName) return `audio/${sm.audio.fileName}`
+    return null
+  }
+
+  $effect(() => {
+    const sm = $songMap
+    const ps = $projectStore
+    const semitones = transposeSemitones
+    transposeAudioGeneration += 1
+    const generation = transposeAudioGeneration
+
+    if (!transposeAudioEnabled || semitones === 0) {
+      transposePlaybackBuffer = null
+      transposeAudioStatus = 'idle'
+      transposeAudioError = ''
+      return
+    }
+
+    if (!sm || !ps.osPath || !ps.activeSongFolder) {
+      transposePlaybackBuffer = null
+      transposeAudioStatus = 'error'
+      transposeAudioError = 'Transpose audio needs a project song on disk.'
+      return
+    }
+    const srcSubpath = sourceAudioSubpath(sm)
+    if (!srcSubpath) {
+      transposePlaybackBuffer = null
+      transposeAudioStatus = 'error'
+      transposeAudioError = 'Transpose audio needs a linked source file.'
+      return
+    }
+
+    transposePlaybackBuffer = null
+    transposeAudioStatus = 'rendering'
+    transposeAudioError = ''
+
+    void (async () => {
+      try {
+        // Client-side shift (signalsmith-stretch, MIT): decode the source once
+        // (cached per file), then render the shifted buffer in-browser. No
+        // sidecar round-trip; per-semitone results are cached inside
+        // pitchShiftAudioBuffer, so revisiting a shift is instant.
+        const original = await transposeSourceBufferCached(
+          ps.osPath!,
+          ps.activeSongFolder!,
+          srcSubpath,
+        )
+        if (generation !== transposeAudioGeneration) return
+        const buffer = await pitchShiftAudioBuffer(original, semitones)
+        if (generation !== transposeAudioGeneration) return
+        transposePlaybackBuffer = buffer
+        transposeAudioStatus = 'ready'
+      } catch (e) {
+        if (generation !== transposeAudioGeneration) return
+        transposePlaybackBuffer = null
+        transposeAudioStatus = 'error'
+        transposeAudioError = e instanceof Error ? e.message : String(e)
+      }
+    })()
+  })
+
+  /**
+   * Decoded transpose source, cached by project/song/file so changing the
+   * semitone amount doesn't re-read + re-decode the audio. A failed decode
+   * clears the cache entry so the next attempt retries.
+   */
+  let transposeSrcKey = ''
+  let transposeSrcPromise: Promise<AudioBuffer> | null = null
+  function transposeSourceBufferCached(
+    osPath: string,
+    folder: string,
+    subpath: string,
+  ): Promise<AudioBuffer> {
+    const key = `${osPath}::${folder}::${subpath}`
+    if (transposeSrcKey !== key || !transposeSrcPromise) {
+      transposeSrcKey = key
+      const p = (async () => {
+        const r = await readProjectSongAsset(osPath, folder, subpath)
+        if (!r.ok) throw new Error(r.error)
+        return await decodePlaybackBlob(r.blob)
+      })()
+      p.catch(() => {
+        if (transposeSrcKey === key) {
+          transposeSrcPromise = null
+          transposeSrcKey = ''
+        }
+      })
+      transposeSrcPromise = p
+    }
+    return transposeSrcPromise
+  }
+
+  $effect(() => {
+    const pending = transposePlaybackResume
+    if (!pending) return
+    const readyForPlayback =
+      transposeSemitones === 0 || (transposeAudioStatus === 'ready' && transposePlaybackBuffer !== null)
+    if (!readyForPlayback) return
+    transposePlaybackResume = null
+    const resumeAt = pending.timeSec
+    const shouldPlay = pending.wasPlaying
+    queueMicrotask(() => {
+      playbackController.seek(resumeAt)
+      if (shouldPlay) playbackController.play()
+    })
   })
 
   onDestroy(() => {
@@ -1533,6 +2007,17 @@
     else beatEditError = ''
   }
 
+  function setSelectedCueSpokenCountIn(spokenCountIn: boolean) {
+    const track = selectedCueTrack
+    if (!track) return
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? { ...t, spokenCountIn } : t)),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+    else beatEditError = ''
+  }
+
   function generateSelectedCueTrackFromSections() {
     const track = selectedCueTrack
     if (!track) {
@@ -1782,7 +2267,11 @@
       cueGenErr = 'Create a cue track first.'
       return
     }
-    const needsVoice = track.events.some((event) => event.enabled && event.text?.trim())
+    // The spoken count-in produces speech that isn't stored as text events, so
+    // it must count toward "needs voice" — otherwise the render skips the
+    // readiness guard and silently produces a cue with no speech.
+    const needsVoice =
+      !!track.spokenCountIn || track.events.some((event) => event.enabled && event.text?.trim())
     if (needsVoice && !piperCueReady) {
       cueGenErr = 'Voice cues are not ready. Start BarBro Desktop and finish voice setup.'
       return
@@ -1904,6 +2393,302 @@
     }
   }
 
+  // ── Lyrics tab ─────────────────────────────────────────────────────────
+  // Paste → clean ([Chorus] markers etc.) → save into `sm.lyrics.sourceText`.
+  // Timing (`lyrics.words`) comes from "Fit to song" (Phase C); editing the
+  // text after an alignment clears the words — their timing is stale.
+  let lyricsDraft = $state('')
+  /** Which song the draft was seeded for — re-seed on song switch, never on ticks. */
+  let lyricsSeededFor = ''
+  $effect(() => {
+    if (editMode !== 'lyrics') return
+    const sm = $songMap
+    if (!sm) return
+    const key = `${$projectStore.activeSongId ?? 'session'}::${sm.metadata.title}`
+    if (lyricsSeededFor === key) return
+    lyricsSeededFor = key
+    lyricsDraft = untrack(() => sm.lyrics?.sourceText ?? '')
+  })
+
+  const lyricsCleanedPreview = $derived(cleanLyricsText(lyricsDraft))
+  const lyricsSaved = $derived($songMap?.lyrics ?? null)
+  const lyricsDraftMatchesSaved = $derived(
+    (lyricsSaved?.sourceText ?? '') === lyricsCleanedPreview.text,
+  )
+  let lyricsSaveMsg = $state('')
+
+  function saveLyrics() {
+    const cleaned = cleanLyricsText(lyricsDraft)
+    const p = patchSongMap((m) => {
+      if (!cleaned.text) {
+        const { lyrics: _lyrics, ...rest } = m
+        return rest as typeof m
+      }
+      const sameText = m.lyrics?.sourceText === cleaned.text
+      return {
+        ...m,
+        lyrics: sameText && m.lyrics
+          ? m.lyrics // unchanged text keeps existing word timing
+          : { words: [], sourceText: cleaned.text },
+      }
+    })
+    if (!p.ok) {
+      lyricsSaveMsg = p.errors.join('; ')
+      return
+    }
+    lyricsDraft = cleaned.text
+    lyricsSaveMsg = cleaned.text
+      ? `Saved ${cleaned.lines.length} line${cleaned.lines.length === 1 ? '' : 's'}.`
+      : 'Lyrics removed.'
+  }
+
+  // ── "Fit to song": transcribe the vocal → align imported words to it ──
+  let lyricsFitBusy = $state(false)
+  let lyricsFitMsg = $state('')
+  let lyricsFitErr = $state('')
+  let lyricsMatchedPct = $state<number | null>(null)
+  let lyricsMatchedRows = $state(0)
+  let lyricsTotalRows = $state(0)
+
+  /** Vocals stem if on disk (cleanest recognition), else the original audio. */
+  function resolveLyricsAudioAbsPath(): { abs: string; usedStem: boolean } | null {
+    const ps = get(projectStore)
+    const sm = get(songMap)
+    if (!ps.osPath || !ps.activeSongFolder || !sm) return null
+    const meta = ps.metadataByFolder[ps.activeSongFolder]
+    const best = selectBestStemSet(meta)
+    const vocalsFile = best?.files.find((f) => /^vocals\.(wav|mp3)$/i.test(f))
+    if (vocalsFile) {
+      return {
+        abs: `${ps.osPath}/${ps.activeSongFolder}/${best!.pathPrefix}${vocalsFile}`,
+        usedStem: true,
+      }
+    }
+    const rel = sm.audio?.originalPath
+    if (!rel) return null
+    return { abs: `${ps.osPath}/${ps.activeSongFolder}/${rel}`, usedStem: false }
+  }
+
+  async function fitLyricsToSong() {
+    if (lyricsFitBusy) return
+    const sm = get(songMap)
+    const sourceText = sm?.lyrics?.sourceText
+    if (!sm || !sourceText) {
+      lyricsFitErr = 'Save the lyrics first.'
+      return
+    }
+    const src = resolveLyricsAudioAbsPath()
+    if (!src) {
+      lyricsFitErr = 'This song needs its audio in the project to fit lyrics.'
+      return
+    }
+    lyricsFitBusy = true
+    lyricsFitErr = ''
+    lyricsMatchedPct = null
+    try {
+      // 1. Lyrics engine ready? (one-time install, user-triggered)
+      lyricsFitMsg = 'Checking the lyrics engine…'
+      const status = await getLyricsSetupStatus()
+      if (!status) {
+        lyricsFitErr = 'BarBro Desktop is not reachable (or needs an update).'
+        return
+      }
+      if (!status.ready) {
+        lyricsFitMsg = 'Preparing the lyrics engine (one-time)…'
+        const setup = await setupLyricsDeps((ev) => {
+          if (ev.type === 'progress') lyricsFitMsg = ev.label
+        })
+        if (!setup.ok) {
+          lyricsFitErr = setup.error
+          return
+        }
+      }
+
+      // 2. Transcribe (the model downloads on the very first run).
+      lyricsFitMsg = src.usedStem ? 'Listening to the vocal track…' : 'Listening to the song…'
+      const enq = await enqueueLyricsTranscription(src.abs)
+      if (!enq.ok) {
+        lyricsFitErr = enq.error
+        return
+      }
+      const words = await new Promise<LyricsTranscriptionWord[]>((resolve, reject) => {
+        const userFacingTranscriptionLog = (msg: string): string | null => {
+          const normalized = msg.toLowerCase()
+          if (normalized.includes('downloading speech model')) {
+            return 'Downloading the voice model — first time only (a few minutes)…'
+          }
+          return null
+        }
+        const disconnect = subscribeToJobEvents<LyricsTranscriptionEvent>(
+          enq.jobId,
+          (ev) => {
+            if (ev.type === 'progress' && typeof ev.ratio === 'number') {
+              lyricsFitMsg = `Listening… ${Math.round(ev.ratio * 100)}%`
+            } else if (ev.type === 'log') {
+              const msg = userFacingTranscriptionLog(ev.msg)
+              if (msg) lyricsFitMsg = msg
+            } else if (ev.type === 'state' && ev.state === 'queued') {
+              // The sidecar runs one heavy job at a time — be honest that
+              // we're behind stem prep instead of pretending to listen.
+              lyricsFitMsg = 'Waiting for other audio work to finish (stems in progress)…'
+            } else if (ev.type === 'state' && ev.state === 'running') {
+              lyricsFitMsg = src.usedStem ? 'Listening to the vocal track…' : 'Listening to the song…'
+            } else if (ev.type === 'done') {
+              disconnect()
+              resolve(ev.words ?? [])
+            } else if (ev.type === 'error') {
+              disconnect()
+              reject(new Error(ev.msg || 'Transcription failed.'))
+            } else if (ev.type === 'state' && (ev.state === 'error' || ev.state === 'cancelled')) {
+              disconnect()
+              reject(new Error('Transcription did not finish.'))
+            }
+          },
+          (err) => reject(err),
+        )
+      })
+
+      // 3. Align imported lyrics against the recognized words.
+      lyricsFitMsg = 'Fitting the words…'
+      const tokens = tokenizeLyrics(sourceText)
+      const { words: timed, matchedRatio, matchedRows, totalRows } =
+        alignLyricsToTranscription(tokens, words)
+      if (matchedRatio === 0) {
+        lyricsFitErr = 'Could not match the lyrics to this recording.'
+        return
+      }
+      const p = patchSongMap((m) => ({
+        ...m,
+        lyrics: {
+          words: timed,
+          sourceText,
+          alignedAt: new Date().toISOString(),
+          transcriberVersion: 2,
+        },
+      }))
+      if (!p.ok) {
+        lyricsFitErr = p.errors.join('; ')
+        return
+      }
+      lyricsMatchedPct = Math.round(matchedRatio * 100)
+      lyricsMatchedRows = matchedRows
+      lyricsTotalRows = totalRows
+      lyricsFitMsg = ''
+    } catch (e) {
+      lyricsFitErr = e instanceof Error ? e.message : String(e)
+    } finally {
+      lyricsFitBusy = false
+      if (lyricsFitErr) lyricsFitMsg = ''
+    }
+  }
+
+  /** Aligned lines (index + first-word time) for the nudge list. */
+  const lyricsAlignedLines = $derived.by(() => {
+    const words = $songMap?.lyrics?.words ?? []
+    if (words.length === 0) return []
+    const byLine = new Map<number, { line: number; text: string[]; startSec: number }>()
+    for (const w of words) {
+      const cur = byLine.get(w.line)
+      if (cur) {
+        cur.text.push(w.text)
+        cur.startSec = Math.min(cur.startSec, w.startSec)
+      } else {
+        byLine.set(w.line, { line: w.line, text: [w.text], startSec: w.startSec })
+      }
+    }
+    return [...byLine.values()]
+      .sort((a, b) => a.line - b.line)
+      .map((l) => ({ line: l.line, text: l.text.join(' '), startSec: l.startSec }))
+  })
+
+  /** Shift one line's words by ±deltaSec (manual fix-up for a misfit line). */
+  function nudgeLyricsLine(line: number, deltaSec: number) {
+    const p = patchSongMap((m) => {
+      if (!m.lyrics) return m
+      const lineWords = m.lyrics.words.filter((w) => w.line === line)
+      if (lineWords.length === 0) return m
+      // Clamp so the line's earliest word never goes below 0.
+      const minStart = Math.min(...lineWords.map((w) => w.startSec))
+      const d = Math.max(deltaSec, -minStart)
+      return {
+        ...m,
+        lyrics: {
+          ...m.lyrics,
+          words: m.lyrics.words.map((w) =>
+            w.line === line ? { ...w, startSec: w.startSec + d, endSec: w.endSec + d } : w,
+          ),
+        },
+      }
+    })
+    if (!p.ok) lyricsFitErr = p.errors.join('; ')
+  }
+
+  // ── Overview "Play cues" toggle ──────────────────────────────────────────
+  // "Play cues" is a LOCAL playback preference — the cue lane's mute in
+  // `mixState` (per-machine, stripped from cloud sync). It NEVER touches the
+  // shared `cueTracks[].enabled` field, so toggling can't cause a cloud
+  // conflict. On enable it auto-renders the cue WAV if stale (renderExport is
+  // also local) and bumps `mixerReloadSignal` once so the new lane appears;
+  // pure on/off after that is a live mute with no reload.
+  let mixerReloadSignal = $state(0)
+  let overviewCueTrack = $derived($songMap ? getPrimaryCueTrack($songMap) : undefined)
+  let overviewHasCueContent = $derived(
+    !!overviewCueTrack &&
+      (overviewCueTrack.events.some((e) => e.enabled && e.text?.trim()) ||
+        !!overviewCueTrack.spokenCountIn),
+  )
+  let overviewCueRendered = $derived.by(() => {
+    const sm = $songMap
+    const t = overviewCueTrack
+    if (!sm || !t) return false
+    const exp = t.renderExport
+    if (!exp?.relativePath) return false
+    return exp.fingerprint === fingerprintCueTrackInputs(sm, t)
+  })
+  let overviewCueMuted = $derived(
+    $songMap?.mixState?.tracks.find((t) => t.key === 'cue')?.muted ?? false,
+  )
+  /** Checkbox = cues will actually be heard: rendered fresh AND not muted. */
+  let overviewCuesActive = $derived(overviewCueRendered && !overviewCueMuted)
+  /** Spoken count-in wants numbers but there's no count-in to place them on. */
+  let overviewCuesNeedCountIn = $derived(
+    !!overviewCueTrack?.spokenCountIn && cueCountInBeats === 0,
+  )
+
+  function setCueLaneMuted(muted: boolean) {
+    patchSongMap((m) => {
+      const tracks = m.mixState?.tracks ? m.mixState.tracks.map((t) => ({ ...t })) : []
+      const i = tracks.findIndex((t) => t.key === 'cue')
+      if (i >= 0) {
+        if (muted) tracks[i]!.muted = true
+        else delete tracks[i]!.muted
+      } else if (muted) {
+        tracks.push({ key: 'cue', volume: 1, muted: true })
+      }
+      return { ...m, mixState: { tracks } }
+    })
+  }
+
+  async function toggleOverviewCues(on: boolean) {
+    cueGenErr = ''
+    if (on) {
+      // Render the cue WAV if it's missing/stale (renderExport + the WAV are
+      // per-machine — no cloud push). A one-time reload surfaces the new lane.
+      const sm = get(songMap)
+      const t = sm ? getPrimaryCueTrack(sm) : undefined
+      const exp = t?.renderExport
+      const stale =
+        !sm || !t || !exp?.relativePath || exp.fingerprint !== fingerprintCueTrackInputs(sm, t)
+      if (stale) {
+        await generateCueTrackWav()
+        mixerReloadSignal++
+      }
+      setCueLaneMuted(false)
+    } else {
+      setCueLaneMuted(true)
+    }
+  }
+
   function downloadCueTrackFile() {
     const sm = get(songMap)
     if (!lastCueDownloadBlob || !sm) return
@@ -1948,7 +2733,7 @@
 </script>
 
 <main
-  class="relative z-10 flex min-h-dvh w-full max-w-none flex-col gap-6 px-2 py-8 sm:px-4 md:px-6 md:py-12 lg:px-8"
+  class="edit-page relative z-10 flex min-h-dvh w-full max-w-none flex-col gap-6 px-2 py-8 sm:px-4 md:px-6 md:py-12 lg:px-8"
 >
   {#if !browser}
     <div class="min-h-[50vh]" aria-hidden="true"></div>
@@ -1983,51 +2768,131 @@
   {:else if $audioSession.file && $songMap}
     {@const sm = $songMap}
 
-    <header
-      class="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
+    <!-- Song-first header, raw over the background (a <div>, NOT a <header>, so
+         it escapes the `.edit-page > header` studio-box rule). -->
+    <div
+      class="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"
     >
-      <div class="flex items-center gap-3">
+      <div class="min-w-0">
+        {#if editingTitle}
+          <input
+            class="border-foreground bg-background text-foreground w-full min-w-0 max-w-md border-b-2 px-0.5 text-3xl font-bold tracking-tight outline-none"
+            bind:value={titleDraft}
+            onblur={commitTitleEdit}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
+            use:focusOnMount
+          />
+        {:else}
+          <h1 class="flex items-center gap-2 text-3xl font-bold tracking-tight">
+            <span class="truncate">{sm.metadata.title || 'Untitled song'}</span>
+            <button
+              type="button"
+              class="text-muted-foreground/50 hover:text-foreground shrink-0 transition-colors"
+              onclick={startTitleEdit}
+              aria-label="Rename song"
+            >
+              <Pencil class="size-4" />
+            </button>
+          </h1>
+        {/if}
         <div
-          class="brutalist-shadow-sm border-foreground bg-muted text-foreground inline-flex size-11 shrink-0 items-center justify-center border-2"
-          aria-hidden="true"
+          class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums"
         >
-          <Music class="size-6" strokeWidth={2} />
-        </div>
-        <div>
-          <p class="text-muted-foreground text-xs font-medium tracking-wide uppercase">BarBro</p>
-          <h1 class="text-2xl font-semibold tracking-tight">Edit</h1>
-          <p class="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-sm">
-            {#if editingTitle}
-              <input
-                class="border-foreground bg-background text-foreground min-w-0 w-40 border-b px-0.5 text-sm outline-none"
-                bind:value={titleDraft}
-                onblur={commitTitleEdit}
-                onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
-                use:focusOnMount
+          <span>{sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}</span>
+          <span class="text-muted-foreground/40" aria-hidden="true">·</span>
+          <span class="inline-flex items-center gap-1">
+            {keyLabel ?? '— key'}
+            <button
+              type="button"
+              class="text-muted-foreground/50 hover:text-foreground transition-colors disabled:opacity-40"
+              onclick={() => void redetectKey()}
+              disabled={redetectingKey || chordChromaStatus === 'analyzing' || chordChromaStatus === 'installing'}
+              title="Re-detect the key from the audio (overwrites the current key)"
+              aria-label="Re-detect key"
+            >
+              <RefreshCw
+                class="size-3 {redetectingKey || chordChromaStatus === 'analyzing'
+                  ? 'animate-spin'
+                  : ''}"
               />
-            {:else}
-              <span>{sm.metadata.title}</span>
+            </button>
+          </span>
+          <span class="text-muted-foreground/40" aria-hidden="true">·</span>
+          <span
+            class="border-foreground/30 bg-background inline-flex items-center overflow-hidden rounded-[var(--radius)] border font-mono text-[11px] font-black"
+            aria-label="Song transpose"
+          >
+            <button
+              type="button"
+              class="hover:bg-foreground hover:text-background px-2 py-0.5 transition-colors disabled:opacity-35"
+              onclick={() => setTransposeBase(transposeSemitones - 1)}
+              disabled={transposeSemitones <= -12}
+              aria-label="Transpose down one semitone"
+            >
+              -1
+            </button>
+            <span class="border-foreground/20 min-w-9 border-x px-2 py-0.5 text-center">
+              {formatTransposeLabel(transposeSemitones)}
+            </span>
+            <button
+              type="button"
+              class="hover:bg-foreground hover:text-background px-2 py-0.5 transition-colors disabled:opacity-35"
+              onclick={() => setTransposeBase(transposeSemitones + 1)}
+              disabled={transposeSemitones >= 12}
+              aria-label="Transpose up one semitone"
+            >
+              +1
+            </button>
+            {#if transposeSemitones !== 0}
               <button
                 type="button"
-                class="text-muted-foreground/50 hover:text-foreground transition-colors"
-                onclick={startTitleEdit}
-                aria-label="Rename song"
+                class="hover:bg-foreground hover:text-background border-foreground/20 border-l px-2 py-0.5 transition-colors"
+                onclick={() => setTransposeBase(0)}
+                aria-label="Reset transpose"
               >
-                <Pencil class="size-3" />
+                reset
               </button>
             {/if}
-            <span class="text-muted-foreground/80 font-mono text-xs tabular-nums">
-              · {sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}
+          </span>
+          {#if transposeSemitones !== 0}
+            <span
+              class="font-mono text-[10px] font-bold {transposeAudioEnabled && transposeAudioStatus === 'error'
+                ? 'text-destructive'
+                : 'text-muted-foreground'}"
+              title={transposeAudioEnabled
+                ? transposeAudioError || undefined
+                : 'Chords and key are transposed for display. Pitch-shifting the audio is not available in this version.'}
+            >
+              {transposeAudioEnabled
+                ? transposeAudioStatus === 'ready'
+                  ? 'audio shifted'
+                  : transposeAudioStatus === 'rendering'
+                    ? 'preparing audio...'
+                    : 'audio unavailable'
+                : 'chords & key only'}
             </span>
-          </p>
+          {/if}
         </div>
       </div>
 
       <div
-        class="border-foreground bg-muted inline-grid grid-cols-6 gap-0 self-start overflow-hidden border-2 sm:self-auto"
+        class="border-foreground bg-muted inline-grid grid-cols-7 gap-0 self-start overflow-hidden border-2 sm:self-auto"
         role="tablist"
         aria-label="Edit mode"
       >
+        <Button
+          type="button"
+          role="tab"
+          aria-selected={editMode === 'overview'}
+          variant="ghost"
+          size="sm"
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'overview'
+            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
+            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
+          onclick={() => (editMode = 'overview')}
+        >
+          Overview
+        </Button>
         <Button
           type="button"
           role="tab"
@@ -2083,15 +2948,15 @@
         <Button
           type="button"
           role="tab"
-          aria-selected={editMode === 'mix'}
+          aria-selected={editMode === 'lyrics'}
           variant="ghost"
           size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'mix'
+          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'lyrics'
             ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
             : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'mix')}
+          onclick={() => (editMode = 'lyrics')}
         >
-          Mix
+          Lyrics
         </Button>
         <Button
           type="button"
@@ -2107,7 +2972,7 @@
           Lead sheet
         </Button>
       </div>
-    </header>
+    </div>
 
 
     {#if editMode === 'cue'}
@@ -2234,6 +3099,21 @@
                 aria-label="Intro cue text"
                 maxlength="120"
               />
+              <label class="mt-2 flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedCueTrack.spokenCountIn ?? false}
+                  onchange={(e) => setSelectedCueSpokenCountIn((e.currentTarget as HTMLInputElement).checked)}
+                  class="accent-foreground mt-0.5 size-4"
+                />
+                <span class="flex flex-col">
+                  <span class="font-medium">Speak the count-in</span>
+                  <span class="text-muted-foreground text-xs">
+                    Announces the intro above + the count length, then counts the beats aloud
+                    (e.g. “{selectedCueIntroText || $songMap?.metadata.title || 'Song'}… {cueCountInBeats || 4}… one, two…”).
+                  </span>
+                </span>
+              </label>
             </fieldset>
 
             <div class="flex flex-wrap items-center gap-2">
@@ -2351,11 +3231,19 @@
       </section>
     {/if}
 
-    {#if editMode === 'mix'}
+    {#if editMode === 'overview'}
       <section
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Mixer"
+        aria-label="Overview"
       >
+        <div
+          class="text-muted-foreground mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs tabular-nums"
+        >
+          <span>{sm.timeline.bars.length} bars</span>
+          <span>{sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}</span>
+          {#if sm.metadata.bpm != null}<span>{Math.round(sm.metadata.bpm)} BPM</span>{/if}
+          {#if keyLabel}<span>{keyLabel}</span>{/if}
+        </div>
         <details class="text-muted-foreground mb-3 text-xs sm:mb-4">
           <summary
             class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
@@ -2367,7 +3255,168 @@
             the song, and every lane stays aligned for playback and export. Click on a waveform to seek.
           </p>
         </details>
-        <MixerView />
+
+        {#if overviewHasCueContent}
+          <div class="border-foreground/15 mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-b pb-3 sm:mb-4">
+            <label class="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={overviewCuesActive}
+                disabled={cueGenBusy}
+                onchange={(e) => void toggleOverviewCues((e.currentTarget as HTMLInputElement).checked)}
+                class="accent-foreground size-4"
+              />
+              <span class="font-semibold">Play cues</span>
+            </label>
+            {#if cueGenBusy}
+              <span class="text-muted-foreground text-xs">Preparing cues…</span>
+            {/if}
+            {#if cueGenErr}
+              <span class="text-destructive text-xs">{cueGenErr}</span>
+            {:else if overviewCuesNeedCountIn}
+              <span class="text-muted-foreground text-xs" role="status">
+                Set a count-in for this song to hear the numbers (Project settings or the count-in control).
+              </span>
+            {:else if cueSpeechNote}
+              <span class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</span>
+            {/if}
+          </div>
+        {/if}
+
+        <MixerView reloadSignal={mixerReloadSignal} />
+      </section>
+    {/if}
+
+    {#if editMode === 'lyrics'}
+      <section
+        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
+        aria-label="Lyrics"
+      >
+        <div class="grid gap-4 md:grid-cols-2">
+          <div class="flex flex-col gap-2">
+            <label class="text-muted-foreground text-xs font-medium uppercase tracking-wide" for="lyrics-paste">
+              Paste lyrics
+            </label>
+            <textarea
+              id="lyrics-paste"
+              bind:value={lyricsDraft}
+              rows="18"
+              placeholder={'Paste the full lyrics here…\n\nSection markers like [Chorus] or (Verse 2) are removed automatically.'}
+              class="border-foreground bg-background min-h-[24rem] w-full resize-y border-2 px-3 py-2 font-mono text-sm leading-relaxed focus:outline-none"
+              spellcheck="false"
+            ></textarea>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+                onclick={saveLyrics}
+                disabled={lyricsDraftMatchesSaved && !!lyricsSaved}
+              >
+                Save lyrics
+              </button>
+              <button
+                type="button"
+                class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+                onclick={() => void fitLyricsToSong()}
+                disabled={lyricsFitBusy || !lyricsSaved?.sourceText || !lyricsDraftMatchesSaved || !$desktopCompanionStatus.reachable}
+                title={!$desktopCompanionStatus.reachable
+                  ? 'BarBro Desktop must be running.'
+                  : !lyricsDraftMatchesSaved
+                    ? 'Save the lyrics first.'
+                    : 'Listen to the song and time every word'}
+              >
+                {lyricsFitBusy ? 'Fitting…' : lyricsSaved?.words.length ? 'Fit to song again' : 'Fit to song'}
+              </button>
+              {#if lyricsSaveMsg && !lyricsFitBusy}
+                <span class="text-muted-foreground text-xs" role="status">{lyricsSaveMsg}</span>
+              {/if}
+            </div>
+            {#if lyricsFitBusy && lyricsFitMsg}
+              <p class="text-muted-foreground text-xs" role="status">✨ {lyricsFitMsg}</p>
+            {/if}
+            {#if lyricsFitErr}
+              <p class="text-destructive text-xs">{lyricsFitErr}</p>
+            {/if}
+            {#if lyricsMatchedPct !== null}
+              {@const rowPct = lyricsTotalRows > 0 ? Math.round((lyricsMatchedRows / lyricsTotalRows) * 100) : 0}
+              <p class="text-xs {rowPct < 40 ? 'text-amber-600' : 'text-muted-foreground'}">
+                Placed {lyricsMatchedRows} of {lyricsTotalRows} lines from the recording
+                ({lyricsMatchedPct}% of words){rowPct < 40
+                  ? ' — that looks rough. Splitting stems first usually helps a lot.'
+                  : '. Lines it couldn’t hear are placed by their neighbors.'}
+              </p>
+            {/if}
+            {#if lyricsSaved && lyricsSaved.words.length > 0 && !lyricsDraftMatchesSaved}
+              <p class="text-amber-600 text-xs">
+                Changing the words clears the current timing — run “Fit to song” again after saving.
+              </p>
+            {/if}
+          </div>
+
+          <div class="flex min-w-0 flex-col gap-2">
+            <span class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+              Cleaned preview · {lyricsCleanedPreview.lines.length} line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
+            </span>
+            <div class="border-foreground/30 bg-muted/40 min-h-[24rem] overflow-auto border-2 px-3 py-2">
+              {#if lyricsCleanedPreview.text}
+                {#each lyricsCleanedPreview.text.split('\n') as line, i (i)}
+                  {#if line}
+                    <p class="text-sm leading-relaxed">{line}</p>
+                  {:else}
+                    <div class="h-3"></div>
+                  {/if}
+                {/each}
+              {:else}
+                <p class="text-muted-foreground text-sm italic">Nothing yet — paste lyrics on the left.</p>
+              {/if}
+            </div>
+            <p class="text-muted-foreground text-xs">
+              {#if lyricsSaved?.words.length}
+                Fitted to the song ({lyricsSaved.words.length} timed words).
+              {:else if lyricsSaved}
+                Saved — not fitted to the song yet.
+              {:else}
+                Lyrics are shown in playback mode once saved and fitted to the song.
+              {/if}
+            </p>
+
+            {#if lyricsAlignedLines.length > 0}
+              <div class="border-foreground/20 flex flex-col border-t pt-2">
+                <span class="text-muted-foreground mb-1 text-[11px] font-semibold uppercase tracking-wider">
+                  Timing · nudge a line if it sits early/late
+                </span>
+                <div class="max-h-64 overflow-auto">
+                  {#each lyricsAlignedLines as l (l.line)}
+                    <div class="flex items-center gap-2 py-0.5 text-xs">
+                      <span class="text-muted-foreground w-12 shrink-0 text-right font-mono tabular-nums">
+                        {Math.floor(l.startSec / 60)}:{String(Math.floor(l.startSec % 60)).padStart(2, '0')}
+                      </span>
+                      <button
+                        type="button"
+                        class="border-foreground/40 hover:border-foreground border px-1.5 font-mono leading-4"
+                        onclick={() => nudgeLyricsLine(l.line, -0.25)}
+                        title="Earlier (−0.25 s)"
+                        aria-label={`Line ${l.line + 1} earlier`}
+                      >
+                        −
+                      </button>
+                      <button
+                        type="button"
+                        class="border-foreground/40 hover:border-foreground border px-1.5 font-mono leading-4"
+                        onclick={() => nudgeLyricsLine(l.line, 0.25)}
+                        title="Later (+0.25 s)"
+                        aria-label={`Line ${l.line + 1} later`}
+                      >
+                        +
+                      </button>
+                      <span class="min-w-0 truncate">{l.text}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+        </div>
       </section>
     {/if}
 
@@ -2407,7 +3456,8 @@
               </p>
             {:else}
               <p>
-                Select beats on the chord strip, then click a beat to edit. ⌘/Ctrl+C and ⌘/Ctrl+V copy and paste chords.
+                Select beats on the chord strip, double-click/tap to edit, and press Space to play from the selected beat.
+                ⌘/Ctrl+C and ⌘/Ctrl+V copy and paste chords.
               </p>
             {/if}
           </div>
@@ -2435,6 +3485,40 @@
             onDismiss={handleDismissAutoFill}
             onUndoDismiss={handleUndoDismissAutoFill}
           />
+          <div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs">
+            <label class="inline-flex items-center gap-2 font-bold">
+              <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
+              Suggestions
+            </label>
+            <span class="text-muted-foreground">
+              {currentChordSection
+                ? sectionDisplayLabel(currentChordSection)
+                : 'Select a beat in a section'}
+            </span>
+            {#if currentChordSection && currentChordSectionDone}
+              <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase">done</span>
+            {/if}
+            <button
+              type="button"
+              class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+              onclick={handleAcceptCurrentSectionSuggestions}
+              disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
+              title="Write every visible suggestion in the selected section"
+            >
+              Use section suggestions ({currentSectionSuggestionEntries.length})
+            </button>
+            <button
+              type="button"
+              class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+              onclick={toggleCurrentChordSectionDone}
+              disabled={!currentChordSection}
+              title={currentChordSectionDone
+                ? 'Show chord suggestions in this section again'
+                : 'Hide chord suggestions in this section'}
+            >
+              {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
+            </button>
+          </div>
           <div
             data-song-key-picker
             class="border-foreground bg-muted mb-4 flex flex-wrap items-center gap-2 border-2 px-3 py-2"
@@ -2548,10 +3632,15 @@
           bind:sectionsSelectionBarIds
           bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
+          currentChordLabelByBeatId={playbackChordLabelByBeatId}
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
+          onChordContextMenu={onChordContextMenu}
           bind:audioElement={audioEl}
+          playbackAudioBufferOverride={transposeAudioEnabled && transposeSemitones !== 0
+            ? transposePlaybackBuffer
+            : undefined}
           countInTicks={editMode === 'grid' ? countInTicksForGrid : []}
           songStartBarIndex={songStartBarIndex}
           onSetStartBar={editMode === 'grid' ? setStartBar : undefined}
@@ -2563,6 +3652,65 @@
       </section>
       <!-- Radial menu stays outside container ancestors for stable fixed-position clientX/Y alignment. -->
       {#if editMode === 'chords' && $songMap}
+        {#if chordContextMenu}
+          <div
+            class="bg-popover text-popover-foreground border-foreground/15 fixed z-[90] w-52 rounded-[var(--radius)] border p-1 text-sm shadow-lg"
+            style={chordContextMenuStyle()}
+            role="menu"
+            tabindex="-1"
+            aria-label="Chord actions"
+            onpointerdown={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              class="hover:bg-muted flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={selectedChordTargetBeatIds().length === 0}
+              onclick={copyChordsFromContextMenu}
+            >
+              <span>Copy chords</span>
+              <span class="text-muted-foreground font-mono text-[10px]">Ctrl/⌘C</span>
+            </button>
+            <button
+              type="button"
+              class="hover:bg-muted flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!chordPasteAnchorBeatId()}
+              onclick={pasteChordsFromContextMenu}
+            >
+              <span>Paste chords here</span>
+              <span class="text-muted-foreground font-mono text-[10px]">Ctrl/⌘V</span>
+            </button>
+            <button
+              type="button"
+              class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={selectedChordTargetBeatIds().length === 0}
+              onclick={clearChordsFromContextMenu}
+            >
+              Clear selected chords
+            </button>
+            <div class="bg-border/70 my-1 h-px"></div>
+            <button
+              type="button"
+              class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
+              onclick={acceptSectionSuggestionsFromContextMenu}
+            >
+              Use section suggestions ({currentSectionSuggestionEntries.length})
+            </button>
+            <button
+              type="button"
+              class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!currentChordSection}
+              onclick={toggleSectionDoneFromContextMenu}
+            >
+              {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
+            </button>
+          </div>
+        {/if}
         <ChordRadialQuickSelect
           bind:open={chordPickerOpen}
           anchorX={chordAnchorX}
@@ -2824,3 +3972,27 @@
     </Button>
   {/if}
 </main>
+
+<style>
+  /* (The old `.edit-page > header` studio box was removed — the header is now a
+     raw <div> over the background.) */
+  .edit-page :global(.brutalist-shadow.border-foreground.bg-background),
+  .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-background),
+  .edit-page :global(details.border-foreground.bg-background) {
+    background: var(--card);
+  }
+
+  .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-muted) {
+    background: var(--studio-orange);
+    color: var(--foreground);
+  }
+
+  .edit-page :global(.inline-grid.grid-cols-7.border-foreground.bg-muted) {
+    background: var(--card);
+    box-shadow: 4px 4px 0 var(--ink);
+  }
+
+  .edit-page :global(fieldset.border-foreground) {
+    background: color-mix(in oklch, var(--card) 84%, var(--muted));
+  }
+</style>

@@ -8,6 +8,11 @@
   } from '$lib/leadsheet/iterate'
   import { generateChartHints, type BarHint } from '$lib/leadsheet/analyze'
   import { formatChordSymbol } from '$lib/chords'
+  import {
+    effectiveTransposeSemitones,
+    transposeChordForDisplay,
+    transposeSongKey,
+  } from '$lib/songmap/transposition'
 
   let { songMap }: { songMap: SongMap } = $props()
 
@@ -57,14 +62,16 @@
   }
 
   function keyString(sm: SongMap): string {
-    if (sm.metadata.keyDetail) {
+    const semitones = effectiveTransposeSemitones(sm)
+    const key = sm.metadata.keyDetail ? transposeSongKey(sm.metadata.keyDetail, semitones) : null
+    if (key) {
       const acc =
-        sm.metadata.keyDetail.accidental === 'sharp'
+        key.accidental === 'sharp'
           ? '♯'
-          : sm.metadata.keyDetail.accidental === 'flat'
+          : key.accidental === 'flat'
             ? '♭'
             : ''
-      return `${sm.metadata.keyDetail.root}${acc} ${sm.metadata.keyDetail.mode}`
+      return `${key.root}${acc} ${key.mode}`
     }
     return sm.metadata.key ?? ''
   }
@@ -90,6 +97,10 @@
   }
 
   const hints = $derived(generateChartHints(songMap))
+  const transposeSemitones = $derived(effectiveTransposeSemitones(songMap))
+  const displayedKey = $derived(
+    songMap.metadata.keyDetail ? transposeSongKey(songMap.metadata.keyDetail, transposeSemitones) : null,
+  )
 
   const pages = $derived.by<PageLayout[]>(() => {
     const sortedAll: Bar[] = [...songMap.timeline.bars].sort((a, b) => a.index - b.index)
@@ -146,9 +157,10 @@
           const chords: ChordItem[] = sorted_h.map((h) => {
             const offset = harmonyBeatOffset(h, beats)
             const ratio = offset / Math.max(1, bar.meter.numerator)
+            const chord = transposeChordForDisplay(h.chord, transposeSemitones, displayedKey ?? undefined)
             return {
               x: barX + 2 + ratio * (barWidth - 4),
-              text: formatChordSymbol(h.chord, { unicode: true }),
+              text: formatChordSymbol(chord, { unicode: true }),
             }
           })
 

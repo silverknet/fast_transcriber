@@ -20,6 +20,11 @@ function mapWithRenderedCue(): SongMap {
     timeline: { bars: [], beats: [] },
     sections: [],
     harmony: [],
+    transpose: { baseSemitones: 2 },
+    lyrics: {
+      words: [{ text: 'Hey', startSec: 1, endSec: 1.5, line: 0, aligned: true }],
+      sourceText: 'Hey',
+    },
     cueTracks: [
       {
         id: 'main',
@@ -61,6 +66,10 @@ describe('collaborative SongMap cue fields', () => {
   it('keeps shared cue data but strips local render paths before upload', () => {
     const collab = toCollabSongMap(mapWithRenderedCue())
     expect(collab.audio?.originalPath).toBeUndefined()
+    expect(collab.transpose).toEqual({ baseSemitones: 2 })
+    // Lyrics are shared musical data — must survive the collab strip.
+    expect(collab.lyrics?.sourceText).toBe('Hey')
+    expect(collab.lyrics?.words).toHaveLength(1)
     expect(collab.cueTracks[0]?.events[0]?.text).toBe('Intro')
     expect(collab.cueTracks[0]?.renderExport?.fingerprint).toBe('cue-fp')
     expect(collab.cueTracks[0]?.renderExport?.relativePath).toBeUndefined()

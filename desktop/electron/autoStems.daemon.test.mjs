@@ -112,19 +112,22 @@ test('disabled policy → nothing enqueued', async () => {
   assert.equal(enqueued.length, 0)
 })
 
-test('skips un-analyzed songs and songs without audio', async () => {
+test('splits songs with audio regardless of analysis; skips songs without audio', async () => {
   const { daemon, enqueued } = makeDaemon([
     {
       path: '/proj',
       autoStems: CFG,
       songs: [
+        // Un-analyzed but HAS audio → still split (demucs needs no beat grid).
         { id: 's1', folder: 'songs/a', analyzed: false, audioPath: 'audio/a.wav', stemsByPreset: {} },
+        // No audio → skipped.
         { id: 's2', folder: 'songs/b', analyzed: true, audioPath: undefined, stemsByPreset: {} },
       ],
     },
   ])
   await daemon.runOnce()
-  assert.equal(enqueued.length, 0)
+  assert.equal(enqueued.length, 1)
+  assert.equal(enqueued[0].songId, 's1')
 })
 
 test('skips hidden songs', async () => {
@@ -277,4 +280,60 @@ test('safety: does not pile onto a busy queue (one job at a time)', async () => 
   )
   await daemon.runOnce()
   assert.equal(enqueued.length, 0)
+})
+
+// ── Status visibility + force controls ──────────────────────────────────────
+
+const oneSong = (over = {}) => [
+  {
+    path: '/proj',
+    autoStems: CFG,
+    songs: [{ id: 's1', folder: 'songs/a', analyzed: true, audioPath: 'audio/a.wav', stemsByPreset: {}, ...over }],
+  },
+]
+
+test('records an abandoned status with a reason after the attempt cap', async () => {
+  const { daemon, enqueued } = makeDaemon(oneSong())
+  for (let i = 0; i < 5; i++) await daemon.runOnce()
+  assert.equal(enqueued.length, 3) // capped at MAX_ATTEMPTS
+  const st = daemon.getStatuses().find((s) => s.songId === 's1')
+  assert.ok(st, 'status present')
+  assert.equal(st.phase, 'abandoned')
+  assert.match(st.reason, /gave up/i)
+})
+
+test('retrySong clears the budget so the song is re-queued', async () => {
+  const { daemon, enqueued } = makeDaemon(oneSong())
+  for (let i = 0; i < 5; i++) await daemon.runOnce()
+  assert.equal(enqueued.length, 3)
+  daemon.retrySong('/proj/songs/a')
+  await daemon.runOnce()
+  assert.equal(enqueued.length, 4) // budget reset → re-queued
+})
+
+test('policy change resets the budget so abandoned songs retry', async () => {
+  const projects = oneSong()
+  const { daemon, enqueued } = makeDaemon(projects)
+  for (let i = 0; i < 5; i++) await daemon.runOnce()
+  assert.equal(enqueued.length, 3)
+  projects[0].autoStems = { enabled: true, stems: ['drums', 'bass'], quality: 'best' } // quality change
+  await daemon.runOnce()
+  assert.equal(enqueued.length, 4)
+})
+
+test('splits an unanalyzed song that has audio (analysis not required)', async () => {
+  const { daemon, enqueued } = makeDaemon(oneSong({ analyzed: false }))
+  await daemon.runOnce()
+  assert.equal(enqueued.length, 1)
+  const st = daemon.getStatuses().find((s) => s.songId === 's1')
+  assert.equal(st.phase, 'queued')
+})
+
+test('reports a blocked reason when audio is missing', async () => {
+  const { daemon, enqueued } = makeDaemon(oneSong({ audioPath: undefined }))
+  await daemon.runOnce()
+  assert.equal(enqueued.length, 0)
+  const st = daemon.getStatuses().find((s) => s.songId === 's1')
+  assert.equal(st.phase, 'blocked')
+  assert.match(st.reason, /audio/i)
 })

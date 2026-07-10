@@ -1,0 +1,8 @@
+# Lyrics transcription venv — word-level speech recognition on the vocal track.
+#
+# faster-whisper = CTranslate2 reimplementation of Whisper: CPU-friendly
+# (int8), word_timestamps + built-in VAD. It transitively pulls ctranslate2,
+# tokenizers, huggingface-hub, onnxruntime and av (PyAV) — several of which
+# want numpy 2.x, which is why this venv is ISOLATED from the sections venv
+# (pinned numpy<2 for librosa 0.10).
+faster-whisper>=1.0,<2

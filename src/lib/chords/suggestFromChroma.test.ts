@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 import {
   aggregateBarChroma,
+  CHORD_ANALYZER_VERSION,
   proposeChordSuggestions,
   rankTriadFitsForChroma,
 } from './suggestFromChroma'
@@ -32,6 +33,32 @@ describe('rankTriadFitsForChroma', () => {
     const ranked = rankTriadFitsForChroma(chromaFor([9, 0, 4]), undefined)
     expect(ranked[0].pc).toBe(9)
     expect(ranked[0].quality).toBe('minor')
+  })
+
+  it('tells Am7 apart from C major (the classic relative-major confusion)', () => {
+    // A-C-E-G: with triad templates only, Am (A,C,E) and C (C,E,G) both match
+    // 3-of-4 and it was a coin flip. The min7 template matches 4-of-4.
+    const ranked = rankTriadFitsForChroma(chromaFor([9, 0, 4, 7]), undefined)
+    expect(ranked[0].pc).toBe(9)
+    expect(ranked[0].quality).toBe('min7')
+  })
+
+  it('detects a dominant 7th (G7 = G,B,D,F)', () => {
+    const ranked = rankTriadFitsForChroma(chromaFor([7, 11, 2, 5]), undefined)
+    expect(ranked[0].pc).toBe(7)
+    expect(ranked[0].quality).toBe('7')
+  })
+
+  it('key bias is quality-aware: E beats Em in A major on ambiguous chroma', () => {
+    // Chroma with E root+5th and BOTH thirds equally present — pure signal
+    // can't decide E vs Em. In A major, E major is the diatonic V while
+    // E minor is out of key; the chord-aware bias must pick E major.
+    const ambiguous = chromaFor([4, 11, 7, 8]) // E, B, G, G#
+    const aMajor: SongKey = { root: 'A', mode: 'major' }
+    const ranked = rankTriadFitsForChroma(ambiguous, aMajor)
+    const eMajIdx = ranked.findIndex((s) => s.pc === 4 && s.quality === 'major')
+    const eMinIdx = ranked.findIndex((s) => s.pc === 4 && s.quality === 'minor')
+    expect(eMajIdx).toBeLessThan(eMinIdx)
   })
 
   it('applies diatonic bias toward in-key chords on close calls', () => {
@@ -136,6 +163,23 @@ describe('proposeChordSuggestions', () => {
     expect(proposeChordSuggestions(map).size).toBe(0)
   })
 
+  it('refuses stale chroma from an older analyzer version', () => {
+    const bars: Bar[] = [bar(0, ['b0_0', 'b0_1', 'b0_2', 'b0_3'])]
+    const beats: Beat[] = [beat(0, 0), beat(0, 1), beat(0, 2), beat(0, 3)]
+    const cMaj = chromaFor([0, 4, 7])
+    const hints: ChordHints = {
+      beatChroma: [cMaj, cMaj, cMaj, cMaj],
+      detectedKey: null,
+      audioFingerprint: 'fake',
+      generatedAt: '',
+      // Pre-v4 chroma had the bass-weighting bug — confidently wrong
+      // suggestions. Must yield NOTHING until re-analysis.
+      analyzerVersion: CHORD_ANALYZER_VERSION - 1,
+    }
+    const map = buildSongMap({ bars, beats, hints })
+    expect(proposeChordSuggestions(map).size).toBe(0)
+  })
+
   it('returns one suggestion per bar keyed by the downbeat id', () => {
     const bars: Bar[] = [
       bar(0, ['b0_0', 'b0_1', 'b0_2', 'b0_3']),
@@ -154,7 +198,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({ bars, beats, hints })
     const out = proposeChordSuggestions(map)
@@ -175,7 +219,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({ bars, beats, hints })
     expect(proposeChordSuggestions(map).size).toBe(0)
@@ -190,7 +234,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({ bars, beats, hints })
     const s = proposeChordSuggestions(map).get('b0_0')
@@ -215,7 +259,7 @@ describe('proposeChordSuggestions', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 2,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const map = buildSongMap({
       bars,
@@ -261,7 +305,7 @@ describe('proposeChordSuggestions — section bias', () => {
       detectedKey: null,
       audioFingerprint: 'fake',
       generatedAt: '',
-      analyzerVersion: 3,
+      analyzerVersion: CHORD_ANALYZER_VERSION,
     }
     const sections: import('$lib/songmap/types').Section[] = [
       { id: 'v1', kind: 'verse', label: 'verse', barRange: { startBarIndex: 0, endBarIndex: 1 } },

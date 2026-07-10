@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { app } from 'electron'
+import { rubberBandPlatformKey } from './transposeCache.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -19,6 +20,40 @@ export function getNativePythonRoot() {
     return path.join(process.resourcesPath, 'app.asar.unpacked', 'native', 'python')
   }
   return path.resolve(path.join(__dirname, '..', 'native', 'python'))
+}
+
+export function getNativeBinRoot() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'app.asar.unpacked', 'native', 'bin')
+  }
+  return path.resolve(path.join(__dirname, '..', 'native', 'bin'))
+}
+
+export function expectedRubberBandBundledPath() {
+  const key = rubberBandPlatformKey()
+  if (!key) return null
+  return path.join(
+    getNativeBinRoot(),
+    'rubberband',
+    key,
+    process.platform === 'win32' ? 'rubberband.exe' : 'rubberband',
+  )
+}
+
+/**
+ * Rubber Band CLI resolution.
+ *
+ * Packaged builds only use an explicit env override or the bundled commercial
+ * binary. Dev builds may also fall back to `rubberband` on PATH so local
+ * experiments work before the licensed bundle is installed.
+ */
+export function rubberBandExePath() {
+  const override = process.env.BARBRO_RUBBERBAND?.trim()
+  if (override) return override
+  const bundled = expectedRubberBandBundledPath()
+  if (bundled && existsSync(bundled)) return bundled
+  if (!app.isPackaged) return 'rubberband'
+  return bundled
 }
 
 export function beatsScriptPath() {
@@ -86,6 +121,44 @@ export function pythonPiperTtsExe() {
   const override = process.env.BARBRO_PYTHON_PIPER_TTS?.trim()
   if (override) return override
   if (piperTtsVenvIsReady()) return getPiperTtsVenvPythonExe()
+  return process.env.BARBRO_PYTHON?.trim() || 'python3'
+}
+
+/** Lyrics transcription — isolated venv (`desktop/native/python/lyrics/`).
+ * faster-whisper pulls ctranslate2/tokenizers/av, which conflict with the
+ * sections venv's numpy<2 pins — keep it separate (same rationale as piper). */
+export function transcribeLyricsScriptPath() {
+  return path.join(getNativePythonRoot(), 'lyrics', 'transcribe.py')
+}
+
+export function getLyricsVenvDir() {
+  return path.join(app.getPath('userData'), 'python', 'lyrics-venv')
+}
+
+export function getLyricsVenvPythonExe() {
+  const venv = getLyricsVenvDir()
+  if (process.platform === 'win32') {
+    return path.join(venv, 'Scripts', 'python.exe')
+  }
+  return path.join(venv, 'bin', 'python3')
+}
+
+export function lyricsVenvIsReady() {
+  return existsSync(getLyricsVenvPythonExe())
+}
+
+/** Speech models live next to the venv (downloaded on first transcription). */
+export function getLyricsModelDir() {
+  return path.join(app.getPath('userData'), 'python', 'lyrics', 'models')
+}
+
+/**
+ * Interpreter for lyrics: `BARBRO_PYTHON_LYRICS` → venv → `BARBRO_PYTHON` → python3.
+ */
+export function pythonLyricsExe() {
+  const override = process.env.BARBRO_PYTHON_LYRICS?.trim()
+  if (override) return override
+  if (lyricsVenvIsReady()) return getLyricsVenvPythonExe()
   return process.env.BARBRO_PYTHON?.trim() || 'python3'
 }
 

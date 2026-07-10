@@ -110,6 +110,9 @@ export function parseProjectJson(text: string): ProjectFile {
     if (typeof e.lastSyncedRevision === 'number' && Number.isFinite(e.lastSyncedRevision)) {
       entry.lastSyncedRevision = e.lastSyncedRevision
     }
+    if (typeof e.lastSyncedContentHash === 'string' && e.lastSyncedContentHash.length > 0) {
+      entry.lastSyncedContentHash = e.lastSyncedContentHash
+    }
     songs.push(entry)
   }
 
@@ -134,6 +137,8 @@ export function parseProjectJson(text: string): ProjectFile {
   }
 
   const autoStems = parseAutoStems(o.autoStems)
+  const defaults = parseDefaults(o.defaults)
+  const mastering = parseMastering(o.mastering)
 
   return {
     formatVersion: PROJECT_FILE_VERSION,
@@ -144,5 +149,58 @@ export function parseProjectJson(text: string): ProjectFile {
     songs,
     ...(cloud ? { cloud } : {}),
     ...(autoStems ? { autoStems } : {}),
+    ...(defaults ? { defaults } : {}),
+    ...(mastering ? { mastering } : {}),
   }
+}
+
+/** Parse the optional project-wide `mastering` (project sound) block. */
+function parseMastering(raw: unknown): ProjectFile['mastering'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  if (typeof r.enabled !== 'boolean') return undefined
+  const out: NonNullable<ProjectFile['mastering']> = { enabled: r.enabled }
+  if (typeof r.matchLoudness === 'boolean') out.matchLoudness = r.matchLoudness
+  if (typeof r.masterGlue === 'boolean') out.masterGlue = r.masterGlue
+  const stems = r.stems as Record<string, unknown> | undefined
+  if (stems && typeof stems === 'object') {
+    const parsed: NonNullable<NonNullable<ProjectFile['mastering']>['stems']> = {}
+    for (const name of AUTO_STEM_NAMES) {
+      const v = stems[name]
+      // Legacy shape (first release stored just the intensity string).
+      if (v === 'off' || v === 'light' || v === 'firm') {
+        parsed[name] = { intensity: v }
+        continue
+      }
+      if (!v || typeof v !== 'object') continue
+      const s = v as Record<string, unknown>
+      const entry: NonNullable<typeof parsed[typeof name]> = {}
+      if (s.intensity === 'off' || s.intensity === 'light' || s.intensity === 'firm') {
+        entry.intensity = s.intensity
+      }
+      if (typeof s.trimDb === 'number' && Number.isFinite(s.trimDb)) {
+        entry.trimDb = Math.max(-9, Math.min(9, s.trimDb))
+      }
+      if (s.tone === 'natural' || s.tone === 'shaped') entry.tone = s.tone
+      if (Object.keys(entry).length > 0) parsed[name] = entry
+    }
+    if (Object.keys(parsed).length > 0) out.stems = parsed
+  }
+  return out
+}
+
+/** Parse the optional project-wide `defaults` (count-in + pre-count-in cue). */
+function parseDefaults(raw: unknown): ProjectFile['defaults'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  const out: NonNullable<ProjectFile['defaults']> = {}
+  if (typeof r.countInBeats === 'number' && Number.isInteger(r.countInBeats) && r.countInBeats >= 0) {
+    out.countInBeats = r.countInBeats
+  }
+  const pc = r.preCountInCue as Record<string, unknown> | undefined
+  if (pc && (pc.mode === 'off' || pc.mode === 'title' || pc.mode === 'custom')) {
+    out.preCountInCue = { mode: pc.mode }
+    if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }

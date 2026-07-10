@@ -90,7 +90,7 @@
       </p>
 
       <div class="flex flex-wrap items-center gap-3 pt-2">
-        <Button class="brutalist-shadow h-11 gap-2 px-5 text-sm" onclick={() => (window.location.href = '/login')}>
+        <Button class="h-11 gap-2 px-5 text-sm" onclick={() => (window.location.href = '/login')}>
           Sign in
           <ArrowRight class="size-4" aria-hidden="true" />
         </Button>

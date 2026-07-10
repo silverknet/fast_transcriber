@@ -81,7 +81,7 @@
 
 {#if show}
   <div
-    class="flex flex-wrap items-center gap-x-3 gap-y-1 bg-amber-500 px-3 py-2 text-sm text-amber-950"
+    class="desktop-update-banner border-foreground flex flex-wrap items-center gap-x-3 gap-y-1 border-b-2 px-3 py-2 text-sm"
     role="status"
     aria-label="Desktop update available"
   >
@@ -93,7 +93,7 @@
     </span>
     <button
       type="button"
-      class="border-amber-950 hover:bg-amber-950/10 shrink-0 border-2 px-2 py-0.5 text-xs font-bold uppercase tracking-wider disabled:opacity-50"
+      class="border-foreground hover:bg-foreground/10 shrink-0 border-2 px-2 py-0.5 text-xs font-bold uppercase disabled:opacity-50"
       onclick={() => void onUpdate()}
       disabled={installing}
     >
@@ -112,8 +112,15 @@
 {/if}
 
 {#if installMsg}
-  <div class="flex items-center gap-3 bg-emerald-600 px-3 py-2 text-sm text-white" role="status">
+  <div class="border-foreground flex items-center gap-3 border-b-2 bg-emerald-600 px-3 py-2 text-sm text-white" role="status">
     <Download class="size-4 shrink-0" aria-hidden="true" />
     <span class="min-w-0 flex-1">{installMsg}</span>
   </div>
 {/if}
+
+<style>
+  .desktop-update-banner {
+    background: var(--studio-orange);
+    color: var(--foreground);
+  }
+</style>

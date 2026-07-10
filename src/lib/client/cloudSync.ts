@@ -17,7 +17,7 @@ import type {
 } from '$lib/project/types'
 import { PROJECT_FILE_VERSION, PROJECT_SONGS_DIR } from '$lib/project/types'
 import type { SongMap, ExpectedAudio } from '$lib/songmap/types'
-import { toCollabSongMap } from '$lib/songmap/collab'
+import { toCollabSongMap, collabContentFingerprint } from '$lib/songmap/collab'
 import {
   patchMetadataForFolder,
   project as projectStore,
@@ -70,6 +70,9 @@ export interface CloudMemberView {
   user_id: string
   role: 'owner' | 'editor'
   added_at: string
+  display_name?: string | null
+  email?: string | null
+  avatar_url?: string | null
 }
 
 // ── Read paths ────────────────────────────────────────────────────────
@@ -213,6 +216,7 @@ export async function createCloudProject(): Promise<
     hidden: boolean
     sortOrder: number
   }> = []
+  const hashById = new Map<string, string>()
   for (let i = 0; i < proj.songs.length; i++) {
     const entry = proj.songs[i]
     const r = await readProjectSong(osPath, entry.folder)
@@ -222,6 +226,7 @@ export async function createCloudProject(): Promise<
     const sm = data.project.songMap
     const collab = toCollabSongMap(sm)
     const expected = expectedAudioFromSongMap(sm)
+    hashById.set(entry.id, collabContentFingerprint(sm))
     songs.push({
       id: entry.id,
       songMap: collab,
@@ -274,6 +279,9 @@ export async function createCloudProject(): Promise<
         ...s,
         cloudSongId: s.id,
         lastSyncedRevision: syncedRevision,
+        // Adopted projects intentionally stay "unsynced" so a follow-up pull
+        // reconciles; a fresh enable can record the pushed content hash.
+        lastSyncedContentHash: data.adopted ? s.lastSyncedContentHash : hashById.get(s.id),
       }),
     ),
   }
@@ -310,13 +318,21 @@ export async function pullCloudChanges(): Promise<
   // `commitCloudSongToProject`-style stamp — for Phase 4's MVP we
   // simply append to the manifest and leave the audio missing for
   // Phase 6 to surface.
+  const syncedBySong = new Map<string, { revision: number; contentHash: string }>()
   for (const cloudSong of songs) {
-    await applyCloudSongIntoLocal(osPath, proj, cloudSong)
+    const res = await applyCloudSongIntoLocal(osPath, proj, cloudSong)
+    if (res) syncedBySong.set(res.songId, { revision: res.revision, contentHash: res.contentHash })
   }
 
   const nextManifest: ProjectFile = {
     ...proj,
     name: manifest.project.name,
+    // Stamp each pulled song's revision + content fingerprint so the autosave
+    // dirty-check recognises it as already-synced and doesn't bounce it back.
+    songs: proj.songs.map((s) => {
+      const u = syncedBySong.get(s.id)
+      return u ? { ...s, lastSyncedRevision: u.revision, lastSyncedContentHash: u.contentHash } : s
+    }),
     cloud: {
       ...proj.cloud,
       lastSyncedRevision: manifest.project.revision,
@@ -385,6 +401,7 @@ export async function joinCloudProject(
       folder: folderRel,
       cloudSongId: cs.id,
       lastSyncedRevision: cs.revision,
+      lastSyncedContentHash: collabContentFingerprint(withExpected),
     }
     if (cs.hidden) entry.hidden = true
     localSongs.push(entry)
@@ -553,7 +570,7 @@ async function applyCloudSongIntoLocal(
   osPath: string,
   proj: ProjectFile,
   cloudSong: CloudSongView,
-): Promise<void> {
+): Promise<{ songId: string; revision: number; contentHash: string } | null> {
   const entry = proj.songs.find((s) => s.id === cloudSong.id)
   if (!entry) {
     // New song from another machine. For Phase 4 MVP we record the
@@ -563,17 +580,26 @@ async function applyCloudSongIntoLocal(
       title:
         (cloudSong.song_map.metadata?.title as string | undefined) ?? cloudSong.id.slice(0, 8),
     })
-    return
+    return null
   }
   const r = await readProjectSong(osPath, entry.folder)
   if (!r.ok) {
     console.warn('[cloudSync] readProjectSong failed during pull:', r.error)
-    return
+    return null
   }
   const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
   const data = await decodeSmapFile(blob)
   const local = data.project.songMap
-  const { mergeLocalIntoCollab } = await import('$lib/songmap/collab')
+  const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
+  const incomingHash = collabContentFingerprint(cloudSong.song_map as SongMap)
+  // Self-echo guard: if the incoming content already matches what we last
+  // synced (our own push coming back via realtime, or an unchanged song),
+  // skip the disk rewrite entirely — just advance the revision watermark.
+  // Rewriting would re-stamp a fresh hash and, if it differed by a hair,
+  // make the autosave think the live song changed → push → 409 → loop.
+  if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
+    return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
+  }
   const merged = mergeLocalIntoCollab(local, cloudSong.song_map)
   // Stamp expectedAudio onto the local map so the Phase 5 reconciler
   // can use it without re-fetching from the server.
@@ -585,4 +611,8 @@ async function applyCloudSongIntoLocal(
   })
   const { writeProjectSong } = await import('./desktopProjectFs')
   await writeProjectSong(osPath, entry.folder, new Uint8Array(await blobOut.arrayBuffer()))
+  // Report the sync watermark for this song so the caller can stamp the
+  // manifest entry — this is what stops the autosave from immediately
+  // re-pushing freshly-pulled content (the phantom-conflict loop).
+  return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: collabContentFingerprint(merged) }
 }

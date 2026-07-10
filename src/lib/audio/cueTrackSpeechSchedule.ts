@@ -7,7 +7,7 @@
  */
 import { computeCountIn } from '$lib/audio/computeCountIn'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
-import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
+import { getPrimaryCueTrack, NUMBER_WORDS } from '$lib/songmap/cueTracks'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { Bar, Beat, CueAnchor, CueEvent, CueTrack, SongMap } from '$lib/songmap/types'
 
@@ -47,13 +47,16 @@ export function resolvedSpokenIntroText(sm: SongMap, track: CueTrack | undefined
  * grows the prelude just like a different title would.
  */
 export function titleCuePreludeSec(sm: SongMap, track: CueTrack | undefined = getPrimaryCueTrack(sm)): number {
-  const intro = track?.enabled
-    ? track.events.find((event) => event.enabled && event.kind === 'intro' && event.text?.trim())
-    : undefined
-  if (!intro) return 0
-  const len = Math.min(72, resolvedSpokenIntroText(sm, track).length)
+  if (!track?.enabled) return 0
+  // A spoken count-in announces "{intro/title} {N}" before the numbers, so it
+  // needs head-room even when there's no explicit intro event.
+  const spokenCountIn = !!track.spokenCountIn && effectiveCountInBeats(sm) > 0
+  const intro = track.events.find((event) => event.enabled && event.kind === 'intro' && event.text?.trim())
+  if (!intro && !spokenCountIn) return 0
+  let len = Math.min(72, resolvedSpokenIntroText(sm, track).length)
+  if (spokenCountIn) len = Math.min(78, len + 4) // room for the spoken count length ("… eight")
   // Conservative headroom for Piper (~13–16 chars/s) + small gap before beat 1 of the grid.
-  return Math.min(2.85, Math.max(0.82, 0.34 + len * 0.055))
+  return Math.min(2.95, Math.max(0.82, 0.34 + len * 0.055))
 }
 
 export function firstBarDownbeatBeat(sm: SongMap): Beat | undefined {
@@ -257,6 +260,9 @@ export function buildCueSpeechEvents(
 
   const preludeSec = titleCuePreludeSec(sm, track)
   const events: CueSpeechEvent[] = []
+  // Spoken count-in: announce "{intro} {N}", then count the beats in time.
+  const spokenCountIn = !!track.spokenCountIn && countInBeats > 0
+  let hasTitle = false
 
   for (const event of track.events) {
     if (!event.enabled) continue
@@ -264,8 +270,12 @@ export function buildCueSpeechEvents(
     if (!raw) continue
     const kind = speechKindForEvent(event)
     const maxLen = kind === 'title' ? 72 : 120
-    const text = sanitizeCueSpeechText(raw.endsWith('.') ? raw : `${raw}.`, maxLen)
+    // For a spoken count-in, the intro also announces the count length
+    // ("Valerie … 8"), so the band hears what's coming before the numbers.
+    const phrase = kind === 'title' && spokenCountIn ? `${raw} ${countInBeats}` : raw
+    const text = sanitizeCueSpeechText(phrase.endsWith('.') ? phrase : `${phrase}.`, maxLen)
     if (kind === 'title') {
+      hasTitle = true
       events.push({ kind, tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC, text })
       continue
     }
@@ -274,6 +284,28 @@ export function buildCueSpeechEvents(
     const tSec = preludeSec + prependSec + (originalTime - trim.startSec)
     if (!Number.isFinite(tSec)) continue
     events.push({ kind, tSec: Math.max(MIN_SPEECH_ON_CUE_TIMELINE_SEC, tSec), text })
+  }
+
+  if (spokenCountIn) {
+    // Fall back to the song title for the announcement if there's no intro cue.
+    if (!hasTitle) {
+      const t = sm.metadata.title?.trim()
+      if (t) {
+        events.push({
+          kind: 'title',
+          tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC,
+          text: sanitizeCueSpeechText(`${t} ${countInBeats}.`, 72),
+        })
+      }
+    }
+    // "one, two, … N" exactly on the count-in beats (the last lands one beat
+    // before the song's downbeat).
+    const times = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)
+    for (let k = 0; k < times.length; k++) {
+      const word = NUMBER_WORDS[k] ?? String(k + 1)
+      const tSec = Math.max(MIN_SPEECH_ON_CUE_TIMELINE_SEC, preludeSec + times[k]!)
+      events.push({ kind: 'count', tSec, text: sanitizeCueSpeechText(`${word}.`, 40) })
+    }
   }
 
   return events.sort((a, b) => a.tSec - b.tSec)

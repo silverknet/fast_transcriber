@@ -14,7 +14,8 @@
  *
  * Safety properties (this runs unattended):
  *   - Off unless a watched project's manifest has `autoStems.enabled`.
- *   - Only analyzed, non-hidden songs with audio are touched.
+ *   - Non-hidden songs WITH AUDIO are touched. Analysis (the beat grid) is NOT
+ *     required — demucs separates the raw audio and doesn't use the grid.
  *   - Renders the FULL untrimmed source (trim-independent).
  *   - Partial/corrupt stem WAVs (companion killed mid-render) are detected
  *     and re-rendered.
@@ -30,6 +31,40 @@ export const PRESET_RANK = { best: 0, balanced: 1, preview: 2, legacy: 3 }
 const UNKNOWN_RANK = 99
 const STEM_NAMES = ['vocals', 'drums', 'bass', 'other']
 
+/**
+ * What each preset slug is DEFINED to mean (mirrors AUTO_STEM_PRESET_ARGS in
+ * main.mjs and STEM_QUALITY_PRESETS on the web side). Stems in a preset folder
+ * only earn that preset's rank when their provenance proves at-least-equal
+ * settings — a folder merely NAMED "best" proves nothing.
+ */
+export const PRESET_DEFINITIONS = {
+  best: { model: 'htdemucs_ft', shifts: 10, overlap: 0.5 },
+  balanced: { model: 'htdemucs_ft', shifts: 5, overlap: 0.25 },
+  preview: { model: 'htdemucs', shifts: 1, overlap: 0.25 },
+}
+
+/**
+ * Does a `provenance.json` payload prove the slug's definition (or better)?
+ * `_ft` bag models outrank their plain variants; more shifts/overlap ≥ fewer.
+ */
+export function provenanceSatisfiesPreset(slug, provenance) {
+  const def = PRESET_DEFINITIONS[slug]
+  if (!def) return true // legacy/unknown slugs carry no promise to verify
+  if (!provenance || typeof provenance !== 'object') return false
+  if (provenance.engine !== 'demucs') return false
+  const model = String(provenance.model ?? '')
+  const modelOk = model === def.model || (def.model === 'htdemucs' && model === 'htdemucs_ft')
+  const shifts = Number(provenance.shifts)
+  const overlap = Number(provenance.overlap)
+  return (
+    modelOk &&
+    Number.isFinite(shifts) &&
+    shifts >= def.shifts &&
+    Number.isFinite(overlap) &&
+    overlap >= def.overlap
+  )
+}
+
 /** `stems/<slug>/` for tagged presets, `stems/` for flat legacy files. */
 export function pathPrefixForSlug(slug) {
   return slug === 'legacy' ? 'stems/' : `stems/${slug}/`
@@ -43,12 +78,24 @@ export function stemSubpath(loc) {
 /**
  * Best (highest-quality) on-disk copy of each demucs stem from a
  * `stemsByPreset` map. Returns `Map<stemName, {rank, slug, filename}>`.
+ *
+ * When `provenanceBySlug` (Record<slug, provenance.json payload|null>) is
+ * provided, stems in a defined preset folder only earn that preset's rank if
+ * their provenance proves matching-or-better settings; unproven stems demote
+ * to UNKNOWN_RANK so the daemon quietly re-splits them in the background (the
+ * old files stay playable until the fresh split overwrites them).
  */
-export function bestStemOnDisk(stemsByPreset) {
+export function bestStemOnDisk(stemsByPreset, provenanceBySlug = undefined) {
   const out = new Map()
   for (const [slug, files] of Object.entries(stemsByPreset ?? {})) {
     if (!Array.isArray(files)) continue
-    const rank = PRESET_RANK[slug] ?? UNKNOWN_RANK
+    let rank = PRESET_RANK[slug] ?? UNKNOWN_RANK
+    if (
+      provenanceBySlug !== undefined &&
+      !provenanceSatisfiesPreset(slug, provenanceBySlug?.[slug])
+    ) {
+      rank = UNKNOWN_RANK
+    }
     for (const filename of files) {
       const base = String(filename).toLowerCase().replace(/\.[^.]+$/, '')
       if (!STEM_NAMES.includes(base)) continue
@@ -60,9 +107,9 @@ export function bestStemOnDisk(stemsByPreset) {
 }
 
 /** Configured stems that are missing or only present below the target quality. */
-export function computeNeededStems(stemsByPreset, config) {
+export function computeNeededStems(stemsByPreset, config, provenanceBySlug = undefined) {
   const target = PRESET_RANK[config.quality] ?? UNKNOWN_RANK
-  const have = bestStemOnDisk(stemsByPreset)
+  const have = bestStemOnDisk(stemsByPreset, provenanceBySlug)
   return (config.stems ?? []).filter((s) => {
     const h = have.get(s)
     return !h || h.rank > target
@@ -107,6 +154,7 @@ const MAX_ATTEMPTS = 3
  * @param {(projectPath: string) => Promise<any>} deps.readManifest
  * @param {(smapPath: string) => Promise<any>} deps.readSmapHeader  // {metadata,audio,timeline}|null
  * @param {(songFolderAbs: string) => Promise<Record<string,string[]>>} deps.listStemSets
+ * @param {(songFolderAbs: string) => Promise<Record<string,object|null>>} [deps.readStemProvenance]
  * @param {(absPath: string) => Promise<{durationSec,sampleRate,channels,fileSize}|null>} deps.wavInfo
  * @param {(args: {inputPath,outputDir,stems:string[],quality:string,songId:string|null}) => string|null} deps.enqueueJob
  * @param {(songId: string) => boolean} deps.hasInflightJobForSong
@@ -122,6 +170,36 @@ export function createAutoStemsDaemon(deps) {
   const watched = new Set()
   /** Per-song (folderAbs) enqueue attempts since last success/reset. */
   const attempts = new Map()
+  /**
+   * Per-song (folderAbs) status for the web UI — so a song that isn't
+   * splitting shows WHY (not analyzed / no audio / gave up after N) instead
+   * of silently doing nothing. `{ folder, songId, phase, attempts, reason,
+   * stems, updatedAt }`. Phases: blocked | queued | running | ready |
+   * failed | abandoned.
+   */
+  const statuses = new Map()
+  /** Last failure reason per song (folderAbs), surfaced on `abandoned`. */
+  const lastErrorByKey = new Map()
+  /** Per-project normalized-policy fingerprint — reset attempts when it changes. */
+  const policyHashByProject = new Map()
+
+  function setStatus(songKey, patch) {
+    const prev = statuses.get(songKey) ?? {}
+    statuses.set(songKey, { ...prev, ...patch, updatedAt: Date.now() })
+  }
+
+  /** Clear attempt budget + status for keys under `projectPath` (or all). */
+  function clearBudgets(projectPath) {
+    for (const key of [...attempts.keys()]) {
+      if (!projectPath || key.startsWith(projectPath)) attempts.delete(key)
+    }
+    for (const key of [...statuses.keys()]) {
+      if (!projectPath || key.startsWith(projectPath)) statuses.delete(key)
+    }
+    for (const key of [...lastErrorByKey.keys()]) {
+      if (!projectPath || key.startsWith(projectPath)) lastErrorByKey.delete(key)
+    }
+  }
   /** @type {NodeJS.Timeout | null} */
   let timer = null
   let running = false
@@ -153,6 +231,20 @@ export function createAutoStemsDaemon(deps) {
       deps.log(`auto-stems: now watching ${projectPath}`)
     }
     schedule(250)
+  }
+
+  /**
+   * Stop auto-preparing stems for a project on THIS machine (per-machine opt-
+   * out). The project's shared stem config is untouched — only this device
+   * stops generating. Used when a collaborator wants to wait for a package.
+   */
+  function unwatchProject(projectPath) {
+    if (typeof projectPath !== 'string' || !projectPath) return
+    if (watched.delete(projectPath)) {
+      clearBudgets(projectPath)
+      persist()
+      deps.log(`auto-stems: stopped watching ${projectPath}`)
+    }
   }
 
   function schedule(delay = intervalMs) {
@@ -203,6 +295,15 @@ export function createAutoStemsDaemon(deps) {
         continue // unreadable manifest — try again next tick
       }
       const policy = normalizeAutoStems(manifest?.autoStems)
+
+      // Reset attempt budgets when the policy (stems/quality) changes, so
+      // songs that were abandoned under the old settings get another shot.
+      const policyHash = JSON.stringify(policy)
+      if (policyHashByProject.get(projectPath) !== policyHash) {
+        clearBudgets(projectPath)
+        policyHashByProject.set(projectPath, policyHash)
+      }
+
       if (!policy) continue
 
       for (const entry of manifest.songs ?? []) {
@@ -215,8 +316,12 @@ export function createAutoStemsDaemon(deps) {
   async function prepareSong(projectPath, entry, policy) {
     const folderAbs = path.join(projectPath, entry.folder)
     const songKey = folderAbs
+    const base = { folder: entry.folder, songId: entry.id ?? null }
 
-    if (entry.id && deps.hasInflightJobForSong(entry.id)) return
+    if (entry.id && deps.hasInflightJobForSong(entry.id)) {
+      setStatus(songKey, { ...base, phase: 'running' })
+      return
+    }
 
     let stemsByPreset
     try {
@@ -225,10 +330,23 @@ export function createAutoStemsDaemon(deps) {
       return
     }
 
-    const needed = computeNeededStems(stemsByPreset, policy)
+    // Provenance gate: stems in a preset folder must PROVE their settings
+    // (stems/<slug>/provenance.json) or they count as unknown quality and get
+    // re-split. Old splits (pre-provenance) stay on disk and playable until
+    // the fresh, verified files overwrite them.
+    let provenanceBySlug
+    if (deps.readStemProvenance) {
+      try {
+        provenanceBySlug = await deps.readStemProvenance(folderAbs)
+      } catch {
+        provenanceBySlug = undefined // fail open — don't re-split on read errors
+      }
+    }
+
+    const needed = computeNeededStems(stemsByPreset, policy, provenanceBySlug)
 
     // Corruption check on the stems we believe are satisfied.
-    const have = bestStemOnDisk(stemsByPreset)
+    const have = bestStemOnDisk(stemsByPreset, provenanceBySlug)
     for (const stem of policy.stems) {
       if (needed.includes(stem)) continue
       const loc = have.get(stem)
@@ -244,16 +362,31 @@ export function createAutoStemsDaemon(deps) {
 
     if (needed.length === 0) {
       attempts.delete(songKey)
+      lastErrorByKey.delete(songKey)
+      setStatus(songKey, { ...base, phase: 'ready', attempts: 0, reason: null })
       return
     }
 
-    if ((attempts.get(songKey) ?? 0) >= MAX_ATTEMPTS) return
+    if ((attempts.get(songKey) ?? 0) >= MAX_ATTEMPTS) {
+      setStatus(songKey, {
+        ...base,
+        phase: 'abandoned',
+        attempts: attempts.get(songKey),
+        stems: needed,
+        reason:
+          lastErrorByKey.get(songKey) ??
+          `Auto-split gave up after ${MAX_ATTEMPTS} attempts. Use Retry to try again.`,
+      })
+      return
+    }
 
     // One job at a time: once anything is queued/running (incl. a job we just
     // enqueued earlier in this same pass), stop enqueuing more.
     if (deps.anyStemJobActive && deps.anyStemJobActive()) return
 
-    // Read the smap once: gate on analyzed + resolve the source audio path.
+    // Read the smap once to resolve the source audio path. Stem separation
+    // (demucs) works on the raw audio and does NOT need the beat grid — so we
+    // do NOT gate on `analyzed`; any song with audio can be split.
     const smapPath = path.join(folderAbs, 'song.smap')
     let header
     try {
@@ -261,14 +394,26 @@ export function createAutoStemsDaemon(deps) {
     } catch {
       return
     }
-    if (!header) return
+    if (!header) {
+      setStatus(songKey, { ...base, phase: 'blocked', reason: 'Could not read the song.' })
+      return
+    }
     const sm = header.songMap ?? header // tolerate either shape
-    const analyzed = isSongAnalyzed(sm?.metadata?.analyzed, sm?.timeline?.bars?.length ?? 0)
     const rel = sm?.audio?.originalPath
-    if (!analyzed || !rel) return
+    if (!rel) {
+      setStatus(songKey, {
+        ...base,
+        phase: 'blocked',
+        reason: 'No audio yet — add or import audio for this song first.',
+      })
+      return
+    }
 
     const inputPath = path.join(folderAbs, rel)
-    if (!deps.existsSync(inputPath)) return
+    if (!deps.existsSync(inputPath)) {
+      setStatus(songKey, { ...base, phase: 'blocked', reason: 'Audio file is missing on disk.' })
+      return
+    }
 
     const outputDir = path.join(folderAbs, 'stems', policy.quality)
     attempts.set(songKey, (attempts.get(songKey) ?? 0) + 1)
@@ -278,6 +423,13 @@ export function createAutoStemsDaemon(deps) {
       stems: needed,
       quality: policy.quality,
       songId: entry.id ?? null,
+    })
+    setStatus(songKey, {
+      ...base,
+      phase: 'queued',
+      attempts: attempts.get(songKey),
+      stems: needed,
+      reason: null,
     })
     if (jobId) {
       deps.log(
@@ -289,6 +441,39 @@ export function createAutoStemsDaemon(deps) {
   /** Call when a job for a folder succeeds, to clear its attempt budget. */
   function noteSongSatisfied(folderAbs) {
     attempts.delete(folderAbs)
+    lastErrorByKey.delete(folderAbs)
+    setStatus(folderAbs, { phase: 'ready', attempts: 0, reason: null, stems: [] })
+  }
+
+  /** Call when a job for a folder fails, to record why (surfaced on abandon). */
+  function noteSongFailed(folderAbs, reason) {
+    const msg = typeof reason === 'string' && reason ? reason : 'Stem split failed.'
+    lastErrorByKey.set(folderAbs, msg)
+    setStatus(folderAbs, { phase: 'failed', reason: msg })
+  }
+
+  /** Snapshot of per-song status for the web UI. */
+  function getStatuses() {
+    return [...statuses.entries()].map(([key, v]) => ({ key, ...v }))
+  }
+
+  /**
+   * Force a song back into the queue: clears its attempt budget + status so
+   * the next pass re-evaluates it. Returns true (always) so the caller can
+   * report success. `schedule` triggers a near-immediate re-scan.
+   */
+  function retrySong(folderAbs) {
+    attempts.delete(folderAbs)
+    lastErrorByKey.delete(folderAbs)
+    statuses.delete(folderAbs)
+    schedule(250)
+    return true
+  }
+
+  /** Clear all attempt budgets (optionally for one project) + re-scan. */
+  function resetAttempts(projectPath) {
+    clearBudgets(projectPath || undefined)
+    schedule(250)
   }
 
   function start() {
@@ -305,5 +490,19 @@ export function createAutoStemsDaemon(deps) {
     pending = false
   }
 
-  return { watchProject, start, stop, runOnce, noteSongSatisfied, _watched: watched, _attempts: attempts }
+  return {
+    watchProject,
+    unwatchProject,
+    start,
+    stop,
+    runOnce,
+    noteSongSatisfied,
+    noteSongFailed,
+    getStatuses,
+    retrySong,
+    resetAttempts,
+    _watched: watched,
+    _attempts: attempts,
+    _statuses: statuses,
+  }
 }

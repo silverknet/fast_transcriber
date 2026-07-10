@@ -36,6 +36,16 @@
   const LABEL_FADE_START_PX = 20
   const LABEL_FADE_END_PX = 52
   const DRAG_PX = 5
+  const CHORD_LABEL_PAD_PX = 9
+  const CHORD_LABEL_CHAR_PX = 7.4
+  const CHORD_SUGGESTION_CHAR_PX = 6.9
+  const CHORD_DOUBLE_TAP_MS = 320
+  const CHORD_DOUBLE_TAP_PX = 18
+
+  function chordLabelFits(widthPx: number, label: string, charPx = CHORD_LABEL_CHAR_PX): boolean {
+    if (!label) return false
+    return widthPx >= Math.ceil(label.length * charPx + CHORD_LABEL_PAD_PX)
+  }
 
   const SECTION_LABEL_TEXT: Record<SectionKind, string> = {
     intro: 'text-violet-200',
@@ -68,6 +78,8 @@
     onViewportWheel,
     /** Chords mode: after selecting a beat, report pointer position for anchoring a popover. */
     onChordBeatInteract,
+    /** Chords mode: right-click command menu request. */
+    onChordContextMenu,
     selectedBeatId = $bindable<string | null>(null),
     /** Chords mode: multi-select beats (timeline order); single-click also sets `selectedBeatId`. */
     chordsSelectionBeatIds = $bindable<string[]>([]),
@@ -126,6 +138,7 @@
     onSectionsSeekCommit?: (timeSec: number) => void
     onViewportWheel?: (e: WheelEvent) => boolean
     onChordBeatInteract?: (detail: { clientX: number; clientY: number }) => void
+    onChordContextMenu?: (detail: { clientX: number; clientY: number }) => void
     selectedBeatId?: string | null
     chordsSelectionBeatIds?: string[]
     chordLabelByBeatId?: Record<string, string>
@@ -617,9 +630,54 @@
     return out
   })
 
+  let chordLabelSpans = $derived.by(() => {
+    if (stripMode !== 'chords' || !(widthPx > 0) || viewEnd <= viewStart) {
+      return [] as { beatId: string; label: string; x0: number; x1: number }[]
+    }
+    const sorted = [...beats].sort((a, b) => a.timeSec - b.timeSec || a.id.localeCompare(b.id))
+    const labeled = sorted
+      .map((beat) => ({ beat, label: chordLabelByBeatId[beat.id] ?? '' }))
+      .filter((entry) => entry.label)
+    if (labeled.length === 0) return []
+    const timelineEnd = Math.max(
+      timelineMaxSec,
+      ...bars.map((bar) => bar.endSec),
+      labeled[labeled.length - 1]!.beat.timeSec + 0.1,
+    )
+    const barsById = new Map(bars.map((bar) => [bar.id, bar]))
+    const barsByIndex = new Map(bars.map((bar) => [bar.index, bar]))
+    const sectionEndForBeat = (beat: Beat): number => {
+      const bar = barsById.get(beat.barId)
+      if (!bar) return timelineEnd
+      const section = mapSections.find(
+        (s) =>
+          bar.index >= s.barRange.startBarIndex &&
+          bar.index <= s.barRange.endBarIndex,
+      )
+      if (!section) return timelineEnd
+      return barsByIndex.get(section.barRange.endBarIndex)?.endSec ?? timelineEnd
+    }
+    const out: { beatId: string; label: string; x0: number; x1: number }[] = []
+    for (let i = 0; i < labeled.length; i += 1) {
+      const current = labeled[i]!
+      const next = labeled[i + 1]
+      const spanStart = current.beat.timeSec
+      const spanEnd = Math.min(next ? next.beat.timeSec : timelineEnd, sectionEndForBeat(current.beat))
+      if (spanStart >= viewEnd || spanEnd <= viewStart) continue
+      const visibleStart = Math.max(spanStart, viewStart)
+      const visibleEnd = Math.min(spanEnd, viewEnd)
+      if (!(visibleEnd > visibleStart)) continue
+      const x0 = timeToPxInView(visibleStart, viewStart, viewEnd, widthPx)
+      const x1 = timeToPxInView(visibleEnd, viewStart, viewEnd, widthPx)
+      if (x1 - x0 > 0.5) out.push({ beatId: current.beat.id, label: current.label, x0, x1 })
+    }
+    return out
+  })
+
   let sectionsDragCleanup: (() => void) | null = null
   let chordsDragCleanup: (() => void) | null = null
   let barBoundaryResizeCleanup: (() => void) | null = null
+  let lastChordTap: { beatId: string; timeMs: number; clientX: number; clientY: number } | null = null
 
   onDestroy(() => {
     sectionsDragCleanup?.()
@@ -913,17 +971,17 @@
     return sortBeatsByTime(beats)
   }
 
-  function applyChordsClick(hit: Beat, shift: boolean, meta: boolean): boolean {
+  function applyChordsClick(hit: Beat, shift: boolean, meta: boolean): void {
     const sorted = sortedBeatsChord()
     const idx = sorted.findIndex((b) => b.id === hit.id)
-    if (idx < 0) return false
+    if (idx < 0) return
 
     if (shift && rangeAnchorChordSortedIndex != null) {
       const a = Math.min(rangeAnchorChordSortedIndex, idx)
       const b = Math.max(rangeAnchorChordSortedIndex, idx)
       chordsSelectionBeatIds = sorted.slice(a, b + 1).map((bt) => bt.id)
       selectedBeatId = hit.id
-      return false
+      return
     }
     if (meta) {
       const set = new Set(chordsSelectionBeatIds)
@@ -932,13 +990,12 @@
       chordsSelectionBeatIds = sorted.filter((b) => set.has(b.id)).map((b) => b.id)
       rangeAnchorChordSortedIndex = idx
       selectedBeatId = hit.id
-      return false
+      return
     }
 
     chordsSelectionBeatIds = [hit.id]
     rangeAnchorChordSortedIndex = idx
     selectedBeatId = hit.id
-    return true
   }
 
   function onChordsPointerDown(e: PointerEvent) {
@@ -990,8 +1047,21 @@
     const up = (ev: PointerEvent) => {
       teardown()
       if (!dragActive) {
-        const openPicker = applyChordsClick(hit, downShift, downMeta)
-        if (openPicker) onChordBeatInteract?.({ clientX: ev.clientX, clientY: ev.clientY })
+        const now = performance.now()
+        const doubleTap =
+          !downShift &&
+          !downMeta &&
+          lastChordTap?.beatId === hit.id &&
+          now - lastChordTap.timeMs <= CHORD_DOUBLE_TAP_MS &&
+          Math.hypot(ev.clientX - lastChordTap.clientX, ev.clientY - lastChordTap.clientY) <=
+            CHORD_DOUBLE_TAP_PX
+        applyChordsClick(hit, downShift, downMeta)
+        if (doubleTap) {
+          lastChordTap = null
+          onChordBeatInteract?.({ clientX: ev.clientX, clientY: ev.clientY })
+        } else {
+          lastChordTap = { beatId: hit.id, timeMs: now, clientX: ev.clientX, clientY: ev.clientY }
+        }
       }
     }
 
@@ -999,6 +1069,28 @@
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
     chordsDragCleanup = teardown
+  }
+
+  function onChordsContextMenu(e: MouseEvent) {
+    if (!editing || stripMode !== 'chords') return
+    e.preventDefault()
+    e.stopPropagation()
+
+    const hit = beatAtTime(timeFromClientX(e.clientX))
+    if (hit) {
+      lastChordTap = null
+      const selected = new Set(chordsSelectionBeatIds)
+      if (!selected.has(hit.id)) {
+        const sorted = sortedBeatsChord()
+        const idx = sorted.findIndex((b) => b.id === hit.id)
+        chordsSelectionBeatIds = [hit.id]
+        selectedBeatId = hit.id
+        rangeAnchorChordSortedIndex = idx >= 0 ? idx : null
+      } else {
+        selectedBeatId = hit.id
+      }
+    }
+    onChordContextMenu?.({ clientX: e.clientX, clientY: e.clientY })
   }
 
   function onStripPointerDown(e: PointerEvent) {
@@ -1096,6 +1188,7 @@
       aria-hidden="true"
       data-chord-beat-strip={stripMode === 'chords' ? '' : undefined}
       onpointerdown={onStripPointerDown}
+      oncontextmenu={onChordsContextMenu}
     ></div>
   {/if}
 
@@ -1326,29 +1419,35 @@
           style:width="{seg.x1 - seg.x0}px"
           aria-hidden="true"
         ></div>
-        {#if chordLabelByBeatId[seg.beat.id]}
-          <div
-            class="pointer-events-none absolute bottom-1 z-[9] truncate text-center font-mono text-[11px] font-semibold tabular-nums text-foreground/90"
-            style:left="{seg.x0}px"
-            style:width="{seg.x1 - seg.x0}px"
-            title={chordLabelByBeatId[seg.beat.id]}
-          >
-            {chordLabelByBeatId[seg.beat.id]}
-          </div>
-        {:else if chordSuggestionByBeatId[seg.beat.id]}
+        {#if !chordLabelByBeatId[seg.beat.id] && chordSuggestionByBeatId[seg.beat.id]}
           {@const sug = chordSuggestionByBeatId[seg.beat.id]}
           {@const tier = sug.confidence >= 0.10 ? 'high' : sug.confidence >= 0.05 ? 'medium' : 'low'}
+          {@const sugLabel = `${sug.label}${tier === 'low' ? '?' : ''}`}
+          {#if chordLabelFits(seg.x1 - seg.x0, sugLabel, CHORD_SUGGESTION_CHAR_PX)}
+            <div
+              class="text-muted-foreground pointer-events-none absolute bottom-0.5 z-[8] overflow-hidden whitespace-nowrap px-0.5 text-center font-mono text-[10px] font-medium tabular-nums {tier === 'high'
+                ? 'opacity-65'
+                : tier === 'medium'
+                  ? 'italic opacity-50'
+                  : 'italic opacity-35'}"
+              style:left="{seg.x0}px"
+              style:width="{seg.x1 - seg.x0}px"
+              title={`Suggested: ${sug.label} (margin ${sug.confidence.toFixed(3)})`}
+            >
+              {sugLabel}
+            </div>
+          {/if}
+        {/if}
+      {/each}
+      {#each chordLabelSpans as span (span.beatId)}
+        {#if chordLabelFits(span.x1 - span.x0, span.label)}
           <div
-            class="pointer-events-none absolute bottom-1 z-[9] truncate text-center font-mono text-[11px] tabular-nums text-foreground/90 {tier === 'high'
-              ? 'font-semibold opacity-55'
-              : tier === 'medium'
-                ? 'italic opacity-40'
-                : 'italic opacity-30'}"
-            style:left="{seg.x0}px"
-            style:width="{seg.x1 - seg.x0}px"
-            title={`Suggested: ${sug.label} (margin ${sug.confidence.toFixed(3)})`}
+            class="pointer-events-none absolute bottom-1 z-[9] overflow-hidden whitespace-nowrap px-1 text-left font-mono text-[11px] font-black tabular-nums text-foreground"
+            style:left="{span.x0}px"
+            style:width="{span.x1 - span.x0}px"
+            title={span.label}
           >
-            {sug.label}{tier === 'low' ? '?' : ''}
+            {span.label}
           </div>
         {/if}
       {/each}

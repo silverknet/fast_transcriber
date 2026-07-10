@@ -64,6 +64,31 @@ describe('collabMerge · mergeForConflict', () => {
     expect(merged.harmony.map((h) => h.id).sort()).toEqual(['h-1', 'h-2', 'h-3', 'h-4'])
   })
 
+  it('does NOT flag a phantom conflict when a chord differs only by float round-trip noise', () => {
+    // The server (JSONB) re-serializes floats, so a chord that came back from
+    // the cloud can have startSec 1.2000000000000002 vs the local 1.2. These
+    // are the same chord — must not surface a conflict row.
+    const base = createEmptySongMap()
+    const mine = { ...chord('h-1', 'C'), startSec: 1.2, endSec: 2.4 }
+    const theirs = { ...chord('h-1', 'C'), startSec: 1.2000000000000002, endSec: 2.3999999999999995 }
+    const local: SongMap = { ...base, harmony: [mine] }
+    const cloud: SongMap = { ...base, harmony: [theirs] }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts).toEqual([])
+  })
+
+  it('does NOT flag a phantom conflict for an undefined-vs-missing optional field', () => {
+    const base = createEmptySongMap()
+    const mine = { ...chord('h-1', 'C'), beatId: undefined } as HarmonyEvent
+    const theirs = chord('h-1', 'C') // no beatId key at all
+    const local: SongMap = { ...base, harmony: [mine] }
+    const cloud: SongMap = { ...base, harmony: [theirs] }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts).toEqual([])
+  })
+
   it('flags a safe conflict for same-id chord with different content; defaults to theirs', () => {
     const base = createEmptySongMap()
     const local: SongMap = { ...base, harmony: [chord('h-1', 'C')] }
@@ -216,6 +241,45 @@ describe('collabMerge · applyConflictDecisions', () => {
     expect(result.expectedAudio?.sha256).toBe('aaa')
   })
 
+  it('labels and resolves transpose conflicts', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = { ...base, transpose: { baseSemitones: -2 } }
+    const cloud: SongMap = { ...base, transpose: { baseSemitones: 2 } }
+    const report = mergeForConflict(local, cloud)
+    expect(report.conflicts).toContainEqual(
+      expect.objectContaining({ path: 'transpose', label: 'Transposition' }),
+    )
+    expect(applyConflictDecisions(report, new Map()).transpose?.baseSemitones).toBe(2)
+    expect(applyConflictDecisions(report, new Map([['transpose', 'mine']])).transpose?.baseSemitones).toBe(-2)
+  })
+
+  it('labels and resolves lyrics conflicts (whole-field LWW)', () => {
+    const base = createEmptySongMap()
+    const mine = {
+      words: [{ text: 'Hey', startSec: 1, endSec: 1.4, line: 0 }],
+      sourceText: 'Hey',
+    }
+    const theirs = {
+      words: [{ text: 'Yo', startSec: 2, endSec: 2.3, line: 0 }],
+      sourceText: 'Yo',
+    }
+    const local: SongMap = { ...base, lyrics: mine }
+    const cloud: SongMap = { ...base, lyrics: theirs }
+    const report = mergeForConflict(local, cloud)
+    expect(report.conflicts).toContainEqual(
+      expect.objectContaining({ path: 'lyrics', label: 'Lyrics' }),
+    )
+    expect(applyConflictDecisions(report, new Map()).lyrics?.sourceText).toBe('Yo')
+    expect(applyConflictDecisions(report, new Map([['lyrics', 'mine']])).lyrics?.sourceText).toBe('Hey')
+  })
+
+  it('identical lyrics on both sides produce no conflict', () => {
+    const base = createEmptySongMap()
+    const same = { words: [], sourceText: 'La la' }
+    const report = mergeForConflict({ ...base, lyrics: same }, { ...base, lyrics: { ...same } })
+    expect(report.conflicts.some((c) => c.path === 'lyrics')).toBe(false)
+  })
+
   it('preserves non-conflicted local-only items regardless of decisions', () => {
     const base = createEmptySongMap()
     const local: SongMap = { ...base, harmony: [chord('h-1', 'C'), chord('h-2', 'F')] }
@@ -235,6 +299,7 @@ describe('collabMerge · invariant: no silent data loss', () => {
       harmony: [chord('h-1', 'C'), chord('h-2', 'F')],
       sections: [section('s-1', 'Verse', 0, 3)],
       countInBeats: 4,
+      transpose: { baseSemitones: -1 },
     }
     const cloud: SongMap = {
       ...base,
@@ -242,6 +307,7 @@ describe('collabMerge · invariant: no silent data loss', () => {
       harmony: [chord('h-1', 'G'), chord('h-3', 'Am')],
       sections: [section('s-1', 'Verse (cloud)', 0, 3)],
       countInBeats: 2,
+      transpose: { baseSemitones: 1 },
     }
     const { conflicts } = mergeForConflict(local, cloud)
     const paths = pathSet(conflicts)
@@ -250,6 +316,7 @@ describe('collabMerge · invariant: no silent data loss', () => {
     expect(paths.has('harmony/h-1')).toBe(true)
     expect(paths.has('sections/s-1')).toBe(true)
     expect(paths.has('countInBeats')).toBe(true)
+    expect(paths.has('transpose')).toBe(true)
     // Non-conflicting (h-2, h-3) must NOT appear.
     expect(paths.has('harmony/h-2')).toBe(false)
     expect(paths.has('harmony/h-3')).toBe(false)

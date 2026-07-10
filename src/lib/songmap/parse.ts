@@ -1,4 +1,9 @@
-import { SONGMAP_FORMAT_VERSION, SONGMAP_LEGACY_FORMAT_VERSION } from './version'
+import {
+  SONGMAP_CUE_TRACK_FORMAT_VERSION,
+  SONGMAP_FORMAT_VERSION,
+  SONGMAP_LEGACY_FORMAT_VERSION,
+  SONGMAP_TRANSPOSE_FORMAT_VERSION,
+} from './version'
 import type {
   AudioReference,
   Bar,
@@ -9,6 +14,8 @@ import type {
   CueSettings,
   CueTrack,
   HarmonyEvent,
+  LyricWord,
+  Lyrics,
   Meter,
   RenderedCueExport,
   Section,
@@ -17,6 +24,7 @@ import type {
   SongMapAppInfo,
   SongMetadata,
   SongMapTimeline,
+  SongTranspose,
 } from './types'
 import { defaultCueSettings } from './defaults'
 import { createDefaultCueTrack } from './cueTracks'
@@ -172,6 +180,42 @@ function parseSongKey(raw: unknown, path: string): SongKey | undefined {
     accidental: optString(o.accidental) as SongKey['accidental'] | undefined,
     mode: mode as SongKey['mode'],
   }
+}
+
+function parseTranspose(raw: unknown, path: string): SongTranspose | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  return {
+    baseSemitones: reqNum(o.baseSemitones, `${path}.baseSemitones`),
+  }
+}
+
+function parseLyricWord(raw: unknown, path: string): LyricWord {
+  const o = expectObject(raw, path)
+  const word: LyricWord = {
+    text: reqString(o.text, `${path}.text`),
+    startSec: reqNum(o.startSec, `${path}.startSec`),
+    endSec: reqNum(o.endSec, `${path}.endSec`),
+    line: reqNum(o.line, `${path}.line`),
+  }
+  if (typeof o.aligned === 'boolean') word.aligned = o.aligned
+  return word
+}
+
+function parseLyrics(raw: unknown, path: string): Lyrics | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const o = expectObject(raw, path)
+  const out: Lyrics = {
+    words: Array.isArray(o.words)
+      ? o.words.map((w, i) => parseLyricWord(w, `${path}.words[${i}]`))
+      : [],
+    sourceText: reqString(o.sourceText, `${path}.sourceText`),
+  }
+  const alignedAt = optString(o.alignedAt)
+  if (alignedAt) out.alignedAt = alignedAt
+  const tv = optNum(o.transcriberVersion)
+  if (tv !== undefined) out.transcriberVersion = tv
+  return out
 }
 
 function parseAudio(raw: unknown, path: string): AudioReference {
@@ -503,7 +547,9 @@ function parseTimeline(raw: unknown, path: string): SongMapTimeline {
 function extractSongMap(raw: Record<string, unknown>): SongMap {
   const formatVersion = raw.formatVersion
   const isLegacyV1 = formatVersion === SONGMAP_LEGACY_FORMAT_VERSION
-  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1) {
+  const isLegacyV2 = formatVersion === SONGMAP_CUE_TRACK_FORMAT_VERSION
+  const isLegacyV3 = formatVersion === SONGMAP_TRANSPOSE_FORMAT_VERSION
+  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1 && !isLegacyV2 && !isLegacyV3) {
     // A file from a NEWER build (formatVersion above what we understand) gets a
     // user-facing "update BarBro" message wherever this error surfaces, instead
     // of a cryptic version number. Older/unknown versions keep the raw message.
@@ -535,6 +581,8 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     formatVersion: SONGMAP_FORMAT_VERSION,
     app: parseApp(raw.app, 'app'),
     metadata,
+    transpose: parseTranspose(raw.transpose, 'transpose'),
+    lyrics: parseLyrics(raw.lyrics, 'lyrics'),
     audio: raw.audio !== undefined && raw.audio !== null ? parseAudio(raw.audio, 'audio') : undefined,
     timeline,
     sections: Array.isArray(raw.sections)
@@ -593,6 +641,8 @@ const KNOWN_TOP_KEYS = new Set([
   'formatVersion',
   'app',
   'metadata',
+  'transpose',
+  'lyrics',
   'audio',
   'timeline',
   'sections',

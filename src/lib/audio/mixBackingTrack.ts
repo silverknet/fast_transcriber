@@ -13,6 +13,11 @@
  * source — for v1 we sum at t=0.
  */
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
+import {
+  renderBufferThroughMasterChain,
+  renderBufferThroughStemChain,
+} from '$lib/audio/mastering'
+import type { AutoStemName, ProjectMastering } from '$lib/project/types'
 
 export interface BackingMixSource {
   /** Human-readable label for error reporting. */
@@ -22,6 +27,16 @@ export interface BackingMixSource {
   offsetSec?: number
   /** Per-source gain multiplier (default 1). */
   gain?: number
+  /**
+   * Mastering stem type — set for musical stems so the project-sound chain is
+   * applied. Cue/click sources leave it unset and are never processed.
+   */
+  stemKind?: AutoStemName | null
+}
+
+export interface BackingMixOptions {
+  /** Project-sound config; when enabled the export matches the Overview mixer. */
+  mastering?: ProjectMastering
 }
 
 const TARGET_SAMPLE_RATE = 44100
@@ -58,9 +73,13 @@ function getChannel(buf: AudioBuffer, channelIndex: number): Float32Array {
  * Mix the given sources into a single WAV at 44.1 kHz. Returns the encoded
  * blob ready for download. Throws if no sources are provided or none decode.
  */
-export async function mixBackingTrack(sources: BackingMixSource[]): Promise<Blob> {
+export async function mixBackingTrack(
+  sources: BackingMixSource[],
+  opts: BackingMixOptions = {},
+): Promise<Blob> {
   if (sources.length === 0) throw new Error('No sources selected')
 
+  const mastering = opts.mastering?.enabled ? opts.mastering : undefined
   const ac = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE })
   try {
     type Decoded = { src: BackingMixSource; buf: AudioBuffer }
@@ -68,7 +87,11 @@ export async function mixBackingTrack(sources: BackingMixSource[]): Promise<Blob
     const failures: string[] = []
     for (const src of sources) {
       try {
-        const buf = await ac.decodeAudioData(await src.blob.arrayBuffer())
+        let buf = await ac.decodeAudioData(await src.blob.arrayBuffer())
+        // Project sound: same per-stem chain the Overview mixer plays through.
+        if (mastering && src.stemKind) {
+          buf = await renderBufferThroughStemChain(buf, src.stemKind, mastering)
+        }
         decoded.push({ src, buf })
       } catch (e) {
         failures.push(`${src.label}: ${e instanceof Error ? e.message : 'decode failed'}`)
@@ -102,6 +125,19 @@ export async function mixBackingTrack(sources: BackingMixSource[]): Promise<Blob
         for (let i = 0; i < copyLen; i++) {
           dst[offset + i]! += resampled[i]! * gain
         }
+      }
+    }
+
+    // Project sound: glue + limiter over the summed mix (same as the mixer's
+    // master bus). Runs before the peak safety-net below.
+    if (mastering?.masterGlue) {
+      const summed = ac.createBuffer(channels, maxFrames, TARGET_SAMPLE_RATE)
+      for (let c = 0; c < channels; c++) {
+        summed.copyToChannel(out[c]! as Float32Array<ArrayBuffer>, c, 0)
+      }
+      const mastered = await renderBufferThroughMasterChain(summed, mastering)
+      for (let c = 0; c < channels; c++) {
+        out[c]!.set(mastered.getChannelData(Math.min(c, mastered.numberOfChannels - 1)))
       }
     }
 
