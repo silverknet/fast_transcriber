@@ -49,6 +49,13 @@ export type AlignmentResult = {
   words: LyricWord[]
   /** Fraction of lyric words anchored to a recognized word (0..1). */
   matchedRatio: number
+  /**
+   * Row coverage — the honest display-quality metric: rows with at least one
+   * real anchor are PLACED by evidence; anchorless rows interpolate between
+   * their neighbors (fine when few, guesswork when most).
+   */
+  matchedRows: number
+  totalRows: number
 }
 
 /** Tokenize cleaned lyrics source text into `LyricToken`s (line-aware). */
@@ -374,7 +381,7 @@ export function alignLyricsToTranscription(
   tokens: LyricToken[],
   asr: AsrWord[],
 ): AlignmentResult {
-  if (tokens.length === 0) return { words: [], matchedRatio: 0 }
+  if (tokens.length === 0) return { words: [], matchedRatio: 0, matchedRows: 0, totalRows: 0 }
 
   const lyr = tokens.map((t) => normalizeWord(t.text))
   const rec = asr.map((w) => normalizeWord(w.text))
@@ -443,7 +450,14 @@ export function alignLyricsToTranscription(
   }
 
   const words = interpolateTimes(tokens, anchors)
-  return { words, matchedRatio: anchors.size / n }
+  const anchoredRows = new Set<number>()
+  for (const i of anchors.keys()) anchoredRows.add(tokens[i]!.line)
+  return {
+    words,
+    matchedRatio: anchors.size / n,
+    matchedRows: anchoredRows.size,
+    totalRows: rows.length,
+  }
 }
 
 /** Nominal spoken duration of a word (seconds) when we must guess. */

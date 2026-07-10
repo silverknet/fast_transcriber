@@ -2447,6 +2447,8 @@
   let lyricsFitMsg = $state('')
   let lyricsFitErr = $state('')
   let lyricsMatchedPct = $state<number | null>(null)
+  let lyricsMatchedRows = $state(0)
+  let lyricsTotalRows = $state(0)
 
   /** Vocals stem if on disk (cleanest recognition), else the original audio. */
   function resolveLyricsAudioAbsPath(): { abs: string; usedStem: boolean } | null {
@@ -2549,7 +2551,8 @@
       // 3. Align imported lyrics against the recognized words.
       lyricsFitMsg = 'Fitting the words…'
       const tokens = tokenizeLyrics(sourceText)
-      const { words: timed, matchedRatio } = alignLyricsToTranscription(tokens, words)
+      const { words: timed, matchedRatio, matchedRows, totalRows } =
+        alignLyricsToTranscription(tokens, words)
       if (matchedRatio === 0) {
         lyricsFitErr = 'Could not match the lyrics to this recording.'
         return
@@ -2560,7 +2563,7 @@
           words: timed,
           sourceText,
           alignedAt: new Date().toISOString(),
-          transcriberVersion: 1,
+          transcriberVersion: 2,
         },
       }))
       if (!p.ok) {
@@ -2568,6 +2571,8 @@
         return
       }
       lyricsMatchedPct = Math.round(matchedRatio * 100)
+      lyricsMatchedRows = matchedRows
+      lyricsTotalRows = totalRows
       lyricsFitMsg = ''
     } catch (e) {
       lyricsFitErr = e instanceof Error ? e.message : String(e)
@@ -3333,10 +3338,12 @@
               <p class="text-destructive text-xs">{lyricsFitErr}</p>
             {/if}
             {#if lyricsMatchedPct !== null}
-              <p class="text-xs {lyricsMatchedPct < 40 ? 'text-amber-600' : 'text-muted-foreground'}">
-                Matched {lyricsMatchedPct}% of words to the recording{lyricsMatchedPct < 40
+              {@const rowPct = lyricsTotalRows > 0 ? Math.round((lyricsMatchedRows / lyricsTotalRows) * 100) : 0}
+              <p class="text-xs {rowPct < 40 ? 'text-amber-600' : 'text-muted-foreground'}">
+                Placed {lyricsMatchedRows} of {lyricsTotalRows} lines from the recording
+                ({lyricsMatchedPct}% of words){rowPct < 40
                   ? ' — that looks rough. Splitting stems first usually helps a lot.'
-                  : '.'}
+                  : '. Lines it couldn’t hear are placed by their neighbors.'}
               </p>
             {/if}
             {#if lyricsSaved && lyricsSaved.words.length > 0 && !lyricsDraftMatchesSaved}
