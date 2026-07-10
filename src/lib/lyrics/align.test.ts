@@ -276,6 +276,40 @@ describe('alignLyricsToTranscription', () => {
     assertMonotone(words)
   })
 
+  it('repeated stanza copies: audio right after an anchored row binds to the CONTIGUOUS copy', () => {
+    // The sheet lists the same stanza twice (verse repeated); the recording
+    // sings it once, straight after row 0. Without a skip prior the DP could
+    // jump to the SECOND copy (rows 3-4), leaving rows 1-2 crammed into a
+    // 2-second hole — "13 rows in 2 seconds" on real data. Skips need time.
+    const tokens = tokensFrom([
+      'intro line anchors here',
+      'gotta fly gotta see tonight',
+      'every time i love you dear',
+      'gotta fly gotta see tonight', // twin copy of row 1
+      'every time i love you dear', // twin copy of row 2
+      'final outro line lands here',
+    ])
+    const asr = [
+      ...asrFrom('intro line anchors here', 10),
+      ...asrFrom('gotta fly gotta see tonight', 14),
+      ...asrFrom('every time i love you dear', 18),
+      ...asrFrom('final outro line lands here', 40),
+    ]
+    const { words } = alignLyricsToTranscription(tokens, asr)
+    // Rows 1-2 (first copy) must take the 14s/18s blocks…
+    expect(words.find((w) => w.line === 1)!.startSec).toBeCloseTo(14, 1)
+    expect(words.find((w) => w.line === 2)!.startSec).toBeCloseTo(18, 1)
+    expect(words.filter((w) => w.line === 1).every((w) => w.aligned)).toBe(true)
+    // …and the twin copies (rows 3-4) interpolate in the long gap before 40s,
+    // not the other way around.
+    for (const w of words.filter((w) => w.line === 3 || w.line === 4)) {
+      expect(w.aligned).toBeUndefined()
+      expect(w.startSec).toBeGreaterThan(20)
+      expect(w.endSec).toBeLessThanOrEqual(40 + 1e-9)
+    }
+    assertMonotone(words)
+  })
+
   it('property: random word drops keep output monotone and in-bounds', () => {
     const line = 'one two three four five six seven eight nine ten eleven twelve'
     const tokens = tokensFrom([line, line, line])

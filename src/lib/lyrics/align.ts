@@ -2,13 +2,27 @@
  * Lyrics-to-audio alignment — fit imported lyric words to the timestamps of
  * words recognized in the vocal track.
  *
- * Why this works better than raw speech-to-text: the lyrics are KNOWN text.
- * We only need the recognizer to be right often enough to provide anchors;
- * a Needleman–Wunsch alignment (semi-global / overlap variant) matches the
- * two word sequences in order, transfers timestamps at matches, and
- * interpolates the words the recognizer missed. Recognition errors therefore
- * cost coverage, never correctness of the text (the imported lyrics are
- * always what's displayed).
+ * ARCHITECTURE (row-based): song lyrics repeat — the same chorus text appears
+ * many times while the recognizer only catches SOME occurrences. Word-level
+ * global alignment is ambiguous under repetition (verified on real data: it
+ * mapped whisper's blocks onto later twin stanzas and misplaced the whole top
+ * of the sheet). The natural unit is the ROW:
+ *
+ *  1. CANDIDATES — every lyric row is matched against the recognition at each
+ *     plausible starting point (a windowed mini-alignment per occurrence).
+ *     A row candidate needs a real run of matching words, which makes ad-lib
+ *     one-offs ("uh you movin") score below acceptance for real rows.
+ *  2. ASSIGNMENT — a monotone DP picks at most one occurrence per row,
+ *     maximizing total match quality with time strictly advancing. Repeated
+ *     chorus rows land on successive occurrences; rows the recognizer missed
+ *     stay unassigned.
+ *  3. RESCUE — unassigned rows get a relaxed second look inside the unclaimed
+ *     time window between their assigned neighbors.
+ *
+ * Matched words anchor to the recognized timestamps; everything else
+ * interpolates line-aware (words hug their own row's anchors; gaps live
+ * BETWEEN rows). Recognition errors cost coverage, never text correctness —
+ * the imported lyrics are always what's displayed.
  *
  * Time base: recognized-word times come from the vocals stem / original file,
  * i.e. ORIGINAL audio time — the same base as `Beat.timeSec` and the schema's
@@ -97,11 +111,259 @@ function wordScore(a: string, b: string): number {
   return SCORE_MISMATCH
 }
 
-/** Move codes for the traceback matrix. */
-const MOVE_NONE = 0
-const MOVE_DIAG = 1 // lyric i-1 aligned with asr j-1 (match or mismatch)
-const MOVE_UP = 2 // gap in ASR (lyric word unmatched)
-const MOVE_LEFT = 3 // gap in lyrics (extra ASR word skipped)
+// ── Row candidates ──────────────────────────────────────────────────────────
+
+/** Nominal within-row word spacing (seconds). */
+const PACE_SEC = 0.42
+/** Extra window beyond the row's nominal length when matching an occurrence. */
+const ROW_WINDOW_SLACK_SEC = 3.5
+/** Minimum (exact + 0.6·fuzzy)/rowLen for a candidate to count. */
+const ROW_ACCEPT_SCORE = 0.3
+/** Relaxed threshold used by the rescue pass inside a bounded window. */
+const ROW_RESCUE_SCORE = 0.25
+
+type RowHit = { tokenIdx: number; asrIdx: number; exact: boolean }
+
+/** One candidate occurrence of a lyric row in the recognition. */
+type RowCandidate = {
+  row: number
+  score: number
+  hits: RowHit[]
+  tFirst: number
+  tLast: number
+}
+
+/** Token indices grouped by row, in order. */
+function rowsOf(tokens: LyricToken[]): number[][] {
+  const rows: number[][] = []
+  let line = -1
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.line !== line) {
+      line = tokens[i]!.line
+      rows.push([])
+    }
+    rows[rows.length - 1]!.push(i)
+  }
+  return rows
+}
+
+/**
+ * Mini semi-global alignment of ONE row against an ASR window: free
+ * leading/trailing gaps on the ASR side (extra recognized words cost nothing
+ * at the edges), penalized gaps for missing lyric words and interior ad-libs.
+ * Returns the positive-scoring matches (the row's anchors at this occurrence).
+ */
+function matchRowWindow(
+  rowIdxs: readonly number[],
+  lyr: readonly string[],
+  rec: readonly string[],
+  j0: number,
+  jEnd: number,
+): RowHit[] {
+  const L = rowIdxs.length
+  const W = jEnd - j0
+  if (L === 0 || W <= 0) return []
+  const width = W + 1
+  const dp = new Float64Array((L + 1) * width)
+  const move = new Uint8Array((L + 1) * width)
+  const M_DIAG = 1
+  const M_UP = 2
+  const M_LEFT = 3
+  // Row 0: free leading ASR gaps (dp stays 0). Column 0: missing lyric words
+  // cost a gap each (we want occurrences that cover the row).
+  for (let i = 1; i <= L; i++) {
+    dp[i * width] = dp[(i - 1) * width]! + SCORE_GAP
+    move[i * width] = M_UP
+  }
+  for (let i = 1; i <= L; i++) {
+    const li = lyr[rowIdxs[i - 1]!]!
+    for (let j = 1; j <= W; j++) {
+      const diag = dp[(i - 1) * width + (j - 1)]! + wordScore(li, rec[j0 + j - 1]!)
+      const up = dp[(i - 1) * width + j]! + SCORE_GAP
+      const left = dp[i * width + (j - 1)]! + SCORE_GAP
+      let best = diag
+      let mv = M_DIAG
+      if (up > best) {
+        best = up
+        mv = M_UP
+      }
+      if (left > best) {
+        best = left
+        mv = M_LEFT
+      }
+      dp[i * width + j] = best
+      move[i * width + j] = mv
+    }
+  }
+  // Traceback from the best cell in the LAST lyric row (free trailing ASR).
+  let bj = 0
+  let bestScore = -Infinity
+  for (let j = 0; j <= W; j++) {
+    const s = dp[L * width + j]!
+    if (s > bestScore) {
+      bestScore = s
+      bj = j
+    }
+  }
+  const hits: RowHit[] = []
+  let i = L
+  let j = bj
+  while (i > 0 && j > 0) {
+    const mv = move[i * width + j]!
+    if (mv === M_DIAG) {
+      const s = wordScore(lyr[rowIdxs[i - 1]!]!, rec[j0 + j - 1]!)
+      if (s > 0) {
+        hits.push({ tokenIdx: rowIdxs[i - 1]!, asrIdx: j0 + j - 1, exact: s === SCORE_EXACT })
+      }
+      i--
+      j--
+    } else if (mv === M_UP) {
+      i--
+    } else {
+      j--
+    }
+  }
+  hits.reverse()
+  return hits
+}
+
+function candidateFromHits(row: number, rowLen: number, hits: RowHit[], asr: readonly AsrWord[]): RowCandidate | null {
+  if (hits.length === 0) return null
+  const exact = hits.filter((h) => h.exact).length
+  const score = (exact + 0.6 * (hits.length - exact)) / rowLen
+  return {
+    row,
+    score,
+    hits,
+    tFirst: asr[hits[0]!.asrIdx]!.startSec,
+    tLast: asr[hits[hits.length - 1]!.asrIdx]!.endSec,
+  }
+}
+
+function acceptCandidate(
+  c: RowCandidate | null,
+  lyr: readonly string[],
+  minScore: number,
+): c is RowCandidate {
+  if (!c) return false
+  if (c.score < minScore) return false
+  if (c.hits.length >= 2) return true
+  // A lone hit only counts when it's self-evident: exact + distinctive word.
+  const h = c.hits[0]!
+  return h.exact && lyr[h.tokenIdx]!.length >= 4
+}
+
+/**
+ * All acceptable occurrences of one row. Start positions are prefiltered to
+ * recognized words matching one of the row's first `startDepth` tokens;
+ * duplicates (same first hit) keep the best score.
+ */
+function rowCandidates(
+  row: number,
+  rowIdxs: readonly number[],
+  lyr: readonly string[],
+  rec: readonly string[],
+  asr: readonly AsrWord[],
+  opts: { jLo?: number; jHi?: number; minScore?: number; startDepth?: number; usable?: (j: number) => boolean } = {},
+): RowCandidate[] {
+  const jLo = opts.jLo ?? 0
+  const jHi = opts.jHi ?? rec.length
+  const minScore = opts.minScore ?? ROW_ACCEPT_SCORE
+  const startDepth = Math.min(opts.startDepth ?? 3, rowIdxs.length)
+  const out: RowCandidate[] = []
+  const seenFirstHit = new Map<number, number>() // first asrIdx → index in out
+
+  for (let j0 = jLo; j0 < jHi; j0++) {
+    if (opts.usable && !opts.usable(j0)) continue
+    let starts = false
+    for (let x = 0; x < startDepth; x++) {
+      if (wordScore(lyr[rowIdxs[x]!]!, rec[j0]!) > 0) {
+        starts = true
+        break
+      }
+    }
+    if (!starts) continue
+    const windowEnd = asr[j0]!.startSec + rowIdxs.length * PACE_SEC + ROW_WINDOW_SLACK_SEC
+    let jEnd = j0
+    while (jEnd < jHi && asr[jEnd]!.startSec <= windowEnd) jEnd++
+    let hits = matchRowWindow(rowIdxs, lyr, rec, j0, jEnd)
+    if (opts.usable) hits = hits.filter((h) => opts.usable!(h.asrIdx))
+    const cand = candidateFromHits(row, rowIdxs.length, hits, asr)
+    if (!acceptCandidate(cand, lyr, minScore)) continue
+    const key = cand.hits[0]!.asrIdx
+    const existing = seenFirstHit.get(key)
+    if (existing !== undefined) {
+      if (out[existing]!.score < cand.score) out[existing] = cand
+      continue
+    }
+    seenFirstHit.set(key, out.length)
+    out.push(cand)
+  }
+  return out
+}
+
+// ── Monotone row assignment ─────────────────────────────────────────────────
+
+/** Rows may flow into each other, but never by more than this overlap. */
+const ROW_FLOW_OVERLAP_SEC = 1.5
+/** A skipped sheet row "costs" at least this much audio time to be plausible. */
+const MIN_SKIPPED_ROW_SEC = 1.5
+/** Penalty per implausibly-skipped row (see below). */
+const ROW_SKIP_PENALTY = 0.2
+
+/**
+ * Pick at most one occurrence per row so that chosen occurrences advance
+ * strictly in time, maximizing total match quality. Classic weighted-chain
+ * DP; ties resolve to the EARLIEST candidates (iteration order + strict `>`),
+ * so repeated stanzas fill from the first occurrence forward.
+ *
+ * MUSICAL PRIOR — skips need time. Lyric sheets repeat stanzas the recording
+ * sings once; without a prior, the DP happily jumps 13 rows in 2 seconds to
+ * anchor a later twin copy (seen on real data). Skipping K rows across a time
+ * gap Δt is penalized for every row beyond what the gap could plausibly have
+ * contained (Δt / MIN_SKIPPED_ROW_SEC) — a real instrumental bridge grants
+ * its skip for free, a 2-second hop over half the sheet does not.
+ */
+function assignRowsMonotone(candidatesByRow: RowCandidate[][]): (RowCandidate | null)[] {
+  type Node = { cand: RowCandidate; total: number; prev: Node | null }
+  const chosen: (RowCandidate | null)[] = candidatesByRow.map(() => null)
+  const nodes: Node[] = []
+  let best: Node | null = null
+
+  for (let r = 0; r < candidatesByRow.length; r++) {
+    const rowCands = [...candidatesByRow[r]!].sort((a, b) => a.tFirst - b.tFirst)
+    const newNodes: Node[] = []
+    for (const cand of rowCands) {
+      const gain = cand.score + 0.02 * cand.hits.length
+      let bestPrev: Node | null = null
+      let bestPrevTotal = 0
+      for (const p of nodes) {
+        if (p.cand.row >= cand.row) continue
+        if (!(cand.tFirst > p.cand.tFirst + 0.05)) continue
+        if (!(cand.tFirst >= p.cand.tLast - ROW_FLOW_OVERLAP_SEC)) continue
+        if (!(cand.tLast > p.cand.tLast)) continue
+        const skipped = cand.row - p.cand.row - 1
+        const gapSec = Math.max(0, cand.tFirst - p.cand.tLast)
+        const plausibleSkips = gapSec / MIN_SKIPPED_ROW_SEC
+        const penalty = ROW_SKIP_PENALTY * Math.max(0, skipped - plausibleSkips)
+        const total = p.total - penalty
+        if (!bestPrev || total > bestPrevTotal) {
+          bestPrev = p
+          bestPrevTotal = total
+        }
+      }
+      const node: Node = { cand, total: gain + (bestPrev ? bestPrevTotal : 0), prev: bestPrev }
+      newNodes.push(node)
+      if (!best || node.total > best.total) best = node
+    }
+    nodes.push(...newNodes)
+  }
+
+  for (let n = best; n; n = n.prev) chosen[n.cand.row] = n.cand
+  return chosen
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
 
 /**
  * Align lyric tokens against recognized words and produce fully-timed
@@ -116,355 +378,77 @@ export function alignLyricsToTranscription(
 
   const lyr = tokens.map((t) => normalizeWord(t.text))
   const rec = asr.map((w) => normalizeWord(w.text))
-  const n = lyr.length
-  const m = rec.length
+  const n = tokens.length
+  const rows = rowsOf(tokens)
 
-  // With no usable recognition, spread words evenly over nothing → all
-  // interpolated from 0 with nominal durations (caller should treat a
-  // matchedRatio of 0 as "alignment failed").
-  /** lyric index → matched ASR word (+ whether the text matched exactly). */
-  const anchors = new Map<number, { w: AsrWord; exact: boolean; asrIdx: number }>()
+  // Pass 1+2: per-row occurrence candidates → monotone assignment.
+  const candidatesByRow = rows.map((rowIdxs, r) => rowCandidates(r, rowIdxs, lyr, rec, asr))
+  const chosen = assignRowsMonotone(candidatesByRow)
 
-  if (m > 0) {
-    // Semi-global (overlap) NW: leading/trailing gaps in EITHER sequence are
-    // free, interior gaps penalized. dp[i][j] = best score of aligning
-    // lyr[0..i) with rec[0..j).
-    const width = m + 1
-    const dp = new Float64Array((n + 1) * width)
-    const move = new Uint8Array((n + 1) * width)
-    // Free leading gaps: dp row 0 and column 0 stay 0 with MOVE_NONE.
+  // Pass 3: rescue unassigned rows inside the unclaimed window between their
+  // assigned neighbors (relaxed score is safe in a bounded window; recognized
+  // words already claimed by neighbors are off-limits).
+  const usedAsr = new Set<number>()
+  for (const c of chosen) if (c) for (const h of c.hits) usedAsr.add(h.asrIdx)
 
-    for (let i = 1; i <= n; i++) {
-      const li = lyr[i - 1]!
-      for (let j = 1; j <= m; j++) {
-        const diag = dp[(i - 1) * width + (j - 1)]! + wordScore(li, rec[j - 1]!)
-        const up = dp[(i - 1) * width + j]! + SCORE_GAP
-        const left = dp[i * width + (j - 1)]! + SCORE_GAP
-        let best = diag
-        let mv = MOVE_DIAG
-        if (up > best) {
-          best = up
-          mv = MOVE_UP
-        }
-        if (left > best) {
-          best = left
-          mv = MOVE_LEFT
-        }
-        // Semi-global: never force a negative prefix — restarting free here
-        // beats dragging a bad prefix along (local-ish start).
-        if (best < 0) {
-          best = 0
-          mv = MOVE_NONE
-        }
-        dp[i * width + j] = best
-        move[i * width + j] = mv
-      }
-    }
-
-    // Traceback from the best cell anywhere in the last row or last column
-    // (free trailing gaps on both sides).
-    let bi = n
-    let bj = m
-    let bestScore = -Infinity
-    for (let j = 0; j <= m; j++) {
-      const s = dp[n * width + j]!
-      if (s > bestScore) {
-        bestScore = s
-        bi = n
-        bj = j
-      }
-    }
-    for (let i = 0; i <= n; i++) {
-      const s = dp[i * width + m]!
-      if (s > bestScore) {
-        bestScore = s
-        bi = i
-        bj = m
-      }
-    }
-
-    let i = bi
-    let j = bj
-    while (i > 0 && j > 0) {
-      const mv = move[i * width + j]!
-      if (mv === MOVE_DIAG) {
-        // Anchor only on positive-scoring diagonals (real matches, not
-        // mismatch substitutions).
-        const s = wordScore(lyr[i - 1]!, rec[j - 1]!)
-        if (s > 0) {
-          anchors.set(i - 1, { w: asr[j - 1]!, exact: s === SCORE_EXACT, asrIdx: j - 1 })
-        }
-        i--
-        j--
-      } else if (mv === MOVE_UP) {
-        i--
-      } else if (mv === MOVE_LEFT) {
-        j--
-      } else {
-        break // MOVE_NONE — free-start boundary reached
-      }
-    }
-  }
-
-  // Musical common sense, applied in three passes:
-  //  1. Anchors need friends — an isolated fuzzy/short-word anchor is almost
-  //     always noise (an ad-lib "uh you movin" exact-matching a common word,
-  //     or a near-miss grabbing the wrong occurrence). Real lines match as
-  //     RUNS of neighboring words.
-  //  2. A row is sung in one breath — anchors that put a word many seconds
-  //     from its rowmates matched the wrong occurrence; vote them out
-  //     ("hej" held for 10 seconds).
-  //  3. Recovery — with trusted anchors in place, unanchored words in a row
-  //     get a second, row-local look at the recognized words near their row
-  //     (generous matching is safe inside a tight window).
-  const supported = pruneUnsupportedAnchors(tokens, anchors)
-  const consistent = rejectLineOutlierAnchors(tokens, supported)
-  const recovered = recoverRowAnchors(tokens, lyr, rec, asr, consistent)
-
-  const finalAnchors = new Map<number, AsrWord>()
-  for (const [i, a] of recovered) finalAnchors.set(i, a.w)
-  const words = interpolateTimes(tokens, finalAnchors)
-  return { words, matchedRatio: recovered.size / n }
-}
-
-type Anchor = { w: AsrWord; exact: boolean; asrIdx: number }
-
-/**
- * Pass 1 — drop anchors without support. An anchor is supported when a
- * nearby token (within 2 positions) is also anchored at a plausible sung
- * distance. Isolated anchors survive only when they're self-evident: an
- * EXACT match of a distinctive word (≥ 4 letters). Everything else —
- * isolated fuzzy hits, isolated "you"/"so"/"uh" exact hits inside ad-lib
- * sections — is noise.
- */
-function pruneUnsupportedAnchors(
-  tokens: LyricToken[],
-  anchors: Map<number, Anchor>,
-): Map<number, Anchor> {
-  const idxs = [...anchors.keys()].sort((a, b) => a - b)
-  const kept = new Map<number, Anchor>()
-  for (let k = 0; k < idxs.length; k++) {
-    const i = idxs[k]!
-    const a = anchors.get(i)!
-    let hasSupport = false
-    for (const dk of [-4, -3, -2, -1, 1, 2, 3, 4]) {
-      // Support = another anchored token within 4 token positions whose time
-      // sits within sung distance for that spacing. Radius 4 lets sparse
-      // scaffolds ("Where … when … you") support each other while ad-lib
-      // one-offs, which have no in-order timed neighbors, stay isolated.
-      const j = idxs[k + dk]
-      if (j === undefined) continue
-      if (Math.abs(j - i) > 4) continue
-      const b = anchors.get(j)!
-      if (Math.abs(b.w.startSec - a.w.startSec) <= 2.5 + PACE_SEC * Math.abs(j - i)) {
-        hasSupport = true
+  for (let r = 0; r < rows.length; r++) {
+    if (chosen[r]) continue
+    let tLo = 0
+    let tHi = Number.POSITIVE_INFINITY
+    for (let p = r - 1; p >= 0; p--) {
+      if (chosen[p]) {
+        tLo = chosen[p]!.tLast - 0.3
         break
       }
     }
-    if (hasSupport || (a.exact && normalizeWord(tokens[i]!.text).length >= 4)) {
-      kept.set(i, a)
+    for (let q = r + 1; q < rows.length; q++) {
+      if (chosen[q]) {
+        tHi = chosen[q]!.tFirst + 0.3
+        break
+      }
     }
+    if (tHi <= tLo) continue
+    // Translate the time window to an ASR index range.
+    let jLo = 0
+    while (jLo < asr.length && asr[jLo]!.startSec < tLo) jLo++
+    let jHi = jLo
+    while (jHi < asr.length && asr[jHi]!.startSec <= tHi) jHi++
+    const rescued = rowCandidates(r, rows[r]!, lyr, rec, asr, {
+      jLo,
+      jHi,
+      minScore: ROW_RESCUE_SCORE,
+      startDepth: rows[r]!.length, // any row word can start a rescue match
+      usable: (j) => !usedAsr.has(j),
+    })
+    if (rescued.length === 0) continue
+    let bestCand = rescued[0]!
+    for (const c of rescued) if (c.score > bestCand.score) bestCand = c
+    chosen[r] = bestCand
+    for (const h of bestCand.hits) usedAsr.add(h.asrIdx)
   }
-  return kept
+
+  // Collect anchors; a final monotone sweep drops any stragglers that would
+  // step backward (rescue windows overlap slightly at their edges).
+  const anchors = new Map<number, AsrWord>()
+  for (const c of chosen) {
+    if (!c) continue
+    for (const h of c.hits) anchors.set(h.tokenIdx, asr[h.asrIdx]!)
+  }
+  const ordered = [...anchors.keys()].sort((a, b) => a - b)
+  let prevT = -Infinity
+  for (const i of ordered) {
+    const t = anchors.get(i)!.startSec
+    if (t + 0.05 < prevT) anchors.delete(i)
+    else prevT = Math.max(prevT, t)
+  }
+
+  const words = interpolateTimes(tokens, anchors)
+  return { words, matchedRatio: anchors.size / n }
 }
 
 /** Nominal spoken duration of a word (seconds) when we must guess. */
 function nominalDurationSec(text: string): number {
   return Math.min(0.9, Math.max(0.18, 0.07 * Math.max(2, normalizeWord(text).length)))
-}
-
-/** Nominal within-row word spacing used for consensus + chained fills. */
-const PACE_SEC = 0.42
-/** Max deviation from a row's consensus start before an anchor is rejected. */
-const LINE_ORIGIN_TOLERANCE_SEC = 3
-
-/** 0-based position of each token within its row. */
-function indexInLine(tokens: LyricToken[]): number[] {
-  const out = new Array<number>(tokens.length)
-  let line = -1
-  let k = 0
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i]!.line !== line) {
-      line = tokens[i]!.line
-      k = 0
-    }
-    out[i] = k++
-  }
-  return out
-}
-
-/**
- * Pass 2 — per-row anchor consensus. Each anchor implies a "row start" (its
- * time minus pace × its position in the row); anchors deviating from the
- * row's consensus by more than the tolerance matched a different occurrence.
- * Consensus rules, in order of trust:
- *  - majority (median of exact anchors when any exist — fuzzy hits don't
- *    get to out-vote exact ones),
- *  - on a 2-way disagreement with no majority, the EARLIER cluster wins
- *    (wrong-occurrence grabs are almost always a LATER repetition).
- * A final monotonic sweep drops survivors that step backward in time.
- */
-function rejectLineOutlierAnchors(
-  tokens: LyricToken[],
-  anchors: Map<number, Anchor>,
-): Map<number, Anchor> {
-  const idxInLine = indexInLine(tokens)
-
-  const byLine = new Map<number, number[]>()
-  for (const i of anchors.keys()) {
-    const arr = byLine.get(tokens[i]!.line) ?? []
-    arr.push(i)
-    byLine.set(tokens[i]!.line, arr)
-  }
-
-  const kept = new Map<number, Anchor>()
-  for (const idxs of byLine.values()) {
-    if (idxs.length === 1) {
-      const i = idxs[0]!
-      kept.set(i, anchors.get(i)!)
-      continue
-    }
-    const origin = (i: number) => anchors.get(i)!.w.startSec - PACE_SEC * idxInLine[i]!
-    // Consensus origin: median over EXACT anchors when available, else all.
-    const exactIdxs = idxs.filter((i) => anchors.get(i)!.exact)
-    const voters = exactIdxs.length > 0 ? exactIdxs : idxs
-    const origins = voters.map(origin).sort((a, b) => a - b)
-    // Lower median: on an even split, the EARLIER cluster wins.
-    const median = origins[Math.max(0, Math.ceil(origins.length / 2) - 1)]!
-    for (const i of idxs) {
-      if (Math.abs(origin(i) - median) <= LINE_ORIGIN_TOLERANCE_SEC) {
-        kept.set(i, anchors.get(i)!)
-      }
-    }
-  }
-  return kept
-}
-
-/**
- * Pass 3 — row-local recovery. Rows that kept at least one trusted anchor
- * get a second look: each still-unanchored token in the row tries to match
- * a not-yet-claimed recognized word inside the row's expected time window.
- * Generous matching is safe here because the window is tight — this is what
- * lifts songs where the recognizer garbled half the words. Finishes with the
- * global monotonic sweep.
- */
-function recoverRowAnchors(
-  tokens: LyricToken[],
-  lyr: string[],
-  rec: string[],
-  asr: AsrWord[],
-  anchors: Map<number, Anchor>,
-): Map<number, Anchor> {
-  const idxInLine = indexInLine(tokens)
-  const out = new Map<number, Anchor>(anchors)
-  const usedAsr = new Set<number>()
-  for (const a of anchors.values()) usedAsr.add(a.asrIdx)
-
-  const byLine = new Map<number, number[]>()
-  for (let i = 0; i < tokens.length; i++) {
-    const arr = byLine.get(tokens[i]!.line) ?? []
-    arr.push(i)
-    byLine.set(tokens[i]!.line, arr)
-  }
-
-  for (const rowIdxs of byLine.values()) {
-    const rowAnchors = rowIdxs.filter((i) => out.has(i))
-    if (rowAnchors.length === 0) continue
-    // Expected row window from the anchors' implied row start.
-    const origins = rowAnchors.map((i) => out.get(i)!.w.startSec - PACE_SEC * idxInLine[i]!)
-    const rowStart = Math.min(...origins)
-    const rowLen = rowIdxs.length
-    const winLo = rowStart - 1.5
-    const winHi = rowStart + PACE_SEC * rowLen + 2.5
-
-    for (const i of rowIdxs) {
-      if (out.has(i)) continue
-      const expected = rowStart + PACE_SEC * idxInLine[i]!
-      let best: { asrIdx: number; dist: number } | null = null
-      for (let j = 0; j < asr.length; j++) {
-        if (usedAsr.has(j)) continue
-        const t = asr[j]!.startSec
-        if (t < winLo || t > winHi) continue
-        if (wordScore(lyr[i]!, rec[j]!) <= 0) continue
-        const dist = Math.abs(t - expected)
-        if (!best || dist < best.dist) best = { asrIdx: j, dist }
-      }
-      if (best && best.dist <= 3) {
-        usedAsr.add(best.asrIdx)
-        out.set(i, {
-          w: asr[best.asrIdx]!,
-          exact: lyr[i] === rec[best.asrIdx],
-          asrIdx: best.asrIdx,
-        })
-      }
-    }
-  }
-
-  // Rows with NO surviving anchor (a bad global path swallowed their words):
-  // rescue inside the unclaimed time window between the neighboring anchored
-  // tokens. In-order chained matching; accepted with ≥2 hits, or a single
-  // EXACT hit on a distinctive (≥4 letters) word.
-  for (const rowIdxs of byLine.values()) {
-    if (rowIdxs.some((i) => out.has(i))) continue
-    const first = rowIdxs[0]!
-    const last = rowIdxs[rowIdxs.length - 1]!
-    // Window: after the last anchor before the row, before the first anchor
-    // after it (in token order).
-    let winLo = 0
-    let winHi = Number.POSITIVE_INFINITY
-    for (const [k, a] of out) {
-      if (k < first) winLo = Math.max(winLo, a.w.endSec)
-      if (k > last) winHi = Math.min(winHi, a.w.startSec)
-    }
-    if (winHi <= winLo) continue
-
-    const hits: Array<{ i: number; asrIdx: number }> = []
-    let searchFrom = 0
-    for (const i of rowIdxs) {
-      let found = -1
-      for (let j = searchFrom; j < asr.length; j++) {
-        if (usedAsr.has(j)) continue
-        const t = asr[j]!.startSec
-        if (t < winLo) continue
-        if (t > winHi) break
-        if (wordScore(lyr[i]!, rec[j]!) > 0) {
-          found = j
-          break
-        }
-      }
-      if (found >= 0) {
-        hits.push({ i, asrIdx: found })
-        searchFrom = found + 1
-      }
-    }
-    const acceptable =
-      hits.length >= 2 ||
-      (hits.length === 1 &&
-        lyr[hits[0]!.i] === rec[hits[0]!.asrIdx] &&
-        normalizeWord(tokens[hits[0]!.i]!.text).length >= 4)
-    if (!acceptable) continue
-    // Row-span sanity: accepted hits must themselves sit within one breath.
-    const times = hits.map((h) => asr[h.asrIdx]!.startSec)
-    if (Math.max(...times) - Math.min(...times) > PACE_SEC * rowIdxs.length + 3) continue
-    for (const h of hits) {
-      usedAsr.add(h.asrIdx)
-      out.set(h.i, {
-        w: asr[h.asrIdx]!,
-        exact: lyr[h.i] === rec[h.asrIdx],
-        asrIdx: h.asrIdx,
-      })
-    }
-  }
-
-  // Global monotonic sweep — recovery must not create time-travel.
-  const ordered = [...out.keys()].sort((a, b) => a - b)
-  let prevT = -Infinity
-  for (const i of ordered) {
-    const t = out.get(i)!.w.startSec
-    if (t + 0.05 < prevT) out.delete(i)
-    else prevT = Math.max(prevT, t)
-  }
-  return out
 }
 
 /**
