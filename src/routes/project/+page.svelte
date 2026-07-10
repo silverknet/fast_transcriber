@@ -657,9 +657,75 @@
   }
 
   let songs = $derived($project.data?.songs ?? [])
+  const setDurationSummary = $derived.by(() => {
+    let totalSec = 0
+    let missing = 0
+    for (const entry of songs) {
+      if (entry.hidden) continue
+      const duration = $project.metadataByFolder[entry.folder]?.audioDurationSec
+      if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+        totalSec += duration
+      } else {
+        missing += 1
+      }
+    }
+    const visibleCount = songs.filter((entry) => !entry.hidden).length
+    return { totalSec, missing, visibleCount }
+  })
+
+  function formatSetDuration(sec: number): string {
+    const rounded = Math.round(sec)
+    const hours = Math.floor(rounded / 3600)
+    const minutes = Math.floor((rounded % 3600) / 60)
+    const seconds = rounded % 60
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    }
+    return `${minutes}:${String(seconds).padStart(2, '0')}`
+  }
+
+  const setDurationKnown = $derived(setDurationSummary.totalSec > 0)
+  const setDurationLabel = $derived.by(() => {
+    if (!setDurationKnown) return 'set length unavailable'
+    return `${formatSetDuration(setDurationSummary.totalSec)}${setDurationSummary.missing > 0 ? '+' : ''} set`
+  })
+
+  const songListStats = $derived.by(() => {
+    let hidden = 0
+    let visible = 0
+    let withAudio = 0
+    let analyzed = 0
+    let stemReady = 0
+    for (const entry of songs) {
+      if (entry.hidden) {
+        hidden += 1
+        continue
+      }
+      visible += 1
+      const meta = $project.metadataByFolder[entry.folder]
+      if (meta?.hasAudio) withAudio += 1
+      if (meta?.analyzed) analyzed += 1
+      const hasStemRefs = Object.keys(meta?.stemRefs ?? {}).length > 0
+      const hasStemFiles = Object.values(meta?.stemsByPreset ?? {}).some(
+        (files) => Array.isArray(files) && files.length > 0,
+      )
+      if (hasStemRefs || hasStemFiles) stemReady += 1
+    }
+    return { hidden, visible, withAudio, analyzed, stemReady }
+  })
+
+  function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+    return `${count} ${count === 1 ? singular : plural}`
+  }
+
+  function ratioLabel(label: string, count: number, total: number): string {
+    return total > 0 ? `${label} ${count}/${total}` : `${label} 0`
+  }
 </script>
 
-<main class="project-page relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col gap-6 px-4 py-12 sm:px-6">
+<main
+  class="project-page relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col gap-6 px-4 pt-14 pb-12 sm:px-6"
+>
   {#if restoring}
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}
@@ -808,68 +874,95 @@
     <!-- Title sits raw over the background (no box). A <div>, NOT a <header>,
          to escape the `.project-page > header` studio box rule below. Rename
          inline; cloud box + Settings / Share / Refresh share the row. -->
-    <div class="flex flex-wrap items-center gap-2">
-      <input
-        type="text"
-        class="min-w-[8rem] flex-1 border-b-2 border-transparent bg-transparent pb-0.5 text-4xl font-bold tracking-tight focus:border-foreground focus:outline-none"
-        placeholder="Untitled project"
-        bind:value={renameInput}
-        onblur={commitNameRename}
-        onkeydown={(e) => {
-          if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
-        }}
-      />
-      <Button
-        variant="ghost"
-        size="sm"
-        class="h-9 gap-1 border-transparent px-2"
-        onclick={() => void goto('/project/playback')}
-        title="Open the full-screen live playback page"
-      >
-        <Play class="size-3.5" aria-hidden="true" />
-        Live
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        class="h-9 gap-1 border-transparent px-2"
-        onclick={() => (settingsDialogOpen = true)}
-        title="Project settings — automatic stem preparation"
-      >
-        <Settings class="size-3.5" aria-hidden="true" />
-        Settings
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        class="h-9 gap-1 border-transparent px-2"
-        onclick={() => (shareDialogOpen = true)}
-        title="Invite collaborators to this project"
-      >
-        <Share2 class="size-3.5" aria-hidden="true" />
-        Share
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        class="h-9 gap-1 border-transparent px-2"
-        disabled={refreshing}
-        onclick={() => void onRefreshProject()}
-        title="Re-scan every song folder for stems and metadata changes"
-      >
-        <RefreshCw class="size-3.5 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
-        {refreshing ? 'Refreshing…' : 'Refresh'}
-      </Button>
-      <CloudStatusChip onManage={() => (shareDialogOpen = true)} />
+    <div class="project-title-block flex shrink-0 flex-col gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          class="min-w-[8rem] flex-1 border-b-2 border-transparent bg-transparent pb-0.5 text-4xl font-bold tracking-tight focus:border-foreground focus:outline-none"
+          placeholder="Untitled project"
+          bind:value={renameInput}
+          onblur={commitNameRename}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+          }}
+        />
+        <DropdownMenu>
+          <DropdownMenuTrigger>
+            {#snippet child({ props })}
+              <Button size="sm" class="add-song-gradient h-9 gap-1.5 px-3" {...props}>
+                <Plus class="size-3.5" aria-hidden="true" />
+                Add song
+              </Button>
+            {/snippet}
+          </DropdownMenuTrigger>
+          <DropdownMenuContent class="min-w-[14rem]">
+            <DropdownMenuItem class="cursor-pointer" onclick={onAddCreateNew}>
+              <ListPlus class="mr-2 size-4" aria-hidden="true" />
+              Create new song
+            </DropdownMenuItem>
+            <DropdownMenuItem class="cursor-pointer" onclick={onAddImportLocal}>
+              Import local .smap…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-9 gap-1 border-transparent px-2"
+          onclick={() => void goto('/project/playback')}
+          title="Open the full-screen live playback page"
+        >
+          <Play class="size-3.5" aria-hidden="true" />
+          Live
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-9 gap-1 border-transparent px-2"
+          onclick={() => (settingsDialogOpen = true)}
+          title="Project settings — automatic stem preparation"
+        >
+          <Settings class="size-3.5" aria-hidden="true" />
+          Settings
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-9 gap-1 border-transparent px-2"
+          onclick={() => (shareDialogOpen = true)}
+          title="Invite collaborators to this project"
+        >
+          <Share2 class="size-3.5" aria-hidden="true" />
+          Share
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-9 gap-1 border-transparent px-2"
+          disabled={refreshing}
+          onclick={() => void onRefreshProject()}
+          title="Re-scan every song folder for stems and metadata changes"
+        >
+          <RefreshCw class="size-3.5 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </Button>
+        <AutoStemsStatusPanel />
+        <CloudStatusChip onManage={() => (shareDialogOpen = true)} />
+      </div>
+      <div class="text-muted-foreground flex items-center gap-3 text-xs">
+        <span>{songs.length} song{songs.length === 1 ? '' : 's'}</span>
+        <span
+          title={setDurationSummary.missing > 0
+            ? `${setDurationSummary.missing} non-hidden song${setDurationSummary.missing === 1 ? '' : 's'} missing duration metadata`
+            : 'Total length of non-hidden songs'}
+        >
+          · {setDurationLabel}
+        </span>
+        {#if refreshMsg}
+          <span class="truncate" role="status" title={refreshMsgTitle || refreshMsg}>· {refreshMsg}</span>
+        {/if}
+      </div>
     </div>
-    <div class="text-muted-foreground -mt-1 flex items-center gap-3 text-xs">
-      <span>{songs.length} song{songs.length === 1 ? '' : 's'}</span>
-      {#if refreshMsg}
-        <span class="truncate" role="status" title={refreshMsgTitle || refreshMsg}>· {refreshMsg}</span>
-      {/if}
-    </div>
-
-    <AutoStemsStatusPanel />
 
     {#if actionError}
       <p class="text-destructive text-sm" role="status">{actionError}</p>
@@ -877,7 +970,7 @@
 
     {#if dragSongs.length === 0}
       <div class="studio-empty p-8 text-center">
-        <p class="text-muted-foreground text-sm">No songs yet. Add the first one below.</p>
+        <p class="text-muted-foreground text-sm">No songs yet. Add the first one from the toolbar.</p>
       </div>
     {:else}
       <div class="studio-song-board flex flex-col">
@@ -918,7 +1011,7 @@
           use:dndzone={{ items: dragSongs, flipDurationMs: 260, dropTargetStyle: {} }}
           onconsider={(e) => onDndConsider(e as CustomEvent<{ items: ProjectSongEntry[] }>)}
           onfinalize={(e) => onDndFinalize(e as CustomEvent<{ items: ProjectSongEntry[] }>)}
-          class="border-foreground border-x-2 border-b-2 flex flex-col"
+          class="border-foreground flex flex-col border-x-2"
         >
           {#each dragSongs as entry, index (entry.id)}
             <ProjectSongCard
@@ -936,52 +1029,15 @@
             />
           {/each}
         </ul>
-      </div>
-    {/if}
-
-    <div class="studio-action-box border-foreground border-2 p-4">
-      <DropdownMenu>
-        <DropdownMenuTrigger>
-          {#snippet child({ props })}
-            <Button class="w-full gap-2" {...props}>
-              <Plus class="size-4" aria-hidden="true" />
-              Add song
-            </Button>
-          {/snippet}
-        </DropdownMenuTrigger>
-        <DropdownMenuContent class="min-w-[14rem]">
-          <DropdownMenuItem class="cursor-pointer" onclick={onAddCreateNew}>
-            <ListPlus class="mr-2 size-4" aria-hidden="true" />
-            Create new song
-          </DropdownMenuItem>
-          <DropdownMenuItem class="cursor-pointer" onclick={onAddImportLocal}>
-            Import local .smap…
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-
-    {#if songs.length > 0}
-      <div class="studio-action-box flex items-center gap-3 px-4 py-3">
-        <div class="min-w-0 flex-1">
-          <p class="text-xs font-semibold">Setlist · Ableton Live 12</p>
-          <p class="text-muted-foreground text-[11px]">
-            One .als with a scene per song. Click track is re-rendered fresh on every export.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          class="shrink-0 gap-1"
-          disabled={!$desktopCompanionStatus.reachable}
-          onclick={openSetlistExport}
-          title={!$desktopCompanionStatus.reachable
-            ? 'Setlist export needs the BarBro desktop client running.'
-            : 'Open the export dialog'}
-        >
-          <Music4 class="size-3.5" aria-hidden="true" />
-          Export .als
-        </Button>
+        <footer class="song-list-footer border-foreground flex flex-wrap items-center gap-x-3 gap-y-1 border-x-2 border-t-2 border-b-2 px-3 py-2 text-[11px] font-semibold">
+          <span>{countLabel(songListStats.visible, 'visible song')}</span>
+          {#if songListStats.hidden > 0}
+            <span class="text-muted-foreground">· {countLabel(songListStats.hidden, 'hidden song')}</span>
+          {/if}
+          <span class="text-muted-foreground">· {ratioLabel('audio', songListStats.withAudio, songListStats.visible)}</span>
+          <span class="text-muted-foreground">· {ratioLabel('analyzed', songListStats.analyzed, songListStats.visible)}</span>
+          <span class="text-muted-foreground">· {ratioLabel('stems', songListStats.stemReady, songListStats.visible)}</span>
+        </footer>
       </div>
     {/if}
 
@@ -1003,7 +1059,7 @@
       onImported={replaceTargetId ? onReplaceImportedAudio : onAttachImportedAudio}
     />
 
-    <ProjectSettingsDialog bind:open={settingsDialogOpen} />
+    <ProjectSettingsDialog bind:open={settingsDialogOpen} onOpenSetlistExport={openSetlistExport} />
   {/if}
 </main>
 
@@ -1115,18 +1171,56 @@
     overflow: hidden;
   }
 
-  .studio-empty,
-  .studio-action-box {
+  .add-song-gradient {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border-color: var(--ink);
+    background:
+      radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.42) 0 1px, transparent 1.5px),
+      radial-gradient(circle at 72% 42%, rgba(0, 0, 0, 0.16) 0 1px, transparent 1.5px),
+      radial-gradient(circle at 39% 78%, rgba(255, 255, 255, 0.34) 0 1px, transparent 1.5px),
+      linear-gradient(
+        135deg,
+        color-mix(in oklch, var(--studio-orange) 88%, white),
+        color-mix(in oklch, var(--studio-orange) 64%, #ffd43b) 45%,
+        color-mix(in oklch, var(--studio-orange) 82%, #111111)
+      );
+    background-size:
+      11px 11px,
+      13px 13px,
+      17px 17px,
+      100% 100%;
+    color: var(--studio-ink);
+  }
+
+  .add-song-gradient::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    opacity: 0.28;
+    background-image:
+      repeating-linear-gradient(
+        45deg,
+        rgba(0, 0, 0, 0.2) 0 1px,
+        transparent 1px 3px
+      );
+    mix-blend-mode: multiply;
+  }
+
+  .add-song-gradient:hover {
+    background-position:
+      1px 0,
+      -1px 1px,
+      0 -1px,
+      0 0;
+  }
+
+  .studio-empty {
     border: 2px dashed color-mix(in oklch, var(--ink) 62%, transparent);
     border-radius: var(--radius);
     background: color-mix(in oklch, var(--card) 84%, var(--muted));
-  }
-
-  .studio-action-box {
-    border-style: solid;
-    box-shadow:
-      4px 4px 0 var(--ink),
-      var(--ao-soft);
   }
 
   .studio-song-board {
@@ -1135,6 +1229,15 @@
     box-shadow:
       5px 5px 0 var(--ink),
       var(--ao-soft);
+  }
+
+  .song-list-footer {
+    background:
+      linear-gradient(
+        90deg,
+        color-mix(in oklch, var(--studio-orange) 12%, var(--card)),
+        var(--card)
+      );
   }
 
   :global(.song-row-grid) {

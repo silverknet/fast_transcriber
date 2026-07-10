@@ -198,6 +198,9 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   if (info.hasCueTrack) out.hasCueTrack = true
   if (info.hasClickTrack) out.hasClickTrack = true
   if (info.hasAudio) out.hasAudio = true
+  if (typeof info.audioDurationSec === 'number' && info.audioDurationSec > 0) {
+    out.audioDurationSec = info.audioDurationSec
+  }
   if (typeof info.countInBeats === 'number' && info.countInBeats > 0) {
     out.countInBeats = info.countInBeats
   }

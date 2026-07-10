@@ -1,17 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BarBro">
-  <!-- Brutalist tile: near-black studio-ink square, light "B" in the app font
-       (Space Grotesk, with a system sans fallback since favicons can't load a
-       web font). Dark tile + light glyph reads on both light and dark tabs. -->
-  <rect width="64" height="64" rx="13" fill="#191a1f" />
+  <rect x="8" y="8" width="52" height="52" rx="8" fill="#504e45" />
+  <rect x="0" y="0" width="52" height="52" rx="8" fill="#ffffff" />
   <text
-    x="32"
-    y="34"
+    x="30"
+    y="28"
     text-anchor="middle"
     dominant-baseline="central"
-    font-family="'Space Grotesk', 'Helvetica Neue', Arial, sans-serif"
+    font-family="'Space Grotesk', Arial, Helvetica, sans-serif"
+    font-size="50"
     font-weight="700"
-    font-size="44"
-    letter-spacing="-1"
-    fill="#f4f2ee"
+    fill="#5c5c51"
+  >B</text>
+  <text
+    x="21"
+    y="22"
+    text-anchor="middle"
+    dominant-baseline="central"
+    font-family="'Space Grotesk', Arial, Helvetica, sans-serif"
+    font-size="50"
+    font-weight="700"
+    fill="#ffffff"
   >B</text>
 </svg>

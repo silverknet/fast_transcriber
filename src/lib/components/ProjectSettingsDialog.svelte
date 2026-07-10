@@ -35,8 +35,15 @@
     type MasteringIntensity,
     type PreCountInCueMode,
   } from '$lib/project/types'
+  import { Music4 } from '@lucide/svelte'
 
-  let { open = $bindable(false) } = $props<{ open?: boolean }>()
+  let {
+    open = $bindable(false),
+    onOpenSetlistExport,
+  } = $props<{
+    open?: boolean
+    onOpenSetlistExport?: () => void
+  }>()
 
   /** Friendly labels — never expose model names / internals here. */
   const STEM_LABELS: Record<AutoStemName, string> = {
@@ -141,10 +148,20 @@
 
   const chosenStems = $derived(AUTO_STEM_NAMES.filter((n) => selected[n]))
   const noStemsButEnabled = $derived(enabled && chosenStems.length === 0)
+  const songCount = $derived($projectStore.data?.songs.length ?? 0)
+  const canExportSetlist = $derived(
+    songCount > 0 && $desktopCompanionStatus.reachable && typeof onOpenSetlistExport === 'function',
+  )
   const preCountInCue = $derived({
     mode: cueMode,
     ...(cueMode === 'custom' && cueText.trim() ? { text: cueText.trim() } : {}),
   })
+
+  function requestSetlistExport() {
+    if (!canExportSetlist) return
+    open = false
+    onOpenSetlistExport?.()
+  }
 
   async function save() {
     if (busy) return
@@ -207,7 +224,7 @@
 </script>
 
 <Dialog bind:open>
-  <DialogContent class="max-w-md">
+  <DialogContent class="max-w-lg">
     <DialogHeader>
       <DialogTitle>Project settings</DialogTitle>
     </DialogHeader>
@@ -449,6 +466,36 @@
         {#if !$desktopCompanionStatus.reachable}
           <p class="text-muted-foreground pl-7 text-[11px]">BarBro Desktop must be running for this.</p>
         {/if}
+      </section>
+
+      <section class="border-foreground/10 flex flex-col gap-2 border-t pt-4">
+        <h3 class="text-muted-foreground text-[11px] font-bold uppercase tracking-wider">
+          Export
+        </h3>
+        <div class="flex items-center gap-3">
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-semibold">Setlist · Ableton Live 12</p>
+            <p class="text-muted-foreground text-xs">
+              One .als with a scene per song. Click track is re-rendered fresh on every export.
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            class="shrink-0 gap-1"
+            disabled={!canExportSetlist}
+            onclick={requestSetlistExport}
+            title={songCount === 0
+              ? 'Add at least one song before exporting.'
+              : !$desktopCompanionStatus.reachable
+                ? 'Setlist export needs the BarBro desktop client running.'
+                : 'Open the export dialog'}
+          >
+            <Music4 class="size-3.5" aria-hidden="true" />
+            Export .als
+          </Button>
+        </div>
       </section>
 
       {#if noStemsButEnabled}

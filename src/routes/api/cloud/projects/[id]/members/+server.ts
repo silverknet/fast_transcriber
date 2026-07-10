@@ -25,6 +25,7 @@ import {
   getCloudProject,
   listCloudMembers,
   removeMember,
+  resolveCloudMemberProfiles,
 } from '$lib/server/db/cloudRepo'
 import type { RequestHandler } from './$types'
 
@@ -38,7 +39,15 @@ export const GET: RequestHandler = async ({ locals, params }) => {
   const projectId = params.id
   if (!projectId) throw error(400, 'Missing project id.')
   const members = await listCloudMembers(locals.supabase, projectId)
-  return json({ ok: true, members })
+  try {
+    const memberProfiles = await resolveCloudMemberProfiles(
+      getSupabaseServiceClient(),
+      members,
+    )
+    return json({ ok: true, members: memberProfiles })
+  } catch {
+    return json({ ok: true, members })
+  }
 }
 
 interface InviteBody {

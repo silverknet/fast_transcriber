@@ -70,6 +70,9 @@ export interface CloudMemberView {
   user_id: string
   role: 'owner' | 'editor'
   added_at: string
+  display_name?: string | null
+  email?: string | null
+  avatar_url?: string | null
 }
 
 // ── Read paths ────────────────────────────────────────────────────────

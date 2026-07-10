@@ -7,10 +7,12 @@
  *            409 conflict.
  */
 import { error, json } from '@sveltejs/kit'
+import { getSupabaseServiceClient } from '$lib/server/supabase/serverClient'
 import {
   deleteCloudProject,
   getCloudProject,
   listCloudMembers,
+  resolveCloudMemberProfiles,
   rpcPatchManifest,
   type PatchManifestArgs,
 } from '$lib/server/db/cloudRepo'
@@ -28,7 +30,15 @@ export const GET: RequestHandler = async ({ locals, params }) => {
   const project = await getCloudProject(locals.supabase, projectId)
   if (!project) throw error(404, 'Project not found.')
   const members = await listCloudMembers(locals.supabase, projectId)
-  return json({ ok: true, project, members })
+  try {
+    const memberProfiles = await resolveCloudMemberProfiles(
+      getSupabaseServiceClient(),
+      members,
+    )
+    return json({ ok: true, project, members: memberProfiles })
+  } catch {
+    return json({ ok: true, project, members })
+  }
 }
 
 interface PatchBody {

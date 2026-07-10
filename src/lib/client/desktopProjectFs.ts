@@ -37,6 +37,7 @@ export interface ProjectSongMetadataInfo {
    * `audio` block at all — these report `hasAudio !== true`.
    */
   hasAudio?: boolean
+  audioDurationSec?: number
   stemRefs?: StemRefs
   hasSmap: boolean
   hasAls: boolean

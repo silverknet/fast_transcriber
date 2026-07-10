@@ -11,7 +11,7 @@
  * Port must stay in sync with `src/lib/client/desktopBeacon.ts`.
  */
 
-import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import archiver from 'archiver'
 import yauzl from 'yauzl'
@@ -73,7 +73,7 @@ import {
   pythonLyricsExe,
   transcribeLyricsScriptPath,
 } from './nativePython.mjs'
-import { createAutoStemsDaemon } from './autoStems.mjs'
+import { createAutoStemsDaemon, isStemWavHealthy } from './autoStems.mjs'
 import {
   RUBBERBAND_RENDER_TIMEOUT_MS,
   RUBBERBAND_TRANSPOSE_ALGO_VERSION,
@@ -170,6 +170,189 @@ const MAX_REQUEST_BYTES = 200 * 1024 * 1024
  */
 const stemsJobs = new Map()
 const STEMS_JOB_TTL_MS = 30 * 60 * 1000
+const STEMS_JOB_RECOVERY_VERSION = 1
+const RECOVERABLE_STEM_NAMES = new Set(['vocals', 'drums', 'bass', 'other'])
+let stemsRecoveryInProgress = false
+
+function stemsJobRecoveryFilePath() {
+  return path.join(app.getPath('userData'), 'stems-job-recovery.json')
+}
+
+function normalizeRecoverableStemList(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : []
+  const stems = []
+  for (const item of raw) {
+    const stem = String(item ?? '').trim().toLowerCase()
+    if (RECOVERABLE_STEM_NAMES.has(stem) && !stems.includes(stem)) stems.push(stem)
+  }
+  return stems.length > 0 ? stems : ['vocals', 'drums', 'bass', 'other']
+}
+
+function normalizeRecoverableStemRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const inputPath = typeof raw.inputPath === 'string' ? raw.inputPath.trim() : ''
+  const outputDir = typeof raw.outputDir === 'string' ? raw.outputDir.trim() : ''
+  if (!path.isAbsolute(inputPath) || !path.isAbsolute(outputDir)) return null
+  const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : 'htdemucs_ft'
+  const shifts = Math.max(1, Math.min(20, Number.parseInt(String(raw.shifts ?? 5), 10) || 5))
+  const overlap = Math.max(0, Math.min(0.95, Number.parseFloat(String(raw.overlap ?? 0.25)) || 0.25))
+  const createdAt = Number.isFinite(raw.createdAt) ? Number(raw.createdAt) : Date.now()
+  return {
+    jobId: typeof raw.jobId === 'string' && raw.jobId ? raw.jobId : randomUUID(),
+    inputPath,
+    outputDir,
+    model,
+    shifts,
+    overlap,
+    stems: normalizeRecoverableStemList(raw.stems),
+    songId: typeof raw.songId === 'string' && raw.songId.trim() ? raw.songId.trim() : null,
+    createdAt,
+  }
+}
+
+function readRecoverableStemJobs() {
+  try {
+    const raw = JSON.parse(readFileSync(stemsJobRecoveryFilePath(), 'utf8'))
+    const jobs = Array.isArray(raw) ? raw : Array.isArray(raw?.jobs) ? raw.jobs : []
+    return jobs.map(normalizeRecoverableStemRecord).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function writeRecoverableStemJobs(records) {
+  try {
+    const file = stemsJobRecoveryFilePath()
+    mkdirSync(path.dirname(file), { recursive: true })
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(
+      tmp,
+      JSON.stringify({ version: STEMS_JOB_RECOVERY_VERSION, jobs: records }, null, 2),
+    )
+    renameSync(tmp, file)
+  } catch (e) {
+    logWarn(`stems: could not persist recovery state: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+function isRecoverableStemJob(job) {
+  return job && (!job.kind || job.kind === 'stems')
+}
+
+function rememberRecoverableStemJob(job) {
+  if (!isRecoverableStemJob(job)) return
+  const record = normalizeRecoverableStemRecord({
+    jobId: job.jobId,
+    inputPath: job.inputPath,
+    outputDir: job.outDir,
+    model: job.options?.model,
+    shifts: job.options?.shifts,
+    overlap: job.options?.overlap,
+    stems: job.options?.stems,
+    songId: job.songId,
+    createdAt: job.createdAt,
+  })
+  if (!record) return
+  const records = readRecoverableStemJobs().filter((r) => r.jobId !== record.jobId)
+  records.push(record)
+  writeRecoverableStemJobs(records)
+}
+
+function forgetRecoverableStemJob(jobOrId) {
+  const jobId = typeof jobOrId === 'string' ? jobOrId : jobOrId?.jobId
+  if (!jobId) return
+  const records = readRecoverableStemJobs()
+  const next = records.filter((r) => r.jobId !== jobId)
+  if (next.length !== records.length) writeRecoverableStemJobs(next)
+}
+
+function isRecoverableStemJobActive(record) {
+  const job = stemsJobs.get(record.jobId)
+  return isRecoverableStemJob(job) && (job.state === 'queued' || job.state === 'running' || job.state === 'paused')
+}
+
+function isRecoveredStemFileHealthy(filePath) {
+  try {
+    if (!existsSync(filePath)) return false
+    const info = readAudioInfo(filePath)
+    return isStemWavHealthy({ ...info, fileSize: statSync(filePath).size })
+  } catch {
+    return false
+  }
+}
+
+function missingRecoverableStemNames(record) {
+  return record.stems.filter((stem) => !isRecoveredStemFileHealthy(path.join(record.outputDir, `${stem}.wav`)))
+}
+
+async function recoverInterruptedStemJobs() {
+  if (stemsRecoveryInProgress) return
+  const allRecords = readRecoverableStemJobs()
+  if (allRecords.length === 0) return
+  if (!stemsVenvIsReady()) {
+    logInfo(`stems: ${allRecords.length} interrupted job(s) waiting for Demucs setup`)
+    return
+  }
+
+  stemsRecoveryInProgress = true
+  try {
+    const activeRecords = []
+    const staleRecords = []
+    for (const record of allRecords) {
+      if (isRecoverableStemJobActive(record)) activeRecords.push(record)
+      else staleRecords.push(record)
+    }
+    if (staleRecords.length === 0) return
+
+    const retryRecords = []
+    for (const record of staleRecords) {
+      if (!existsSync(record.inputPath)) {
+        logWarn(`stems: dropping interrupted job; source is missing: ${record.inputPath}`)
+        continue
+      }
+      const missing = missingRecoverableStemNames(record)
+      if (missing.length === 0) {
+        logInfo(`stems: interrupted job already has healthy output at ${record.outputDir}`)
+        continue
+      }
+      retryRecords.push({ ...record, stems: missing })
+    }
+
+    writeRecoverableStemJobs(activeRecords)
+    if (retryRecords.length === 0) return
+
+    const failed = []
+    let requeued = 0
+    for (const record of retryRecords) {
+      try {
+        const { jobId } = await createStemsJob({
+          inputPath: record.inputPath,
+          outputDir: record.outputDir,
+          model: record.model,
+          shifts: record.shifts,
+          overlap: record.overlap,
+          stems: record.stems.join(','),
+          songId: record.songId,
+        })
+        requeued += 1
+        logInfo(`stems: recovered interrupted job ${jobId.slice(0, 8)} (${record.stems.join(', ')})`)
+      } catch (e) {
+        failed.push(record)
+        logWarn(`stems: could not recover interrupted job: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    if (failed.length > 0) {
+      writeRecoverableStemJobs([...readRecoverableStemJobs(), ...failed])
+    }
+    if (requeued > 0) logInfo(`stems: requeued ${requeued} interrupted job(s)`)
+  } finally {
+    stemsRecoveryInProgress = false
+  }
+}
 
 /** Default Piper voice for debug + future cue tracks (`rhasspy/piper-voices` v1.0.0). */
 const PIPER_DEFAULT_VOICE_ID = 'en_US-lessac-medium'
@@ -851,6 +1034,9 @@ function extractSongMetadataLite(songProject) {
   const a = map.audio
   if (a && typeof a === 'object' && (typeof a.fileName === 'string' || typeof a.originalPath === 'string')) {
     out.hasAudio = true
+    if (typeof a.durationSec === 'number' && Number.isFinite(a.durationSec) && a.durationSec > 0) {
+      out.audioDurationSec = a.durationSec
+    }
   }
   if (map.stemRefs && typeof map.stemRefs === 'object') out.stemRefs = { ...map.stemRefs }
   return out
@@ -3327,6 +3513,7 @@ async function runQueuedJob(job) {
     emitJobEvent(job, { type: 'error', msg: job.lastErrorMsg })
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
+    forgetRecoverableStemJob(job)
     scheduleJobCleanup(job.jobId)
     tryRunNext()
     return
@@ -3352,6 +3539,7 @@ async function runQueuedJob(job) {
     emitJobEvent(job, { type: 'error', msg })
     emitJobEvent(job, { type: 'state', state: 'error' })
     activeJobId = null
+    forgetRecoverableStemJob(job)
     scheduleJobCleanup(job.jobId)
     tryRunNext()
     return
@@ -3502,6 +3690,7 @@ async function runQueuedJob(job) {
     }
   }
 
+  forgetRecoverableStemJob(job)
   activeJobId = null
   scheduleJobCleanup(job.jobId)
   tryRunNext()
@@ -3909,6 +4098,7 @@ async function createStemsJob(args) {
     cleanupTimer: null,
   }
   stemsJobs.set(jobId, job)
+  rememberRecoverableStemJob(job)
   emitJobEvent(job, { type: 'state', state: 'queued' })
 
   const queuedAhead = [...stemsJobs.values()].filter(
@@ -4180,6 +4370,7 @@ async function handleCancelJob(res, cors, jobId) {
     job.finishedAt = Date.now()
     job.lastErrorMsg = 'Cancelled before start'
     emitJobEvent(job, { type: 'state', state: 'cancelled' })
+    forgetRecoverableStemJob(job)
     scheduleJobCleanup(jobId)
     logInfo(`${job.kind ?? 'stems'}: job ${jobId.slice(0, 8)} cancelled (was queued)`)
     sendJson(res, 200, { ok: true, state: 'cancelled' }, cors)
@@ -4191,6 +4382,7 @@ async function handleCancelJob(res, cors, jobId) {
     job.state = 'cancelled'
     job.lastErrorMsg = 'Cancelled mid-run'
     emitJobEvent(job, { type: 'state', state: 'cancelled' })
+    forgetRecoverableStemJob(job)
     try {
       // A SIGSTOPped process won't act on SIGTERM until it's resumed —
       // SIGCONT first, then SIGTERM, otherwise cancel-from-paused hangs.
@@ -4428,6 +4620,9 @@ async function handleSetupStems(req, res, cors) {
     emit({ type: 'done', venvPython })
     emit({ type: 'state', state: 'done' })
     logInfo(`setup/stems: venv ready at ${venvPython}`)
+    void recoverInterruptedStemJobs().catch((e) => {
+      logWarn(`stems: recovery after setup failed: ${e instanceof Error ? e.message : String(e)}`)
+    })
     res.end()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -6490,6 +6685,9 @@ app.whenReady().then(() => {
   logInfo(`Piper TTS ${piperTtsVenvIsReady() ? 'venv OK' : 'venv missing'} · ${getPiperTtsVenvDir()}`)
   // Resume background stem prep for projects watched in a previous session.
   setupAutoStemsDaemon()
+  void recoverInterruptedStemJobs().catch((e) => {
+    logWarn(`stems: recovery failed: ${e instanceof Error ? e.message : String(e)}`)
+  })
 })
 
 app.on('before-quit', () => {

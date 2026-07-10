@@ -52,7 +52,14 @@
   const proj = $derived($project.data)
   const osPath = $derived($project.osPath)
   const cloud = $derived(proj?.cloud ?? null)
-  const userId = $derived(($page.data?.user as { id?: string } | undefined)?.id ?? null)
+  interface PageUser {
+    id?: string
+    email?: string | null
+    name?: string | null
+  }
+
+  const pageUser = $derived(($page.data?.user as PageUser | null | undefined) ?? null)
+  const userId = $derived(pageUser?.id ?? null)
 
   let busy = $state(false)
   let errorMsg = $state('')
@@ -63,6 +70,40 @@
   let pending = $state<CloudPendingInviteView[]>([])
   let inviteEmail = $state('')
   let inviteRole = $state<'editor' | 'owner'>('editor')
+
+  function cleanMemberValue(value: string | null | undefined): string | null {
+    const trimmed = value?.trim()
+    return trimmed ? trimmed : null
+  }
+
+  function memberPrimary(member: CloudMemberView): string {
+    if (member.user_id === userId) return 'you'
+    return (
+      cleanMemberValue(member.display_name) ??
+      cleanMemberValue(member.email) ??
+      'Unknown member'
+    )
+  }
+
+  function memberSecondary(member: CloudMemberView): string {
+    const email = cleanMemberValue(member.email)
+    const name = cleanMemberValue(member.display_name)
+    if (member.user_id === userId) return cleanMemberValue(pageUser?.email) ?? email ?? ''
+    if (name && email && name.toLowerCase() !== email.toLowerCase()) return email
+    return ''
+  }
+
+  function memberInitial(member: CloudMemberView): string {
+    const label =
+      member.user_id === userId
+        ? (cleanMemberValue(pageUser?.name) ?? cleanMemberValue(pageUser?.email))
+        : (cleanMemberValue(member.display_name) ?? cleanMemberValue(member.email))
+    return (label ?? '?').slice(0, 1).toUpperCase()
+  }
+
+  function memberRoleLabel(member: CloudMemberView): string {
+    return member.role === 'owner' ? 'Owner' : 'Editor'
+  }
 
   // ── Audio package (hydration) ────────────────────────────────────────────
   // Cloud sync carries the grid/chords/sections, NOT the audio (too big to
@@ -288,11 +329,26 @@
           </h3>
           <ul class="border-foreground/20 divide-foreground/10 divide-y border text-xs">
             {#each members as m (m.user_id)}
-              <li class="flex items-center justify-between gap-3 px-2 py-1.5">
-                <span class="truncate font-mono">
-                  {m.user_id === userId ? 'you' : `${m.user_id.slice(0, 8)}…`}
+              <li class="flex items-center justify-between gap-3 px-2 py-2">
+                <span class="flex min-w-0 items-center gap-2">
+                  <span
+                    class="border-foreground/25 bg-muted grid size-7 shrink-0 place-items-center rounded-md border text-[11px] font-bold"
+                    aria-hidden="true"
+                  >
+                    {memberInitial(m)}
+                  </span>
+                  <span class="min-w-0">
+                    <span class="block truncate font-semibold">{memberPrimary(m)}</span>
+                    {#if memberSecondary(m)}
+                      <span class="text-muted-foreground block truncate text-[11px]">
+                        {memberSecondary(m)}
+                      </span>
+                    {/if}
+                  </span>
                 </span>
-                <span class="text-muted-foreground text-[10px] uppercase">{m.role}</span>
+                <span class="text-muted-foreground shrink-0 text-[10px] uppercase">
+                  {memberRoleLabel(m)}
+                </span>
               </li>
             {/each}
           </ul>

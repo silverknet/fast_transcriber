@@ -34,7 +34,7 @@
 
 {#if visible}
   <div
-    class="project-context-bar bg-card text-foreground flex h-9 items-center gap-3 px-3 text-sm"
+    class="project-context-bar text-foreground flex h-8 items-center gap-3 px-3 text-sm"
     role="navigation"
     aria-label="Project context"
   >
@@ -46,7 +46,7 @@
     -->
     <button
       type="button"
-      class="hover:bg-accent -my-1 inline-flex shrink-0 items-center gap-1.5 px-2 py-1 text-sm font-bold transition-colors"
+      class="hover:bg-accent inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[var(--radius)] px-2 text-sm font-bold transition-colors"
       onclick={() => void backToProject()}
       aria-label="Back to project {projectName}"
     >
@@ -70,3 +70,13 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .project-context-bar {
+    background: color-mix(in oklch, var(--studio-orange) 5%, var(--card));
+  }
+
+  :global(.dark) .project-context-bar {
+    background: color-mix(in oklch, var(--studio-orange) 8%, var(--card));
+  }
+</style>
