@@ -31,7 +31,11 @@ import threading
 # v2: condition_on_previous_text=False (whisper skips REPEATED lyric lines
 #     when conditioning — fatal for choruses) + softer VAD threshold so quiet
 #     opening phrases over the intro aren't dropped.
-TRANSCRIBER_VERSION = 2
+# v3: temperature=0.0 (NO fallback ladder). The fallback resamples failed
+#     segments with randomness — on singing, many segments fail thresholds,
+#     making every run produce different words (user saw fit quality swing
+#     17→30→17 rows on identical audio). Determinism beats marginal quality.
+TRANSCRIBER_VERSION = 3
 
 DEFAULT_MODEL = "small"
 
@@ -136,6 +140,16 @@ def main() -> None:
             # CRITICAL for lyrics: with conditioning on, whisper deduplicates
             # repeated lines (choruses!) and can skip whole occurrences.
             condition_on_previous_text=False,
+            # Deterministic decoding — the default temperature fallback ladder
+            # RESAMPLES failed segments randomly, so hard (sung) audio produced
+            # different words on every run and alignment quality see-sawed.
+            # Loop-breaking must then be deterministic too: without it, greedy
+            # decoding gets stuck emitting "uh, uh, uh…" through entire verses
+            # (observed). The n-gram ban still allows real lyric repeats like
+            # "hold me, hold me" (a first 4-gram is always allowed).
+            temperature=0.0,
+            repetition_penalty=1.15,
+            no_repeat_ngram_size=4,
             language=str(language) if language else None,
             beam_size=5,
         )
