@@ -38,6 +38,11 @@ const HAT_QUARTERS_MIN_PER_BAR = 2.5
 
 const CRASH_NEAR_BOUNDARY_BARS = 1
 
+/** Snare slots quieter than this fraction of the loudest snare slot = bleed. */
+const SNARE_BACKBEAT_VEL_RATIO = 0.72
+/** A groove's snare pattern lives on at most this many bar positions. */
+const SNARE_MAX_PATTERN_SLOTS = 2
+
 type BarSlots = {
   bar: Bar
   beats: Beat[]
@@ -155,12 +160,27 @@ export function inferDrumGroove(sm: SongMap, events: DrumMidiEvent[]): DrumMidiE
         cur.vels.push(p.e.velocity)
         bySlot.set(p.slot, cur)
       }
-      const patternSlots: { slot: number; velocity: number }[] = []
+      let patternSlots: { slot: number; velocity: number; freq: number }[] = []
       for (const [slot, info] of bySlot) {
         const freq = info.bars.size / blockBars.length
         if (freq >= PATTERN_MIN_FREQ[cls]) {
-          patternSlots.push({ slot, velocity: Math.min(1, median(info.vels)) })
+          patternSlots.push({ slot, velocity: Math.min(1, median(info.vels)), freq })
         }
+      }
+      if (cls === 'snare' && patternSlots.length > 1) {
+        // Backbeat prior. Kick clicks + hats bleed into the snare bands on
+        // strong beats, so raw histograms happily put a snare on every beat
+        // ("it thinks everything is a snare"). Two facts about real snare
+        // patterns: the true backbeat hits are the LOUDEST snares in the
+        // bar, and a groove's snare lives on at most two positions. Keep
+        // only slots nearly as loud as the loudest — this self-selects
+        // beats 2 & 4 even when the bar grid's phase is rotated — then cap
+        // at the two strongest.
+        const vMax = Math.max(...patternSlots.map((p) => p.velocity))
+        patternSlots = patternSlots
+          .filter((p) => p.velocity >= SNARE_BACKBEAT_VEL_RATIO * vMax)
+          .sort((a, b) => b.freq * b.velocity - a.freq * a.velocity)
+          .slice(0, SNARE_MAX_PATTERN_SLOTS)
       }
       if (patternSlots.length === 0) continue
       for (const barIdx of blockBars) {
