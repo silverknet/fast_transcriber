@@ -122,6 +122,7 @@
           // Keep the user's previous sound choices across re-detects.
           kit: m.drumMidi?.kit,
           quantize: m.drumMidi?.quantize,
+          style: m.drumMidi?.style,
         },
       }))
       if (!p.ok) {
@@ -142,6 +143,11 @@
 
   function setQuantize(q: DrumQuantize) {
     patchSongMap((m) => (m.drumMidi ? { ...m, drumMidi: { ...m.drumMidi, quantize: q } } : m))
+    onChanged?.()
+  }
+
+  function setStyle(style: 'steady' | 'detected') {
+    patchSongMap((m) => (m.drumMidi ? { ...m, drumMidi: { ...m.drumMidi, style } } : m))
     onChanged?.()
   }
 
@@ -249,17 +255,31 @@
         </select>
       </label>
       <label class="inline-flex items-center gap-1.5">
-        <span class="text-muted-foreground">Timing</span>
+        <span class="text-muted-foreground">Feel</span>
         <select
           class="border-input bg-background text-foreground border-2 px-1.5 py-0.5 text-xs"
-          value={dm.quantize ?? 'off'}
-          onchange={(e) => setQuantize(e.currentTarget.value as DrumQuantize)}
+          value={dm.style ?? 'steady'}
+          onchange={(e) => setStyle(e.currentTarget.value as 'steady' | 'detected')}
+          title="Steady groove plays the pattern BarBro hears, locked to the grid — misses filled, flukes dropped. As detected plays every raw hit."
         >
-          {#each QUANTIZE_OPTIONS as q (q.value)}
-            <option value={q.value}>{q.label}</option>
-          {/each}
+          <option value="steady">Steady groove</option>
+          <option value="detected">As detected</option>
         </select>
       </label>
+      {#if (dm.style ?? 'steady') === 'detected'}
+        <label class="inline-flex items-center gap-1.5">
+          <span class="text-muted-foreground">Timing</span>
+          <select
+            class="border-input bg-background text-foreground border-2 px-1.5 py-0.5 text-xs"
+            value={dm.quantize ?? 'off'}
+            onchange={(e) => setQuantize(e.currentTarget.value as DrumQuantize)}
+          >
+            {#each QUANTIZE_OPTIONS as q (q.value)}
+              <option value={q.value}>{q.label}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
       <Button
         variant="outline"
         size="sm"

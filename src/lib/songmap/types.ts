@@ -218,6 +218,12 @@ export type DrumMidi = {
   /** Drum kit id (see `$lib/audio/drumKits`); absent = default kit. */
   kit?: string
   quantize?: DrumQuantize
+  /**
+   * 'steady' (default): play the INFERRED groove — per-section patterns,
+   * misses filled, flukes dropped (see `songmap/drumGroove.ts`).
+   * 'detected': play the raw detected hits.
+   */
+  style?: 'steady' | 'detected'
   /** Saved render of the drum track, when written into the project. */
   renderExport?: RenderedCueExport
 }

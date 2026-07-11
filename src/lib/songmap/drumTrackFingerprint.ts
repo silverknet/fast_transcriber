@@ -29,6 +29,7 @@ export function drumTrackFingerprintPayload(sm: SongMap): unknown {
     })),
     kit: dm?.kit ?? 'synth',
     quantize: dm?.quantize ?? 'off',
+    style: dm?.style ?? 'steady',
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),

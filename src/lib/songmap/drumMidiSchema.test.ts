@@ -228,3 +228,72 @@ describe('drumTrackFingerprint', () => {
     ).toBe(base)
   })
 })
+
+describe('inferDrumGroove', () => {
+  function grooveMap(barCount: number) {
+    const sm = withGrid(createEmptySongMap(), barCount)
+    return sm
+  }
+  function hit(t: number, cls: DrumMidiEvent['cls'], v = 0.8): DrumMidiEvent {
+    return { timeSec: t, cls, velocity: v }
+  }
+
+  it('fills missed bars and drops one-off flukes', async () => {
+    const { inferDrumGroove } = await import('./drumGroove')
+    const sm = grooveMap(8) // bars at 0..7s, beats every 0.25s
+    const events: DrumMidiEvent[] = []
+    // Kick on beat 1 (slot 0) of bars 0-6 — bar 5 "missed" by the detector.
+    for (const bar of [0, 1, 2, 3, 4, 6]) events.push(hit(bar, 'kick'))
+    // Snare on beat 3 (t = bar + 0.5) everywhere.
+    for (const bar of [0, 1, 2, 3, 4, 5, 6]) events.push(hit(bar + 0.5, 'snare'))
+    // One fluke tom in bar 2.
+    events.push(hit(2.25, 'tom'))
+    // Bar 7 is a BREAK — no events at all.
+    const out = inferDrumGroove(sm, events)
+
+    const kicks = out.filter((e) => e.cls === 'kick').map((e) => e.timeSec)
+    // Bar 5's kick is FILLED (pattern), bar 7 stays silent (break).
+    expect(kicks).toContain(5)
+    expect(kicks.some((t) => t >= 7)).toBe(false)
+    // Fluke tom removed (1/7 bars ≪ threshold).
+    expect(out.some((e) => e.cls === 'tom')).toBe(false)
+    // Snares locked on their slot in every active bar.
+    const snares = out.filter((e) => e.cls === 'snare')
+    expect(snares).toHaveLength(7)
+    for (const s of snares) expect((s.timeSec % 1).toFixed(2)).toBe('0.50')
+  })
+
+  it('dense hats become a steady 8ths pulse with downbeat accents', async () => {
+    const { inferDrumGroove } = await import('./drumGroove')
+    const sm = grooveMap(4)
+    const events: DrumMidiEvent[] = []
+    for (let bar = 0; bar < 4; bar++) {
+      for (let i = 0; i < 8; i++) events.push(hit(bar + i * 0.125 + 0.01, 'hihat', 0.6))
+      events.push(hit(bar, 'kick'))
+    }
+    const out = inferDrumGroove(sm, events)
+    const hats = out.filter((e) => e.cls === 'hihat')
+    expect(hats.length).toBe(4 * 8) // steady 8ths, every active bar
+    const onBeat = hats.filter((h) => Math.abs((h.timeSec * 4) % 1) < 1e-6)
+    const offBeat = hats.filter((h) => Math.abs((h.timeSec * 4) % 1) >= 1e-6)
+    expect(Math.max(...offBeat.map((h) => h.velocity))).toBeLessThan(
+      Math.min(...onBeat.map((h) => h.velocity)) + 1e-9,
+    )
+  })
+
+  it('adds a crash on a section boundary when one was detected nearby', async () => {
+    const { inferDrumGroove } = await import('./drumGroove')
+    const sm = grooveMap(8)
+    sm.sections = [
+      { id: 'a', kind: 'verse', label: 'V', barRange: { startBarIndex: 0, endBarIndex: 3 } },
+      { id: 'b', kind: 'chorus', label: 'C', barRange: { startBarIndex: 4, endBarIndex: 7 } },
+    ]
+    const events: DrumMidiEvent[] = []
+    for (let bar = 0; bar < 8; bar++) events.push(hit(bar, 'kick'))
+    events.push(hit(4.02, 'cymbal', 0.9)) // crash at the chorus downbeat
+    const out = inferDrumGroove(sm, events)
+    const crashes = out.filter((e) => e.cls === 'cymbal')
+    expect(crashes).toHaveLength(1)
+    expect(crashes[0]!.timeSec).toBeCloseTo(4, 6)
+  })
+})

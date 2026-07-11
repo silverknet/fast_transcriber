@@ -16,6 +16,7 @@ import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { quantizeTimesToGrid, dedupeDrumEvents } from '$lib/songmap/quantizeToGrid'
+import { inferDrumGroove } from '$lib/songmap/drumGroove'
 import { DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKit, type DrumKitId } from './drumKits'
 import type { DrumMidiEvent, DrumQuantize, SongMap } from '$lib/songmap/types'
 
@@ -104,9 +105,13 @@ export async function renderDrumTrackWavBlob(
 
   const kitId = opts.kitId ?? (dm.kit === 'acoustic' ? 'acoustic' : 'synth')
   const quantize = opts.quantize ?? dm.quantize ?? 'off'
+  const style = dm.style ?? 'steady'
 
   let events: DrumMidiEvent[] = dm.events
-  if (quantize !== 'off') {
+  if (style === 'steady') {
+    // The groove engine outputs grid-locked events already — no quantize.
+    events = inferDrumGroove(sm, events)
+  } else if (quantize !== 'off') {
     const beatsSorted = sortBeatsByTime(sm.timeline.beats)
     const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
     events = dedupeDrumEvents(quantizeTimesToGrid(events, beatsSorted, barsById, quantize))
