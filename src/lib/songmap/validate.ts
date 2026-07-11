@@ -355,6 +355,25 @@ export function validateSongMap(map: SongMap): ValidationResult {
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
   else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
 
+  if (map.drumMidi !== undefined) {
+    const dm = map.drumMidi
+    if (!dm || typeof dm !== 'object') errors.push('drumMidi must be object')
+    else {
+      if (!Array.isArray(dm.events)) errors.push('drumMidi.events must be array')
+      else {
+        dm.events.forEach((e, i) => {
+          if (!Number.isFinite(e.timeSec) || e.timeSec < 0) {
+            errors.push(`drumMidi.events[${i}].timeSec must be a finite number ≥ 0`)
+          }
+          if (!Number.isFinite(e.velocity) || e.velocity < 0 || e.velocity > 1) {
+            errors.push(`drumMidi.events[${i}].velocity must be within [0, 1]`)
+          }
+        })
+      }
+      if (dm.renderExport !== undefined) validateRenderedExport(dm.renderExport, 'drumMidi.renderExport')
+    }
+  }
+
   if (map.chordLayers !== undefined) {
     if (!Array.isArray(map.chordLayers)) errors.push('chordLayers must be array')
     else {

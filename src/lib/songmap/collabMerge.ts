@@ -322,6 +322,12 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   // (paste / re-align), so per-word merging isn't worth the complexity.
   const lyC = classifyScalar(local.lyrics, cloud.lyrics, 'lyrics', 'Lyrics')
   if (lyC) conflicts.push(lyC)
+  // Drum track: whole-field LWW like lyrics. Compare with renderExport
+  // stripped so a local re-render (new fingerprint/path) never conflicts.
+  const dmLocal = local.drumMidi ? { ...local.drumMidi, renderExport: undefined } : undefined
+  const dmCloud = cloud.drumMidi ? { ...cloud.drumMidi, renderExport: undefined } : undefined
+  const dmC = classifyScalar(dmLocal, dmCloud, 'drumMidi', 'Drum track')
+  if (dmC) conflicts.push(dmC)
   // Whole-field LWW for stored chord tracks (v5) — layers are snapshots
   // created/consumed wholesale (stash on import, switch), like lyrics.
   const clC = classifyScalar(local.chordLayers, cloud.chordLayers, 'chordLayers', 'Chord tracks')
@@ -491,6 +497,7 @@ export function applyConflictDecisions(
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
     else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
+    else if (c.path === 'drumMidi') result = { ...result, drumMidi: c.mine as SongMap['drumMidi'] }
     else if (c.path === 'harmony') result = { ...result, harmony: c.mine as SongMap['harmony'] }
     else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
     else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }

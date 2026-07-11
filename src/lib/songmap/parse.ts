@@ -497,6 +497,55 @@ function migrateLegacyCueTracks(opts: {
   ]
 }
 
+const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal'])
+const DRUM_QUANTIZE = new Set(['off', '1/8', '1/16', '1/16T'])
+
+/**
+ * Defensive like `parseChordHints`: malformed events are dropped rather than
+ * failing the whole song; velocity clamps to [0,1]; unknown kit ids pass
+ * through (forward compat with future kits).
+ */
+function parseDrumMidi(raw: unknown, path: string): import('./types').DrumMidi | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  if (typeof o.analyzedAt !== 'string' || typeof o.audioFingerprint !== 'string') return undefined
+  const analyzerVersion = optNum(o.analyzerVersion)
+  if (analyzerVersion === undefined) return undefined
+  const events: import('./types').DrumMidiEvent[] = []
+  if (Array.isArray(o.events)) {
+    for (const ev of o.events) {
+      if (!ev || typeof ev !== 'object') continue
+      const e = ev as Record<string, unknown>
+      const t = optNum(e.timeSec)
+      const v = optNum(e.velocity)
+      const cls = typeof e.cls === 'string' && DRUM_CLASSES.has(e.cls) ? e.cls : null
+      if (t === undefined || t < 0 || cls === null) continue
+      events.push({
+        timeSec: t,
+        cls: cls as import('./types').DrumClass,
+        velocity: Math.max(0, Math.min(1, v ?? 1)),
+      })
+    }
+  }
+  const out: import('./types').DrumMidi = {
+    events,
+    analyzedAt: o.analyzedAt,
+    analyzerVersion,
+    sourceStem: typeof o.sourceStem === 'string' ? o.sourceStem : '',
+    audioFingerprint: o.audioFingerprint,
+  }
+  const kit = optString(o.kit)
+  if (kit) out.kit = kit
+  const quantize = optString(o.quantize)
+  if (quantize && DRUM_QUANTIZE.has(quantize)) {
+    out.quantize = quantize as import('./types').DrumMidi['quantize']
+  }
+  const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
+  if (renderExport) out.renderExport = renderExport
+  return out
+}
+
 function parseChordHints(raw: unknown, path: string): import('./types').ChordHints | undefined {
   if (raw === undefined || raw === null) return undefined
   const o = expectObject(raw, path)
@@ -675,6 +724,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
       raw.chordHints !== undefined && raw.chordHints !== null
         ? parseChordHints(raw.chordHints, 'chordHints')
         : undefined,
+    drumMidi: parseDrumMidi(raw.drumMidi, 'drumMidi'),
   }
 }
 
@@ -728,4 +778,5 @@ const KNOWN_TOP_KEYS = new Set([
   'expectedAudio',
   'sectionBorderHints',
   'chordHints',
+  'drumMidi',
 ])

@@ -87,6 +87,9 @@ export function toCollabSongMap(sm: SongMap): SongMap {
 
   out.cueTracks = sm.cueTracks.map(stripCueTrackLocalRender)
   out.clickExport = stripExport(sm.clickExport)
+  if (sm.drumMidi) {
+    out.drumMidi = { ...sm.drumMidi, renderExport: stripExport(sm.drumMidi.renderExport) }
+  }
 
   return out
 }
@@ -162,6 +165,10 @@ export function collabContentFingerprint(sm: SongMap): string {
   // joiner's copy, not user content — the owner's map doesn't carry it, so
   // including it would make owner and joiner fingerprints disagree forever.
   delete normalized.expectedAudio
+  if (normalized.drumMidi && typeof normalized.drumMidi === 'object') {
+    const { renderExport: _re, ...dmRest } = normalized.drumMidi as Record<string, unknown>
+    normalized.drumMidi = dmRest
+  }
   if (Array.isArray(normalized.cueTracks)) {
     normalized.cueTracks = (normalized.cueTracks as Array<Record<string, unknown>>).map((t) => {
       const { renderExport: _renderExport, ...rest } = t
@@ -220,6 +227,15 @@ export function mergeLocalIntoCollab(local: SongMap, cloud: SongMap): SongMap {
     merged.clickExport = {
       ...merged.clickExport,
       relativePath: local.clickExport.relativePath,
+    }
+  }
+  if (merged.drumMidi?.renderExport && local.drumMidi?.renderExport?.relativePath) {
+    merged.drumMidi = {
+      ...merged.drumMidi,
+      renderExport: {
+        ...merged.drumMidi.renderExport,
+        relativePath: local.drumMidi.renderExport.relativePath,
+      },
     }
   }
 

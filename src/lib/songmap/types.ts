@@ -185,6 +185,42 @@ export type RenderedCueExport = {
 }
 
 export type CueTrackExport = RenderedCueExport
+
+// ── Drum track (drum stem → detected hits → rendered BarBro kit) ─────────────
+
+export type DrumClass = 'kick' | 'snare' | 'hihat' | 'tom' | 'cymbal'
+
+export type DrumMidiEvent = {
+  /** ORIGINAL audio time — same base as `Beat.timeSec` (stems are untrimmed). */
+  timeSec: number
+  cls: DrumClass
+  /** 0..1 — per-song relative (P95-normalized per class at analysis time). */
+  velocity: number
+}
+
+/** Render-time grid snapping. Events are always stored raw ("as played"). */
+export type DrumQuantize = 'off' | '1/8' | '1/16' | '1/16T'
+
+/**
+ * Detected drum hits + the settings BarBro renders its own drum track with.
+ * Events sync between collaborators (whole-field LWW, like `lyrics`);
+ * `renderExport.relativePath` is per-machine and stripped, like cue renders.
+ */
+export type DrumMidi = {
+  events: DrumMidiEvent[]
+  analyzedAt: string
+  /** Mirror of the sidecar analyzer's version — older results are stale. */
+  analyzerVersion: number
+  /** Song-relative path of the stem the events came from (provenance label). */
+  sourceStem: string
+  /** Fingerprint of the audio analyzed: sha256 if present, else `<name>:<size>`. */
+  audioFingerprint: string
+  /** Drum kit id (see `$lib/audio/drumKits`); absent = default kit. */
+  kit?: string
+  quantize?: DrumQuantize
+  /** Saved render of the drum track, when written into the project. */
+  renderExport?: RenderedCueExport
+}
 export type ClickTrackExport = RenderedCueExport
 
 export type CueAnchor =
@@ -523,6 +559,8 @@ export type SongMapV3 = {
   sectionBorderHints?: SectionBorderHints
   /** Cached per-beat chroma + detected key (display-only / hint source). */
   chordHints?: ChordHints
+  /** Detected drum hits + BarBro's rendered drum-track settings. */
+  drumMidi?: DrumMidi
 }
 
 /** Current persistent shape (formatVersion 4). Name kept from the v3 era to
