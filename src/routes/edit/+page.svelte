@@ -2590,6 +2590,23 @@
     return `${m}:${s.toFixed(2).padStart(5, '0')}`
   }
 
+  let chordInspectorCopied = $state(false)
+  async function copyChordInspector() {
+    const header = '#\tbar.beat\ttime\tchord\tplaced'
+    const lines = chordInspectorRows.map(
+      (r, i) =>
+        `${i + 1}\t${r.barIndex !== null ? `${r.barIndex + 1}.${r.beatInBar}` : '—'}\t${formatInspectorTime(r.timeSec)}\t${r.symbol}\t${r.origin}`,
+    )
+    const text = [`track: ${activeChordTrackLabel} · ${chordInspectorRows.length} chords`, header, ...lines].join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      chordInspectorCopied = true
+      setTimeout(() => (chordInspectorCopied = false), 2000)
+    } catch {
+      /* clipboard unavailable — selection copy still works */
+    }
+  }
+
   // ── "Import chord sheet" (Chords tab): its own paste box, independent of
   // the lyrics. Sheet lyric lines fuzzy-match against the stored fitted
   // lyrics, so a lazy UG sheet (skipped repeats, "Chorus x2") still anchors.
@@ -3898,6 +3915,13 @@
                 <span>Stored chords · {chordInspectorRows.length}</span>
                 <span>track: {activeChordTrackLabel}</span>
                 <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
+                <button
+                  type="button"
+                  class="border-foreground hover:bg-foreground hover:text-background ml-auto border px-1.5 py-0.5 normal-case"
+                  onclick={() => void copyChordInspector()}
+                >
+                  {chordInspectorCopied ? 'Copied ✓' : 'Copy all'}
+                </button>
               </div>
               <div class="max-h-64 overflow-auto">
                 <table class="w-full font-mono text-[11px] tabular-nums">
