@@ -76,6 +76,7 @@ describe('sectionLayers helpers', () => {
 
     let map = buildMap({ sections: [sec('a', 'verse', 0, 7)] })
     map = stashActiveSections(map, newId, { name: 'X' })
+    map = { ...map, sections: [sec('z', 'chorus', 0, 7)] } // content changed
     map = stashActiveSections(map, newId, { name: 'X' })
     expect(map.sectionLayers!.map((l) => l.name)).toEqual(['X', 'X 2'])
     const cleared = deleteSectionLayer(map, map.sectionLayers![0]!.id)

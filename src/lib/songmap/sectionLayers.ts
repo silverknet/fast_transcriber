@@ -16,13 +16,28 @@ export function activeSectionLayoutName(map: SongMap): string {
   return map.activeSectionLayerName ?? DEFAULT_ACTIVE_SECTION_LAYER_NAME
 }
 
-/** Snapshot the CURRENT sections into a new inactive layer (no-op when empty). */
+/** Content fingerprint: two layouts equal iff same (range, kind, label) rows. */
+function sectionsContentKey(sections: SongMap['sections']): string {
+  return sections
+    .map((s) => `${s.barRange.startBarIndex}-${s.barRange.endBarIndex}·${s.kind}·${s.label}`)
+    .sort()
+    .join('|')
+}
+
+/**
+ * Snapshot the CURRENT sections into a new inactive layer. No-op when empty
+ * or when an existing layer already holds the identical layout.
+ */
 export function stashActiveSections(
   map: SongMap,
   newId: IdFactory,
   opts?: { name?: string; source?: SectionLayer['source'] },
 ): SongMap {
   if (map.sections.length === 0) return map
+  const activeKey = sectionsContentKey(map.sections)
+  if ((map.sectionLayers ?? []).some((l) => sectionsContentKey(l.sections) === activeKey)) {
+    return map
+  }
   const name = opts?.name ?? activeSectionLayoutName(map)
   const layer: SectionLayer = {
     id: newId(),
@@ -47,9 +62,23 @@ export function switchToSectionLayer(
   const target = layers.find((l) => l.id === layerId)
   if (!target) return { ok: false, error: 'Unknown section layout' }
 
-  const remaining = { ...map, sectionLayers: layers.filter((l) => l.id !== layerId) }
+  const nextLayers = layers.filter((l) => l.id !== layerId)
+  const remaining = { ...map, sectionLayers: nextLayers }
+  const activeKey = sectionsContentKey(map.sections)
+  // Identical content: absorb the layer instead of duplicating (see chordLayers).
+  if (sectionsContentKey(target.sections) === activeKey) {
+    return {
+      ok: true,
+      map: {
+        ...map,
+        sectionLayers: nextLayers.length > 0 ? nextLayers : undefined,
+        activeSectionLayerName: target.name,
+      },
+    }
+  }
+  const alreadyKept = nextLayers.some((l) => sectionsContentKey(l.sections) === activeKey)
   const outgoing: SectionLayer | null =
-    map.sections.length > 0
+    map.sections.length > 0 && !alreadyKept
       ? {
           id: newId(),
           name: uniqueSectionLayerName(remaining, activeSectionLayoutName(map)),
@@ -58,8 +87,6 @@ export function switchToSectionLayer(
           sections: map.sections.map((s) => ({ ...s, barRange: { ...s.barRange } })),
         }
       : null
-
-  const nextLayers = layers.filter((l) => l.id !== layerId)
   if (outgoing) nextLayers.push(outgoing)
 
   return {

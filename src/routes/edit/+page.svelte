@@ -2484,6 +2484,21 @@
       : 'Lyrics removed.'
   }
 
+  /** "13:04" / "yesterday" — so the layer picker shows WHICH import is which. */
+  function layerAgeLabel(iso: string | undefined): string {
+    if (!iso) return ''
+    const then = new Date(iso).getTime()
+    if (!Number.isFinite(then)) return ''
+    const mins = Math.round((Date.now() - then) / 60_000)
+    if (mins < 1) return 'just now'
+    if (mins < 60) return `${mins} min ago`
+    const d = new Date(iso)
+    const today = new Date()
+    const sameDay = d.toDateString() === today.toDateString()
+    if (sameDay) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  }
+
   // ── Parallel chord tracks: active = sm.harmony; layers switch losslessly ──
   const chordLayerList = $derived($songMap?.chordLayers ?? [])
   const activeChordTrackLabel = $derived($songMap ? activeChordTrackName($songMap) : '')
@@ -3678,7 +3693,9 @@
                       title={`Switch to “${layer.name}” — the current layout is kept`}
                     >
                       {layer.name}
-                      <span class="text-muted-foreground ml-auto">{layer.sections.length} sections</span>
+                      <span class="text-muted-foreground ml-auto">
+                        {layer.sections.length} sections{layerAgeLabel(layer.createdAt) ? ` · ${layerAgeLabel(layer.createdAt)}` : ''}
+                      </span>
                     </DropdownMenuItem>
                   {/each}
                   <DropdownMenuSeparator class="" />
@@ -3743,7 +3760,9 @@
                     title={`Switch to “${layer.name}” — the current track is kept`}
                   >
                     {layer.name}
-                    <span class="text-muted-foreground ml-auto">{layer.harmony.length} chords</span>
+                    <span class="text-muted-foreground ml-auto">
+                      {layer.harmony.length} chords{layerAgeLabel(layer.createdAt) ? ` · ${layerAgeLabel(layer.createdAt)}` : ''}
+                    </span>
                   </DropdownMenuItem>
                 {/each}
                 {#if chordLayerList.length === 0}

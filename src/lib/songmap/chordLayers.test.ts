@@ -70,9 +70,10 @@ describe('chordLayers helpers', () => {
     expect(out.harmony).toHaveLength(2) // active untouched by a stash
   })
 
-  it('stash de-duplicates layer names', () => {
+  it('stash de-duplicates layer names (for DIFFERENT content)', () => {
     let map = buildMap({ harmony: [h('b0', 'C')] })
     map = stashActiveChords(map, newId, { name: 'My chords' })
+    map = { ...map, harmony: [h('b0', 'G')] } // content changed since the stash
     map = stashActiveChords(map, newId, { name: 'My chords' })
     expect(map.chordLayers!.map((l) => l.name)).toEqual(['My chords', 'My chords 2'])
   })
@@ -98,6 +99,19 @@ describe('chordLayers helpers', () => {
     // Round-trip back.
     const back = switchToChordLayer(r.map, r.map.chordLayers![0]!.id, newId)
     expect(back.ok && back.map.harmony.map((x) => x.chord.displayRaw).sort()).toEqual(['A', 'D'])
+  })
+
+  it('stash and switch skip duplicating content-identical layers', () => {
+    let map = buildMap({ harmony: [h('b0', 'C')] })
+    map = stashActiveChords(map, newId, { name: 'My chords' })
+    // Stashing the SAME active content again is a no-op.
+    const again = stashActiveChords(map, newId, { name: 'Whatever' })
+    expect(again.chordLayers).toHaveLength(1)
+    // Switching to a content-identical layer doesn't re-stash the active set
+    // — repeated flips must not pile up "Sheet import 2/3…" duplicates.
+    const r = switchToChordLayer(map, map.chordLayers![0]!.id, newId)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.map.chordLayers ?? []).toHaveLength(0)
   })
 
   it('switch to unknown layer refuses; delete removes only the layer', () => {
