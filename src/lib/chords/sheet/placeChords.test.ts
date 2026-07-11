@@ -94,22 +94,44 @@ describe('beatAtTime + snapChordTimeToBeat', () => {
 describe('placeChords', () => {
   const SHEET = ['[Verse 1]', 'Am  C           G', 'Hold me now tonight'].join('\n')
 
-  it('places word-anchored chords on snapped beats', () => {
+  it('quantizes word anchors to bar downbeats (one chord per bar)', () => {
     const sheet = parseChordSheet(SHEET)
     const map = buildMap({
       lyrics: {
         sourceText: sheet.lyricsText,
-        words: words(['Hold', 1.0, 0], ['me', 1.26, 0], ['now', 1.51, 0], ['tonight', 2.0, 0]),
+        // Words land in bars 1, 2 and 3 — chords go on those bars' downbeats,
+        // never on whatever raw beat the (jittery) word time hits.
+        words: words(['Hold', 1.1, 0], ['me', 2.3, 0], ['now', 2.6, 0], ['tonight', 3.05, 0]),
       },
     })
     const r = placeChords(sheet, map)
     expect(r.ok).toBe(true)
     if (!r.ok) return
     const byToken = Object.fromEntries(r.plan.placements.map((p) => [p.chord.displayRaw, p.beatId]))
-    expect(byToken['Am']).toBe('b1_0') // "Hold" at 1.0
-    expect(byToken['C']).toBe('b1_1') // "me" at 1.26
-    expect(byToken['G']).toBe('b2_0') // "tonight" at 2.0
+    expect(byToken['Am']).toBe('b1_0')
+    expect(byToken['C']).toBe('b2_0')
+    expect(byToken['G']).toBe('b3_0')
     expect(r.plan.stats).toMatchObject({ placed: 3, estimated: 0, collisions: 0, unplaceable: 0 })
+  })
+
+  it('spreads bunched anchors across bars instead of cramming (shared-bar penalty)', () => {
+    // Three chords whose anchor words all sit inside bar 1 (interpolated
+    // lines do this): downbeat + mid-bar, then overflow to the next bar.
+    const sheet = parseChordSheet(['[Verse 1]', 'Am C  G', 'Hold me now tonight'].join('\n'))
+    const map = buildMap({
+      lyrics: {
+        sourceText: sheet.lyricsText,
+        words: words(['Hold', 1.0, 0], ['me', 1.2, 0], ['now', 1.4, 0], ['tonight', 1.6, 0]),
+      },
+    })
+    const r = placeChords(sheet, map)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const ids = r.plan.placements.map((p) => p.beatId)
+    // Monotone, collision-free, at most two per bar (downbeat + mid).
+    expect(new Set(ids).size).toBe(3)
+    expect(r.plan.placements[0]!.beatId).toBe('b1_0')
+    expect(r.plan.stats.collisions).toBe(0)
   })
 
   it('marks placements from interpolated words as estimated', () => {
@@ -162,7 +184,7 @@ describe('placeChords', () => {
     expect(r.plan.stats.matchedLines).toBe(1)
     const byToken = Object.fromEntries(r.plan.placements.map((p) => [p.chord.displayRaw, p.beatId]))
     expect(byToken['Am']).toBe('b1_0')
-    expect(byToken['C']).toBe('b1_1')
+    expect(byToken['C']).toBe('b2_0') // "me" mid-bar-1 → next downbeat beats a cram
   })
 
   it('a lazy sheet (skipped repeats) matches monotonically against full lyrics', () => {
@@ -234,20 +256,21 @@ describe('placeChords', () => {
     ])
   })
 
-  it('keeps the first chord on same-beat collisions and counts the rest', () => {
+  it('same-instant anchors never collide — the allocator stacks or advances', () => {
     const sheet = parseChordSheet(['[Verse 1]', 'Am C', 'Hold me now tonight'].join('\n'))
     const map = buildMap({
       lyrics: {
         sourceText: sheet.lyricsText,
-        // Both anchor words land on the same beat.
+        // Both anchor words land at (nearly) the same moment.
         words: words(['Hold', 1.0, 0], ['me', 1.01, 0], ['now', 1.51, 0], ['tonight', 2.0, 0]),
       },
     })
     const r = placeChords(sheet, map)
     expect(r.ok).toBe(true)
     if (!r.ok) return
-    expect(r.plan.stats.collisions).toBe(1)
-    expect(r.plan.placements).toHaveLength(1)
+    expect(r.plan.stats.collisions).toBe(0)
+    expect(r.plan.placements).toHaveLength(2)
+    expect(new Set(r.plan.placements.map((p) => p.beatId)).size).toBe(2)
     expect(r.plan.placements[0]!.chord.displayRaw).toBe('Am')
   })
 

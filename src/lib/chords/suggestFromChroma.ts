@@ -258,6 +258,31 @@ export function rankTriadFitsForChroma(
   return scored
 }
 
+/**
+ * Pearson fit of ONE specific chord against a 12-d chroma vector — used by
+ * the chord-sheet importer to arbitrate WHICH bar an imported chord starts
+ * on. Maps the chord to its closest matchable template (7ths keep their
+ * quality; dim → minor template on the same root as the nearest stand-in).
+ * Returns null when the chord has no usable mapping or the chroma is empty.
+ */
+export function chordChromaFitScore(
+  chroma: readonly number[] | null | undefined,
+  chord: ChordSymbol,
+): number | null {
+  if (!chroma || chroma.length !== 12) return null
+  const pc = chordRootToPitchClass(chord.root, chord.accidental)
+  const q = chord.quality ?? 'major'
+  const mq: MatchQuality =
+    q === 'maj7' ? 'maj7'
+    : q === 'min7' ? 'min7'
+    : q === '7' ? '7'
+    : q === 'minor' || q === 'm' || q === 'min' ? 'minor'
+    : q === 'dim' || q === 'm7b5' || q === 'min7b5' ? 'minor'
+    : 'major'
+  const template = buildTemplate(pc, QUALITY_INTERVALS[mq])
+  return pearson(chroma as number[], template)
+}
+
 /** Convert a ChordSymbol to the `(pc, quality)` shape used by the matcher. */
 function chordSymbolToTriadKey(c: ChordSymbol): { pc: number; quality: 'major' | 'minor' } | null {
   const pc = chordRootToPitchClass(c.root, c.accidental)

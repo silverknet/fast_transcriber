@@ -97,6 +97,19 @@ export type ChordLayer = {
   harmony: HarmonyEvent[]
 }
 
+/**
+ * A stored, INACTIVE alternative section layout (v5) — the sections twin of
+ * `ChordLayer`, with the same swap semantics (`songmap/sectionLayers.ts`).
+ * The active layout is always `SongMap.sections`.
+ */
+export type SectionLayer = {
+  id: string
+  name: string
+  source?: 'manual' | 'sheet-import' | 'suggestions'
+  createdAt?: string
+  sections: Section[]
+}
+
 export type SectionKind =
   | 'intro'
   | 'verse'
@@ -471,6 +484,10 @@ export type SongMapV3 = {
   chordLayers?: ChordLayer[]
   /** Name shown for the ACTIVE chord track when layers exist. */
   activeChordLayerName?: string
+  /** Inactive alternative section layouts (v5); `sections` is the active one. */
+  sectionLayers?: SectionLayer[]
+  /** Name shown for the ACTIVE section layout when layers exist. */
+  activeSectionLayerName?: string
   cueTracks: CueTrack[]
   /**
    * Count-in beats before the song start, independent of cue speech. When

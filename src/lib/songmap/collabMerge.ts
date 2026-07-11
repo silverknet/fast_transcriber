@@ -307,6 +307,15 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     'Active chord track name',
   )
   if (clnC) conflicts.push(clnC)
+  const slC = classifyScalar(local.sectionLayers, cloud.sectionLayers, 'sectionLayers', 'Section layouts')
+  if (slC) conflicts.push(slC)
+  const slnC = classifyScalar(
+    local.activeSectionLayerName,
+    cloud.activeSectionLayerName,
+    'activeSectionLayerName',
+    'Active section layout name',
+  )
+  if (slnC) conflicts.push(slnC)
 
   // ── expectedAudio swap is dangerous (different master) ──
   if (
@@ -458,6 +467,8 @@ export function applyConflictDecisions(
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
     else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
     else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }
+    else if (c.path === 'sectionLayers') result = { ...result, sectionLayers: c.mine as SongMap['sectionLayers'] }
+    else if (c.path === 'activeSectionLayerName') result = { ...result, activeSectionLayerName: c.mine as string | undefined }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
     else if (c.path === 'audio') result = { ...result, audio: c.mine as SongMap['audio'] }
     // `timeline/bars-count` is informational — the per-id merges above

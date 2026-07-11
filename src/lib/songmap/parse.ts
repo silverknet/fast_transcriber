@@ -21,6 +21,7 @@ import type {
   Meter,
   RenderedCueExport,
   Section,
+  SectionLayer,
   SongKey,
   SongMap,
   SongMapAppInfo,
@@ -242,6 +243,31 @@ function parseChordLayers(raw: unknown, path: string): ChordLayer[] | undefined 
   if (raw === undefined || raw === null) return undefined
   if (!Array.isArray(raw)) return undefined
   const layers = raw.map((l, i) => parseChordLayer(l, `${path}[${i}]`))
+  return layers.length > 0 ? layers : undefined
+}
+
+function parseSectionLayer(raw: unknown, path: string): SectionLayer {
+  const o = expectObject(raw, path)
+  const layer: SectionLayer = {
+    id: reqString(o.id, `${path}.id`),
+    name: reqString(o.name, `${path}.name`),
+    sections: Array.isArray(o.sections)
+      ? o.sections.map((sec, i) => parseSection(sec, `${path}.sections[${i}]`))
+      : [],
+  }
+  const source = optString(o.source)
+  if (source === 'manual' || source === 'sheet-import' || source === 'suggestions') {
+    layer.source = source
+  }
+  const createdAt = optString(o.createdAt)
+  if (createdAt) layer.createdAt = createdAt
+  return layer
+}
+
+function parseSectionLayers(raw: unknown, path: string): SectionLayer[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (!Array.isArray(raw)) return undefined
+  const layers = raw.map((l, i) => parseSectionLayer(l, `${path}[${i}]`))
   return layers.length > 0 ? layers : undefined
 }
 
@@ -627,6 +653,8 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
       : [],
     chordLayers: parseChordLayers(raw.chordLayers, 'chordLayers'),
     activeChordLayerName: optString(raw.activeChordLayerName),
+    sectionLayers: parseSectionLayers(raw.sectionLayers, 'sectionLayers'),
+    activeSectionLayerName: optString(raw.activeSectionLayerName),
     cueTracks: isLegacyV1
       ? migrateLegacyCueTracks({ cues: legacyCues, cueTrackExport: legacyCueTrackExport })
       : parseCueTracks(raw.cueTracks),
@@ -685,6 +713,8 @@ const KNOWN_TOP_KEYS = new Set([
   'harmony',
   'chordLayers',
   'activeChordLayerName',
+  'sectionLayers',
+  'activeSectionLayerName',
   'cueTracks',
   'cues',
   'countInBeats',

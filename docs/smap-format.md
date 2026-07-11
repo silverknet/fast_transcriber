@@ -219,6 +219,12 @@ importer stashes existing chords here instead of overwriting them.
 | `createdAt` | `string` | Optional ISO timestamp. |
 | `harmony` | `HarmonyEvent[]` | Same shape/invariants as top-level `harmony[]`. |
 
+`sectionLayers[]` / `activeSectionLayerName` (v5) mirror the same pattern for
+section layouts: the active layout is always `sections[]`; layers hold
+inactive alternatives with identical swap semantics
+([`sectionLayers.ts`](../src/lib/songmap/sectionLayers.ts)). Layer shape:
+`{ id, name, source?, createdAt?, sections: Section[] }`.
+
 `activeChordLayerName` (top-level, optional `string`) names the active track
 when layers exist; absent means the default "My chords".
 

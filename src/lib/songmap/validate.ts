@@ -378,6 +378,29 @@ export function validateSongMap(map: SongMap): ValidationResult {
     errors.push('activeChordLayerName must be string')
   }
 
+  if (map.sectionLayers !== undefined) {
+    if (!Array.isArray(map.sectionLayers)) errors.push('sectionLayers must be array')
+    else {
+      const seenSectionLayerIds = new Set<string>()
+      map.sectionLayers.forEach((layer, i) => {
+        const path = `sectionLayers[${i}]`
+        if (!layer || typeof layer !== 'object') {
+          errors.push(`${path}: must be object`)
+          return
+        }
+        if (typeof layer.id !== 'string' || !layer.id) errors.push(`${path}.id: required string`)
+        else if (seenSectionLayerIds.has(layer.id)) errors.push(`${path}.id: duplicate layer id`)
+        else seenSectionLayerIds.add(layer.id)
+        if (typeof layer.name !== 'string' || !layer.name) errors.push(`${path}.name: required string`)
+        if (!Array.isArray(layer.sections)) errors.push(`${path}.sections: must be array`)
+        else layer.sections.forEach((sec, j) => validateSection(sec, `${path}.sections[${j}]`, errors))
+      })
+    }
+  }
+  if (map.activeSectionLayerName !== undefined && typeof map.activeSectionLayerName !== 'string') {
+    errors.push('activeSectionLayerName must be string')
+  }
+
   if (!Array.isArray(map.harmony)) errors.push('harmony must be array')
   else {
     map.harmony.forEach((h, i) => validateHarmony(h, `harmony[${i}]`, errors))

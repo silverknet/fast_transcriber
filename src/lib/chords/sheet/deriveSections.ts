@@ -28,10 +28,14 @@ export function sectionKindFromSheetLabel(label: string): SectionKind {
 }
 
 /**
- * Build sections for an empty-section song: section i spans from the bar of
- * its first placed chord to the bar before section i+1's first placed chord
- * (first section extends back to bar 0, last one to the final bar). Sheet
- * sections whose chords all failed to place are skipped.
+ * Build sections from the sheet: section i spans from the bar of its first
+ * placed chord to the bar before section i+1's first placed chord (first
+ * section extends back to bar 0, last one to the final bar). Sheet sections
+ * whose chords all failed to place are skipped.
+ *
+ * Pure derivation — the CALLER decides what to do with an existing layout
+ * (the editor stashes it as a section layer before replacing; see
+ * `songmap/sectionLayers.ts`).
  */
 export function deriveSectionsFromSheet(
   sheet: ParsedChordSheet,
@@ -39,7 +43,6 @@ export function deriveSectionsFromSheet(
   map: SongMap,
   newId: IdFactory,
 ): Section[] {
-  if (map.sections.length > 0) return []
   const lastBarIndex = Math.max(-1, ...map.timeline.bars.map((b) => b.index))
   if (lastBarIndex < 0) return []
 

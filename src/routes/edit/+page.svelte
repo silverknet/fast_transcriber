@@ -97,6 +97,12 @@
     stashActiveChords,
     switchToChordLayer,
   } from '$lib/songmap/chordLayers'
+  import {
+    activeSectionLayoutName,
+    deleteSectionLayer,
+    stashActiveSections,
+    switchToSectionLayer,
+  } from '$lib/songmap/sectionLayers'
   import { placeChords } from '$lib/chords/sheet/placeChords'
   import { applyChordPlacements } from '$lib/chords/sheet/applyPlacement'
   import { deriveSectionsFromSheet } from '$lib/chords/sheet/deriveSections'
@@ -2503,6 +2509,31 @@
     if (p.ok) chordLayerMsg = `Deleted “${layer.name}”.`
   }
 
+  // ── Parallel section layouts: active = sm.sections; layers swap losslessly ──
+  const sectionLayerList = $derived($songMap?.sectionLayers ?? [])
+  const activeSectionLayoutLabel = $derived($songMap ? activeSectionLayoutName($songMap) : '')
+  let sectionLayerMsg = $state('')
+
+  function switchSectionLayout(layerId: string) {
+    sectionLayerMsg = ''
+    const p = patchSongMap((m) => {
+      const r = switchToSectionLayer(m, layerId, newId)
+      return r.ok ? r.map : m
+    })
+    if (p.ok) sectionLayerMsg = 'Switched — the other layout is kept.'
+  }
+
+  function removeSectionLayout(layerId: string) {
+    const layer = sectionLayerList.find((l) => l.id === layerId)
+    if (!layer) return
+    if (!window.confirm(`Delete the stored section layout “${layer.name}” (${layer.sections.length} sections)? The active sections stay.`)) {
+      return
+    }
+    sectionLayerMsg = ''
+    const p = patchSongMap((m) => deleteSectionLayer(m, layerId))
+    if (p.ok) sectionLayerMsg = `Deleted “${layer.name}”.`
+  }
+
   // ── "Import chord sheet" (Chords tab): its own paste box, independent of
   // the lyrics. Sheet lyric lines fuzzy-match against the stored fitted
   // lyrics, so a lazy UG sheet (skipped repeats, "Chorus x2") still anchors.
@@ -2538,12 +2569,21 @@
           return { ...applied, activeChordLayerName: 'Sheet import' }
         })
         let addedSections = 0
+        let stashedSections = false
         const cur = get(songMap)
-        if (applyRes.ok && cur && cur.sections.length === 0) {
+        if (applyRes.ok && cur) {
           const derived = deriveSectionsFromSheet(sheet, r.plan, cur, newId)
           if (derived.length > 0) {
-            const sp = patchSongMap((m) => ({ ...m, sections: derived }))
+            // Same rule as chords: existing sections become a parallel
+            // layout first, never overwritten.
+            stashedSections = cur.sections.length > 0
+            const sp = patchSongMap((m) => ({
+              ...stashActiveSections(m, newId),
+              sections: derived,
+              activeSectionLayerName: 'Sheet import',
+            }))
             if (sp.ok) addedSections = derived.length
+            else stashedSections = false
           }
         }
         if (!applyRes.ok) {
@@ -2561,7 +2601,7 @@
           chordsPlaceMsg += ` Matched ${stats.matchedLines} of ${stats.totalLines} sheet lines to your lyrics.`
         }
         if (addedSections > 0) {
-          chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}.`
+          chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}${stashedSections ? ' (your previous sections are kept as a separate layout)' : ''}.`
         }
         if (hadChords) {
           chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time.'
@@ -3604,6 +3644,57 @@
           </div>
         </details>
         {#if editMode === 'sections'}
+          {#if sectionLayerList.length > 0}
+            <!-- Parallel section layouts — same lossless switching as chord tracks. -->
+            <div class="border-foreground bg-muted mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-2 px-2 py-1.5 text-xs">
+              <DropdownMenu>
+                <DropdownMenuTrigger>
+                  {#snippet child({ props })}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
+                      title="Section layouts — switch which layout is on the timeline"
+                      {...props}
+                    >
+                      <Layers class="size-3.5" aria-hidden="true" />
+                      <span class="max-w-36 truncate">{activeSectionLayoutLabel}</span>
+                      <ChevronDown class="size-3" aria-hidden="true" />
+                    </Button>
+                  {/snippet}
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" class="min-w-56">
+                  <div class="text-muted-foreground px-2 py-1 text-[10px] font-bold uppercase tracking-wider">
+                    Section layouts
+                  </div>
+                  <DropdownMenuItem disabled class="font-bold">
+                    ✓ {activeSectionLayoutLabel}
+                    <span class="text-muted-foreground ml-auto font-normal">on the timeline</span>
+                  </DropdownMenuItem>
+                  {#each sectionLayerList as layer (layer.id)}
+                    <DropdownMenuItem
+                      class=""
+                      onclick={() => switchSectionLayout(layer.id)}
+                      title={`Switch to “${layer.name}” — the current layout is kept`}
+                    >
+                      {layer.name}
+                      <span class="text-muted-foreground ml-auto">{layer.sections.length} sections</span>
+                    </DropdownMenuItem>
+                  {/each}
+                  <DropdownMenuSeparator class="" />
+                  {#each sectionLayerList as layer (`del-${layer.id}`)}
+                    <DropdownMenuItem class="text-destructive" onclick={() => removeSectionLayout(layer.id)}>
+                      <Trash2 class="size-3.5" aria-hidden="true" />
+                      Delete “{layer.name}”…
+                    </DropdownMenuItem>
+                  {/each}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {#if sectionLayerMsg}
+                <span class="text-muted-foreground" role="status">{sectionLayerMsg}</span>
+              {/if}
+            </div>
+          {/if}
           <SectionSuggestionBanner
             suggestion={activeSuggestion}
             index={activeSuggestionPosition}

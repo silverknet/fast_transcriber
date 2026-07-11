@@ -52,11 +52,12 @@ export function switchToChordLayer(
   const target = layers.find((l) => l.id === layerId)
   if (!target) return { ok: false, error: 'Unknown chord track' }
 
+  const remaining = { ...map, chordLayers: layers.filter((l) => l.id !== layerId) }
   const outgoing: ChordLayer | null =
     map.harmony.length > 0
       ? {
           id: newId(),
-          name: activeChordTrackName(map),
+          name: uniqueLayerName(remaining, activeChordTrackName(map)),
           source: 'manual',
           createdAt: new Date().toISOString(),
           harmony: map.harmony.map((h) => ({ ...h })),

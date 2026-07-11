@@ -112,12 +112,13 @@ describe('deriveSectionsFromSheet', () => {
     expect(sections[sections.length - 1]!.barRange.endBarIndex).toBe(11)
   })
 
-  it('returns nothing when the song already has sections', () => {
+  it('derives regardless of existing sections (caller stashes the old layout)', () => {
     const { parsed, plan } = fit()
     const mapWithSections = buildMap({
       sections: [{ id: 's', kind: 'verse', label: 'V', barRange: { startBarIndex: 0, endBarIndex: 3 } }],
     })
-    expect(deriveSectionsFromSheet(parsed, plan, mapWithSections, newId)).toEqual([])
+    const derived = deriveSectionsFromSheet(parsed, plan, mapWithSections, newId)
+    expect(derived.length).toBeGreaterThan(0)
   })
 
   it('skips sheet sections whose chords all failed to place', () => {

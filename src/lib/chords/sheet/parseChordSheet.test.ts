@@ -179,6 +179,12 @@ describe('parseChordSheet', () => {
     expect(s.anchoredChords.every((c) => (c.wordIdx ?? 0) <= 2)).toBe(true)
   })
 
+  it('decoration-only lines (N.C., x2) vanish from the lyrics', () => {
+    const s = parseChordSheet('N.C.\nHello world\nx2\nGoodbye moon\n')
+    expect(s.lyricsText).toBe('Hello world\nGoodbye moon')
+    expect(s.chordCount).toBe(0)
+  })
+
   it('chords before any marker land in an implicit head section', () => {
     const s = parseChordSheet('C  G\nHello world\n')
     expect(s.sections).toEqual([{ label: '' }])

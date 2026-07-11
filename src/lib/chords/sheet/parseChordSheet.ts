@@ -83,7 +83,9 @@ function classifyLine(raw: string): Line {
     if (!p.ok) return { raw, kind: 'lyric' }
     chordTokens.push({ ...t, chord: p.chord })
   }
-  if (chordTokens.length === 0) return { raw, kind: 'lyric' } // decorations only
+  // All tokens were decorations (`N.C.`, `x2`, `|`) — part of the chord
+  // notation, not lyrics. Treat as an empty chord line so it vanishes.
+  if (chordTokens.length === 0) return { raw, kind: 'chord', tokens: [] }
 
   // A lone `A` / `Am` flush against the left margin reads as a lyric ("Am I
   // wrong…" wraps, one-word lines happen). Indentation = column positioning =
