@@ -2457,9 +2457,7 @@
       lyricsSaveMsg = p.errors.join('; ')
       return
     }
-    // Keep the pasted sheet in the box when it carries chords — "Place
-    // chords" reads them from the draft. Plain lyrics normalize as before.
-    if (sheetParsed.chordCount === 0) lyricsDraft = cleaned.text
+    lyricsDraft = cleaned.text
     lyricsSaveMsg = cleaned.text
       ? `Saved ${cleaned.lines.length} line${cleaned.lines.length === 1 ? '' : 's'}.`
       : 'Lyrics removed.'
@@ -2490,7 +2488,12 @@
     if (p.ok) chordLayerMsg = `Deleted “${layer.name}”.`
   }
 
-  // ── "Place chords": project the pasted sheet's chords onto the beat grid ──
+  // ── "Import chord sheet" (Chords tab): its own paste box, independent of
+  // the lyrics. Sheet lyric lines fuzzy-match against the stored fitted
+  // lyrics, so a lazy UG sheet (skipped repeats, "Chorus x2") still anchors.
+  let chordSheetOpen = $state(false)
+  let chordSheetDraft = $state('')
+  const chordSheetParsed = $derived(parseChordSheet(chordSheetDraft))
   let chordsPlaceBusy = $state(false)
   let chordsPlaceMsg = $state('')
   let chordsPlaceErr = $state('')
@@ -2501,7 +2504,7 @@
     chordsPlaceMsg = ''
     const sm = get(songMap)
     if (!sm) return
-    const sheet = parseChordSheet(lyricsDraft)
+    const sheet = parseChordSheet(chordSheetDraft)
     const r = placeChords(sheet, sm)
     if (!r.ok) {
       chordsPlaceErr = r.error
@@ -2539,6 +2542,9 @@
         if (stats.unplaceable > 0) parts.push(`${stats.unplaceable} skipped`)
         chordsPlaceMsg =
           parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')}).` : `${parts[0]}.`
+        if (stats.totalLines > 0) {
+          chordsPlaceMsg += ` Matched ${stats.matchedLines} of ${stats.totalLines} sheet lines to your lyrics.`
+        }
         if (addedSections > 0) {
           chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}.`
         }
@@ -3464,34 +3470,11 @@
             {/if}
 
             {#if sheetParsed.chordCount > 0}
-              <div class="border-foreground/40 flex flex-col gap-2 border-t-2 border-dashed pt-3">
-                <p class="text-muted-foreground text-xs" role="status">
-                  🎸 Detected {sheetParsed.chordCount} chords in
-                  {sheetParsed.sections.length} section{sheetParsed.sections.length === 1 ? '' : 's'}
-                  — chord lines won’t be treated as lyrics.
-                </p>
-                <div class="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
-                    onclick={placeChordsFromSheet}
-                    disabled={chordsPlaceBusy || !lyricsDraftMatchesSaved}
-                    title={!lyricsDraftMatchesSaved
-                      ? 'Save the lyrics first.'
-                      : lyricsSaved?.words.length
-                        ? 'Put every chord from the sheet on its beat'
-                        : 'Works best after “Fit to song” — the timed words anchor each chord'}
-                  >
-                    Place chords on the grid
-                  </button>
-                  {#if chordsPlaceMsg}
-                    <span class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</span>
-                  {/if}
-                </div>
-                {#if chordsPlaceErr}
-                  <p class="text-destructive text-xs">{chordsPlaceErr}</p>
-                {/if}
-              </div>
+              <p class="text-muted-foreground text-xs" role="status">
+                🎸 Looks like a chord sheet — the chord lines are stripped here, only the
+                words are saved. To place the chords, paste the sheet in the
+                <strong>Chords</strong> tab under “Import chord sheet”.
+              </p>
             {/if}
           </div>
 
@@ -3653,6 +3636,53 @@
               {/if}
             </div>
           {/if}
+          <!-- Import chord sheet: independent of the lyrics box — sheet lines
+               fuzzy-match the stored fitted lyrics at placement time. -->
+          <div class="mb-3 px-1">
+            <button
+              type="button"
+              class="text-foreground text-xs font-bold underline-offset-2 hover:underline"
+              onclick={() => (chordSheetOpen = !chordSheetOpen)}
+            >
+              {chordSheetOpen ? '▾' : '▸'} Import chord sheet…
+            </button>
+            {#if chordSheetOpen}
+              <div class="border-foreground/40 mt-2 flex flex-col gap-2 border-2 border-dashed p-2">
+                <textarea
+                  bind:value={chordSheetDraft}
+                  rows="10"
+                  placeholder={'Paste a chord sheet here (chords above lyrics, like Ultimate Guitar).\nThe words in the sheet are only used to find where each chord goes —\nyour saved lyrics stay untouched.'}
+                  class="border-foreground bg-background w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
+                  spellcheck="false"
+                ></textarea>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+                    onclick={placeChordsFromSheet}
+                    disabled={chordsPlaceBusy || chordSheetParsed.chordCount === 0}
+                    title={chordSheetParsed.chordCount === 0
+                      ? 'Paste a sheet with chord lines first.'
+                      : 'Put every chord from the sheet on its beat — current chords are kept as a separate track'}
+                  >
+                    Place chords on the grid
+                  </button>
+                  {#if chordSheetParsed.chordCount > 0}
+                    <span class="text-muted-foreground text-xs">
+                      {chordSheetParsed.chordCount} chords in
+                      {chordSheetParsed.sections.length} section{chordSheetParsed.sections.length === 1 ? '' : 's'}
+                    </span>
+                  {/if}
+                </div>
+                {#if chordsPlaceMsg}
+                  <p class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</p>
+                {/if}
+                {#if chordsPlaceErr}
+                  <p class="text-destructive text-xs">{chordsPlaceErr}</p>
+                {/if}
+              </div>
+            {/if}
+          </div>
           <ChordAutoFillBanner
             proposal={activeAutoFill}
             index={activeAutoFillPosition}

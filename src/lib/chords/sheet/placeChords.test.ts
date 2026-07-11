@@ -124,14 +124,69 @@ describe('placeChords', () => {
     expect(r.ok && r.plan.stats.estimated).toBe(1)
   })
 
-  it('refuses when stored lyrics are not from this sheet', () => {
+  it('unrelated stored lyrics → no line matches, chords spread instead', () => {
     const sheet = parseChordSheet(SHEET)
     const map = buildMap({
-      lyrics: { sourceText: 'totally different lyrics', words: words(['x', 1, 0]) },
+      lyrics: {
+        sourceText: 'totally different words entirely',
+        words: words(['totally', 1, 0], ['different', 1.3, 0], ['words', 1.6, 0], ['entirely', 2, 0]),
+      },
     })
+    const r = placeChords(sheet, map)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.plan.stats.matchedLines).toBe(0)
+    expect(r.plan.placements.every((p) => p.origin === 'spread')).toBe(true)
+  })
+
+  it('refuses only when lyrics have no timing at all', () => {
+    const sheet = parseChordSheet(SHEET)
+    const map = buildMap({ lyrics: { sourceText: 'Hold me now tonight', words: [] } })
     const r = placeChords(sheet, map)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.error).toMatch(/fit the lyrics/i)
+  })
+
+  it('matches sheet lines to stored lyrics despite wording drift', () => {
+    // Sheet says "Hold me now tonite" (typo); stored lyrics differ by one token.
+    const sheet = parseChordSheet(['[Verse 1]', 'Am  C', 'Hold me now, tonite!'].join('\n'))
+    const map = buildMap({
+      lyrics: {
+        sourceText: 'Hold me now tonight',
+        words: words(['Hold', 1.0, 0], ['me', 1.26, 0], ['now', 1.51, 0], ['tonight', 2.0, 0]),
+      },
+    })
+    const r = placeChords(sheet, map)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.plan.stats.matchedLines).toBe(1)
+    const byToken = Object.fromEntries(r.plan.placements.map((p) => [p.chord.displayRaw, p.beatId]))
+    expect(byToken['Am']).toBe('b1_0')
+    expect(byToken['C']).toBe('b1_1')
+  })
+
+  it('a lazy sheet (skipped repeats) matches monotonically against full lyrics', () => {
+    // Full lyrics: verse, chorus, chorus (repeated). Sheet only writes the
+    // verse + ONE chorus — its chorus must match the FIRST chorus occurrence.
+    const sheet = parseChordSheet(
+      ['[Verse]', 'Am', 'Hold me now tonight', '', '[Chorus]', 'G', 'Sing it loud again'].join('\n'),
+    )
+    const map = buildMap({
+      lyrics: {
+        sourceText: 'Hold me now tonight\nSing it loud again\nSing it loud again',
+        words: words(
+          ['Hold', 1.0, 0], ['me', 1.2, 0], ['now', 1.4, 0], ['tonight', 1.6, 0],
+          ['Sing', 3.0, 1], ['it', 3.2, 1], ['loud', 3.4, 1], ['again', 3.6, 1],
+          ['Sing', 5.0, 2], ['it', 5.2, 2], ['loud', 5.4, 2], ['again', 5.6, 2],
+        ),
+      },
+    })
+    const r = placeChords(sheet, map)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.plan.stats.matchedLines).toBe(2)
+    const g = r.plan.placements.find((p) => p.chord.displayRaw === 'G')!
+    expect(g.beatId).toBe('b3_0') // first chorus occurrence (3.0s), not the later one
   })
 
   it('refuses without a beat grid', () => {

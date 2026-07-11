@@ -2,17 +2,23 @@
  * Chord placement — project a parsed chord sheet onto the song's beat grid
  * using the timed lyrics as anchors.
  *
- *   word-anchored chord  →  word.startSec  →  snapChordTimeToBeat  →  beatId
- *   unanchored runs (instrumental blocks)  →  spread across the bar downbeats
+ * The sheet and the stored lyrics are INDEPENDENT sources: lyrics usually
+ * come complete (Genius etc.) while chord sheets are lazy — skipped repeats,
+ * "Chorus x2", slightly different spellings. Each sheet lyric line is
+ * fuzzy-matched (monotone, in song order) against the stored fitted lyrics:
+ *
+ *   sheet line  →  best stored line after the previous match (Dice ≥ 0.6)
+ *   word-anchored chord  →  matched line's word  →  startSec  →  beat
+ *   unmatched lines / instrumental runs  →  spread across the bar downbeats
  *   between the surrounding anchored placements.
  *
- * Pure: returns a plan + honest stats; `applyPlacement.ts` writes it. Refuses
- * outright when the stored lyrics don't come from this sheet — misplacement
- * is worse than a refusal.
+ * Pure: returns a plan + honest stats; `applyPlacement.ts` writes it.
  */
-import type { SongMap, ChordSymbol, Beat } from '$lib/songmap/types'
+import type { SongMap, ChordSymbol, Beat, LyricWord } from '$lib/songmap/types'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { snapChordTimeToBeat } from '$lib/songmap/beatAtTime'
+import { lyricWordsOfLine } from '$lib/lyrics/clean'
+import { normalizeWord } from '$lib/lyrics/align'
 import type { ParsedChordSheet, SheetChord } from './parseChordSheet'
 
 export type ChordPlacement = {
@@ -33,6 +39,10 @@ export type ChordPlacementStats = {
   collisions: number
   /** Chords that could not be mapped to any beat/word. */
   unplaceable: number
+  /** Sheet lyric lines that found a stored-lyrics line. */
+  matchedLines: number
+  /** Sheet lyric lines that carry chord anchors. */
+  totalLines: number
 }
 
 export type ChordPlacementPlan = { placements: ChordPlacement[]; stats: ChordPlacementStats }
@@ -48,9 +58,10 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
 
   const needsLyrics = sheet.anchoredChords.some((c) => c.wordIdx !== null)
   const words = map.lyrics?.words ?? []
-  if (needsLyrics) {
-    if (map.lyrics?.sourceText !== sheet.lyricsText || words.length === 0) {
-      return { ok: false, error: 'Save and fit the lyrics from this sheet first.' }
+  if (needsLyrics && words.length === 0) {
+    return {
+      ok: false,
+      error: 'Fit the lyrics to the song first — the timed words anchor each chord.',
     }
   }
 
@@ -58,15 +69,38 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
   const barsByIndex = [...map.timeline.bars].sort((a, b) => a.index - b.index)
   const beatsById = new Map(map.timeline.beats.map((b) => [b.id, b]))
 
-  // Words grouped by line, in token order (align.ts emits them in order).
-  const wordsByLine = new Map<number, typeof words>()
+  // Stored words grouped by line, in token order (align.ts emits them in order).
+  const wordsByLine = new Map<number, LyricWord[]>()
   for (const w of words) {
     const arr = wordsByLine.get(w.line)
     if (arr) arr.push(w)
     else wordsByLine.set(w.line, [w])
   }
 
-  const stats: ChordPlacementStats = { placed: 0, estimated: 0, collisions: 0, unplaceable: 0 }
+  // Match each sheet lyric line to a stored lyric line — monotone (sheet
+  // lines come in song order) and fuzzy (spelling/punctuation drift between
+  // sources). Lines the sheet has but the lyrics don't (or vice versa —
+  // sheets skip repeats) simply stay unmatched; their chords spread.
+  const sheetLines = sheet.lyricsText.split('\n').filter((l) => l.length > 0)
+  const storedLineCount = Math.max(-1, ...[...wordsByLine.keys()]) + 1
+  const storedTokens: string[][] = []
+  for (let li = 0; li < storedLineCount; li++) {
+    storedTokens.push((wordsByLine.get(li) ?? []).map((w) => normalizeWord(w.text)).filter(Boolean))
+  }
+  const anchoredLineIdxs = new Set<number>()
+  for (const c of sheet.anchoredChords) {
+    if (c.lineIdx !== null) anchoredLineIdxs.add(c.lineIdx)
+  }
+  const lineMap = matchSheetLinesToStored(sheetLines, storedTokens, anchoredLineIdxs)
+
+  const stats: ChordPlacementStats = {
+    placed: 0,
+    estimated: 0,
+    collisions: 0,
+    unplaceable: 0,
+    matchedLines: [...anchoredLineIdxs].filter((li) => lineMap.get(li) !== undefined).length,
+    totalLines: anchoredLineIdxs.size,
+  }
 
   // Pass 1 — word-anchored chords.
   type Slot = {
@@ -85,9 +119,13 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
   for (const slot of slots) {
     const c = slot.sheetChord
     if (slot.needsSpread) continue
-    const word = wordsByLine.get(c.lineIdx!)?.[c.wordIdx!]
+    const storedLine = lineMap.get(c.lineIdx!)
+    const lineWords = storedLine !== undefined ? (wordsByLine.get(storedLine) ?? []) : []
+    // Word index carries over by position; different sources drift by a word
+    // or two, so clamp — the beat snap absorbs small offsets.
+    const word = lineWords.length > 0 ? lineWords[Math.min(c.wordIdx!, lineWords.length - 1)] : undefined
     if (!word) {
-      slot.needsSpread = true // anchor lost — let the spread pass place it
+      slot.needsSpread = true // no matching line — let the spread pass place it
       continue
     }
     slot.beat = snapChordTimeToBeat(beatsSorted, barsById, word.startSec)
@@ -171,4 +209,59 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
   }
 
   return { ok: true, plan: { placements, stats } }
+}
+
+// ── Sheet-line ↔ stored-line matching ───────────────────────────────────────
+
+/** Dice coefficient over token multisets — robust to small wording drift. */
+function diceSimilarity(a: string[], b: string[]): number {
+  if (a.length === 0 || b.length === 0) return 0
+  const counts = new Map<string, number>()
+  for (const t of a) counts.set(t, (counts.get(t) ?? 0) + 1)
+  let common = 0
+  for (const t of b) {
+    const c = counts.get(t) ?? 0
+    if (c > 0) {
+      common++
+      counts.set(t, c - 1)
+    }
+  }
+  return (2 * common) / (a.length + b.length)
+}
+
+const LINE_MATCH_MIN_SIMILARITY = 0.6
+
+/**
+ * Greedy monotone matching: each sheet line takes the best-scoring stored
+ * line AFTER the previous match. Monotonicity is what keeps a repeated
+ * chorus honest — the sheet's second chorus can only match a later
+ * occurrence than its first. Only lines that actually anchor chords matter.
+ */
+function matchSheetLinesToStored(
+  sheetLines: string[],
+  storedTokens: string[][],
+  anchoredLineIdxs: Set<number>,
+): Map<number, number> {
+  const out = new Map<number, number>()
+  let cursor = 0
+  for (let si = 0; si < sheetLines.length; si++) {
+    if (!anchoredLineIdxs.has(si)) continue
+    const tokens = lyricWordsOfLine(sheetLines[si]!).map(normalizeWord).filter(Boolean)
+    if (tokens.length === 0) continue
+    let bestIdx = -1
+    let bestScore = 0
+    for (let li = cursor; li < storedTokens.length; li++) {
+      const score = diceSimilarity(tokens, storedTokens[li]!)
+      if (score > bestScore) {
+        bestScore = score
+        bestIdx = li
+        if (score === 1) break // exact — no better match exists
+      }
+    }
+    if (bestIdx >= 0 && bestScore >= LINE_MATCH_MIN_SIMILARITY) {
+      out.set(si, bestIdx)
+      cursor = bestIdx + 1
+    }
+  }
+  return out
 }
