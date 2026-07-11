@@ -30,6 +30,7 @@ Any doc or handover mentioning `desktop/electron/preload.cjs`,
 | `GET` | `/native/setup/status` | Auto-setup progress. |
 | `POST` | `/native/analyze-downbeats` | WAV bytes -> beat JSON. |
 | `POST` | `/native/analyze-drums` | JSON `{stemAbsPath}` (drum stem on disk) -> drum-hit events + class counts (sections venv, one-shot). |
+| `POST` | `/native/analyze-bass` | JSON `{stemAbsPath}` (bass stem on disk) -> bass notes via YIN pitch tracking (sections venv, one-shot). |
 | `POST` | `/native/separate-stems` | Project audio path -> queued Demucs progress/job. |
 | `GET` | `/native/stems/:jobId/:filename` | Fetch generated stem WAV. |
 | `GET` | `/native/setup/youtube-import/status` | YouTube audio import readiness. |

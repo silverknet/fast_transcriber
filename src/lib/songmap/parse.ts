@@ -548,6 +548,50 @@ function parseDrumMidi(raw: unknown, path: string): import('./types').DrumMidi |
   return out
 }
 
+/** `parseDrumMidi`'s sibling: drop malformed notes, clamp velocity, round-trip the rest. */
+function parseBassMidi(raw: unknown, path: string): import('./types').BassMidi | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  if (typeof o.analyzedAt !== 'string' || typeof o.audioFingerprint !== 'string') return undefined
+  const analyzerVersion = optNum(o.analyzerVersion)
+  if (analyzerVersion === undefined) return undefined
+  const events: import('./types').BassMidiEvent[] = []
+  if (Array.isArray(o.events)) {
+    for (const ev of o.events) {
+      if (!ev || typeof ev !== 'object') continue
+      const e = ev as Record<string, unknown>
+      const t = optNum(e.timeSec)
+      const d = optNum(e.durationSec)
+      const midi = optNum(e.midi)
+      const v = optNum(e.velocity)
+      if (t === undefined || t < 0) continue
+      if (d === undefined || !(d > 0)) continue
+      if (midi === undefined || !Number.isInteger(midi) || midi < 0 || midi > 127) continue
+      events.push({
+        timeSec: t,
+        durationSec: d,
+        midi,
+        velocity: Math.max(0, Math.min(1, v ?? 1)),
+      })
+    }
+  }
+  const out: import('./types').BassMidi = {
+    events,
+    analyzedAt: o.analyzedAt,
+    analyzerVersion,
+    sourceStem: typeof o.sourceStem === 'string' ? o.sourceStem : '',
+    audioFingerprint: o.audioFingerprint,
+  }
+  const quantize = optString(o.quantize)
+  if (quantize && DRUM_QUANTIZE.has(quantize)) {
+    out.quantize = quantize as import('./types').BassMidi['quantize']
+  }
+  const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
+  if (renderExport) out.renderExport = renderExport
+  return out
+}
+
 function parseChordHints(raw: unknown, path: string): import('./types').ChordHints | undefined {
   if (raw === undefined || raw === null) return undefined
   const o = expectObject(raw, path)
@@ -727,6 +771,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
         ? parseChordHints(raw.chordHints, 'chordHints')
         : undefined,
     drumMidi: parseDrumMidi(raw.drumMidi, 'drumMidi'),
+    bassMidi: parseBassMidi(raw.bassMidi, 'bassMidi'),
   }
 }
 
@@ -781,4 +826,5 @@ const KNOWN_TOP_KEYS = new Set([
   'sectionBorderHints',
   'chordHints',
   'drumMidi',
+  'bassMidi',
 ])

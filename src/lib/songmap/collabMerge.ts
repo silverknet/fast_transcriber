@@ -328,6 +328,10 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const dmCloud = cloud.drumMidi ? { ...cloud.drumMidi, renderExport: undefined } : undefined
   const dmC = classifyScalar(dmLocal, dmCloud, 'drumMidi', 'Drum track')
   if (dmC) conflicts.push(dmC)
+  const bmLocal = local.bassMidi ? { ...local.bassMidi, renderExport: undefined } : undefined
+  const bmCloud = cloud.bassMidi ? { ...cloud.bassMidi, renderExport: undefined } : undefined
+  const bmC = classifyScalar(bmLocal, bmCloud, 'bassMidi', 'Bass track')
+  if (bmC) conflicts.push(bmC)
   // Whole-field LWW for stored chord tracks (v5) — layers are snapshots
   // created/consumed wholesale (stash on import, switch), like lyrics.
   const clC = classifyScalar(local.chordLayers, cloud.chordLayers, 'chordLayers', 'Chord tracks')
@@ -498,6 +502,7 @@ export function applyConflictDecisions(
     else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
     else if (c.path === 'drumMidi') result = { ...result, drumMidi: c.mine as SongMap['drumMidi'] }
+    else if (c.path === 'bassMidi') result = { ...result, bassMidi: c.mine as SongMap['bassMidi'] }
     else if (c.path === 'harmony') result = { ...result, harmony: c.mine as SongMap['harmony'] }
     else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
     else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }

@@ -41,6 +41,7 @@ import {
   runPythonCapture,
   sectionsScriptPath,
   chordChromaScriptPath,
+  transcribeBassScriptPath,
   transcribeDrumsScriptPath,
   getSectionsVenvDir,
   getSectionsVenvPythonExe,
@@ -3417,6 +3418,57 @@ async function handleAnalyzeDrums(req, res, cors) {
   }
 }
 
+/**
+ * `POST /native/analyze-bass` — transcribe bass notes from an on-disk bass
+ * stem. JSON body `{ stemAbsPath }`; JSON response
+ * `{ ok, data: { notes, noteCount, durationSec, analyzerVersion } }`.
+ * One-shot like analyze-drums; reuses the sections venv (YIN pitch tracking).
+ */
+async function handleAnalyzeBass(req, res, cors) {
+  const t0 = Date.now()
+  try {
+    const body = await readRequestJson(req)
+    const stemAbsPath = body && typeof body.stemAbsPath === 'string' ? body.stemAbsPath : ''
+    if (!stemAbsPath || !path.isAbsolute(stemAbsPath)) {
+      sendJson(res, 400, { ok: false, error: 'stemAbsPath must be an absolute path' }, cors)
+      return
+    }
+    if (!existsSync(stemAbsPath)) {
+      sendJson(res, 404, { ok: false, error: `Stem file not found: ${stemAbsPath}` }, cors)
+      return
+    }
+    const script = transcribeBassScriptPath()
+    if (!existsSync(script)) {
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+    logInfo(`analyze-bass: ${stemAbsPath}`)
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      [stemAbsPath],
+      240_000,
+    )
+    if (code !== 0) {
+      const tail = (stderr || '').split('\n').filter(Boolean).slice(-6).join('; ')
+      logWarn(`analyze-bass: exit ${code}${signal ? ` (signal ${signal})` : ''}: ${tail}`)
+      sendJson(res, 503, { ok: false, error: tail || `Bass detection failed (exit ${code})` }, cors)
+      return
+    }
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      sendJson(res, 502, { ok: false, error: 'Bass detection returned unreadable output' }, cors)
+      return
+    }
+    logInfo(`analyze-bass: ${data?.notes?.length ?? 0} notes in ${Date.now() - t0}ms`)
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
 async function handleAnalyzeChordChroma(req, res, cors) {
   let workDir = null
   const t0 = Date.now()
@@ -6304,6 +6356,10 @@ function startBeaconServer() {
       return
     }
 
+    if (req.method === 'POST' && req.url === '/native/analyze-bass') {
+      void handleAnalyzeBass(req, res, cors)
+      return
+    }
     if (req.method === 'POST' && req.url === '/native/analyze-drums') {
       void handleAnalyzeDrums(req, res, cors)
       return
@@ -6865,6 +6921,7 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/suggest-section-borders  (X-Bars-Json header; body = WAV)`)
   logInfo(`  POST   /native/analyze-chord-chroma     (X-Beats-Json header; body = WAV)`)
   logInfo(`  POST   /native/analyze-drums            (JSON {stemAbsPath} → drum hits)`)
+  logInfo(`  POST   /native/analyze-bass             (JSON {stemAbsPath} → bass notes)`)
   logInfo(`  GET    /native/setup/sections/status    (check librosa venv readiness)`)
   logInfo(`  POST   /native/setup/sections           (create venv + pip install librosa)`)
   logInfo(`  POST   /native/separate-stems        (returns jobId immediately; queue runs serially)`)

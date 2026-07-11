@@ -374,6 +374,31 @@ export function validateSongMap(map: SongMap): ValidationResult {
     }
   }
 
+  if (map.bassMidi !== undefined) {
+    const bm = map.bassMidi
+    if (!bm || typeof bm !== 'object') errors.push('bassMidi must be object')
+    else {
+      if (!Array.isArray(bm.events)) errors.push('bassMidi.events must be array')
+      else {
+        bm.events.forEach((e, i) => {
+          if (!Number.isFinite(e.timeSec) || e.timeSec < 0) {
+            errors.push(`bassMidi.events[${i}].timeSec must be a finite number ≥ 0`)
+          }
+          if (!Number.isFinite(e.durationSec) || e.durationSec <= 0) {
+            errors.push(`bassMidi.events[${i}].durationSec must be a finite number > 0`)
+          }
+          if (!Number.isInteger(e.midi) || e.midi < 0 || e.midi > 127) {
+            errors.push(`bassMidi.events[${i}].midi must be an integer within [0, 127]`)
+          }
+          if (!Number.isFinite(e.velocity) || e.velocity < 0 || e.velocity > 1) {
+            errors.push(`bassMidi.events[${i}].velocity must be within [0, 1]`)
+          }
+        })
+      }
+      if (bm.renderExport !== undefined) validateRenderedExport(bm.renderExport, 'bassMidi.renderExport')
+    }
+  }
+
   if (map.chordLayers !== undefined) {
     if (!Array.isArray(map.chordLayers)) errors.push('chordLayers must be array')
     else {

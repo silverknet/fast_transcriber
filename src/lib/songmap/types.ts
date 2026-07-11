@@ -227,6 +227,38 @@ export type DrumMidi = {
   /** Saved render of the drum track, when written into the project. */
   renderExport?: RenderedCueExport
 }
+
+// ── Bass track (bass stem → detected notes → rendered BarBro bass) ───────────
+
+export type BassMidiEvent = {
+  /** ORIGINAL audio time — same base as `Beat.timeSec` (stems are untrimmed). */
+  timeSec: number
+  /** Sounding length; the renderer sustains the voice for this long. */
+  durationSec: number
+  /** MIDI note number (open E on a bass guitar = E1 = 28). */
+  midi: number
+  /** 0..1 — per-song relative (P95-normalized at analysis time). */
+  velocity: number
+}
+
+/**
+ * Detected bass notes + render settings — `drumMidi`'s sibling, same
+ * lifecycle: events sync whole-field LWW, `renderExport.relativePath` is
+ * per-machine and stripped. Quantize snaps ONSETS only; durations are kept.
+ */
+export type BassMidi = {
+  events: BassMidiEvent[]
+  analyzedAt: string
+  /** Mirror of the sidecar analyzer's version — older results are stale. */
+  analyzerVersion: number
+  /** Song-relative path of the stem the events came from (provenance label). */
+  sourceStem: string
+  /** Fingerprint of the audio analyzed: sha256 if present, else `<name>:<size>`. */
+  audioFingerprint: string
+  quantize?: DrumQuantize
+  /** Saved render of the bass track, when written into the project. */
+  renderExport?: RenderedCueExport
+}
 export type ClickTrackExport = RenderedCueExport
 
 export type CueAnchor =
@@ -567,6 +599,8 @@ export type SongMapV3 = {
   chordHints?: ChordHints
   /** Detected drum hits + BarBro's rendered drum-track settings. */
   drumMidi?: DrumMidi
+  /** Detected bass notes + BarBro's rendered bass-track settings. */
+  bassMidi?: BassMidi
 }
 
 /** Current persistent shape (formatVersion 4). Name kept from the v3 era to
