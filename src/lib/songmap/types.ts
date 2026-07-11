@@ -80,6 +80,23 @@ export type HarmonyEvent = {
   beatAnchor?: { indexInBar: number }
 }
 
+/**
+ * A stored, INACTIVE alternative chord track (v5). The active track is always
+ * `SongMap.harmony` — every consumer (grid, lead sheet, mixer rail, exports)
+ * keeps reading that one field; layers are parallel snapshots the user can
+ * switch to (see `songmap/chordLayers.ts`). Lets a sheet import land without
+ * destroying hand-entered chords.
+ */
+export type ChordLayer = {
+  id: string
+  /** User-facing track name, e.g. `My chords`, `Sheet import`. */
+  name: string
+  /** What produced this layer (display hint only). */
+  source?: 'manual' | 'sheet-import' | 'suggestions'
+  createdAt?: string
+  harmony: HarmonyEvent[]
+}
+
 export type SectionKind =
   | 'intro'
   | 'verse'
@@ -450,6 +467,10 @@ export type SongMapV3 = {
   timeline: SongMapTimeline
   sections: Section[]
   harmony: HarmonyEvent[]
+  /** Inactive alternative chord tracks (v5); `harmony` is the active one. */
+  chordLayers?: ChordLayer[]
+  /** Name shown for the ACTIVE chord track when layers exist. */
+  activeChordLayerName?: string
   cueTracks: CueTrack[]
   /**
    * Count-in beats before the song start, independent of cue speech. When

@@ -91,6 +91,12 @@
   } from '$lib/chords/suggestFromChroma'
   import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
   import { parseChordSheet } from '$lib/chords/sheet/parseChordSheet'
+  import {
+    activeChordTrackName,
+    deleteChordLayer,
+    stashActiveChords,
+    switchToChordLayer,
+  } from '$lib/songmap/chordLayers'
   import { placeChords } from '$lib/chords/sheet/placeChords'
   import { applyChordPlacements } from '$lib/chords/sheet/applyPlacement'
   import { deriveSectionsFromSheet } from '$lib/chords/sheet/deriveSections'
@@ -2459,6 +2465,31 @@
       : 'Lyrics removed.'
   }
 
+  // ── Parallel chord tracks: active = sm.harmony; layers switch losslessly ──
+  const chordLayerList = $derived($songMap?.chordLayers ?? [])
+  const activeChordTrackLabel = $derived($songMap ? activeChordTrackName($songMap) : '')
+  let chordLayerMsg = $state('')
+
+  function switchChordTrack(layerId: string) {
+    chordLayerMsg = ''
+    const p = patchSongMap((m) => {
+      const r = switchToChordLayer(m, layerId, newId)
+      return r.ok ? r.map : m
+    })
+    if (p.ok) chordLayerMsg = 'Switched — the other track is kept.'
+  }
+
+  function removeChordTrack(layerId: string) {
+    const layer = chordLayerList.find((l) => l.id === layerId)
+    if (!layer) return
+    if (!window.confirm(`Delete the stored chord track “${layer.name}” (${layer.harmony.length} chords)? The active chords stay.`)) {
+      return
+    }
+    chordLayerMsg = ''
+    const p = patchSongMap((m) => deleteChordLayer(m, layerId))
+    if (p.ok) chordLayerMsg = `Deleted “${layer.name}”.`
+  }
+
   // ── "Place chords": project the pasted sheet's chords onto the beat grid ──
   let chordsPlaceBusy = $state(false)
   let chordsPlaceMsg = $state('')
@@ -2476,19 +2507,18 @@
       chordsPlaceErr = r.error
       return
     }
-    if (
-      sm.harmony.length > 0 &&
-      !window.confirm(
-        'This song already has chords. Chords from the sheet replace any chord sitting on the same beat. Continue?',
-      )
-    ) {
-      return
-    }
+    const hadChords = sm.harmony.length > 0
     chordsPlaceBusy = true
     try {
       beginPatchBatch()
       try {
-        const applyRes = patchSongMap((m) => applyChordPlacements(m, r.plan, newId).map)
+        // Never destroy existing work: current chords become a parallel
+        // track first, then the sheet's chords take over as the active one.
+        const applyRes = patchSongMap((m) => {
+          const stashed = stashActiveChords(m, newId)
+          const applied = applyChordPlacements({ ...stashed, harmony: [] }, r.plan, newId).map
+          return { ...applied, activeChordLayerName: 'Sheet import' }
+        })
         let addedSections = 0
         const cur = get(songMap)
         if (applyRes.ok && cur && cur.sections.length === 0) {
@@ -2511,6 +2541,9 @@
           parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')}).` : `${parts[0]}.`
         if (addedSections > 0) {
           chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}.`
+        }
+        if (hadChords) {
+          chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time in the Chords tab.'
         }
       } finally {
         endPatchBatch()
@@ -3584,6 +3617,42 @@
           />
         {/if}
         {#if editMode === 'chords'}
+          {#if chordLayerList.length > 0}
+            <!-- Parallel chord tracks: `harmony` is the active one; stored
+                 layers switch in/out losslessly (the outgoing set is kept). -->
+            <div class="border-foreground/40 mb-3 flex flex-wrap items-center gap-2 border-2 border-dashed px-2 py-1.5 text-xs">
+              <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase tracking-wider">
+                Chord tracks
+              </span>
+              <span class="border-foreground bg-foreground text-background border px-1.5 py-0.5 font-bold">
+                {activeChordTrackLabel}
+              </span>
+              {#each chordLayerList as layer (layer.id)}
+                <span class="border-foreground/60 inline-flex items-center border">
+                  <button
+                    type="button"
+                    class="hover:bg-foreground hover:text-background px-1.5 py-0.5 font-bold"
+                    onclick={() => switchChordTrack(layer.id)}
+                    title={`Switch to “${layer.name}” (${layer.harmony.length} chords) — the current track is kept`}
+                  >
+                    {layer.name}
+                  </button>
+                  <button
+                    type="button"
+                    class="text-muted-foreground hover:text-destructive border-foreground/60 border-l px-1 py-0.5"
+                    onclick={() => removeChordTrack(layer.id)}
+                    title={`Delete the stored track “${layer.name}”`}
+                    aria-label={`Delete chord track ${layer.name}`}
+                  >
+                    ✕
+                  </button>
+                </span>
+              {/each}
+              {#if chordLayerMsg}
+                <span class="text-muted-foreground" role="status">{chordLayerMsg}</span>
+              {/if}
+            </div>
+          {/if}
           <ChordAutoFillBanner
             proposal={activeAutoFill}
             index={activeAutoFillPosition}

@@ -2,12 +2,14 @@ import {
   SONGMAP_CUE_TRACK_FORMAT_VERSION,
   SONGMAP_FORMAT_VERSION,
   SONGMAP_LEGACY_FORMAT_VERSION,
+  SONGMAP_LYRICS_FORMAT_VERSION,
   SONGMAP_TRANSPOSE_FORMAT_VERSION,
 } from './version'
 import type {
   AudioReference,
   Bar,
   Beat,
+  ChordLayer,
   ChordSymbol,
   CueAnchor,
   CueEvent,
@@ -216,6 +218,31 @@ function parseLyrics(raw: unknown, path: string): Lyrics | undefined {
   const tv = optNum(o.transcriberVersion)
   if (tv !== undefined) out.transcriberVersion = tv
   return out
+}
+
+function parseChordLayer(raw: unknown, path: string): ChordLayer {
+  const o = expectObject(raw, path)
+  const layer: ChordLayer = {
+    id: reqString(o.id, `${path}.id`),
+    name: reqString(o.name, `${path}.name`),
+    harmony: Array.isArray(o.harmony)
+      ? o.harmony.map((h, i) => parseHarmony(h, `${path}.harmony[${i}]`))
+      : [],
+  }
+  const source = optString(o.source)
+  if (source === 'manual' || source === 'sheet-import' || source === 'suggestions') {
+    layer.source = source
+  }
+  const createdAt = optString(o.createdAt)
+  if (createdAt) layer.createdAt = createdAt
+  return layer
+}
+
+function parseChordLayers(raw: unknown, path: string): ChordLayer[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (!Array.isArray(raw)) return undefined
+  const layers = raw.map((l, i) => parseChordLayer(l, `${path}[${i}]`))
+  return layers.length > 0 ? layers : undefined
 }
 
 function parseAudio(raw: unknown, path: string): AudioReference {
@@ -549,7 +576,14 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const isLegacyV1 = formatVersion === SONGMAP_LEGACY_FORMAT_VERSION
   const isLegacyV2 = formatVersion === SONGMAP_CUE_TRACK_FORMAT_VERSION
   const isLegacyV3 = formatVersion === SONGMAP_TRANSPOSE_FORMAT_VERSION
-  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1 && !isLegacyV2 && !isLegacyV3) {
+  const isLegacyV4 = formatVersion === SONGMAP_LYRICS_FORMAT_VERSION
+  if (
+    formatVersion !== SONGMAP_FORMAT_VERSION &&
+    !isLegacyV1 &&
+    !isLegacyV2 &&
+    !isLegacyV3 &&
+    !isLegacyV4
+  ) {
     // A file from a NEWER build (formatVersion above what we understand) gets a
     // user-facing "update BarBro" message wherever this error surfaces, instead
     // of a cryptic version number. Older/unknown versions keep the raw message.
@@ -591,6 +625,8 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     harmony: Array.isArray(raw.harmony)
       ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`))
       : [],
+    chordLayers: parseChordLayers(raw.chordLayers, 'chordLayers'),
+    activeChordLayerName: optString(raw.activeChordLayerName),
     cueTracks: isLegacyV1
       ? migrateLegacyCueTracks({ cues: legacyCues, cueTrackExport: legacyCueTrackExport })
       : parseCueTracks(raw.cueTracks),
@@ -647,6 +683,8 @@ const KNOWN_TOP_KEYS = new Set([
   'timeline',
   'sections',
   'harmony',
+  'chordLayers',
+  'activeChordLayerName',
   'cueTracks',
   'cues',
   'countInBeats',

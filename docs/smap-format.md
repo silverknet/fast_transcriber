@@ -3,7 +3,7 @@
 **Status:** v4 — stable
 **Container version (binary header `version`):** `2` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
 **JSON envelope version (`projectFormatVersion`):** `1` — [`SONG_PROJECT_FORMAT_VERSION`](../src/lib/songmap/smapFile.ts)
-**SongMap schema version (`formatVersion`):** `4` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
+**SongMap schema version (`formatVersion`):** `5` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
 **MIME type:** `application/vnd.barbro.smap` — [`SMAP_BLOB_TYPE`](../src/lib/songmap/smapFile.ts)
 **Extension:** `.smap`
 
@@ -74,8 +74,8 @@ Defined in [`smapFile.ts`](../src/lib/songmap/smapFile.ts). The envelope exists 
 Source of truth: [`SongMapV3`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
 
 ```ts
-type SongMapV4 = {
-  formatVersion: 4
+type SongMapV5 = {
+  formatVersion: 5
   app?: { name: 'BarBro'; appVersion?: string }
   metadata: SongMetadata             // required
   transpose?: { baseSemitones: number } // shared reversible transpose, -12..12
@@ -84,6 +84,8 @@ type SongMapV4 = {
   timeline: { bars: Bar[]; beats: Beat[] }   // required (arrays can be empty)
   sections: Section[]                // required (can be empty)
   harmony: HarmonyEvent[]            // required (can be empty)
+  chordLayers?: ChordLayer[]         // inactive alternative chord tracks (v5)
+  activeChordLayerName?: string      // display name of the active track
   cueTracks: CueTrack[]              // shared editable cue data
   countInBeats?: number              // top-level click count-in
   startBeatId?: string               // optional song-start beat override
@@ -199,6 +201,26 @@ Inclusive bar ranges (not half-open).
 | `beatAnchor` | `{ indexInBar: uint }` | Optional. |
 
 `ChordSymbol` = `{ root: NoteName, accidental?, quality?, extensions?, bass?, bassAccidental?, displayRaw }`.
+
+### 3.6.1 `chordLayers[]` — parallel chord tracks (v5)
+
+The ACTIVE chord track is always `harmony[]` — every consumer (grid, lead
+sheet, mixer chord rail, exports) reads only that field. `chordLayers` holds
+inactive alternatives; switching (see
+[`chordLayers.ts`](../src/lib/songmap/chordLayers.ts)) swaps a layer's events
+into `harmony` while the outgoing set is preserved as a layer. The chord-sheet
+importer stashes existing chords here instead of overwriting them.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `string` | Unique among layers. |
+| `name` | `string` | User-facing track name (`My chords`, `Sheet import`). |
+| `source` | `'manual' \| 'sheet-import' \| 'suggestions'` | Optional display hint. |
+| `createdAt` | `string` | Optional ISO timestamp. |
+| `harmony` | `HarmonyEvent[]` | Same shape/invariants as top-level `harmony[]`. |
+
+`activeChordLayerName` (top-level, optional `string`) names the active track
+when layers exist; absent means the default "My chords".
 
 ### 3.7 `cueTracks[]` — shared cue editor data
 
@@ -316,6 +338,7 @@ Consequence: `decode(encode(x)) ≡ x` modulo dropped `undefined`s, and `encode(
 - **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`.
 - **Legacy SongMap `formatVersion: 1` or `2` transpose:** absent transpose becomes untransposed.
 - **Legacy SongMap `formatVersion: 1`–`3` lyrics:** absent lyrics stay absent. New saves emit v4 only; builds older than v4 refuse newer files ("saved by a newer version of BarBro") instead of stripping lyrics on save.
+- **Legacy SongMap `formatVersion: 1`–`4` chord layers:** absent `chordLayers` stays absent. New saves emit v5 only; builds older than v5 refuse newer files instead of stripping stored chord tracks on save.
 - **Legacy `cueTrackExport` / `clickTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
 
 Unknown top-level JSON keys are stripped by default during parse. (See [`parse.ts`](../src/lib/songmap/parse.ts).)
