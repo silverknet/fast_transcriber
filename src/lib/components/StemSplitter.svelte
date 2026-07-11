@@ -32,6 +32,7 @@
   } from '$lib/stores/stemJobs'
   import CircleHelp from '@lucide/svelte/icons/circle-help'
   import { Download, Pause, Play, X } from '@lucide/svelte'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 
   const ALL_STEMS: StemName[] = ['vocals', 'drums', 'bass', 'other']
 
@@ -201,6 +202,9 @@
 
   /** Surface invalid-transition / sidecar errors via the existing error slot. */
   let pauseError = $state('')
+  // Pausing suspends the render process — not supported on every platform
+  // (the sidecar says which). Absent info defaults to capable.
+  const canPauseResume = $derived($desktopCompanionStatus.capabilities?.pauseResume !== false)
 
   async function togglePause() {
     const id = jobEntry?.jobId
@@ -447,7 +451,7 @@
       <Play class="size-4" aria-hidden="true" />
       Split Stems
     </Button>
-    {#if jobEntry && phase === 'running'}
+    {#if jobEntry && phase === 'running' && canPauseResume}
       <Button
         variant="outline"
         size="sm"

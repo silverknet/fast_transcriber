@@ -76,3 +76,68 @@ jobs:
             desktop/release/*.zip
             desktop/release/*.zip.blockmap
             desktop/release/latest-mac.yml
+
+  build-windows:
+    name: Build Windows installer (x64)
+    runs-on: windows-latest
+    # Serializes the two softprops release uploads so they don't race to
+    # create the release object for the tag.
+    needs: build-mac
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Same version sync as the mac job — /ping, installer metadata and
+      # latest.yml all read it. bash shell for the ${GITHUB_REF_NAME#...}
+      # parameter expansion on a Windows runner.
+      - name: Sync package.json version to tag
+        working-directory: desktop
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          npm pkg set version="$VERSION"
+          echo "Synced desktop/package.json version -> $VERSION"
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm install
+
+      # Unsigned NSIS build — SmartScreen shows "More info -> Run anyway"
+      # on first run. --publish never for the same reason as the mac job.
+      - name: Build NSIS installer
+        working-directory: desktop
+        run: npx electron-builder --win --x64 --publish never
+
+      # madmom 0.16.1 ships no Windows wheels and end users have no MSVC —
+      # build the cp310 wheel once here; the sidecar's beats setup installs
+      # it from this release asset on Windows (see BARBRO_MADMOM_WHEEL in
+      # desktop/electron/main.mjs).
+      - name: Setup Python 3.10 (madmom wheel build)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build madmom wheel (cp310, win_amd64)
+        shell: bash
+        run: |
+          python -m pip install "numpy>=1.21,<1.24" "cython>=0.29.36" "setuptools>=69,<76" wheel
+          python -m pip wheel --no-build-isolation --no-deps -w wheelhouse madmom==0.16.1
+          ls wheelhouse
+
+      - name: Upload to the pushed tag's GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            desktop/release/*.exe
+            desktop/release/*.exe.blockmap
+            desktop/release/latest.yml
+            wheelhouse/madmom-*.whl

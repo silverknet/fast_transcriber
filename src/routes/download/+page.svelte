@@ -112,6 +112,7 @@
       desktopCompanionStatus.set({
         reachable: r.ok,
         version: r.version,
+        capabilities: r.capabilities,
         versionStatus: classifySidecarVersion(r.version),
         lastCheckedAt: new Date().toISOString(),
         lastError: r.error,
@@ -378,6 +379,25 @@
           <li>Scroll down. Click <span class="font-semibold">Open Anyway</span> next to BarBro Desktop.</li>
           <li>Confirm by clicking <span class="font-semibold">Open Anyway</span> again.</li>
         </ol>
+      </div>
+    {/if}
+
+    <!-- Unsigned Windows builds trip SmartScreen on first run. Same
+         cause as the mac Gatekeeper block: no code-signing certificate. -->
+    {#if recommended?.key === 'win-x64'}
+      <div class="border-foreground/30 mt-6 border-2 p-4 text-sm">
+        <p class="mb-3 text-xs font-bold uppercase tracking-wider">
+          First time opening on Windows?
+        </p>
+        <ol class="list-decimal space-y-1.5 pl-5">
+          <li>Run the installer. Windows shows a <span class="font-semibold">SmartScreen</span> warning.</li>
+          <li>Click <span class="font-semibold">More info</span>.</li>
+          <li>Click <span class="font-semibold">Run anyway</span>. Setup finishes on its own and starts BarBro Desktop.</li>
+        </ol>
+        <p class="text-muted-foreground mt-3 text-xs">
+          With an NVIDIA graphics card, stem splitting uses it automatically — the first
+          setup downloads a few extra gigabytes to make that work.
+        </p>
       </div>
     {/if}
 

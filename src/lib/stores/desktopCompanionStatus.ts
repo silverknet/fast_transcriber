@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-import type { DesktopHealthCheck, DesktopSetupStage } from '$lib/client/desktopBeacon'
+import type { DesktopCapabilities, DesktopHealthCheck, DesktopSetupStage } from '$lib/client/desktopBeacon'
 import type { SidecarVersionStatus } from '$lib/desktop/minSidecarVersion'
 
 /**
@@ -23,6 +23,8 @@ export type PythonHealth = 'unknown' | 'installing' | 'ok' | 'broken'
 export type DesktopCompanionStatus = {
   reachable: boolean
   version: string | null
+  /** Sidecar feature flags (null until first successful ping). */
+  capabilities: DesktopCapabilities | null
   versionStatus: SidecarVersionStatus
   lastCheckedAt: string | null
   lastError: string | null
@@ -39,6 +41,7 @@ export type DesktopCompanionStatus = {
 export const desktopCompanionStatus = writable<DesktopCompanionStatus>({
   reachable: false,
   version: null,
+  capabilities: null,
   versionStatus: 'unknown',
   lastCheckedAt: null,
   lastError: null,

@@ -1,7 +1,17 @@
-# Demucs + deps — install PyTorch per https://github.com/facebookresearch/demucs first if needed.
+# Demucs + deps. Torch resolution differs per platform — see the markers.
 demucs>=4.0.0
 certifi
+# Ships a static ffmpeg binary; the sidecar copies it to a canonical path so
+# MP3 inputs / transcodes work on machines with no system ffmpeg.
+imageio-ffmpeg==0.6.0
 # torchaudio 2.9+ dropped its built-in WAV writer; Demucs's save step now
-# routes through torchcodec. Without this package the run dies with
-# "ImportError: TorchCodec is required for save_with_torchcodec."
-torchcodec
+# routes through torchcodec. torchcodec dlopens FFmpeg SHARED LIBRARIES at
+# runtime — which Windows machines don't have (a static ffmpeg.exe doesn't
+# count). So on Windows we stay on the last torchaudio generation with a
+# native writer (2.6.x, via the soundfile backend) and skip torchcodec.
+# These pins also match the cu124 GPU wheels the setup handler preinstalls,
+# so the GPU build is never downgraded by this file.
+torchcodec ; sys_platform != 'win32'
+torch==2.6.0 ; sys_platform == 'win32'
+torchaudio==2.6.0 ; sys_platform == 'win32'
+soundfile>=0.12 ; sys_platform == 'win32'

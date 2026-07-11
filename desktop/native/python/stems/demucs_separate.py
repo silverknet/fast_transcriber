@@ -38,6 +38,16 @@ def subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
     if sys.platform == "darwin":
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+    # The Electron host passes the directory holding the managed audio
+    # converter (a canonical copy of the imageio-ffmpeg binary). Prepend it on
+    # Windows (nothing else provides ffmpeg there); append elsewhere so a
+    # system/homebrew copy still wins when present.
+    ffdir = env.get("BARBRO_FFMPEG_DIR", "").strip()
+    if ffdir:
+        if sys.platform == "win32":
+            env["PATH"] = ffdir + os.pathsep + env.get("PATH", "")
+        else:
+            env["PATH"] = env.get("PATH", "") + os.pathsep + ffdir
     try:
         import certifi
 
@@ -67,9 +77,13 @@ def assert_deps(streaming: bool) -> None:
     # ffmpeg is optional for WAV inputs (torchaudio reads them directly). Warn
     # but don't bail — Demucs will surface its own error if it actually needs
     # ffmpeg for a non-standard input format.
-    r = subprocess.run(["ffmpeg", "-version"], capture_output=True, env=env)
-    if r.returncode != 0:
-        msg = "ffmpeg not on PATH — fine for WAV inputs; install via `brew install ffmpeg` if other formats fail."
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, env=env)
+        ffmpeg_ok = r.returncode == 0
+    except OSError:
+        ffmpeg_ok = False
+    if not ffmpeg_ok:
+        msg = "Audio converter not found — fine for WAV inputs; other formats may fail."
         if streaming:
             emit({"type": "log", "msg": msg})
         else:

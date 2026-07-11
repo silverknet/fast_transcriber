@@ -89,6 +89,7 @@
     desktopCompanionStatus.set({
       reachable: r.ok,
       version: r.version,
+      capabilities: r.capabilities,
       versionStatus: classifySidecarVersion(r.version),
       lastCheckedAt: new Date().toISOString(),
       lastError: r.error,

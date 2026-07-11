@@ -10,7 +10,12 @@ export type DesktopPingPayload = {
   ok?: boolean
   name?: string
   version?: string
+  platform?: string
+  /** Semantic feature flags; absent on older sidecars (treat as capable). */
+  capabilities?: { pauseResume?: boolean }
 }
+
+export type DesktopCapabilities = { pauseResume: boolean }
 
 const PROBE_MS = 2000
 
@@ -98,6 +103,7 @@ export async function probeDesktopSetupStatus(): Promise<DesktopSetupStatus | nu
 export async function probeDesktopCompanion(): Promise<{
   ok: boolean
   version: string | null
+  capabilities: DesktopCapabilities | null
   error: string | null
 }> {
   const ctrl = new AbortController()
@@ -110,19 +116,25 @@ export async function probeDesktopCompanion(): Promise<{
     })
     clearTimeout(t)
     if (!res.ok) {
-      return { ok: false, version: null, error: `HTTP ${res.status}` }
+      return { ok: false, version: null, capabilities: null, error: `HTTP ${res.status}` }
     }
     const data = (await res.json()) as DesktopPingPayload
     if (data?.ok === true && data?.name === 'barbro-desktop') {
-      return { ok: true, version: typeof data.version === 'string' ? data.version : null, error: null }
+      return {
+        ok: true,
+        version: typeof data.version === 'string' ? data.version : null,
+        // Absent on older sidecars → default to capable (mac behavior).
+        capabilities: { pauseResume: data.capabilities?.pauseResume !== false },
+        error: null,
+      }
     }
-    return { ok: false, version: null, error: 'Unexpected ping response' }
+    return { ok: false, version: null, capabilities: null, error: 'Unexpected ping response' }
   } catch (e) {
     clearTimeout(t)
     const msg = e instanceof Error ? e.message : String(e)
     if (msg === 'The user aborted a request.' || /abort/i.test(msg)) {
-      return { ok: false, version: null, error: null }
+      return { ok: false, version: null, capabilities: null, error: null }
     }
-    return { ok: false, version: null, error: msg }
+    return { ok: false, version: null, capabilities: null, error: msg }
   }
 }
