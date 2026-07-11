@@ -90,7 +90,10 @@
     type ChordSuggestion,
   } from '$lib/chords/suggestFromChroma'
   import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
-  import { cleanLyricsText } from '$lib/lyrics/clean'
+  import { parseChordSheet } from '$lib/chords/sheet/parseChordSheet'
+  import { placeChords } from '$lib/chords/sheet/placeChords'
+  import { applyChordPlacements } from '$lib/chords/sheet/applyPlacement'
+  import { deriveSectionsFromSheet } from '$lib/chords/sheet/deriveSections'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
@@ -114,8 +117,10 @@
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
   import {
+    beginPatchBatch,
     canRedo,
     canUndo,
+    endPatchBatch,
     patchSongMap,
     redoSongMap,
     songMap,
@@ -2410,7 +2415,14 @@
     lyricsDraft = untrack(() => sm.lyrics?.sourceText ?? '')
   })
 
-  const lyricsCleanedPreview = $derived(cleanLyricsText(lyricsDraft))
+  // Chord-sheet awareness: a paste that carries chord lines (Ultimate-Guitar
+  // style, chords above lyrics) yields both lyrics AND placeable chords. For
+  // plain lyrics `sheetParsed.lyricsText` equals `cleanLyricsText().text`.
+  const sheetParsed = $derived(parseChordSheet(lyricsDraft))
+  const lyricsCleanedPreview = $derived({
+    text: sheetParsed.lyricsText,
+    lines: sheetParsed.lyricsText.split('\n').filter((l) => l.length > 0),
+  })
   const lyricsSaved = $derived($songMap?.lyrics ?? null)
   const lyricsDraftMatchesSaved = $derived(
     (lyricsSaved?.sourceText ?? '') === lyricsCleanedPreview.text,
@@ -2418,7 +2430,10 @@
   let lyricsSaveMsg = $state('')
 
   function saveLyrics() {
-    const cleaned = cleanLyricsText(lyricsDraft)
+    const cleaned = {
+      text: sheetParsed.lyricsText,
+      lines: lyricsCleanedPreview.lines,
+    }
     const p = patchSongMap((m) => {
       if (!cleaned.text) {
         const { lyrics: _lyrics, ...rest } = m
@@ -2436,10 +2451,73 @@
       lyricsSaveMsg = p.errors.join('; ')
       return
     }
-    lyricsDraft = cleaned.text
+    // Keep the pasted sheet in the box when it carries chords — "Place
+    // chords" reads them from the draft. Plain lyrics normalize as before.
+    if (sheetParsed.chordCount === 0) lyricsDraft = cleaned.text
     lyricsSaveMsg = cleaned.text
       ? `Saved ${cleaned.lines.length} line${cleaned.lines.length === 1 ? '' : 's'}.`
       : 'Lyrics removed.'
+  }
+
+  // ── "Place chords": project the pasted sheet's chords onto the beat grid ──
+  let chordsPlaceBusy = $state(false)
+  let chordsPlaceMsg = $state('')
+  let chordsPlaceErr = $state('')
+
+  function placeChordsFromSheet() {
+    if (chordsPlaceBusy) return
+    chordsPlaceErr = ''
+    chordsPlaceMsg = ''
+    const sm = get(songMap)
+    if (!sm) return
+    const sheet = parseChordSheet(lyricsDraft)
+    const r = placeChords(sheet, sm)
+    if (!r.ok) {
+      chordsPlaceErr = r.error
+      return
+    }
+    if (
+      sm.harmony.length > 0 &&
+      !window.confirm(
+        'This song already has chords. Chords from the sheet replace any chord sitting on the same beat. Continue?',
+      )
+    ) {
+      return
+    }
+    chordsPlaceBusy = true
+    try {
+      beginPatchBatch()
+      try {
+        const applyRes = patchSongMap((m) => applyChordPlacements(m, r.plan, newId).map)
+        let addedSections = 0
+        const cur = get(songMap)
+        if (applyRes.ok && cur && cur.sections.length === 0) {
+          const derived = deriveSectionsFromSheet(sheet, r.plan, cur, newId)
+          if (derived.length > 0) {
+            const sp = patchSongMap((m) => ({ ...m, sections: derived }))
+            if (sp.ok) addedSections = derived.length
+          }
+        }
+        if (!applyRes.ok) {
+          chordsPlaceErr = applyRes.errors.join('; ')
+          return
+        }
+        const { stats } = r.plan
+        const parts = [`Placed ${stats.placed} chord${stats.placed === 1 ? '' : 's'}`]
+        if (stats.estimated > 0) parts.push(`${stats.estimated} by estimate`)
+        if (stats.collisions > 0) parts.push(`${stats.collisions} overlapped`)
+        if (stats.unplaceable > 0) parts.push(`${stats.unplaceable} skipped`)
+        chordsPlaceMsg =
+          parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')}).` : `${parts[0]}.`
+        if (addedSections > 0) {
+          chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}.`
+        }
+      } finally {
+        endPatchBatch()
+      }
+    } finally {
+      chordsPlaceBusy = false
+    }
   }
 
   // ── "Fit to song": transcribe the vocal → align imported words to it ──
@@ -3350,6 +3428,37 @@
               <p class="text-amber-600 text-xs">
                 Changing the words clears the current timing — run “Fit to song” again after saving.
               </p>
+            {/if}
+
+            {#if sheetParsed.chordCount > 0}
+              <div class="border-foreground/40 flex flex-col gap-2 border-t-2 border-dashed pt-3">
+                <p class="text-muted-foreground text-xs" role="status">
+                  🎸 Detected {sheetParsed.chordCount} chords in
+                  {sheetParsed.sections.length} section{sheetParsed.sections.length === 1 ? '' : 's'}
+                  — chord lines won’t be treated as lyrics.
+                </p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+                    onclick={placeChordsFromSheet}
+                    disabled={chordsPlaceBusy || !lyricsDraftMatchesSaved}
+                    title={!lyricsDraftMatchesSaved
+                      ? 'Save the lyrics first.'
+                      : lyricsSaved?.words.length
+                        ? 'Put every chord from the sheet on its beat'
+                        : 'Works best after “Fit to song” — the timed words anchor each chord'}
+                  >
+                    Place chords on the grid
+                  </button>
+                  {#if chordsPlaceMsg}
+                    <span class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</span>
+                  {/if}
+                </div>
+                {#if chordsPlaceErr}
+                  <p class="text-destructive text-xs">{chordsPlaceErr}</p>
+                {/if}
+              </div>
             {/if}
           </div>
 
