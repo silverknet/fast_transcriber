@@ -50,19 +50,33 @@ describe('mixDrumEvents / normalizeDrumBuffer', () => {
     ) as Record<DrumClass, Float32Array>,
   }
 
-  it('places events at shift + (t − trimStart), honors trim bounds', () => {
+  it('places events at shift + (t − trimStart), honors trim bounds, pans kick center', () => {
     const sr = DRUM_KIT_SAMPLE_RATE
-    const dst = new Float32Array(sr * 4)
+    const dstL = new Float32Array(sr * 4)
+    const dstR = new Float32Array(sr * 4)
     const events: DrumMidiEvent[] = [
       { timeSec: 10.0, cls: 'kick', velocity: 1 }, // inside trim
       { timeSec: 9.0, cls: 'snare', velocity: 1 }, // before trim → excluded
       { timeSec: 20.5, cls: 'hihat', velocity: 1 }, // after trim → excluded
     ]
-    mixDrumEvents(dst, sr, events, impulseKit, 9.5, 20, 1.0)
+    mixDrumEvents(dstL, dstR, sr, events, impulseKit, 9.5, 20, 1.0)
     const idx = Math.floor((1.0 + (10.0 - 9.5)) * sr)
-    expect(dst[idx]).toBeCloseTo(drumVelocityGain(1), 5)
-    const nonZero = dst.reduce((n, v) => n + (v !== 0 ? 1 : 0), 0)
+    // Kick is centered: constant-power pan puts cos(45°) ≈ 0.7071 per side.
+    expect(dstL[idx]).toBeCloseTo(drumVelocityGain(1) * Math.SQRT1_2, 4)
+    expect(dstR[idx]).toBeCloseTo(drumVelocityGain(1) * Math.SQRT1_2, 4)
+    const nonZero = dstL.reduce((n, v) => n + (v !== 0 ? 1 : 0), 0)
     expect(nonZero).toBe(1) // the other two events were excluded
+  })
+
+  it('off-center voices favor their side; stereo energy is conserved', () => {
+    const sr = DRUM_KIT_SAMPLE_RATE
+    const dstL = new Float32Array(sr)
+    const dstR = new Float32Array(sr)
+    mixDrumEvents(dstL, dstR, sr, [{ timeSec: 0.1, cls: 'hihat', velocity: 1 }], impulseKit, 0, 1, 0)
+    const idx = Math.floor(0.1 * sr)
+    expect(dstR[idx]!).toBeGreaterThan(dstL[idx]!) // hats sit right of center
+    const power = dstL[idx]! ** 2 + dstR[idx]! ** 2
+    expect(Math.sqrt(power)).toBeCloseTo(drumVelocityGain(1), 4)
   })
 
   it('velocity curve keeps quiet hits audible and scales up', () => {

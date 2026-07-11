@@ -21,7 +21,9 @@ export function drumTrackFingerprintPayload(sm: SongMap): unknown {
   const trim = sm.audio?.trim ?? { startSec: 0, endSec: 0 }
   const dm = sm.drumMidi
   return {
-    v: 1,
+    // v2: stereo mix bus (pan + reverb + glue compression + saturation) —
+    // saved renders from the dry engine must re-render.
+    v: 2,
     events: (dm?.events ?? []).map((e) => ({
       t: round6(e.timeSec),
       c: e.cls,

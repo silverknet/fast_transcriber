@@ -18,6 +18,7 @@ import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { quantizeTimesToGrid, dedupeDrumEvents } from '$lib/songmap/quantizeToGrid'
 import { inferDrumGroove } from '$lib/songmap/drumGroove'
 import { DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKit, type DrumKitId } from './drumKits'
+import { applyBusCompression, applyReverb, applySaturation, voicePanGains } from './drumBus'
 import type { DrumMidiEvent, DrumQuantize, SongMap } from '$lib/songmap/types'
 
 /** Matches the mixer's drums loudness target (see mastering.ts). */
@@ -30,9 +31,11 @@ export function drumVelocityGain(v: number): number {
   return 0.25 + 0.75 * c * c
 }
 
-/** Pure mixing core (unit-testable with an impulse kit). */
+/** Pure mixing core (unit-testable with an impulse kit). Stereo: per-voice
+ * constant-power panning puts hats/toms slightly off-center like a real kit. */
 export function mixDrumEvents(
-  dst: Float32Array,
+  dstL: Float32Array,
+  dstR: Float32Array,
   sampleRate: number,
   events: DrumMidiEvent[],
   kit: DrumKit,
@@ -44,27 +47,33 @@ export function mixDrumEvents(
     if (e.timeSec < trimStartSec || e.timeSec >= trimEndSec) continue
     const voice = kit.voices[e.cls]
     if (!voice || voice.length === 0) continue
-    addClipAtOffset(
-      dst,
-      sampleRate,
-      voice,
-      DRUM_KIT_SAMPLE_RATE,
-      shiftSec + (e.timeSec - trimStartSec),
-      drumVelocityGain(e.velocity),
-    )
+    const g = drumVelocityGain(e.velocity)
+    const pan = voicePanGains(e.cls)
+    const at = shiftSec + (e.timeSec - trimStartSec)
+    addClipAtOffset(dstL, sampleRate, voice, DRUM_KIT_SAMPLE_RATE, at, g * pan.l)
+    addClipAtOffset(dstR, sampleRate, voice, DRUM_KIT_SAMPLE_RATE, at, g * pan.r)
   }
 }
 
-/** RMS over frames above the silence floor; scale to target; hard-ceiling. */
-export function normalizeDrumBuffer(data: Float32Array, targetRmsDb = DRUM_TRACK_TARGET_RMS_DB): void {
+/** RMS over frames above the silence floor; scale to target; hard-ceiling.
+ * Multi-channel: the gain is computed jointly and applied to every channel. */
+export function normalizeDrumBuffer(
+  channels: Float32Array[] | Float32Array,
+  targetRmsDb = DRUM_TRACK_TARGET_RMS_DB,
+): void {
+  const chs = Array.isArray(channels) ? channels : [channels]
   const floor = 10 ** (-60 / 20)
   let sum = 0
   let n = 0
-  for (const v of data) {
-    const a = Math.abs(v)
-    if (a > floor) {
-      sum += v * v
-      n++
+  let peak = 0
+  for (const data of chs) {
+    for (const v of data) {
+      const a = Math.abs(v)
+      peak = Math.max(peak, a)
+      if (a > floor) {
+        sum += v * v
+        n++
+      }
     }
   }
   if (n === 0) return
@@ -72,10 +81,10 @@ export function normalizeDrumBuffer(data: Float32Array, targetRmsDb = DRUM_TRACK
   if (rms <= 0) return
   const target = 10 ** (targetRmsDb / 20)
   let g = target / rms
-  let peak = 0
-  for (const v of data) peak = Math.max(peak, Math.abs(v))
   if (peak * g > PEAK_CEILING) g = PEAK_CEILING / peak
-  for (let i = 0; i < data.length; i++) data[i]! *= g
+  for (const data of chs) {
+    for (let i = 0; i < data.length; i++) data[i]! *= g
+  }
 }
 
 export type RenderDrumTrackResult = {
@@ -120,13 +129,21 @@ export async function renderDrumTrackWavBlob(
   const kit = await loadDrumKit(kitId)
   const sampleRate = DRUM_KIT_SAMPLE_RATE
   const frames = Math.max(1, Math.ceil(totalSec * sampleRate))
-  const data = new Float32Array(frames)
+  const dataL = new Float32Array(frames)
+  const dataR = new Float32Array(frames)
 
-  mixDrumEvents(data, sampleRate, events, kit, trim.startSec, trim.endSec, preludeSec + prependSec)
-  normalizeDrumBuffer(data)
+  mixDrumEvents(dataL, dataR, sampleRate, events, kit, trim.startSec, trim.endSec, preludeSec + prependSec)
+  // The mix bus — room reverb, glue compression, a little warmth — is what
+  // makes the kit blend into the song instead of sitting dry on top.
+  applyReverb(dataL, dataR, sampleRate)
+  applyBusCompression(dataL, dataR, sampleRate)
+  applySaturation(dataL)
+  applySaturation(dataR)
+  normalizeDrumBuffer([dataL, dataR])
 
-  const buffer = new AudioBuffer({ length: frames, numberOfChannels: 1, sampleRate })
-  buffer.copyToChannel(data, 0)
+  const buffer = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
+  buffer.copyToChannel(dataL, 0)
+  buffer.copyToChannel(dataR, 1)
   return {
     blob: audioBufferToWavBlob(buffer),
     preludeOffsetSec: preludeSec + prependSec,
