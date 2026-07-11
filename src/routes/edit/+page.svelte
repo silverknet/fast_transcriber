@@ -132,7 +132,22 @@
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, Pause, Pencil, Play, RefreshCw } from '@lucide/svelte'
+  import { ArrowLeft, ChevronDown, FileText, Layers, Pause, Pencil, Play, RefreshCw, Trash2 } from '@lucide/svelte'
+  import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+  } from '$lib/components/ui/dialog'
+  import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+  } from '$lib/components/ui/dropdown-menu'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { trimAudioFileToWav } from '$lib/audio/trimAudio'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
@@ -2549,8 +2564,9 @@
           chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}.`
         }
         if (hadChords) {
-          chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time in the Chords tab.'
+          chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time.'
         }
+        chordSheetOpen = false // done — the toolbar status line carries the summary
       } finally {
         endPatchBatch()
       }
@@ -3600,100 +3616,76 @@
           />
         {/if}
         {#if editMode === 'chords'}
-          {#if chordLayerList.length > 0}
-            <!-- Parallel chord tracks: `harmony` is the active one; stored
-                 layers switch in/out losslessly (the outgoing set is kept). -->
-            <div class="border-foreground/40 mb-3 flex flex-wrap items-center gap-2 border-2 border-dashed px-2 py-1.5 text-xs">
-              <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase tracking-wider">
-                Chord tracks
-              </span>
-              <span class="border-foreground bg-foreground text-background border px-1.5 py-0.5 font-bold">
-                {activeChordTrackLabel}
-              </span>
-              {#each chordLayerList as layer (layer.id)}
-                <span class="border-foreground/60 inline-flex items-center border">
-                  <button
-                    type="button"
-                    class="hover:bg-foreground hover:text-background px-1.5 py-0.5 font-bold"
+          <!-- ── Chords toolbar: one row instead of three stacked blocks.
+               Left: chord-track picker + sheet import. Right: suggestions. ── -->
+          <div class="border-foreground bg-muted mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-2 px-2 py-1.5 text-xs">
+            <DropdownMenu>
+              <DropdownMenuTrigger>
+                {#snippet child({ props })}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
+                    title={chordLayerList.length > 0
+                      ? 'Chord tracks — switch which set of chords is on the grid'
+                      : 'Chord tracks — import a sheet to create a second one'}
+                    {...props}
+                  >
+                    <Layers class="size-3.5" aria-hidden="true" />
+                    <span class="max-w-36 truncate">{activeChordTrackLabel}</span>
+                    <ChevronDown class="size-3" aria-hidden="true" />
+                  </Button>
+                {/snippet}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" class="min-w-56">
+                <div class="text-muted-foreground px-2 py-1 text-[10px] font-bold uppercase tracking-wider">
+                  Chord tracks
+                </div>
+                <DropdownMenuItem disabled class="font-bold">
+                  ✓ {activeChordTrackLabel}
+                  <span class="text-muted-foreground ml-auto font-normal">on the grid</span>
+                </DropdownMenuItem>
+                {#each chordLayerList as layer (layer.id)}
+                  <DropdownMenuItem
+                    class=""
                     onclick={() => switchChordTrack(layer.id)}
-                    title={`Switch to “${layer.name}” (${layer.harmony.length} chords) — the current track is kept`}
+                    title={`Switch to “${layer.name}” — the current track is kept`}
                   >
                     {layer.name}
-                  </button>
-                  <button
-                    type="button"
-                    class="text-muted-foreground hover:text-destructive border-foreground/60 border-l px-1 py-0.5"
-                    onclick={() => removeChordTrack(layer.id)}
-                    title={`Delete the stored track “${layer.name}”`}
-                    aria-label={`Delete chord track ${layer.name}`}
-                  >
-                    ✕
-                  </button>
-                </span>
-              {/each}
-              {#if chordLayerMsg}
-                <span class="text-muted-foreground" role="status">{chordLayerMsg}</span>
-              {/if}
-            </div>
-          {/if}
-          <!-- Import chord sheet: independent of the lyrics box — sheet lines
-               fuzzy-match the stored fitted lyrics at placement time. -->
-          <div class="mb-3 px-1">
-            <button
-              type="button"
-              class="text-foreground text-xs font-bold underline-offset-2 hover:underline"
-              onclick={() => (chordSheetOpen = !chordSheetOpen)}
+                    <span class="text-muted-foreground ml-auto">{layer.harmony.length} chords</span>
+                  </DropdownMenuItem>
+                {/each}
+                {#if chordLayerList.length === 0}
+                  <DropdownMenuItem disabled class="text-muted-foreground italic">
+                    Import a sheet to add another track
+                  </DropdownMenuItem>
+                {/if}
+                <DropdownMenuSeparator class="" />
+                <DropdownMenuItem class="" onclick={() => (chordSheetOpen = true)}>
+                  <FileText class="size-3.5" aria-hidden="true" />
+                  Import chord sheet…
+                </DropdownMenuItem>
+                {#each chordLayerList as layer (`del-${layer.id}`)}
+                  <DropdownMenuItem class="text-destructive" onclick={() => removeChordTrack(layer.id)}>
+                    <Trash2 class="size-3.5" aria-hidden="true" />
+                    Delete “{layer.name}”…
+                  </DropdownMenuItem>
+                {/each}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
+              onclick={() => (chordSheetOpen = true)}
+              title="Paste an Ultimate-Guitar-style sheet and put every chord on its beat"
             >
-              {chordSheetOpen ? '▾' : '▸'} Import chord sheet…
-            </button>
-            {#if chordSheetOpen}
-              <div class="border-foreground/40 mt-2 flex flex-col gap-2 border-2 border-dashed p-2">
-                <textarea
-                  bind:value={chordSheetDraft}
-                  rows="10"
-                  placeholder={'Paste a chord sheet here (chords above lyrics, like Ultimate Guitar).\nThe words in the sheet are only used to find where each chord goes —\nyour saved lyrics stay untouched.'}
-                  class="border-foreground bg-background w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
-                  spellcheck="false"
-                ></textarea>
-                <div class="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
-                    onclick={placeChordsFromSheet}
-                    disabled={chordsPlaceBusy || chordSheetParsed.chordCount === 0}
-                    title={chordSheetParsed.chordCount === 0
-                      ? 'Paste a sheet with chord lines first.'
-                      : 'Put every chord from the sheet on its beat — current chords are kept as a separate track'}
-                  >
-                    Place chords on the grid
-                  </button>
-                  {#if chordSheetParsed.chordCount > 0}
-                    <span class="text-muted-foreground text-xs">
-                      {chordSheetParsed.chordCount} chords in
-                      {chordSheetParsed.sections.length} section{chordSheetParsed.sections.length === 1 ? '' : 's'}
-                    </span>
-                  {/if}
-                </div>
-                {#if chordsPlaceMsg}
-                  <p class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</p>
-                {/if}
-                {#if chordsPlaceErr}
-                  <p class="text-destructive text-xs">{chordsPlaceErr}</p>
-                {/if}
-              </div>
-            {/if}
-          </div>
-          <ChordAutoFillBanner
-            proposal={activeAutoFill}
-            index={activeAutoFillPosition}
-            total={visibleAutoFills.length}
-            dismissedCount={dismissedAutoFillSigs.length}
-            onAccept={handleAcceptAutoFill}
-            onSkip={handleSkipAutoFill}
-            onDismiss={handleDismissAutoFill}
-            onUndoDismiss={handleUndoDismissAutoFill}
-          />
-          <div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs">
+              <FileText class="size-3.5" aria-hidden="true" />
+              Import sheet…
+            </Button>
+
+            <span class="border-foreground/30 mx-1 h-5 border-l" aria-hidden="true"></span>
+
             <label class="inline-flex items-center gap-2 font-bold">
               <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
               Suggestions
@@ -3727,6 +3719,77 @@
               {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
             </button>
           </div>
+          {#if chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
+            <p
+              class="mb-3 px-1 text-xs {chordsPlaceErr ? 'text-destructive' : 'text-muted-foreground'}"
+              role="status"
+            >
+              {chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
+            </p>
+          {/if}
+
+          <!-- Import chord sheet: modal, independent of the lyrics box — the
+               sheet's words only locate chords via the fitted lyrics. -->
+          <Dialog open={chordSheetOpen} onOpenChange={(v: boolean) => (chordSheetOpen = v)}>
+            <DialogContent class="flex max-w-2xl flex-col gap-3 p-4">
+              <DialogHeader>
+                <DialogTitle class="flex items-center gap-2">
+                  <FileText class="size-4" aria-hidden="true" />
+                  Import chord sheet
+                </DialogTitle>
+                <DialogDescription>
+                  Paste a sheet with chords written above the words (Ultimate Guitar style).
+                  The sheet's words are only used to find where each chord goes — your saved
+                  lyrics stay untouched, and your current chords are kept as a separate track.
+                </DialogDescription>
+              </DialogHeader>
+              <textarea
+                bind:value={chordSheetDraft}
+                rows="12"
+                placeholder={'[Verse 1]\nAm9  C/D              GM7\nBaby, love never felt so good\n…'}
+                class="border-foreground bg-background max-h-[45vh] w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
+                spellcheck="false"
+              ></textarea>
+              <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span class="text-muted-foreground">
+                  {#if chordSheetParsed.chordCount > 0}
+                    Detected {chordSheetParsed.chordCount} chords in
+                    {chordSheetParsed.sections.length} section{chordSheetParsed.sections.length === 1 ? '' : 's'}.
+                  {:else if chordSheetDraft.trim()}
+                    No chord lines detected yet — is this a chords-over-lyrics sheet?
+                  {:else}
+                    Works best after the lyrics are fitted to the song.
+                  {/if}
+                </span>
+              </div>
+              {#if chordsPlaceErr}
+                <p class="text-destructive text-xs">{chordsPlaceErr}</p>
+              {/if}
+              <DialogFooter class="gap-2">
+                <Button variant="outline" class="border-2 text-xs font-bold" onclick={() => (chordSheetOpen = false)}>
+                  Cancel
+                </Button>
+                <Button
+                  class="border-2 text-xs font-bold"
+                  onclick={placeChordsFromSheet}
+                  disabled={chordsPlaceBusy || chordSheetParsed.chordCount === 0}
+                >
+                  {chordsPlaceBusy ? 'Placing…' : 'Place chords on the grid'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <ChordAutoFillBanner
+            proposal={activeAutoFill}
+            index={activeAutoFillPosition}
+            total={visibleAutoFills.length}
+            dismissedCount={dismissedAutoFillSigs.length}
+            onAccept={handleAcceptAutoFill}
+            onSkip={handleSkipAutoFill}
+            onDismiss={handleDismissAutoFill}
+            onUndoDismiss={handleUndoDismissAutoFill}
+          />
           <div
             data-song-key-picker
             class="border-foreground bg-muted mb-4 flex flex-wrap items-center gap-2 border-2 px-3 py-2"
