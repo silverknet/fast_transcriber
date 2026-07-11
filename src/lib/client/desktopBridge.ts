@@ -169,6 +169,82 @@ export async function suggestSectionBordersViaDesktop(
 
 // ── Chord chroma + key detection ───────────────────────────────────────────
 
+// ── Drum transcription ───────────────────────────────────────────────────────
+
+export type DrumEventRaw = { timeSec: number; cls: string; velocity: number }
+
+export type AnalyzeDrumsResult =
+  | {
+      ok: true
+      events: DrumEventRaw[]
+      classCounts: Record<string, number>
+      analyzerVersion: number
+      durationSec: number
+      note?: string
+    }
+  | { ok: false; error: string }
+
+const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal'])
+
+/**
+ * Transcribe drum hits from an on-disk drum stem (the sidecar reads the file
+ * directly — no audio over HTTP). Times are ORIGINAL audio time, same base
+ * as `Beat.timeSec`.
+ */
+export async function analyzeDrumsViaDesktop(
+  stemAbsPath: string,
+  signal?: AbortSignal,
+): Promise<AnalyzeDrumsResult> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}/native/analyze-drums`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stemAbsPath }),
+      signal,
+    })
+    const payload = (await res.json().catch(() => null)) as {
+      ok?: boolean
+      data?: {
+        events?: unknown
+        classCounts?: unknown
+        analyzerVersion?: unknown
+        durationSec?: unknown
+        note?: unknown
+      }
+      error?: string
+    } | null
+    if (!res.ok || !payload?.ok || !payload.data) {
+      return { ok: false, error: payload?.error || `HTTP ${res.status}` }
+    }
+    const d = payload.data
+    const events: DrumEventRaw[] = []
+    if (Array.isArray(d.events)) {
+      for (const ev of d.events) {
+        if (!ev || typeof ev !== 'object') continue
+        const e = ev as Record<string, unknown>
+        const t = typeof e.timeSec === 'number' && Number.isFinite(e.timeSec) ? e.timeSec : null
+        const v = typeof e.velocity === 'number' && Number.isFinite(e.velocity) ? e.velocity : 1
+        const cls = typeof e.cls === 'string' && DRUM_CLASSES.has(e.cls) ? e.cls : null
+        if (t === null || t < 0 || cls === null) continue
+        events.push({ timeSec: t, cls, velocity: Math.max(0, Math.min(1, v)) })
+      }
+    }
+    return {
+      ok: true,
+      events,
+      classCounts:
+        d.classCounts && typeof d.classCounts === 'object'
+          ? (d.classCounts as Record<string, number>)
+          : {},
+      analyzerVersion: typeof d.analyzerVersion === 'number' ? d.analyzerVersion : 0,
+      durationSec: typeof d.durationSec === 'number' ? d.durationSec : 0,
+      ...(typeof d.note === 'string' && d.note ? { note: d.note } : {}),
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 export type ChordChromaBeatInput = { startSec: number }
 
 /** Tonic returned by the sidecar (0-11, C=0, C#=1, …, B=11). */

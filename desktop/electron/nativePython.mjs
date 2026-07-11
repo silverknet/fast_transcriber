@@ -79,6 +79,10 @@ export function chordChromaScriptPath() {
   return path.join(getNativePythonRoot(), 'sections', 'chord_chroma.py')
 }
 
+export function transcribeDrumsScriptPath() {
+  return path.join(getNativePythonRoot(), 'sections', 'transcribe_drums.py')
+}
+
 /** Piper TTS — isolated from beats/stems (`desktop/native/python/piper_tts/`). */
 export function piperTtsScriptPath() {
   return path.join(getNativePythonRoot(), 'piper_tts', 'synthesize_wav.py')
