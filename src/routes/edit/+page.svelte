@@ -2549,6 +2549,47 @@
     if (p.ok) sectionLayerMsg = `Deleted “${layer.name}”.`
   }
 
+  // ── Chord inspector (debug): the stored truth, row by row ────────────────
+  // Lets the user verify what's IN the song against what the grid draws —
+  // when placement looks wrong, this splits "bad data" from "bad rendering".
+  let chordInspectorOpen = $state(false)
+  /** beatId → origin from the LAST import in this session (plan-only info). */
+  let lastImportOrigins = $state<Map<string, string>>(new Map())
+  const chordInspectorRows = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return []
+    const beatsById = new Map(sm.timeline.beats.map((b) => [b.id, b]))
+    const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
+    return [...sm.harmony]
+      .sort((a, b) => a.startSec - b.startSec)
+      .map((h) => {
+        const beat = h.beatId ? beatsById.get(h.beatId) : undefined
+        const bar = beat ? barsById.get(beat.barId) : undefined
+        const origin = h.beatId ? lastImportOrigins.get(h.beatId) : undefined
+        return {
+          id: h.id,
+          symbol: h.chord.displayRaw,
+          barIndex: bar?.index ?? null,
+          beatInBar: beat ? beat.indexInBar + 1 : null,
+          timeSec: beat?.timeSec ?? h.startSec,
+          origin:
+            origin === 'word'
+              ? 'from a sung word'
+              : origin === 'estimated'
+                ? 'estimated'
+                : origin === 'spread'
+                  ? 'filled in'
+                  : '',
+        }
+      })
+  })
+
+  function formatInspectorTime(t: number): string {
+    const m = Math.floor(t / 60)
+    const s = t - m * 60
+    return `${m}:${s.toFixed(2).padStart(5, '0')}`
+  }
+
   // ── "Import chord sheet" (Chords tab): its own paste box, independent of
   // the lyrics. Sheet lyric lines fuzzy-match against the stored fitted
   // lyrics, so a lazy UG sheet (skipped repeats, "Chorus x2") still anchors.
@@ -2605,6 +2646,7 @@
           chordsPlaceErr = applyRes.errors.join('; ')
           return
         }
+        lastImportOrigins = new Map(r.plan.placements.map((p) => [p.beatId, p.origin]))
         const { stats } = r.plan
         const parts = [`Placed ${stats.placed} chord${stats.placed === 1 ? '' : 's'}`]
         if (stats.estimated > 0) parts.push(`${stats.estimated} by estimate`)
@@ -3794,6 +3836,16 @@
               Import sheet…
             </Button>
 
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-7 border-2 px-2 text-xs font-bold {chordInspectorOpen ? 'bg-foreground text-background' : ''}"
+              onclick={() => (chordInspectorOpen = !chordInspectorOpen)}
+              title="Show every stored chord with its exact bar, beat and time — for checking what you see against what's saved"
+            >
+              Inspect
+            </Button>
+
             <span class="border-foreground/30 mx-1 h-5 border-l" aria-hidden="true"></span>
 
             <label class="inline-flex items-center gap-2 font-bold">
@@ -3836,6 +3888,47 @@
             >
               {chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
             </p>
+          {/if}
+
+          {#if chordInspectorOpen}
+            <!-- The stored truth, row by row: compare against the grid/waveform.
+                 Bar and beat are 1-based here to match what a musician counts. -->
+            <div class="border-foreground bg-background mb-3 border-2 text-xs">
+              <div class="border-foreground/40 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
+                <span>Stored chords · {chordInspectorRows.length}</span>
+                <span>track: {activeChordTrackLabel}</span>
+                <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
+              </div>
+              <div class="max-h-64 overflow-auto">
+                <table class="w-full font-mono text-[11px] tabular-nums">
+                  <thead>
+                    <tr class="text-muted-foreground text-left">
+                      <th class="px-2 py-0.5 font-bold">#</th>
+                      <th class="px-2 py-0.5 font-bold">bar.beat</th>
+                      <th class="px-2 py-0.5 font-bold">time</th>
+                      <th class="px-2 py-0.5 font-bold">chord</th>
+                      <th class="px-2 py-0.5 font-bold">placed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each chordInspectorRows as row, ri (row.id)}
+                      <tr class="odd:bg-muted/40">
+                        <td class="text-muted-foreground px-2 py-0.5">{ri + 1}</td>
+                        <td class="px-2 py-0.5">
+                          {row.barIndex !== null ? `${row.barIndex + 1}.${row.beatInBar}` : '—'}
+                        </td>
+                        <td class="px-2 py-0.5">{formatInspectorTime(row.timeSec)}</td>
+                        <td class="px-2 py-0.5 font-bold">{row.symbol}</td>
+                        <td class="text-muted-foreground px-2 py-0.5">{row.origin}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+                {#if chordInspectorRows.length === 0}
+                  <p class="text-muted-foreground px-2 py-2 italic">No chords on the active track.</p>
+                {/if}
+              </div>
+            </div>
           {/if}
 
           <!-- Import chord sheet: modal, independent of the lyrics box — the
