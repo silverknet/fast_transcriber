@@ -6,6 +6,7 @@ import {
   mergeForConflict,
   type Conflict,
 } from './collabMerge'
+import { mergeLocalIntoCollab } from './collab'
 
 function chord(id: string, root: string): HarmonyEvent {
   return {
@@ -39,6 +40,22 @@ function section(id: string, label: string, start: number, end: number): Section
     kind: 'verse',
     label,
     barRange: { startBarIndex: start, endBarIndex: end },
+  }
+}
+
+function audio(
+  fileName: string,
+  opts: Partial<NonNullable<SongMap['audio']>> = {},
+): NonNullable<SongMap['audio']> {
+  return {
+    fileName,
+    source: 'upload',
+    trim: { startSec: 0, endSec: 10 },
+    durationSec: 10,
+    sampleRate: 44100,
+    channels: 2,
+    fileSize: 12345,
+    ...opts,
   }
 }
 
@@ -168,6 +185,62 @@ describe('collabMerge · mergeForConflict', () => {
     const cloud: SongMap = { ...base, expectedAudio: { fileName: 'a.wav' } }
     const { conflicts } = mergeForConflict(local, cloud)
     expect(conflicts.some((c) => c.path === 'expectedAudio')).toBe(false)
+  })
+
+  it('does not flag audio conflict for same identity with different local paths and duration noise', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = {
+      ...base,
+      audio: audio('song.wav', {
+        sha256: 'same-sha',
+        durationSec: 10.1234561,
+        originalPath: 'audio/local-song.wav',
+      }),
+    }
+    const cloud: SongMap = {
+      ...base,
+      audio: audio('song.wav', {
+        sha256: 'same-sha',
+        durationSec: 10.1234569,
+        originalPath: 'audio/other-machine.wav',
+      }),
+    }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts.some((c) => c.path === 'audio')).toBe(false)
+  })
+
+  it('flags different audio sha as dangerous and can keep mine', () => {
+    const base = createEmptySongMap()
+    const localAudio = audio('song.wav', { sha256: 'local-sha', originalPath: 'audio/song.wav' })
+    const cloudAudio = audio('song.mp3', { sha256: 'cloud-sha', fileSize: 22222 })
+    const local: SongMap = { ...base, audio: localAudio }
+    const cloud: SongMap = { ...base, audio: cloudAudio }
+
+    const report = mergeForConflict(local, cloud)
+    const audioConflicts = report.conflicts.filter((c) => c.path === 'audio')
+    expect(audioConflicts).toHaveLength(1)
+    expect(audioConflicts[0]).toMatchObject({
+      label: 'Audio file',
+      severity: 'dangerous',
+    })
+    expect(report.merged.audio?.sha256).toBe('cloud-sha')
+
+    const result = applyConflictDecisions(report, new Map([['audio', 'mine']]))
+    expect(result.audio?.sha256).toBe('local-sha')
+    expect(result.audio?.fileName).toBe('song.wav')
+    expect(result.audio?.originalPath).toBeUndefined()
+  })
+
+  it('flags audio conflict when local has audio and cloud has none', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = { ...base, audio: audio('song.wav', { sha256: 'local-sha' }) }
+    const cloud: SongMap = { ...base, audio: undefined }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts).toContainEqual(
+      expect.objectContaining({ path: 'audio', severity: 'dangerous' }),
+    )
   })
 
   it('merges sections by id — non-overlapping kept, overlapping flagged', () => {
@@ -342,5 +415,28 @@ describe('collabMerge · invariant: no silent data loss', () => {
     expect(result.metadata.bpm).toBe(100)
     expect(result.harmony[0]?.chord.displayRaw).toBe('C')
     expect(result.countInBeats).toBe(4)
+  })
+
+  it('rehydrates local-only fields after adopting a collab merge result', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = {
+      ...base,
+      audio: audio('song.wav', {
+        sha256: 'same-sha',
+        originalPath: 'audio/song.wav',
+      }),
+      stemRefs: { Vocals: 'stems/best/vocals.wav' },
+      mixState: { master: 0.8, tracks: [{ key: 'original', volume: 0.7, muted: true }] },
+    }
+    const cloud: SongMap = {
+      ...base,
+      audio: audio('song.wav', { sha256: 'same-sha' }),
+    }
+
+    const report = mergeForConflict(local, cloud)
+    const hydrated = mergeLocalIntoCollab(local, report.merged)
+    expect(hydrated.audio?.originalPath).toBe('audio/song.wav')
+    expect(hydrated.stemRefs).toEqual(local.stemRefs)
+    expect(hydrated.mixState).toEqual(local.mixState)
   })
 })

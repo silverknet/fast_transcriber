@@ -123,6 +123,19 @@ function classifyScalar(
   return { path, label, severity: 'safe', mine, theirs }
 }
 
+function audioIdentityDiffers(a: SongMap['audio'], b: SongMap['audio']): boolean {
+  if (!a && !b) return false
+  if (!a || !b) return true
+  if (a.sha256 && b.sha256) return a.sha256 !== b.sha256
+  return a.fileName !== b.fileName || a.fileSize !== b.fileSize
+}
+
+function stripAudioOriginalPath(audio: SongMap['audio']): SongMap['audio'] {
+  if (!audio) return undefined
+  const { originalPath: _originalPath, ...rest } = audio
+  return rest
+}
+
 function cueEventLabel(mine: CueEvent, theirs: CueEvent): string {
   if (mine.text !== theirs.text) return 'Cue text'
   if (!shallowEqual(mine.anchor, theirs.anchor)) return 'Cue timing'
@@ -283,6 +296,17 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   // (paste / re-align), so per-word merging isn't worth the complexity.
   const lyC = classifyScalar(local.lyrics, cloud.lyrics, 'lyrics', 'Lyrics')
   if (lyC) conflicts.push(lyC)
+  // Whole-field LWW for stored chord tracks (v5) — layers are snapshots
+  // created/consumed wholesale (stash on import, switch), like lyrics.
+  const clC = classifyScalar(local.chordLayers, cloud.chordLayers, 'chordLayers', 'Chord tracks')
+  if (clC) conflicts.push(clC)
+  const clnC = classifyScalar(
+    local.activeChordLayerName,
+    cloud.activeChordLayerName,
+    'activeChordLayerName',
+    'Active chord track name',
+  )
+  if (clnC) conflicts.push(clnC)
 
   // ── expectedAudio swap is dangerous (different master) ──
   if (
@@ -296,6 +320,21 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
       severity: 'dangerous',
       mine: local.expectedAudio,
       theirs: cloud.expectedAudio,
+    })
+  }
+
+  // ── Audio identity swap is dangerous (different master) ──
+  // `audio.originalPath` is per-machine and must never participate in the
+  // conflict value. Identity is intentionally narrow: sha when both sides
+  // have it, otherwise fileName/fileSize. Durations/rates pick up float
+  // noise through JSONB and are handled by reconciliation elsewhere.
+  if (audioIdentityDiffers(local.audio, cloud.audio)) {
+    conflicts.push({
+      path: 'audio',
+      label: 'Audio file',
+      severity: 'dangerous',
+      mine: stripAudioOriginalPath(local.audio),
+      theirs: stripAudioOriginalPath(cloud.audio),
     })
   }
 
@@ -417,7 +456,10 @@ export function applyConflictDecisions(
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
     else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
+    else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
+    else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
+    else if (c.path === 'audio') result = { ...result, audio: c.mine as SongMap['audio'] }
     // `timeline/bars-count` is informational — the per-id merges above
     // already determine which bars survive; no extra apply step.
   }
