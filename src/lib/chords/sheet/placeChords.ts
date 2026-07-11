@@ -375,13 +375,29 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
       if (last && g !== null && last[0]!.sheetChord.barGroup === g) last.push(s)
       else groupsInRun.push([s])
     }
-    // Assign groups to bars (even spread), then lay out each bar's chords
-    // evenly across its beats — two vamp chords sharing a bar sit at 0 and
-    // mid; a piped 4-chord walk-up takes all four beats.
+    // Does an anchored chord follow this run? Instrumental passages LEAD INTO
+    // what comes next — a one-bar walk-up before the verse belongs in the
+    // LAST bar of the gap, not the first. So runs followed by an anchor are
+    // END-aligned (last group on the last window bar, earlier groups spread
+    // backwards); a trailing run (outro) starts where the last section ended.
+    let hasNextAnchor = false
+    for (let k = j; k < slots.length; k++) {
+      if (slots[k]!.anchorSec !== null) {
+        hasNextAnchor = true
+        break
+      }
+    }
+
+    // Assign groups to bars, then lay out each bar's chords evenly across its
+    // beats — two vamp chords sharing a bar sit at 0 and mid; a piped 4-chord
+    // walk-up takes all four beats.
     const gCount = groupsInRun.length
     const slotsByBar = new Map<number, typeof run>()
     for (let gi = 0; gi < gCount; gi++) {
-      const bar = windowBars[Math.min(m - 1, Math.floor((gi * m) / gCount))]!
+      const barPos = hasNextAnchor
+        ? m - 1 - Math.min(m - 1, Math.floor(((gCount - 1 - gi) * m) / gCount))
+        : Math.min(m - 1, Math.floor((gi * m) / gCount))
+      const bar = windowBars[barPos]!
       const arr = slotsByBar.get(bar.index)
       if (arr) arr.push(...groupsInRun[gi]!)
       else slotsByBar.set(bar.index, [...groupsInRun[gi]!])

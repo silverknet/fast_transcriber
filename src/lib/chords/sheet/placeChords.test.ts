@@ -274,7 +274,7 @@ describe('placeChords', () => {
     expect(r.plan.placements[0]!.chord.displayRaw).toBe('Am')
   })
 
-  it('a piped walk-up compresses into ONE bar of the window', () => {
+  it('a piped walk-up compresses into the LAST bar before the anchor (a pickup)', () => {
     const sheet = parseChordSheet(
       ['[Intro]', '| G Am C D |', '', '[Verse 1]', 'C', 'Hold me now tonight'].join('\n'),
     )
@@ -288,8 +288,9 @@ describe('placeChords', () => {
     expect(r.ok).toBe(true)
     if (!r.ok) return
     const spread = r.plan.placements.filter((p) => p.origin === 'spread')
-    // All four share bar 0 (first window bar), one per beat.
-    expect(spread.map((p) => p.beatId)).toEqual(['b0_0', 'b0_1', 'b0_2', 'b0_3'])
+    // All four share the LAST gap bar, one per beat — walk-ups lead INTO the
+    // verse, they don't start the intro.
+    expect(spread.map((p) => p.beatId)).toEqual(['b3_0', 'b3_1', 'b3_2', 'b3_3'])
   })
 
   it('(x2) doubles an instrumental vamp so it fills the window one-per-bar', () => {
