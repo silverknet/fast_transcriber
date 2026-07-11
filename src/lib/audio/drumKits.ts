@@ -154,11 +154,17 @@ function synthKick(): Float32Array {
 }
 
 function synthSnare(): Float32Array {
-  const out = new Float32Array(seconds(0.25))
-  mixInto(out, pitchSweep(0.12, 190, 190, 1, 0.06), 0.5)
-  mixInto(out, pitchSweep(0.1, 285, 285, 1, 0.05), 0.25)
-  const wire = lowpass(highpass(noiseBurst(0.25, 0.08, 202), 800, 1), 5000, 1)
-  mixInto(out, wire, 0.9)
+  const out = new Float32Array(seconds(0.28))
+  // Body: a short pitched thump (drops fast so the crack dominates).
+  mixInto(out, pitchSweep(0.1, 210, 165, 0.04, 0.045), 0.55)
+  mixInto(out, pitchSweep(0.08, 320, 300, 0.05, 0.035), 0.25)
+  // Crack: bright wire noise 1.5–8 kHz — this is what reads as "snare"
+  // against a hat-heavy mix; the previous 0.8–5 kHz band buried it.
+  const crack = lowpass(highpass(noiseBurst(0.2, 0.055, 202), 1500, 1), 8000, 1)
+  mixInto(out, crack, 1.4)
+  // Rattle tail: softer, darker noise ringing a touch longer.
+  const rattle = lowpass(highpass(noiseBurst(0.28, 0.11, 212), 700, 1), 4000, 1)
+  mixInto(out, rattle, 0.4)
   return normalizeTo(out, 0.95)
 }
 
@@ -217,10 +223,10 @@ function acousticCymbalFallback(): Float32Array {
 /** Per-voice level trims applied after peak normalization (kit balance). */
 const VOICE_MIX_GAIN: Record<DrumClass, number> = {
   kick: 1.0,
-  snare: 0.9,
-  hihat: 0.45,
+  snare: 1.0,
+  hihat: 0.32,
   tom: 0.8,
-  cymbal: 0.5,
+  cymbal: 0.45,
 }
 
 function withMixGains(voices: Record<DrumClass, Float32Array>): Record<DrumClass, Float32Array> {

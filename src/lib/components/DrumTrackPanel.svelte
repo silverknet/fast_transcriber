@@ -13,7 +13,7 @@
     setupSectionsDeps,
   } from '$lib/client/desktopBridge'
   import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
-  import { DRUM_KITS, type DrumKitId } from '$lib/audio/drumKits'
+  import { DRUM_KITS, DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKitId } from '$lib/audio/drumKits'
   import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
   import {
     DRUM_ANALYZER_VERSION,
@@ -149,6 +149,35 @@
   function setStyle(style: 'steady' | 'detected') {
     patchSongMap((m) => (m.drumMidi ? { ...m, drumMidi: { ...m.drumMidi, style } } : m))
     onChanged?.()
+  }
+
+  // ── Drum pad: audition the current kit's voices ────────────────────────
+  let padCtx: AudioContext | null = null
+  const PAD_VOICES: { cls: DrumClass; label: string }[] = [
+    { cls: 'kick', label: 'Kick' },
+    { cls: 'snare', label: 'Snare' },
+    { cls: 'hihat', label: 'Hat' },
+    { cls: 'tom', label: 'Tom' },
+    { cls: 'cymbal', label: 'Crash' },
+  ]
+
+  async function playPad(cls: DrumClass) {
+    try {
+      const kitId: DrumKitId = dm?.kit === 'acoustic' ? 'acoustic' : 'synth'
+      const kit = await loadDrumKit(kitId)
+      const voice = kit.voices[cls]
+      if (!voice || voice.length === 0) return
+      padCtx ??= new AudioContext({ sampleRate: DRUM_KIT_SAMPLE_RATE })
+      if (padCtx.state === 'suspended') await padCtx.resume()
+      const buf = padCtx.createBuffer(1, voice.length, DRUM_KIT_SAMPLE_RATE)
+      buf.copyToChannel(new Float32Array(voice), 0)
+      const src = padCtx.createBufferSource()
+      src.buffer = buf
+      src.connect(padCtx.destination)
+      src.start()
+    } catch {
+      /* audition is best-effort */
+    }
   }
 
   async function saveRender() {
@@ -291,6 +320,20 @@
         {busy === 'saving' ? 'Saving…' : renderSaved ? 'Save again' : 'Save drum track'}
       </Button>
     {/if}
+  </div>
+
+  <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+    <span class="text-muted-foreground text-[10px] font-bold uppercase tracking-wider">Try the kit</span>
+    {#each PAD_VOICES as v (v.cls)}
+      <button
+        type="button"
+        class="border-foreground hover:bg-foreground hover:text-background active:translate-y-px border-2 px-2 py-0.5 text-xs font-bold"
+        onclick={() => void playPad(v.cls)}
+        title={`Play the ${v.label.toLowerCase()} of the selected kit`}
+      >
+        {v.label}
+      </button>
+    {/each}
   </div>
 
   {#if dm && counts}

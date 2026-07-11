@@ -176,7 +176,11 @@ export function inferDrumGroove(sm: SongMap, events: DrumMidiEvent[]): DrumMidiE
     // ── Hi-hats: steady pulse from observed density ──
     const hats = blockPlaced.filter((p) => p.e.cls === 'hihat')
     if (hats.length > 0) {
-      const perBar = blockBars.map((b) => hats.filter((p) => p.barIdx === b).length)
+      // The pulse only plays in bars that actually HAD hats — a verse the
+      // drummer rides on kick alone must not gain a hat carpet (this was
+      // audibly inflating hat counts by ~60% on real songs).
+      const hatBars = blockBars.filter((b) => hats.some((p) => p.barIdx === b))
+      const perBar = hatBars.map((b) => hats.filter((p) => p.barIdx === b).length)
       const density = median(perBar)
       const hatVel = Math.min(1, median(hats.map((p) => p.e.velocity)))
       let stride: number | null = null
@@ -184,7 +188,7 @@ export function inferDrumGroove(sm: SongMap, events: DrumMidiEvent[]): DrumMidiE
       else if (density >= HAT_8THS_MIN_PER_BAR) stride = 2
       else if (density >= HAT_QUARTERS_MIN_PER_BAR) stride = SLOTS_PER_BEAT
       if (stride !== null) {
-        for (const barIdx of blockBars) {
+        for (const barIdx of hatBars) {
           const bs = barSlots[barIdx]!
           for (let s = 0; s < bs.slotTimes.length; s += stride) {
             const onBeat = s % SLOTS_PER_BEAT === 0
