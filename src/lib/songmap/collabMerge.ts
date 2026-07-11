@@ -234,7 +234,33 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const conflicts: Conflict[] = []
 
   // ── Lists keyed by id ──
-  const harmony = mergeByIdList<HarmonyEvent>(local.harmony, cloud.harmony, 'harmony', 'Chord at beat')
+  // Harmony: per-id merging is right for co-editing, but a sheet import /
+  // track switch REPLACES the whole list with fresh ids. Unioning those with
+  // the cloud's old chords produced a 244-chord soup — and worse, the silent
+  // no-conflict rebase then pushed it. Near-zero id overlap on two non-empty
+  // sides = a wholesale replacement: surface ONE dangerous conflict and keep
+  // the sides intact (cloud default, user can pick "mine").
+  const localHarmonyIds = new Set((local.harmony ?? []).map((h) => h.id))
+  const harmonyOverlap = (cloud.harmony ?? []).filter((h) => localHarmonyIds.has(h.id)).length
+  const harmonyWholesale =
+    (local.harmony?.length ?? 0) > 0 &&
+    (cloud.harmony?.length ?? 0) > 0 &&
+    harmonyOverlap / Math.max(local.harmony.length, cloud.harmony.length) < 0.1 &&
+    !canonicalEqual(local.harmony, cloud.harmony)
+  const harmony = harmonyWholesale
+    ? { merged: cloud.harmony, conflicts: [] as Conflict[] }
+    : mergeByIdList<HarmonyEvent>(local.harmony, cloud.harmony, 'harmony', 'Chord at beat')
+  if (harmonyWholesale) {
+    // mine/theirs carry the ACTUAL arrays so applyConflictDecisions can
+    // install the chosen side; the dialog's describe() truncates for display.
+    conflicts.push({
+      path: 'harmony',
+      label: `Chords (whole track: mine ${local.harmony.length} vs cloud ${cloud.harmony.length})`,
+      severity: 'dangerous',
+      mine: local.harmony,
+      theirs: cloud.harmony,
+    })
+  }
   conflicts.push(...harmony.conflicts)
   const sections = mergeByIdList<Section>(local.sections, cloud.sections, 'sections', 'Section')
   conflicts.push(...sections.conflicts)
@@ -465,6 +491,7 @@ export function applyConflictDecisions(
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
     else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
+    else if (c.path === 'harmony') result = { ...result, harmony: c.mine as SongMap['harmony'] }
     else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
     else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }
     else if (c.path === 'sectionLayers') result = { ...result, sectionLayers: c.mine as SongMap['sectionLayers'] }
