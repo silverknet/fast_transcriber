@@ -49,6 +49,7 @@
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { loadProjectSongIntoEditor, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
+import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
@@ -191,7 +192,7 @@
     // of their own buffer. Stems + original get the same preamble of silence
     // prepended so musical time aligns: the cue's "beat 1" sits at the same
     // mix-timeline second as each stem's `trim.startSec` sample.
-    if (forKey === 'cue' || forKey === 'click') return 0
+    if (forKey === 'cue' || forKey === 'click' || forKey === 'drums-gen') return 0
     const preludeSec = titleCuePreludeSec(sm, getPrimaryCueTrack(sm))
     let prependSec = 0
     const countInBeats = effectiveCountInBeats(sm)
@@ -694,6 +695,30 @@
               includeClicks: true,
               cueTrack: primaryCueTrack,
             })
+            return r.blob
+          } catch {
+            return null
+          }
+        },
+      })
+    }
+
+    // BarBro's generated drum track — present whenever drum hits have been
+    // detected. Prefers the saved render (its presence == fingerprint-fresh,
+    // same auto-drop contract as clickExport); otherwise synthesizes from
+    // the events in memory (fast, no network).
+    if (sm && sm.drumMidi && sm.drumMidi.events.length > 0) {
+      const dmRel = sm.drumMidi.renderExport?.relativePath
+      plan.push({
+        key: 'drums-gen',
+        label: 'BarBro Drums',
+        loader: async () => {
+          if (dmRel && ps.osPath && ps.activeSongFolder) {
+            const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, dmRel)
+            if (r.ok) return r.blob
+          }
+          try {
+            const r = await renderDrumTrackWavBlob(sm)
             return r.blob
           } catch {
             return null
