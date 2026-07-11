@@ -51,7 +51,7 @@ function mixClickKernel(
   }
 }
 
-function linearResampleMono(
+export function linearResampleMono(
   src: Float32Array,
   srcRate: number,
   destLen: number,
@@ -72,7 +72,7 @@ function linearResampleMono(
 }
 
 /** Sum resampled mono clip into `dst` starting at `offsetSec` on `dstRate` timeline. */
-function addClipAtOffset(
+export function addClipAtOffset(
   dst: Float32Array,
   dstRate: number,
   clipMono: Float32Array,
