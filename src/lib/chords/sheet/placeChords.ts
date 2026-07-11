@@ -204,7 +204,7 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
   const slots: Slot[] = sheet.anchoredChords.map((c) => ({
     sheetChord: c,
     beat: null,
-    origin: 'word',
+    origin: c.wordIdx === null || c.lineIdx === null ? 'spread' : 'word',
     needsSpread: c.wordIdx === null || c.lineIdx === null,
     anchorSec: null,
   }))
@@ -220,8 +220,18 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
       slot.needsSpread = true // no matching line — let the spread pass place it
       continue
     }
-    slot.anchorSec = word.startSec
-    slot.origin = word.aligned ? 'word' : 'estimated'
+    if (word.aligned) {
+      // Whisper actually HEARD this word — a trustworthy time anchor.
+      slot.anchorSec = word.startSec
+      slot.origin = 'word'
+    } else {
+      // The aligner only interpolated this word's time. Measured on real
+      // data those times drift by a full bar — worse than useless as
+      // anchors. Demote to the spread pass: the chord interpolates in BAR
+      // space between its flanking heard anchors instead (which reproduced
+      // the user's hand placement where trusting fake times missed by one).
+      slot.origin = 'estimated'
+    }
   }
 
   // ── Joint bar assignment for anchored chords (small DP) ────────────────
@@ -352,7 +362,9 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
     for (let k = j; k < slots.length; k++) {
       const s = slots[k]!
       if (s.anchorSec !== null) {
-        hiBarIndex = barIndexAtTime(s.anchorSec)
+        // Use the anchor's DP-chosen bar, not its raw word bar — the DP may
+        // round the anchor up a bar, and the gap must extend to meet it.
+        hiBarIndex = (s as Slot & { targetBar?: number }).targetBar ?? barIndexAtTime(s.anchorSec)
         break
       }
     }
@@ -375,11 +387,15 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
       if (last && g !== null && last[0]!.sheetChord.barGroup === g) last.push(s)
       else groupsInRun.push([s])
     }
-    // Does an anchored chord follow this run? Instrumental passages LEAD INTO
-    // what comes next — a one-bar walk-up before the verse belongs in the
-    // LAST bar of the gap, not the first. So runs followed by an anchor are
-    // END-aligned (last group on the last window bar, earlier groups spread
-    // backwards); a trailing run (outro) starts where the last section ended.
+    // Alignment inside the gap depends on what flanks the run:
+    //  - between two placed anchors → EVEN interpolation across the open
+    //    interval (this is what recovers a verse whose later lines whisper
+    //    couldn't hear: the chords land on the bar lattice between the
+    //    heard ones — measured to match the user's hand placement);
+    //  - before the first anchor → END-aligned (intros/pickups LEAD INTO
+    //    the song; a walk-up belongs in the last gap bar);
+    //  - after the last anchor (outro) → start-aligned.
+    const hasPrevPlaced = slots.slice(0, i).some((s) => s.beat !== null)
     let hasNextAnchor = false
     for (let k = j; k < slots.length; k++) {
       if (slots[k]!.anchorSec !== null) {
@@ -392,12 +408,47 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
     // beats — two vamp chords sharing a bar sit at 0 and mid; a piped 4-chord
     // walk-up takes all four beats.
     const gCount = groupsInRun.length
+    const positions: number[] = new Array(gCount)
+    const estPinPos = (members: typeof run): number | null => {
+      const est = members.find((s) => s.origin === 'estimated')
+      if (!est) return null
+      const c = est.sheetChord
+      const storedLine = c.lineIdx !== null ? lineMap.get(c.lineIdx) : undefined
+      const lineWords = storedLine !== undefined ? (wordsByLine.get(storedLine) ?? []) : []
+      const word =
+        lineWords.length > 0 ? lineWords[Math.min(c.wordIdx ?? 0, lineWords.length - 1)] : undefined
+      if (!word) return null
+      return Math.max(0, Math.min(m - 1, barIndexAtTime(word.startSec) - loBarIndex))
+    }
+    const headPins = !hasPrevPlaced && hasNextAnchor ? groupsInRun.map(estPinPos) : []
+    if (!hasPrevPlaced && hasNextAnchor && headPins.some((p) => p !== null)) {
+      // Head-of-song run WITH lyric-estimated pins: pinned groups sit at
+      // their own bar (the first verse chord belongs at the verse); untimed
+      // groups (vamps, walk-ups) pack right-to-left against the next pin so
+      // they lead INTO it.
+      let nextAvail = m - 1
+      for (let gi = gCount - 1; gi >= 0; gi--) {
+        const pin = headPins[gi]
+        const pos = pin !== null ? Math.min(nextAvail, pin) : nextAvail
+        positions[gi] = Math.max(0, pos)
+        nextAvail = Math.max(0, positions[gi]! - 1)
+      }
+    } else if (!hasPrevPlaced && hasNextAnchor) {
+      // No pins — END-align the whole run so it resolves into the anchor.
+      for (let gi = 0; gi < gCount; gi++) {
+        positions[gi] = m - 1 - Math.min(m - 1, Math.floor(((gCount - 1 - gi) * m) / gCount))
+      }
+    } else {
+      for (let gi = 0; gi < gCount; gi++) {
+        positions[gi] =
+          hasPrevPlaced && hasNextAnchor
+            ? Math.min(m - 1, Math.round(((gi + 1) * m) / (gCount + 1) - 0.5))
+            : Math.min(m - 1, Math.floor((gi * m) / gCount))
+      }
+    }
     const slotsByBar = new Map<number, typeof run>()
     for (let gi = 0; gi < gCount; gi++) {
-      const barPos = hasNextAnchor
-        ? m - 1 - Math.min(m - 1, Math.floor(((gCount - 1 - gi) * m) / gCount))
-        : Math.min(m - 1, Math.floor((gi * m) / gCount))
-      const bar = windowBars[barPos]!
+      const bar = windowBars[positions[gi]!]!
       const arr = slotsByBar.get(bar.index)
       if (arr) arr.push(...groupsInRun[gi]!)
       else slotsByBar.set(bar.index, [...groupsInRun[gi]!])
@@ -412,7 +463,9 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
         )
         const beat = beatsById.get(bar.beatIds[beatOffset] ?? '') ?? null
         barSlots[mj]!.beat = beat
-        barSlots[mj]!.origin = 'spread'
+        // Keep the 'estimated' label for lyric-anchored chords that landed
+        // here via interpolation; pure instrumentals stay 'spread'.
+        if (barSlots[mj]!.origin === 'word') barSlots[mj]!.origin = 'spread'
         if (!beat) stats.unplaceable++
         else lastKey = Math.max(lastKey, (bar.index << 4) + beatOffset)
       }
