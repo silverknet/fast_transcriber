@@ -98,13 +98,16 @@ describe('parseChordSheet', () => {
   it('parses the Love Never Felt So Good fixture', () => {
     const sheet = parseChordSheet(SHEET)
     expect(sheet.sections.map((s) => s.label)).toEqual(['Intro', 'Verse 1', 'Pre-Chorus'])
-    expect(sheet.chordCount).toBe(4 + 3 + 2 + 2)
+    // Intro line carries (x2) → its 4 chords play twice = 8.
+    expect(sheet.chordCount).toBe(8 + 3 + 2 + 2)
 
-    // Intro chords are instrumental (no lyric anchors).
+    // Intro chords are instrumental (no lyric anchors), repeated by the tag.
     const intro = sheet.anchoredChords.filter((c) => c.sectionIdx === 0)
-    expect(intro).toHaveLength(4)
+    expect(intro).toHaveLength(8)
     expect(intro.every((c) => c.wordIdx === null && c.lineIdx === null)).toBe(true)
-    expect(intro.map((c) => c.rawToken)).toEqual(['GM7', 'Am7/G', 'GM7', 'Am7/G'])
+    expect(intro.map((c) => c.rawToken)).toEqual([
+      'GM7', 'Am7/G', 'GM7', 'Am7/G', 'GM7', 'Am7/G', 'GM7', 'Am7/G',
+    ])
 
     // Verse line 1: Am9 over "Baby," (word 0), C/D over "love" (word 1),
     // GM7 near "good" (last word).
@@ -190,6 +193,30 @@ describe('parseChordSheet', () => {
     expect(s.sections).toEqual([{ label: '' }])
     expect(s.anchoredChords).toHaveLength(2)
     expect(s.anchoredChords[0]!.sectionIdx).toBe(0)
+  })
+
+  it('honors (x2) repeats on instrumental lines', () => {
+    const s = parseChordSheet('[Intro]\nGM7   Am7/G   GM7   Am7/G (x2)\n')
+    expect(s.chordCount).toBe(8)
+    expect(s.anchoredChords.map((c) => c.rawToken)).toEqual([
+      'GM7', 'Am7/G', 'GM7', 'Am7/G', 'GM7', 'Am7/G', 'GM7', 'Am7/G',
+    ])
+    // Each chord its own bar group (no pipes) — 8 distinct groups.
+    expect(new Set(s.anchoredChords.map((c) => c.barGroup)).size).toBe(8)
+  })
+
+  it('| pipes group instrumental chords into shared bars', () => {
+    const s = parseChordSheet('[Intro]\n| Am7 D/E Eb/F F/G |\n')
+    expect(s.chordCount).toBe(4)
+    expect(new Set(s.anchoredChords.map((c) => c.barGroup)).size).toBe(1)
+    const two = parseChordSheet('[Intro]\n| Am7 D/E | Eb/F F/G |\n')
+    expect(new Set(two.anchoredChords.map((c) => c.barGroup)).size).toBe(2)
+  })
+
+  it('repeat tags and pipes are ignored on chords-over-lyrics lines', () => {
+    const s = parseChordSheet('[Verse]\nAm | C (x2)\nHold me now tonight\n')
+    expect(s.chordCount).toBe(2)
+    expect(s.anchoredChords.every((c) => c.barGroup === null)).toBe(true)
   })
 
   it('consecutive chord lines (instrumental) stay unanchored', () => {

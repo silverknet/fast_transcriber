@@ -29,6 +29,19 @@ export function isDecorationToken(token: string): boolean {
   return DECORATION.some((re) => re.test(token))
 }
 
+/** `|` / `||` — bar separators. Chords between pipes share one bar. */
+export function isBarSeparatorToken(token: string): boolean {
+  return /^\|+$/.test(token)
+}
+
+/** Repeat tag value: `x2` → 2, `(x3)` → 3, `[X 4]` → 4; null otherwise. */
+export function repeatTagCount(token: string): number | null {
+  const m = token.match(/^[\[(]?\s*[x×]\s*(\d{1,2})\s*[\])]?$/i)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isInteger(n) && n >= 2 && n <= 16 ? n : null
+}
+
 function normalizeUnicode(s: string): string {
   return s.replace(/[♯♯]/g, '#').replace(/[♭♭]/g, 'b').replace(/°/g, 'dim')
 }

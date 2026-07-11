@@ -274,6 +274,42 @@ describe('placeChords', () => {
     expect(r.plan.placements[0]!.chord.displayRaw).toBe('Am')
   })
 
+  it('a piped walk-up compresses into ONE bar of the window', () => {
+    const sheet = parseChordSheet(
+      ['[Intro]', '| G Am C D |', '', '[Verse 1]', 'C', 'Hold me now tonight'].join('\n'),
+    )
+    const map = buildMap({
+      lyrics: {
+        sourceText: sheet.lyricsText,
+        words: words(['Hold', 4.0, 0], ['me', 4.3, 0], ['now', 4.6, 0], ['tonight', 5.0, 0]),
+      },
+    })
+    const r = placeChords(sheet, map)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const spread = r.plan.placements.filter((p) => p.origin === 'spread')
+    // All four share bar 0 (first window bar), one per beat.
+    expect(spread.map((p) => p.beatId)).toEqual(['b0_0', 'b0_1', 'b0_2', 'b0_3'])
+  })
+
+  it('(x2) doubles an instrumental vamp so it fills the window one-per-bar', () => {
+    const sheet = parseChordSheet(
+      ['[Intro]', 'G Am (x2)', '', '[Verse 1]', 'C', 'Hold me now tonight'].join('\n'),
+    )
+    const map = buildMap({
+      lyrics: {
+        sourceText: sheet.lyricsText,
+        words: words(['Hold', 4.0, 0], ['me', 4.3, 0], ['now', 4.6, 0], ['tonight', 5.0, 0]),
+      },
+    })
+    const r = placeChords(sheet, map)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const spread = r.plan.placements.filter((p) => p.origin === 'spread')
+    expect(spread.map((p) => p.beatId)).toEqual(['b0_0', 'b1_0', 'b2_0', 'b3_0'])
+    expect(spread.map((p) => p.chord.displayRaw)).toEqual(['G', 'Am', 'G', 'Am'])
+  })
+
   it('a fully instrumental sheet places without lyrics', () => {
     const sheet = parseChordSheet('[Intro]\nG  Am  C  D\n')
     const map = buildMap({})

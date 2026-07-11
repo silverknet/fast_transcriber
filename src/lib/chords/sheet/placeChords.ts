@@ -359,25 +359,63 @@ export function placeChords(sheet: ParsedChordSheet, map: SongMap): PlaceChordsR
 
     const windowBars = barsByIndex.filter((b) => b.index >= loBarIndex && b.index < hiBarIndex)
     const m = windowBars.length
-    const k = run.length
     if (m === 0) {
-      stats.unplaceable += k
+      stats.unplaceable += run.length
       i = j
       continue
     }
-    for (let r = 0; r < k; r++) {
-      const bar = windowBars[Math.min(m - 1, Math.floor((r * m) / k))]!
-      run[r]!.beat = allocateSlot(bar.index)
-      run[r]!.origin = 'spread'
-      if (!run[r]!.beat) stats.unplaceable++
+
+    // Chords sharing a `|` bar group occupy ONE bar together (walk-ups,
+    // turnarounds); groups spread evenly across the window. Without pipes
+    // every chord is its own group — the classic one-chord-per-slot vamp.
+    const groupsInRun: (typeof run)[] = []
+    for (const s of run) {
+      const g = s.sheetChord.barGroup
+      const last = groupsInRun[groupsInRun.length - 1]
+      if (last && g !== null && last[0]!.sheetChord.barGroup === g) last.push(s)
+      else groupsInRun.push([s])
     }
+    // Assign groups to bars (even spread), then lay out each bar's chords
+    // evenly across its beats — two vamp chords sharing a bar sit at 0 and
+    // mid; a piped 4-chord walk-up takes all four beats.
+    const gCount = groupsInRun.length
+    const slotsByBar = new Map<number, typeof run>()
+    for (let gi = 0; gi < gCount; gi++) {
+      const bar = windowBars[Math.min(m - 1, Math.floor((gi * m) / gCount))]!
+      const arr = slotsByBar.get(bar.index)
+      if (arr) arr.push(...groupsInRun[gi]!)
+      else slotsByBar.set(bar.index, [...groupsInRun[gi]!])
+    }
+    let lastKey = -1
+    for (const [barIndex, barSlots] of slotsByBar) {
+      const bar = barByIndex.get(barIndex)!
+      for (let mj = 0; mj < barSlots.length; mj++) {
+        const beatOffset = Math.min(
+          bar.beatIds.length - 1,
+          Math.floor((mj * bar.beatIds.length) / barSlots.length),
+        )
+        const beat = beatsById.get(bar.beatIds[beatOffset] ?? '') ?? null
+        barSlots[mj]!.beat = beat
+        barSlots[mj]!.origin = 'spread'
+        if (!beat) stats.unplaceable++
+        else lastKey = Math.max(lastKey, (bar.index << 4) + beatOffset)
+      }
+    }
+    if (lastKey > frontierKey) frontierKey = lastKey
     i = j
   }
 
-  // Collect (the allocator guarantees unique, monotone beats).
+  // Collect. The allocator keeps anchored beats unique; grouped spreads
+  // write directly, so drop any residual same-beat overlap (first wins).
+  const takenBeats = new Set<string>()
   const placements: ChordPlacement[] = []
   for (const slot of slots) {
     if (!slot.beat) continue
+    if (takenBeats.has(slot.beat.id)) {
+      stats.collisions++
+      continue
+    }
+    takenBeats.add(slot.beat.id)
     placements.push({
       beatId: slot.beat.id,
       barIndex: barsById.get(slot.beat.barId)?.index ?? -1,

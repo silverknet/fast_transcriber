@@ -3851,6 +3851,8 @@
                   Paste a sheet with chords written above the words (Ultimate Guitar style).
                   The sheet's words are only used to find where each chord goes — your saved
                   lyrics stay untouched, and your current chords are kept as a separate track.
+                  For instrumental lines, (x2) repeats the line and | pipes | group chords
+                  into one bar (e.g. a one-bar walk-up).
                 </DialogDescription>
               </DialogHeader>
               <textarea

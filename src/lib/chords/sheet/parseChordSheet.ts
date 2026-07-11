@@ -19,7 +19,12 @@
  */
 import type { ChordSymbol } from '$lib/songmap/types'
 import { cleanLyricLine, lyricWordsOfLine } from '$lib/lyrics/clean'
-import { isDecorationToken, parseStrictChordToken } from './chordToken'
+import {
+  isBarSeparatorToken,
+  isDecorationToken,
+  parseStrictChordToken,
+  repeatTagCount,
+} from './chordToken'
 
 export type SheetSection = {
   /** Marker text without brackets, e.g. `Verse 1`, `Pre-Chorus`. '' = implicit head. */
@@ -37,6 +42,13 @@ export type SheetChord = {
   wordIdx: number | null
   /** Position in sheet reading order — placement must stay monotone in this. */
   orderIdx: number
+  /**
+   * Bar group for INSTRUMENTAL chords (globally increasing). Chords sharing a
+   * group were written between the same `|` pipes — they belong in ONE bar
+   * (`| Am7 D/E Eb/F F/G |` = a one-bar walk-up). Without pipes each chord is
+   * its own group. Null for word-anchored chords.
+   */
+  barGroup: number | null
 }
 
 export type ParsedChordSheet = {
@@ -57,6 +69,10 @@ type Line = {
   kind: LineKind
   /** Chord tokens with their starting column (chord/ambiguous lines only). */
   tokens?: { token: string; col: number; chord: ChordSymbol }[]
+  /** Indices into `tokens` per `|`-delimited bar group (chord lines only). */
+  groups?: number[][]
+  /** Trailing repeat tag (`(x2)`) — meaningful for instrumental lines. */
+  repeat?: number
 }
 
 /** Tokenize a line, keeping each token's starting column. */
@@ -77,24 +93,45 @@ function classifyLine(raw: string): Line {
 
   const tokens = tokenizeWithColumns(raw)
   const chordTokens: { token: string; col: number; chord: ChordSymbol }[] = []
+  // `|` bar separators group chords into bars; a trailing `(xN)` repeats an
+  // instrumental line. Both are notation, not lyrics.
+  const groups: number[][] = [[]]
+  let sawPipe = false
+  let repeat = 1
   for (const t of tokens) {
+    if (isBarSeparatorToken(t.token)) {
+      sawPipe = true
+      if (groups[groups.length - 1]!.length > 0) groups.push([])
+      continue
+    }
+    const rep = repeatTagCount(t.token)
+    if (rep !== null) {
+      repeat = rep
+      continue
+    }
     if (isDecorationToken(t.token)) continue
     const p = parseStrictChordToken(t.token)
     if (!p.ok) return { raw, kind: 'lyric' }
+    groups[groups.length - 1]!.push(chordTokens.length)
     chordTokens.push({ ...t, chord: p.chord })
   }
+  if (groups[groups.length - 1]!.length === 0) groups.pop()
   // All tokens were decorations (`N.C.`, `x2`, `|`) — part of the chord
   // notation, not lyrics. Treat as an empty chord line so it vanishes.
   if (chordTokens.length === 0) return { raw, kind: 'chord', tokens: [] }
+  // Without pipes, every chord is its own bar group.
+  const effectiveGroups = sawPipe ? groups : chordTokens.map((_, i) => [i])
 
   // A lone `A` / `Am` flush against the left margin reads as a lyric ("Am I
   // wrong…" wraps, one-word lines happen). Indentation = column positioning =
   // chord. Otherwise defer to neighbor context (resolved in a second pass).
   if (chordTokens.length === 1 && tokens.length === 1 && AMBIGUOUS_BARE.test(tokens[0]!.token)) {
     const indented = /^\s/.test(raw)
-    if (!indented) return { raw, kind: 'ambiguous', tokens: chordTokens }
+    if (!indented) {
+      return { raw, kind: 'ambiguous', tokens: chordTokens, groups: effectiveGroups, repeat }
+    }
   }
-  return { raw, kind: 'chord', tokens: chordTokens }
+  return { raw, kind: 'chord', tokens: chordTokens, groups: effectiveGroups, repeat }
 }
 
 /** Word index of the lyric-line word anchored at chord column `col`. */
@@ -166,6 +203,7 @@ export function parseChordSheet(raw: string): ParsedChordSheet {
   const anchoredChords: SheetChord[] = []
   let currentSection = -1
   let orderIdx = 0
+  let barGroupCounter = 0
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!
     if (l.kind === 'marker') {
@@ -189,22 +227,49 @@ export function parseChordSheet(raw: string): ParsedChordSheet {
         ? lyricWordsOfLine(cleanLyricLine(lyricLine.raw) ?? '').length
         : 0
 
-    for (const t of l.tokens) {
-      let wordIdx: number | null = null
-      if (lyricLine && lineIdx !== null && cleanedWordCount > 0) {
-        const rawIdx = wordIndexAtColumn(lyricLine.raw, t.col)
-        // Cleaning only trims edges / drops a trailing repeat tag, so raw and
-        // cleaned word indices agree — clamp covers the dropped-tail case.
-        wordIdx = rawIdx === null ? null : Math.min(rawIdx, cleanedWordCount - 1)
+    if (lyricLine) {
+      // Chords-over-lyrics line: anchor each chord to its word. Pipes and
+      // repeat tags are ignored here — the lyric anchors carry the timing.
+      for (const t of l.tokens) {
+        let wordIdx: number | null = null
+        if (lineIdx !== null && cleanedWordCount > 0) {
+          const rawIdx = wordIndexAtColumn(lyricLine.raw, t.col)
+          // Cleaning only trims edges / drops a trailing repeat tag, so raw and
+          // cleaned word indices agree — clamp covers the dropped-tail case.
+          wordIdx = rawIdx === null ? null : Math.min(rawIdx, cleanedWordCount - 1)
+        }
+        anchoredChords.push({
+          chord: t.chord,
+          rawToken: t.token,
+          sectionIdx: currentSection,
+          lineIdx: wordIdx === null ? null : lineIdx,
+          wordIdx,
+          orderIdx: orderIdx++,
+          barGroup: null,
+        })
       }
-      anchoredChords.push({
-        chord: t.chord,
-        rawToken: t.token,
-        sectionIdx: currentSection,
-        lineIdx: wordIdx === null ? null : lineIdx,
-        wordIdx,
-        orderIdx: orderIdx++,
-      })
+    } else {
+      // Instrumental line: honor `|` bar groups and the `(xN)` repeat tag —
+      // "GM7 Am7/G (x2)" plays the sequence twice; "| A B C D |" is one bar.
+      const groups = l.groups ?? l.tokens.map((_, gi) => [gi])
+      const repeat = Math.max(1, l.repeat ?? 1)
+      for (let rep = 0; rep < repeat; rep++) {
+        for (const group of groups) {
+          const g = barGroupCounter++
+          for (const ti of group) {
+            const t = l.tokens[ti]!
+            anchoredChords.push({
+              chord: t.chord,
+              rawToken: t.token,
+              sectionIdx: currentSection,
+              lineIdx: null,
+              wordIdx: null,
+              orderIdx: orderIdx++,
+              barGroup: g,
+            })
+          }
+        }
+      }
     }
   }
 
