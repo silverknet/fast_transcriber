@@ -138,7 +138,7 @@
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, ChevronDown, FileText, Layers, Pause, Pencil, Play, RefreshCw, Trash2 } from '@lucide/svelte'
+  import { ArrowLeft, Layers, Pause, Pencil, Play, RefreshCw, Trash2 } from '@lucide/svelte'
   import {
     Dialog,
     DialogContent,
@@ -147,13 +147,6 @@
     DialogHeader,
     DialogTitle,
   } from '$lib/components/ui/dialog'
-  import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
-  } from '$lib/components/ui/dropdown-menu'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { trimAudioFileToWav } from '$lib/audio/trimAudio'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
@@ -2504,24 +2497,69 @@
   const activeChordTrackLabel = $derived($songMap ? activeChordTrackName($songMap) : '')
   let chordLayerMsg = $state('')
 
-  function switchChordTrack(layerId: string) {
+  // ── Loadouts: a chord track + section layout that travel together ──────
+  // Pairing is by layer NAME — a sheet import stashes both sides under the
+  // same name, so "Sheet import" is one loadout with chords AND sections.
+  let loadoutsOpen = $state(false)
+  type LoadoutRow = {
+    name: string
+    chords?: (typeof chordLayerList)[number]
+    sections?: (typeof sectionLayerList)[number]
+  }
+  const storedLoadouts = $derived.by<LoadoutRow[]>(() => {
+    const byName = new Map<string, LoadoutRow>()
+    for (const l of chordLayerList) byName.set(l.name, { name: l.name, chords: l })
+    for (const l of sectionLayerList) {
+      const cur = byName.get(l.name)
+      if (cur) cur.sections = l
+      else byName.set(l.name, { name: l.name, sections: l })
+    }
+    return [...byName.values()].sort((a, b) =>
+      (b.chords?.createdAt ?? b.sections?.createdAt ?? '').localeCompare(
+        a.chords?.createdAt ?? a.sections?.createdAt ?? '',
+      ),
+    )
+  })
+
+  function useLoadout(row: LoadoutRow) {
     chordLayerMsg = ''
-    const p = patchSongMap((m) => {
-      const r = switchToChordLayer(m, layerId, newId)
-      return r.ok ? r.map : m
-    })
-    if (p.ok) chordLayerMsg = 'Switched — the other track is kept.'
+    beginPatchBatch()
+    try {
+      if (row.chords) {
+        patchSongMap((m) => {
+          const r = switchToChordLayer(m, row.chords!.id, newId)
+          return r.ok ? r.map : m
+        })
+      }
+      if (row.sections) {
+        patchSongMap((m) => {
+          const r = switchToSectionLayer(m, row.sections!.id, newId)
+          return r.ok ? r.map : m
+        })
+      }
+    } finally {
+      endPatchBatch()
+    }
+    chordLayerMsg = `Switched to “${row.name}” — the previous loadout is kept.`
   }
 
-  function removeChordTrack(layerId: string) {
-    const layer = chordLayerList.find((l) => l.id === layerId)
-    if (!layer) return
-    if (!window.confirm(`Delete the stored chord track “${layer.name}” (${layer.harmony.length} chords)? The active chords stay.`)) {
+  function deleteLoadout(row: LoadoutRow) {
+    const parts = [
+      row.chords ? `${row.chords.harmony.length} chords` : null,
+      row.sections ? `${row.sections.sections.length} sections` : null,
+    ].filter(Boolean)
+    if (!window.confirm(`Delete the stored loadout “${row.name}” (${parts.join(' + ')})? The active chords and sections stay.`)) {
       return
     }
     chordLayerMsg = ''
-    const p = patchSongMap((m) => deleteChordLayer(m, layerId))
-    if (p.ok) chordLayerMsg = `Deleted “${layer.name}”.`
+    beginPatchBatch()
+    try {
+      if (row.chords) patchSongMap((m) => deleteChordLayer(m, row.chords!.id))
+      if (row.sections) patchSongMap((m) => deleteSectionLayer(m, row.sections!.id))
+    } finally {
+      endPatchBatch()
+    }
+    chordLayerMsg = `Deleted “${row.name}”.`
   }
 
   // ── Parallel section layouts: active = sm.sections; layers swap losslessly ──
@@ -2529,25 +2567,7 @@
   const activeSectionLayoutLabel = $derived($songMap ? activeSectionLayoutName($songMap) : '')
   let sectionLayerMsg = $state('')
 
-  function switchSectionLayout(layerId: string) {
-    sectionLayerMsg = ''
-    const p = patchSongMap((m) => {
-      const r = switchToSectionLayer(m, layerId, newId)
-      return r.ok ? r.map : m
-    })
-    if (p.ok) sectionLayerMsg = 'Switched — the other layout is kept.'
-  }
 
-  function removeSectionLayout(layerId: string) {
-    const layer = sectionLayerList.find((l) => l.id === layerId)
-    if (!layer) return
-    if (!window.confirm(`Delete the stored section layout “${layer.name}” (${layer.sections.length} sections)? The active sections stay.`)) {
-      return
-    }
-    sectionLayerMsg = ''
-    const p = patchSongMap((m) => deleteSectionLayer(m, layerId))
-    if (p.ok) sectionLayerMsg = `Deleted “${layer.name}”.`
-  }
 
   // ── Chord inspector (debug): the stored truth, row by row ────────────────
   // Lets the user verify what's IN the song against what the grid draws —
@@ -2610,7 +2630,6 @@
   // ── "Import chord sheet" (Chords tab): its own paste box, independent of
   // the lyrics. Sheet lyric lines fuzzy-match against the stored fitted
   // lyrics, so a lazy UG sheet (skipped repeats, "Chorus x2") still anchors.
-  let chordSheetOpen = $state(false)
   let chordSheetDraft = $state('')
   const chordSheetParsed = $derived(parseChordSheet(chordSheetDraft))
   let chordsPlaceBusy = $state(false)
@@ -2680,7 +2699,6 @@
         if (hadChords) {
           chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time.'
         }
-        chordSheetOpen = false // done — the toolbar status line carries the summary
       } finally {
         endPatchBatch()
       }
@@ -3718,59 +3736,24 @@
           </div>
         </details>
         {#if editMode === 'sections'}
-          {#if sectionLayerList.length > 0}
-            <!-- Parallel section layouts — same lossless switching as chord tracks. -->
-            <div class="border-foreground bg-muted mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-2 px-2 py-1.5 text-xs">
-              <DropdownMenu>
-                <DropdownMenuTrigger>
-                  {#snippet child({ props })}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
-                      title="Section layouts — switch which layout is on the timeline"
-                      {...props}
-                    >
-                      <Layers class="size-3.5" aria-hidden="true" />
-                      <span class="max-w-36 truncate">{activeSectionLayoutLabel}</span>
-                      <ChevronDown class="size-3" aria-hidden="true" />
-                    </Button>
-                  {/snippet}
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" class="min-w-56">
-                  <div class="text-muted-foreground px-2 py-1 text-[10px] font-bold uppercase tracking-wider">
-                    Section layouts
-                  </div>
-                  <DropdownMenuItem disabled class="font-bold">
-                    ✓ {activeSectionLayoutLabel}
-                    <span class="text-muted-foreground ml-auto font-normal">on the timeline</span>
-                  </DropdownMenuItem>
-                  {#each sectionLayerList as layer (layer.id)}
-                    <DropdownMenuItem
-                      class=""
-                      onclick={() => switchSectionLayout(layer.id)}
-                      title={`Switch to “${layer.name}” — the current layout is kept`}
-                    >
-                      {layer.name}
-                      <span class="text-muted-foreground ml-auto">
-                        {layer.sections.length} sections{layerAgeLabel(layer.createdAt) ? ` · ${layerAgeLabel(layer.createdAt)}` : ''}
-                      </span>
-                    </DropdownMenuItem>
-                  {/each}
-                  <DropdownMenuSeparator class="" />
-                  {#each sectionLayerList as layer (`del-${layer.id}`)}
-                    <DropdownMenuItem class="text-destructive" onclick={() => removeSectionLayout(layer.id)}>
-                      <Trash2 class="size-3.5" aria-hidden="true" />
-                      Delete “{layer.name}”…
-                    </DropdownMenuItem>
-                  {/each}
-                </DropdownMenuContent>
-              </DropdownMenu>
-              {#if sectionLayerMsg}
-                <span class="text-muted-foreground" role="status">{sectionLayerMsg}</span>
+          <div class="mb-3 flex flex-wrap items-center gap-2 px-1 text-xs">
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
+              onclick={() => (loadoutsOpen = true)}
+              title="Loadouts — stored chord + section sets; switch, delete, or import a sheet"
+            >
+              <Layers class="size-3.5" aria-hidden="true" />
+              {activeSectionLayoutLabel}
+              {#if storedLoadouts.length > 0}
+                <span class="text-muted-foreground font-normal">· {storedLoadouts.length} stored</span>
               {/if}
-            </div>
-          {/if}
+            </Button>
+            {#if sectionLayerMsg}
+              <span class="text-muted-foreground" role="status">{sectionLayerMsg}</span>
+            {/if}
+          </div>
           <SectionSuggestionBanner
             suggestion={activeSuggestion}
             index={activeSuggestionPosition}
@@ -3786,71 +3769,18 @@
           <!-- ── Chords toolbar: one row instead of three stacked blocks.
                Left: chord-track picker + sheet import. Right: suggestions. ── -->
           <div class="border-foreground bg-muted mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-2 px-2 py-1.5 text-xs">
-            <DropdownMenu>
-              <DropdownMenuTrigger>
-                {#snippet child({ props })}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
-                    title={chordLayerList.length > 0
-                      ? 'Chord tracks — switch which set of chords is on the grid'
-                      : 'Chord tracks — import a sheet to create a second one'}
-                    {...props}
-                  >
-                    <Layers class="size-3.5" aria-hidden="true" />
-                    <span class="max-w-36 truncate">{activeChordTrackLabel}</span>
-                    <ChevronDown class="size-3" aria-hidden="true" />
-                  </Button>
-                {/snippet}
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" class="min-w-56">
-                <div class="text-muted-foreground px-2 py-1 text-[10px] font-bold uppercase tracking-wider">
-                  Chord tracks
-                </div>
-                <DropdownMenuItem disabled class="font-bold">
-                  ✓ {activeChordTrackLabel}
-                  <span class="text-muted-foreground ml-auto font-normal">on the grid</span>
-                </DropdownMenuItem>
-                {#each chordLayerList as layer (layer.id)}
-                  <DropdownMenuItem
-                    class=""
-                    onclick={() => switchChordTrack(layer.id)}
-                    title={`Switch to “${layer.name}” — the current track is kept`}
-                  >
-                    {layer.name}
-                    <span class="text-muted-foreground ml-auto">
-                      {layer.harmony.length} chords{layerAgeLabel(layer.createdAt) ? ` · ${layerAgeLabel(layer.createdAt)}` : ''}
-                    </span>
-                  </DropdownMenuItem>
-                {/each}
-                {#if chordLayerList.length === 0}
-                  <DropdownMenuItem disabled class="text-muted-foreground italic">
-                    Import a sheet to add another track
-                  </DropdownMenuItem>
-                {/if}
-                <DropdownMenuSeparator class="" />
-                <DropdownMenuItem class="" onclick={() => (chordSheetOpen = true)}>
-                  <FileText class="size-3.5" aria-hidden="true" />
-                  Import chord sheet…
-                </DropdownMenuItem>
-                {#each chordLayerList as layer (`del-${layer.id}`)}
-                  <DropdownMenuItem class="text-destructive" onclick={() => removeChordTrack(layer.id)}>
-                    <Trash2 class="size-3.5" aria-hidden="true" />
-                    Delete “{layer.name}”…
-                  </DropdownMenuItem>
-                {/each}
-              </DropdownMenuContent>
-            </DropdownMenu>
             <Button
               variant="outline"
               size="sm"
               class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
-              onclick={() => (chordSheetOpen = true)}
-              title="Paste an Ultimate-Guitar-style sheet and put every chord on its beat"
+              onclick={() => (loadoutsOpen = true)}
+              title="Loadouts — stored chord + section sets; switch, delete, or import a sheet"
             >
-              <FileText class="size-3.5" aria-hidden="true" />
-              Import sheet…
+              <Layers class="size-3.5" aria-hidden="true" />
+              <span class="max-w-40 truncate">{activeChordTrackLabel}</span>
+              {#if storedLoadouts.length > 0}
+                <span class="text-muted-foreground font-normal">· {storedLoadouts.length} stored</span>
+              {/if}
             </Button>
 
             <Button
@@ -3955,28 +3885,80 @@
             </div>
           {/if}
 
-          <!-- Import chord sheet: modal, independent of the lyrics box — the
-               sheet's words only locate chords via the fitted lyrics. -->
-          <Dialog open={chordSheetOpen} onOpenChange={(v: boolean) => (chordSheetOpen = v)}>
+          <!-- Loadouts: stored chord+section sets — list, switch, delete, and
+               import a new sheet, all in one place. -->
+          <Dialog open={loadoutsOpen} onOpenChange={(v: boolean) => (loadoutsOpen = v)}>
             <DialogContent class="flex max-w-2xl flex-col gap-3 p-4">
               <DialogHeader>
                 <DialogTitle class="flex items-center gap-2">
-                  <FileText class="size-4" aria-hidden="true" />
-                  Import chord sheet
+                  <Layers class="size-4" aria-hidden="true" />
+                  Loadouts
                 </DialogTitle>
                 <DialogDescription>
-                  Paste a sheet with chords written above the words (Ultimate Guitar style).
-                  The sheet's words are only used to find where each chord goes — your saved
-                  lyrics stay untouched, and your current chords are kept as a separate track.
-                  For instrumental lines, (x2) repeats the line and | pipes | group chords
-                  into one bar (e.g. a one-bar walk-up).
+                  A loadout is a matched set of chords and sections. Importing a sheet creates
+                  one; switching keeps the current set stored. Nothing is ever overwritten.
                 </DialogDescription>
               </DialogHeader>
+
+              <div class="border-foreground bg-muted flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
+                <span class="border-foreground bg-foreground text-background border px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase">Active</span>
+                <span class="font-bold">{activeChordTrackLabel}</span>
+                <span class="text-muted-foreground">
+                  {$songMap?.harmony.length ?? 0} chords · {$songMap?.sections.length ?? 0} sections{activeSectionLayoutLabel !== activeChordTrackLabel ? ` · section layout: ${activeSectionLayoutLabel}` : ''}
+                </span>
+              </div>
+
+              {#if storedLoadouts.length === 0}
+                <p class="text-muted-foreground text-xs italic">
+                  No stored loadouts yet — import a sheet below to create one.
+                </p>
+              {:else}
+                <div class="flex max-h-44 flex-col gap-1 overflow-auto">
+                  {#each storedLoadouts as row (row.name)}
+                    <div class="border-foreground/50 flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
+                      <span class="font-bold">{row.name}</span>
+                      <span class="text-muted-foreground">
+                        {row.chords ? `${row.chords.harmony.length} chords` : 'no chords'} ·
+                        {row.sections ? `${row.sections.sections.length} sections` : 'no sections'}
+                        {layerAgeLabel(row.chords?.createdAt ?? row.sections?.createdAt) ? ` · ${layerAgeLabel(row.chords?.createdAt ?? row.sections?.createdAt)}` : ''}
+                      </span>
+                      <span class="ml-auto"></span>
+                      <Button
+                        size="sm"
+                        class="h-6 border-2 px-2 text-xs font-bold"
+                        onclick={() => useLoadout(row)}
+                        title={`Make “${row.name}” active — the current loadout is kept`}
+                      >
+                        Use
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        class="text-destructive hover:bg-destructive hover:text-background h-6 border-2 px-1.5"
+                        onclick={() => deleteLoadout(row)}
+                        aria-label={`Delete loadout ${row.name}`}
+                        title={`Delete “${row.name}”…`}
+                      >
+                        <Trash2 class="size-3" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              {#if chordLayerMsg}
+                <p class="text-muted-foreground text-xs" role="status">{chordLayerMsg}</p>
+              {/if}
+
+              <div class="border-foreground/40 border-t-2 border-dashed"></div>
+
+              <p class="text-muted-foreground text-[10px] font-bold uppercase tracking-wider">
+                Import chord sheet
+              </p>
               <textarea
                 bind:value={chordSheetDraft}
-                rows="12"
-                placeholder={'[Verse 1]\nAm9  C/D              GM7\nBaby, love never felt so good\n…'}
-                class="border-foreground bg-background max-h-[45vh] w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
+                rows="8"
+                placeholder={'Paste a chord sheet (chords above the words, Ultimate Guitar style).\nFor instrumental lines, (x2) repeats the line and | pipes | group chords into one bar.'}
+                class="border-foreground bg-background max-h-[35vh] w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
                 spellcheck="false"
               ></textarea>
               <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -3994,9 +3976,12 @@
               {#if chordsPlaceErr}
                 <p class="text-destructive text-xs">{chordsPlaceErr}</p>
               {/if}
+              {#if chordsPlaceMsg}
+                <p class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</p>
+              {/if}
               <DialogFooter class="gap-2">
-                <Button variant="outline" class="border-2 text-xs font-bold" onclick={() => (chordSheetOpen = false)}>
-                  Cancel
+                <Button variant="outline" class="border-2 text-xs font-bold" onclick={() => (loadoutsOpen = false)}>
+                  Close
                 </Button>
                 <Button
                   class="border-2 text-xs font-bold"
