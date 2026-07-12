@@ -47,6 +47,7 @@
   } from '$lib/audio/mastering'
   import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { loadProjectDrumKit } from '$lib/client/projectDrumKit'
   import { loadProjectSongIntoEditor, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { renderBassTrackWavBlob } from '$lib/audio/renderBassTrack'
@@ -710,16 +711,21 @@
     // the events in memory (fast, no network).
     if (sm && sm.drumMidi && sm.drumMidi.events.length > 0) {
       const dmRel = sm.drumMidi.renderExport?.relativePath
+      // "Your kit" always re-synthesizes: the render fingerprint can't see
+      // the user's sample FILES change, so a saved render is never trusted.
+      const kitIsCustom = sm.drumMidi.kit === 'custom'
       plan.push({
         key: 'drums-gen',
         label: 'BarBro Drums',
         loader: async () => {
-          if (dmRel && ps.osPath && ps.activeSongFolder) {
+          if (!kitIsCustom && dmRel && ps.osPath && ps.activeSongFolder) {
             const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, dmRel)
             if (r.ok) return r.blob
           }
           try {
-            const r = await renderDrumTrackWavBlob(sm)
+            const custom =
+              kitIsCustom && ps.osPath ? await loadProjectDrumKit(ps.osPath) : null
+            const r = await renderDrumTrackWavBlob(sm, custom ? { customKit: custom.kit } : {})
             return r.blob
           } catch {
             return null

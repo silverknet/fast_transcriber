@@ -1,7 +1,7 @@
 /**
  * Drum kits for the generated drum track.
  *
- * Two kits ship today:
+ * Three kits:
  *  - `synth` ("Electronic kit") — every voice synthesized in code with a
  *    seeded PRNG, so output is bit-identical across machines and builds.
  *  - `acoustic` ("Acoustic kit") — loads CC0 one-shot samples from
@@ -9,6 +9,11 @@
  *    falls back to a warmer, acoustic-leaning synthesized variant so the
  *    kit is always complete. See `static/drums/acoustic/README.md` for the
  *    sample drop-in contract (CC0-only, provenance in LICENSE.md).
+ *  - `custom` ("Your kit") — the user's own one-shots from the PROJECT
+ *    folder (`kits/drums/<voice>.wav`), loaded via the sidecar by
+ *    `$lib/client/projectDrumKit.ts` and assembled with `buildCustomKit`.
+ *    Nothing is bundled — the user supplies (and licenses) their own
+ *    sounds, e.g. exported from their DAW.
  *
  * All voices are mono Float32Array at 44.1 kHz, peak-normalized then scaled
  * by a per-voice mix gain — consistent levels are the whole point.
@@ -18,7 +23,7 @@ import type { DrumClass } from '$lib/songmap/types'
 
 export const DRUM_KIT_SAMPLE_RATE = 44100
 
-export type DrumKitId = 'synth' | 'acoustic'
+export type DrumKitId = 'synth' | 'acoustic' | 'custom'
 
 export type DrumKit = {
   id: DrumKitId
@@ -29,6 +34,7 @@ export type DrumKit = {
 export const DRUM_KITS: { id: DrumKitId; label: string }[] = [
   { id: 'synth', label: 'Electronic kit' },
   { id: 'acoustic', label: 'Acoustic kit' },
+  { id: 'custom', label: 'Your kit' },
 ]
 
 // ── Deterministic noise ──────────────────────────────────────────────────────
@@ -264,12 +270,13 @@ export function buildAcousticFallbackVoices(): Record<DrumClass, Float32Array> {
 
 const kitCache = new Map<DrumKitId, Promise<DrumKit>>()
 
-async function fetchAcousticSample(cls: DrumClass): Promise<Float32Array | null> {
-  if (typeof fetch !== 'function' || typeof AudioContext === 'undefined') return null
+/**
+ * Decode arbitrary audio bytes into a kit voice: mono, 44.1 kHz,
+ * peak-normalized. Browser-only (needs `decodeAudioData`); null on failure.
+ */
+export async function decodeToKitVoice(bytes: ArrayBuffer): Promise<Float32Array | null> {
+  if (typeof AudioContext === 'undefined') return null
   try {
-    const res = await fetch(`/drums/acoustic/${cls}.wav`)
-    if (!res.ok) return null
-    const bytes = await res.arrayBuffer()
     const ac = new AudioContext({ sampleRate: DRUM_KIT_SAMPLE_RATE })
     try {
       const buf = await ac.decodeAudioData(bytes)
@@ -293,12 +300,48 @@ async function fetchAcousticSample(cls: DrumClass): Promise<Float32Array | null>
   }
 }
 
+/**
+ * Assemble the user's kit from whatever one-shots they provided (already
+ * decoded via `decodeToKitVoice`). Same level treatment as bundled kits —
+ * peak-normalized input, per-voice mix gain — and any missing voice falls
+ * back to the warm acoustic synth so the kit always plays complete.
+ */
+export function buildCustomKit(samples: Partial<Record<DrumClass, Float32Array>>): DrumKit {
+  const fallback = buildAcousticFallbackVoices()
+  const voices = { ...fallback }
+  for (const cls of Object.keys(VOICE_MIX_GAIN) as DrumClass[]) {
+    const s = samples[cls]
+    if (!s || s.length === 0) continue
+    const scaled = new Float32Array(s.length)
+    const g = VOICE_MIX_GAIN[cls]
+    for (let i = 0; i < s.length; i++) scaled[i] = s[i]! * g
+    voices[cls] = scaled
+  }
+  return { id: 'custom', label: 'Your kit', voices }
+}
+
+async function fetchAcousticSample(cls: DrumClass): Promise<Float32Array | null> {
+  if (typeof fetch !== 'function') return null
+  try {
+    const res = await fetch(`/drums/acoustic/${cls}.wav`)
+    if (!res.ok) return null
+    return await decodeToKitVoice(await res.arrayBuffer())
+  } catch {
+    return null
+  }
+}
+
 export function loadDrumKit(id: DrumKitId): Promise<DrumKit> {
   const cached = kitCache.get(id)
   if (cached) return cached
   const p = (async (): Promise<DrumKit> => {
     if (id === 'synth') {
       return { id, label: 'Electronic kit', voices: buildSynthKit() }
+    }
+    if (id === 'custom') {
+      // The custom kit needs project context (`loadProjectDrumKit`); this
+      // path is the no-samples fallback so callers always get a playable kit.
+      return buildCustomKit({})
     }
     const fallback = buildAcousticFallbackVoices()
     const voices = { ...fallback }

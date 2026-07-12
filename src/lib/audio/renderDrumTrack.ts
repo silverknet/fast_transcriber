@@ -17,7 +17,8 @@ import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { quantizeTimesToGrid, dedupeDrumEvents } from '$lib/songmap/quantizeToGrid'
 import { inferDrumGroove } from '$lib/songmap/drumGroove'
-import { DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKit, type DrumKitId } from './drumKits'
+import { DRUM_KIT_SAMPLE_RATE, loadDrumKit } from './drumKits'
+import type { DrumKit, DrumKitId } from './drumKits'
 import { applyBusCompression, applyReverb, applySaturation, voicePanGains } from './drumBus'
 import type { DrumMidiEvent, DrumQuantize, SongMap } from '$lib/songmap/types'
 
@@ -96,7 +97,7 @@ export type RenderDrumTrackResult = {
 
 export async function renderDrumTrackWavBlob(
   sm: SongMap,
-  opts: { kitId?: DrumKitId; quantize?: DrumQuantize } = {},
+  opts: { kitId?: DrumKitId; quantize?: DrumQuantize; customKit?: DrumKit } = {},
 ): Promise<RenderDrumTrackResult> {
   const dm = sm.drumMidi
   if (!dm || dm.events.length === 0) throw new Error('Detect drums first.')
@@ -112,7 +113,8 @@ export async function renderDrumTrackWavBlob(
   const totalSec = preludeSec + prependSec + plan.songDurationSec
   if (!(totalSec > 0)) throw new Error('Drum track duration is zero')
 
-  const kitId = opts.kitId ?? (dm.kit === 'acoustic' ? 'acoustic' : 'synth')
+  const kitId =
+    opts.kitId ?? (dm.kit === 'acoustic' || dm.kit === 'custom' ? (dm.kit as DrumKitId) : 'synth')
   const quantize = opts.quantize ?? dm.quantize ?? 'off'
   const style = dm.style ?? 'steady'
 
@@ -126,7 +128,9 @@ export async function renderDrumTrackWavBlob(
     events = dedupeDrumEvents(quantizeTimesToGrid(events, beatsSorted, barsById, quantize))
   }
 
-  const kit = await loadDrumKit(kitId)
+  // The caller resolves "Your kit" (project files) and passes it in;
+  // without it, loadDrumKit('custom') degrades to the built-in fallbacks.
+  const kit = kitId === 'custom' && opts.customKit ? opts.customKit : await loadDrumKit(kitId)
   const sampleRate = DRUM_KIT_SAMPLE_RATE
   const frames = Math.max(1, Math.ceil(totalSec * sampleRate))
   const dataL = new Float32Array(frames)

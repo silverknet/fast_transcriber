@@ -15,7 +15,12 @@
     setupSectionsDeps,
   } from '$lib/client/desktopBridge'
   import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
-  import { DRUM_KITS, DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKitId } from '$lib/audio/drumKits'
+  import {
+    loadProjectDrumKit,
+    PROJECT_DRUM_KIT_DIR,
+    type ProjectDrumKit,
+  } from '$lib/client/projectDrumKit'
+  import { DRUM_KITS, DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKit, type DrumKitId } from '$lib/audio/drumKits'
   import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
   import { synthBassNote, renderBassTrackWavBlob } from '$lib/audio/renderBassTrack'
   import {
@@ -55,6 +60,57 @@
   const counts = $derived(dm ? drumClassCounts(dm.events) : null)
   const fresh = $derived($songMap ? hasFreshDrumMidi($songMap) : false)
   const renderSaved = $derived(!!dm?.renderExport?.relativePath)
+  const kitId = $derived<DrumKitId>(
+    dm?.kit === 'acoustic' || dm?.kit === 'custom' ? dm.kit : 'synth',
+  )
+
+  // "Your kit" status — loaded from the project folder when selected.
+  let customKitInfo = $state<ProjectDrumKit | null>(null)
+  let customKitChecked = $state(false)
+  $effect(() => {
+    const osPath = $projectStore.osPath
+    if (kitId !== 'custom' || !osPath) return
+    let cancelled = false
+    void loadProjectDrumKit(osPath).then((info) => {
+      if (cancelled) return
+      customKitInfo = info
+      customKitChecked = true
+    })
+    return () => {
+      cancelled = true
+    }
+  })
+
+  async function reloadCustomKit() {
+    const osPath = $projectStore.osPath
+    if (!osPath) return
+    customKitChecked = false
+    customKitInfo = await loadProjectDrumKit(osPath, { fresh: true })
+    customKitChecked = true
+    onChanged?.()
+  }
+
+  const CLASS_LABELS: Record<DrumClass, string> = {
+    kick: 'kick',
+    snare: 'snare',
+    hihat: 'hi-hat',
+    tom: 'tom',
+    cymbal: 'crash',
+  }
+  const customKitLine = $derived.by(() => {
+    if (kitId !== 'custom' || !customKitChecked) return ''
+    if (!customKitInfo) {
+      return `No sounds found yet. Add WAV files named kick.wav, snare.wav, hihat.wav, tom.wav and cymbal.wav to ${PROJECT_DRUM_KIT_DIR} inside your project folder, then press Reload sounds.`
+    }
+    const found = customKitInfo.found.map((c) => CLASS_LABELS[c])
+    const missing = (Object.keys(CLASS_LABELS) as DrumClass[])
+      .filter((c) => !customKitInfo!.found.includes(c))
+      .map((c) => CLASS_LABELS[c])
+    return (
+      `Using your sounds: ${found.join(', ')}.` +
+      (missing.length ? ` Missing ${missing.join(', ')} — built-in sounds fill in.` : '')
+    )
+  })
 
   const bm = $derived($songMap?.bassMidi ?? null)
   const bassFresh = $derived($songMap ? hasFreshBassMidi($songMap) : false)
@@ -256,10 +312,19 @@
     return padCtx
   }
 
+  /** The kit the current selection actually plays (project sounds included). */
+  async function resolveKit(): Promise<DrumKit> {
+    if (kitId === 'custom') {
+      const osPath = get(projectStore).osPath
+      const info = osPath ? await loadProjectDrumKit(osPath) : null
+      if (info) return info.kit
+    }
+    return loadDrumKit(kitId)
+  }
+
   async function playPad(cls: DrumClass) {
     try {
-      const kitId: DrumKitId = dm?.kit === 'acoustic' ? 'acoustic' : 'synth'
-      const kit = await loadDrumKit(kitId)
+      const kit = await resolveKit()
       const voice = kit.voices[cls]
       if (!voice || voice.length === 0) return
       const ctx = await padContext()
@@ -300,7 +365,10 @@
     busy = 'saving'
     statusMsg = 'Rendering the drum track…'
     try {
-      const r = await renderDrumTrackWavBlob(sm)
+      const r = await renderDrumTrackWavBlob(
+        sm,
+        kitId === 'custom' ? { customKit: await resolveKit() } : {},
+      )
       if (ps.osPath && ps.activeSongFolder) {
         const bytes = new Uint8Array(await r.blob.arrayBuffer())
         const w = await writeProjectSongAsset(ps.osPath, ps.activeSongFolder, DRUM_TRACK_REL, bytes)
@@ -444,7 +512,7 @@
         <span class="text-muted-foreground">Kit</span>
         <select
           class="border-input bg-background text-foreground border-2 px-1.5 py-0.5 text-xs"
-          value={dm.kit === 'acoustic' ? 'acoustic' : 'synth'}
+          value={kitId}
           onchange={(e) => setKit(e.currentTarget.value as DrumKitId)}
         >
           {#each DRUM_KITS as kit (kit.id)}
@@ -452,6 +520,17 @@
           {/each}
         </select>
       </label>
+      {#if kitId === 'custom'}
+        <Button
+          variant="outline"
+          size="sm"
+          class="h-7 border-2 px-2 text-xs font-bold"
+          onclick={() => void reloadCustomKit()}
+          title="Re-read your sound files from the project folder"
+        >
+          Reload sounds
+        </Button>
+      {/if}
       <label class="inline-flex items-center gap-1.5">
         <span class="text-muted-foreground">Feel</span>
         <select
@@ -512,6 +591,10 @@
       Bass
     </button>
   </div>
+
+  {#if dm && kitId === 'custom' && customKitLine}
+    <p class="text-muted-foreground mt-1.5 text-xs" role="status">{customKitLine}</p>
+  {/if}
 
   {#if dm && counts}
     <p class="text-muted-foreground mt-1.5 text-xs" role="status">

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { buildSynthKit, buildAcousticFallbackVoices, DRUM_KIT_SAMPLE_RATE } from './drumKits'
+import {
+  buildSynthKit,
+  buildAcousticFallbackVoices,
+  buildCustomKit,
+  DRUM_KIT_SAMPLE_RATE,
+} from './drumKits'
 import { drumVelocityGain, mixDrumEvents, normalizeDrumBuffer } from './renderDrumTrack'
 import type { DrumClass, DrumMidiEvent } from '$lib/songmap/types'
 
@@ -33,6 +38,22 @@ describe('drum kits', () => {
     for (const cls of ['kick', 'snare', 'hihat'] as DrumClass[]) {
       expect(hashOf(ac[cls])).not.toBe(hashOf(synth[cls]))
     }
+  })
+
+  it('custom kit uses provided samples (mix-gained) and fills gaps with fallbacks', () => {
+    const kit = buildCustomKit({
+      kick: Float32Array.from([1, 0.5]),
+      hihat: Float32Array.from([1]),
+    })
+    expect(kit.id).toBe('custom')
+    // Provided voices get the same per-voice balance trims as bundled kits.
+    expect(kit.voices.kick[0]).toBeCloseTo(1.0, 6) // kick trim is 1.0
+    expect(kit.voices.hihat[0]).toBeCloseTo(0.32, 6) // hats sit at 0.32
+    // Missing voices are the acoustic fallbacks — the kit always plays complete.
+    const fallback = buildAcousticFallbackVoices()
+    expect(hashOf(kit.voices.snare)).toBe(hashOf(fallback.snare))
+    expect(hashOf(kit.voices.tom)).toBe(hashOf(fallback.tom))
+    expect(hashOf(kit.voices.cymbal)).toBe(hashOf(fallback.cymbal))
   })
 })
 
