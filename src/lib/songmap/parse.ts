@@ -587,6 +587,8 @@ function parseBassMidi(raw: unknown, path: string): import('./types').BassMidi |
   if (quantize && DRUM_QUANTIZE.has(quantize)) {
     out.quantize = quantize as import('./types').BassMidi['quantize']
   }
+  const style = optString(o.style)
+  if (style === 'steady' || style === 'detected') out.style = style
   const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
   if (renderExport) out.renderExport = renderExport
   return out

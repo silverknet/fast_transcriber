@@ -255,7 +255,14 @@ export type BassMidi = {
   sourceStem: string
   /** Fingerprint of the audio analyzed: sha256 if present, else `<name>:<size>`. */
   audioFingerprint: string
+  /** Only applies to 'detected' style; 'steady' is grid-locked already. */
   quantize?: DrumQuantize
+  /**
+   * 'steady' (default): the CONFIDENT-BASSIST pass — register-folded,
+   * grid-locked, legato phrasing, flattened dynamics (`songmap/bassGroove.ts`).
+   * 'detected': play the raw detected notes.
+   */
+  style?: 'steady' | 'detected'
   /** Saved render of the bass track, when written into the project. */
   renderExport?: RenderedCueExport
 }

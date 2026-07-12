@@ -27,6 +27,7 @@ export function bassTrackFingerprintPayload(sm: SongMap): unknown {
       vel: round6(e.velocity),
     })),
     quantize: bm?.quantize ?? 'off',
+    style: bm?.style ?? 'steady',
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),

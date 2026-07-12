@@ -17,6 +17,7 @@ import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { quantizeTimesToGrid } from '$lib/songmap/quantizeToGrid'
+import { inferBassGroove } from '$lib/songmap/bassGroove'
 import { DRUM_KIT_SAMPLE_RATE } from './drumKits'
 import { applyBusCompression, applySaturation } from './drumBus'
 import { normalizeDrumBuffer } from './renderDrumTrack'
@@ -216,6 +217,7 @@ export async function renderBassTrackWavBlob(
   if (!(totalSec > 0)) throw new Error('Bass track duration is zero')
 
   const quantize = opts.quantize ?? bm.quantize ?? 'off'
+  const style = bm.style ?? 'steady'
   let events: BassMidiEvent[] = bm.events
   // Transposing a SYNTHESIZED lane means shifting the notes — exact pitch,
   // zero time-stretch artifacts (unlike the audio lanes).
@@ -226,7 +228,10 @@ export async function renderBassTrackWavBlob(
       midi: Math.max(0, Math.min(127, e.midi + semis)),
     }))
   }
-  if (quantize !== 'off') {
+  if (style === 'steady') {
+    // Confident-bassist pass — already grid-locked, so no extra quantize.
+    events = inferBassGroove(sm, events)
+  } else if (quantize !== 'off') {
     const beatsSorted = sortBeatsByTime(sm.timeline.beats)
     const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
     events = quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
