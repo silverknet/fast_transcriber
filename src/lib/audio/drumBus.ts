@@ -136,10 +136,12 @@ export function applyBusCompression(l: Float32Array, r: Float32Array, sampleRate
 
 const SATURATION_DRIVE = 1.4
 
-/** Soft tanh saturation — adds low-order harmonics that help the kit sit. */
-export function applySaturation(data: Float32Array): void {
-  const norm = Math.tanh(SATURATION_DRIVE)
+/** Soft tanh saturation — adds low-order harmonics that help the kit sit.
+ * `drive` is overridable: sustained near-full-scale material (bass) distorts
+ * far more per unit drive than percussive one-shots, so it runs lighter. */
+export function applySaturation(data: Float32Array, drive = SATURATION_DRIVE): void {
+  const norm = Math.tanh(drive)
   for (let i = 0; i < data.length; i++) {
-    data[i] = Math.tanh(data[i]! * SATURATION_DRIVE) / norm
+    data[i] = Math.tanh(data[i]! * drive) / norm
   }
 }

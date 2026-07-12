@@ -49,6 +49,28 @@ describe('synthBassNote', () => {
     expect(estHz).toBeLessThan(41.2 * 2.2)
   })
 
+  it('velocity controls brightness: soft notes carry less high-frequency energy', () => {
+    const loud = new Float32Array(SR)
+    const soft = new Float32Array(SR)
+    // Same gain for both — isolates the brightness (spectral) effect.
+    synthBassNote(loud, SR, 0, 0.6, 40, 1, 1)
+    synthBassNote(soft, SR, 0, 0.6, 40, 1, 0.2)
+    // First-difference energy is a crude high-frequency emphasis.
+    const hfEnergy = (buf: Float32Array) => {
+      let s = 0
+      for (let i = 1; i < buf.length; i++) s += (buf[i]! - buf[i - 1]!) ** 2
+      return s
+    }
+    const lfEnergy = (buf: Float32Array) => {
+      let s = 0
+      for (const v of buf) s += v * v
+      return s
+    }
+    const loudTilt = hfEnergy(loud) / lfEnergy(loud)
+    const softTilt = hfEnergy(soft) / lfEnergy(soft)
+    expect(loudTilt).toBeGreaterThan(softTilt * 1.3)
+  })
+
   it('release fade ends the note near zero (no click)', () => {
     const buf = new Float32Array(SR)
     synthBassNote(buf, SR, 0, 0.5, 40, 1)
