@@ -104,6 +104,10 @@
     return sm.metadata.analyzed ?? sm.timeline.bars.length > 0
   }
 
+  function isDebugRouteId(routeId: string | null | undefined): boolean {
+    return routeId?.startsWith('/debug') || routeId?.startsWith('/project/debug') || false
+  }
+
   /**
    * Restore the last-opened project (and its active song, if any). The
    * project is identified by `localStorage[barbro::lastProjectPath]` and
@@ -136,7 +140,7 @@
       const onAuthRoute = here === '/login' || here?.startsWith('/auth')
       // /debug/* is for inspection — don't steal focus to /edit when the
       // user navigates here intentionally to look at typography, etc.
-      const onDebugRoute = here?.startsWith('/debug')
+      const onDebugRoute = isDebugRouteId(here)
       if (onAuthRoute || onDebugRoute) return
       if (openedSong && here !== '/edit' && here !== '/project/playback') {
         await goto('/edit', { replaceState: true })
@@ -262,7 +266,7 @@
     if (here === '/welcome' || here === '/login' || here === '/pending') return
     if (here?.startsWith('/auth')) return
     // /debug/* is for inspection — doesn't need the sidecar.
-    if (here?.startsWith('/debug')) return
+    if (isDebugRouteId(here)) return
     // /analyzing?preview is a standalone animation preview — no sidecar needed.
     if (here === '/analyzing' && $page.url.searchParams.has('preview')) return
     // Four reasons to lock the user to /download:
