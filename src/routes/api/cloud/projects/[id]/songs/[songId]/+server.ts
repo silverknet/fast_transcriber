@@ -8,7 +8,12 @@
  * then runs the Phase 8 merge to decide how to proceed.
  */
 import { error, json } from '@sveltejs/kit'
-import { listCloudSongs, rpcPushSong, type PushSongArgs } from '$lib/server/db/cloudRepo'
+import {
+  isPlausibleSongMap,
+  listCloudSongs,
+  rpcPushSong,
+  type PushSongArgs,
+} from '$lib/server/db/cloudRepo'
 import type { RequestHandler } from './$types'
 
 interface PushBody {
@@ -29,6 +34,12 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
   const body = (await request.json().catch(() => null)) as PushBody | null
   if (!body || typeof body.clientBaseRevision !== 'number' || body.songMap === undefined) {
     throw error(400, 'songMap + clientBaseRevision are required.')
+  }
+  if (!isPlausibleSongMap(body.songMap)) {
+    // Reject rather than silently accept — an unguarded write here is how
+    // one buggy client permanently breaks the project for every future
+    // reader (join/pull have no way to "fix" a bad row after the fact).
+    throw error(400, 'songMap is missing required fields (metadata, timeline, cueTracks, sections).')
   }
 
   const args: PushSongArgs = {

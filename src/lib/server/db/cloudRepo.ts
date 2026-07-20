@@ -34,6 +34,30 @@ export interface CloudSongRow {
   revision: number
 }
 
+/**
+ * Minimal shape gate for a `song_map` payload before it's allowed into the
+ * DB. `song_map` is stored as untyped jsonb — nothing here ever validated
+ * it, so a single buggy client push could (and did) write a row missing
+ * fields the client type declares required (`metadata`, `timeline`,
+ * `cueTracks`). Every future reader — every join, every pull, for every
+ * member — then crashes on that one row forever ("cannot read properties
+ * of undefined"). This is deliberately NOT full schema validation (new
+ * client fields must keep working without a server deploy); it only
+ * checks the handful of fields read unguarded throughout the app.
+ */
+export function isPlausibleSongMap(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false
+  const sm = v as Record<string, unknown>
+  const metadata = sm.metadata as Record<string, unknown> | undefined
+  if (!metadata || typeof metadata !== 'object' || typeof metadata.title !== 'string') return false
+  const timeline = sm.timeline as Record<string, unknown> | undefined
+  if (!timeline || typeof timeline !== 'object') return false
+  if (!Array.isArray(timeline.bars) || !Array.isArray(timeline.beats)) return false
+  if (!Array.isArray(sm.cueTracks)) return false
+  if (!Array.isArray(sm.sections)) return false
+  return true
+}
+
 export interface CloudMemberRow {
   cloud_project_id: string
   user_id: string

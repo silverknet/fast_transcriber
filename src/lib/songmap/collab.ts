@@ -85,7 +85,13 @@ export function toCollabSongMap(sm: SongMap): SongMap {
     out.audio = audioRest
   }
 
-  out.cueTracks = sm.cueTracks.map(stripCueTrackLocalRender)
+  // `sm.cueTracks` is non-optional on the type, but this function also runs
+  // on untrusted data pulled straight from the cloud DB (`song_map: unknown`
+  // there, no server-side shape validation before this codebase's write —
+  // see `normalizeCloudSongMap`) — a row written before that guard existed,
+  // or by a future buggy client, can genuinely lack the field. Tolerate it
+  // rather than crashing every future join/pull with a cryptic TypeError.
+  out.cueTracks = (sm.cueTracks ?? []).map(stripCueTrackLocalRender)
   out.clickExport = stripExport(sm.clickExport)
   if (sm.drumMidi) {
     out.drumMidi = { ...sm.drumMidi, renderExport: stripExport(sm.drumMidi.renderExport) }

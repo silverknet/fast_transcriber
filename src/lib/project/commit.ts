@@ -145,16 +145,22 @@ export function dropRecentProjectPath(projectPath: string): void {
 
 // ── Metadata helpers ────────────────────────────────────────────────────────
 
-/** Extract the lite metadata used by the project list view from a SongMap. */
+/**
+ * Extract the lite metadata used by the project list view from a SongMap.
+ * `map.metadata` is required by the type, but this also runs on song maps
+ * pulled from the cloud (untrusted `unknown` column) — tolerate a missing
+ * object instead of crashing the caller (join/pull would otherwise fail
+ * for every song after one bad cloud row).
+ */
 export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
-  const m = map.metadata
-  const out: ProjectSongMetadataLite = { title: m.title }
+  const m = map.metadata ?? ({ title: 'Untitled song' } as SongMap['metadata'])
+  const out: ProjectSongMetadataLite = { title: m.title || 'Untitled song' }
   if (m.artist) out.artist = m.artist
   if (m.keyDetail) out.keyDetail = m.keyDetail
   const transposeSemitones = effectiveTransposeSemitones(map)
   if (transposeSemitones !== 0) out.transposeSemitones = transposeSemitones
   if (m.bpm !== undefined) out.bpm = m.bpm
-  out.analyzed = m.analyzed ?? map.timeline.bars.length > 0
+  out.analyzed = m.analyzed ?? (map.timeline?.bars.length ?? 0) > 0
   const dk = map.chordHints?.detectedKey
   if (dk) {
     out.detectedKey = { root: dk.root, ...(dk.accidental ? { accidental: dk.accidental } : {}), mode: dk.mode }
