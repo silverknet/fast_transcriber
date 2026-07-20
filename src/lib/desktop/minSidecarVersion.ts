@@ -25,7 +25,7 @@
  * If the web app writes a newer `.smap` format or calls a newer sidecar
  * endpoint, bump this to the matching desktop release.
  */
-export const MIN_SIDECAR_VERSION = '0.1.7'
+export const MIN_SIDECAR_VERSION = '0.1.14'
 
 export type SidecarVersionStatus = 'ok' | 'outdated' | 'unknown'
 

@@ -1,5 +1,7 @@
 import { derived, get, writable } from 'svelte/store'
 import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+import { fingerprintBassTrackInputs } from '$lib/songmap/bassTrackFingerprint'
+import { fingerprintDrumTrackInputs } from '$lib/songmap/drumTrackFingerprint'
 import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
 import { mergeAudioReferenceFromSession } from '$lib/songmap/session'
 import { validateSongMap, type SongMap } from '$lib/songmap'
@@ -161,6 +163,20 @@ export function patchSongMap(
         ...next,
         cueTracks,
         clickExport: next.clickExport && clickFp !== next.clickExport.fingerprint ? undefined : next.clickExport,
+      }
+    }
+    if (next.drumMidi?.renderExport) {
+      // Saved drum render goes stale when its inputs (events/kit/quantize/
+      // grid/trim) change — drop only the render ref, never the events.
+      const fp = fingerprintDrumTrackInputs(next)
+      if (fp !== next.drumMidi.renderExport.fingerprint) {
+        next = { ...next, drumMidi: { ...next.drumMidi, renderExport: undefined } }
+      }
+    }
+    if (next.bassMidi?.renderExport) {
+      const fp = fingerprintBassTrackInputs(next)
+      if (fp !== next.bassMidi.renderExport.fingerprint) {
+        next = { ...next, bassMidi: { ...next.bassMidi, renderExport: undefined } }
       }
     }
     const v = validateSongMap(next)

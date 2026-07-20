@@ -30,7 +30,7 @@
     type ConflictDecisions,
   } from '$lib/songmap/collabMerge'
   import { pushCloudSong } from '$lib/client/cloudSync'
-  import { collabContentFingerprint } from '$lib/songmap/collab'
+  import { collabContentFingerprint, mergeLocalIntoCollab } from '$lib/songmap/collab'
   import type { ProjectFile } from '$lib/project/types'
 
   let decisions = $state<ConflictDecisions>(new Map())
@@ -79,7 +79,8 @@
   function takeTheirs() {
     const c = $cloudConflict
     if (!c) return
-    songMapStore.set(c.report.merged)
+    const currentLocal = get(songMapStore) ?? c.local
+    songMapStore.set(mergeLocalIntoCollab(currentLocal, c.report.merged))
     // Mark the project as synced at the cloud's revision so the next
     // push uses the right clientBaseRevision.
     const proj = get(projectStore)
@@ -150,7 +151,7 @@
         return
       }
       // Push succeeded — sync local stores at the new revision.
-      songMapStore.set(resolved)
+      songMapStore.set(mergeLocalIntoCollab(currentLocal, resolved))
       if (proj.data?.cloud && proj.osPath) {
         const next: ProjectFile = {
           ...proj.data,

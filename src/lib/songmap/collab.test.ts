@@ -85,4 +85,16 @@ describe('collaborative SongMap cue fields', () => {
     expect(merged.cueTracks[0]?.renderExport?.relativePath).toBe('cue/tracks/main/cue-track.wav')
     expect(merged.clickExport?.relativePath).toBe('cue/click-track.wav')
   })
+
+  it('tolerates a missing cueTracks field instead of crashing', () => {
+    // `song_map` is an untyped jsonb column server-side — a row written
+    // before validation existed (or by a future buggy client) can violate
+    // the "cueTracks is required" contract the type promises. This was the
+    // root cause of "cannot read properties of undefined" on every join/
+    // pull that touched such a row.
+    const broken = { ...mapWithRenderedCue() } as SongMap
+    delete (broken as { cueTracks?: unknown }).cueTracks
+    expect(() => toCollabSongMap(broken)).not.toThrow()
+    expect(toCollabSongMap(broken).cueTracks).toEqual([])
+  })
 })

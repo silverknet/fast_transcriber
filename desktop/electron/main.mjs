@@ -21,10 +21,9 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } from 'electron'
 import {
   beatsScriptPath,
-  bootstrapPythonExe,
   getNativePythonRoot,
   getPiperTtsDefaultModelOnnxPath,
   getPiperTtsModelDir,
@@ -42,6 +41,8 @@ import {
   runPythonCapture,
   sectionsScriptPath,
   chordChromaScriptPath,
+  transcribeBassScriptPath,
+  transcribeDrumsScriptPath,
   getSectionsVenvDir,
   getSectionsVenvPythonExe,
   sectionsLibrosaReady,
@@ -52,6 +53,10 @@ import {
   getUvBinaryPath,
   downloadAndExtractUv,
   UV_PINNED_VERSION,
+  ensureManagedFfmpegBinary,
+  ffmpegExePath,
+  getUvBinDir,
+  resolveTorchIndex,
   stemsScriptPath,
   stemsVenvIsReady,
   getYoutubeImportVenvDir,
@@ -2374,7 +2379,7 @@ function runFfmpegPadTrim(srcAbs, dstAbs, durationSec, sampleRate) {
     const sr = Number(sampleRate)
     if (Number.isFinite(sr) && sr > 0) args.push('-ar', String(Math.round(sr)))
     args.push(dstAbs)
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    const proc = spawn(ffmpegExePath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     proc.stderr?.on('data', (b) => {
       stderr += b.toString()
@@ -2558,7 +2563,7 @@ async function handleProjectPitchShiftCache(req, res, cors) {
 function runFfmpegTranscode(srcAbs, dstAbs) {
   return new Promise((resolve) => {
     const args = ['-y', '-i', srcAbs, '-acodec', 'pcm_s16le', '-ar', '44100', dstAbs]
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    const proc = spawn(ffmpegExePath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     proc.stderr?.on('data', (b) => {
       stderr += b.toString()
@@ -3362,6 +3367,108 @@ async function handleSuggestSectionBorders(req, res, cors) {
  *
  * Reuses the sections venv (same numpy+librosa deps as border_suggest.py).
  */
+/**
+ * `POST /native/analyze-drums` — transcribe drum hits from an on-disk drum
+ * stem. JSON body `{ stemAbsPath }`; JSON response
+ * `{ ok, data: { events, classCounts, durationSec, analyzerVersion } }`.
+ * One-shot like chord-chroma (runs in seconds); reuses the sections venv.
+ */
+async function handleAnalyzeDrums(req, res, cors) {
+  const t0 = Date.now()
+  try {
+    const body = await readRequestJson(req)
+    const stemAbsPath = body && typeof body.stemAbsPath === 'string' ? body.stemAbsPath : ''
+    if (!stemAbsPath || !path.isAbsolute(stemAbsPath)) {
+      sendJson(res, 400, { ok: false, error: 'stemAbsPath must be an absolute path' }, cors)
+      return
+    }
+    if (!existsSync(stemAbsPath)) {
+      sendJson(res, 404, { ok: false, error: `Stem file not found: ${stemAbsPath}` }, cors)
+      return
+    }
+    const script = transcribeDrumsScriptPath()
+    if (!existsSync(script)) {
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+    logInfo(`analyze-drums: ${stemAbsPath}`)
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      [stemAbsPath],
+      240_000,
+    )
+    if (code !== 0) {
+      const tail = (stderr || '').split('\n').filter(Boolean).slice(-6).join('; ')
+      logWarn(`analyze-drums: exit ${code}${signal ? ` (signal ${signal})` : ''}: ${tail}`)
+      sendJson(res, 503, { ok: false, error: tail || `Drum detection failed (exit ${code})` }, cors)
+      return
+    }
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      sendJson(res, 502, { ok: false, error: 'Drum detection returned unreadable output' }, cors)
+      return
+    }
+    logInfo(`analyze-drums: ${data?.events?.length ?? 0} events in ${Date.now() - t0}ms`)
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
+/**
+ * `POST /native/analyze-bass` — transcribe bass notes from an on-disk bass
+ * stem. JSON body `{ stemAbsPath }`; JSON response
+ * `{ ok, data: { notes, noteCount, durationSec, analyzerVersion } }`.
+ * One-shot like analyze-drums; reuses the sections venv (YIN pitch tracking).
+ */
+async function handleAnalyzeBass(req, res, cors) {
+  const t0 = Date.now()
+  try {
+    const body = await readRequestJson(req)
+    const stemAbsPath = body && typeof body.stemAbsPath === 'string' ? body.stemAbsPath : ''
+    if (!stemAbsPath || !path.isAbsolute(stemAbsPath)) {
+      sendJson(res, 400, { ok: false, error: 'stemAbsPath must be an absolute path' }, cors)
+      return
+    }
+    if (!existsSync(stemAbsPath)) {
+      sendJson(res, 404, { ok: false, error: `Stem file not found: ${stemAbsPath}` }, cors)
+      return
+    }
+    const script = transcribeBassScriptPath()
+    if (!existsSync(script)) {
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+    logInfo(`analyze-bass: ${stemAbsPath}`)
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      [stemAbsPath],
+      240_000,
+    )
+    if (code !== 0) {
+      const tail = (stderr || '').split('\n').filter(Boolean).slice(-6).join('; ')
+      logWarn(`analyze-bass: exit ${code}${signal ? ` (signal ${signal})` : ''}: ${tail}`)
+      sendJson(res, 503, { ok: false, error: tail || `Bass detection failed (exit ${code})` }, cors)
+      return
+    }
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      sendJson(res, 502, { ok: false, error: 'Bass detection returned unreadable output' }, cors)
+      return
+    }
+    logInfo(`analyze-bass: ${data?.notes?.length ?? 0} notes in ${Date.now() - t0}ms`)
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+  }
+}
+
 async function handleAnalyzeChordChroma(req, res, cors) {
   let workDir = null
   const t0 = Date.now()
@@ -3557,7 +3664,11 @@ async function runQueuedJob(job) {
     '--stream-progress',
   ]
 
-  const child = spawn(pythonStemsExe(), args, { env: process.env })
+  const child = spawn(pythonStemsExe(), args, {
+    // The managed audio-converter dir rides along so the stem engine (and
+    // the tools it spawns) can find it on machines with no system copy.
+    env: { ...process.env, BARBRO_FFMPEG_DIR: getUvBinDir() },
+  })
   job.child = child
 
   // Stall watchdog. A hung/zombie Demucs child that never exits and never
@@ -4414,6 +4525,10 @@ async function handleCancelJob(res, cors, jobId) {
  *    you'd rather let the next one through.
  */
 async function handlePauseJob(res, cors, jobId) {
+  if (process.platform === 'win32') {
+    sendJson(res, 501, { ok: false, error: "Pausing isn't available on this computer." }, cors)
+    return
+  }
   const job = stemsJobs.get(jobId)
   if (!job) {
     sendJson(res, 404, { ok: false, error: 'Unknown jobId' }, cors)
@@ -4445,6 +4560,10 @@ async function handlePauseJob(res, cors, jobId) {
  * SIGCONT. Buffered stdout drains naturally as Demucs writes new lines.
  */
 async function handleResumeJob(res, cors, jobId) {
+  if (process.platform === 'win32') {
+    sendJson(res, 501, { ok: false, error: "Pausing isn't available on this computer." }, cors)
+    return
+  }
   const job = stemsJobs.get(jobId)
   if (!job) {
     sendJson(res, 404, { ok: false, error: 'Unknown jobId' }, cors)
@@ -4557,35 +4676,96 @@ async function handleSetupStems(req, res, cors) {
   emit({ type: 'log', msg: `Stems venv target: ${venvDir}` })
 
   try {
-    // Step 1 — create venv if missing.
-    if (!existsSync(venvPython)) {
-      const seed = bootstrapPythonExe()
-      emit({ type: 'progress', label: 'Creating venv…', current: 0, overall: 10 })
-      logInfo(`setup/stems: creating venv with ${seed}`)
-      const { code } = await runPipelineNdjson(seed, ['-m', 'venv', venvDir], emit)
-      if (code !== 0 || !existsSync(venvPython)) {
-        emit({ type: 'error', msg: `Could not create Python venv (exit ${code}). Make sure Python 3.10+ is installed.` })
+    // ── Phase 1 — make sure uv is available (same pattern as sections /
+    //    lyrics / beats; removes any dependency on a system Python, which
+    //    plainly does not exist on a fresh Windows machine). ──
+    if (!uvBinaryIsReady()) {
+      emit({
+        type: 'progress',
+        label: `Downloading uv ${UV_PINNED_VERSION} (~14 MB)…`,
+        current: 0,
+        overall: 3,
+      })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
         emit({ type: 'state', state: 'error' })
         res.end()
         return
       }
-      emit({ type: 'progress', label: 'Venv created', current: 100, overall: 25 })
+    }
+    const uvBin = getUvBinaryPath()
+    emit({ type: 'log', msg: `Using uv at ${uvBin}` })
+    emit({ type: 'progress', label: 'uv ready', current: 100, overall: 8 })
+
+    // ── Phase 2 — nuke a stale/broken venv (probe: can it import demucs?).
+    //    Healthy venvs from the old pip-based installer pass and are reused.
+    if (existsSync(venvPython)) {
+      const probe = await runPipelineNdjson(venvPython, ['-c', 'import demucs, torch'], emit)
+      if (probe.code !== 0) {
+        emit({ type: 'log', msg: 'Existing setup is incomplete — rebuilding it.' })
+        await rm(venvDir, { recursive: true, force: true })
+      }
+    }
+
+    // ── Phase 3 — create the venv (uv downloads a sealed Python 3.12 when
+    //    no usable interpreter exists on the system). ──
+    if (!existsSync(venvPython)) {
+      emit({
+        type: 'progress',
+        label: 'Setting up the audio engine…',
+        current: 0,
+        overall: 12,
+      })
+      const v = await runPipelineNdjson(uvBin, ['venv', '--python', '3.12', venvDir], emit)
+      if (v.code !== 0 || !existsSync(venvPython)) {
+        emit({
+          type: 'error',
+          msg: `Environment setup failed (exit ${v.code}). Check the log above for the underlying reason.`,
+        })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+      emit({ type: 'progress', label: 'Environment ready', current: 100, overall: 20 })
     } else {
-      emit({ type: 'log', msg: 'Venv already present — skipping create' })
+      emit({ type: 'log', msg: 'Environment already exists — re-using.' })
     }
 
-    // Step 2 — upgrade pip.
-    emit({ type: 'progress', label: 'Upgrading pip…', current: 0, overall: 30 })
-    const pipUp = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-U', 'pip'], emit)
-    if (pipUp.code !== 0) {
-      emit({ type: 'error', msg: `Failed to upgrade pip (exit ${pipUp.code})` })
-      emit({ type: 'state', state: 'error' })
-      res.end()
-      return
+    // ── Phase 4 — Windows + NVIDIA: install the GPU build of the audio
+    //    engine first, from the dedicated wheel index. The pins match
+    //    requirements.txt, so the later `-r` install sees them satisfied
+    //    and does not downgrade. BARBRO_TORCH_INDEX overrides ('off' → CPU).
+    const torchIndex = await resolveTorchIndex()
+    if (torchIndex) {
+      emit({
+        type: 'progress',
+        label: 'Preparing graphics card acceleration (large download — several minutes)…',
+        current: 0,
+        overall: 25,
+      })
+      // If a CPU-only build is already present (installed before the GPU
+      // existed), force the swap.
+      const cudaProbe = await runPipelineNdjson(
+        venvPython,
+        ['-c', 'import torch; print(torch.version.cuda or "")'],
+        () => {},
+      )
+      const needsSwap = cudaProbe.code === 0
+      const args = ['pip', 'install', '--python', venvPython, '--index-url', torchIndex]
+      if (needsSwap) args.push('--reinstall-package', 'torch', '--reinstall-package', 'torchaudio')
+      args.push('torch==2.6.0', 'torchaudio==2.6.0')
+      const gpu = await runPipelineNdjson(uvBin, args, emit)
+      if (gpu.code !== 0) {
+        emit({ type: 'error', msg: `Graphics-card setup failed (exit ${gpu.code}).` })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+      emit({ type: 'progress', label: 'Graphics card ready', current: 100, overall: 55 })
     }
-    emit({ type: 'progress', label: 'pip upgraded', current: 100, overall: 40 })
 
-    // Step 3 — install requirements (demucs + certifi). Slowest step.
+    // ── Phase 5 — install requirements. Slowest step on CPU-only machines.
     if (!existsSync(reqPath)) {
       emit({ type: 'error', msg: `Missing requirements.txt at ${reqPath}` })
       emit({ type: 'state', state: 'error' })
@@ -4594,27 +4774,48 @@ async function handleSetupStems(req, res, cors) {
     }
     emit({
       type: 'progress',
-      label: 'Installing Demucs (downloads ~1 GB of torch — this can take several minutes)…',
+      label: 'Installing the stem engine (large download — this can take several minutes)…',
       current: 0,
-      overall: 45,
+      overall: torchIndex ? 60 : 30,
     })
-    const inst = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-r', reqPath], emit)
+    const inst = await runPipelineNdjson(
+      uvBin,
+      ['pip', 'install', '--python', venvPython, '-r', reqPath],
+      emit,
+    )
     if (inst.code !== 0) {
-      emit({ type: 'error', msg: `pip install failed (exit ${inst.code})` })
+      emit({ type: 'error', msg: `Install failed (exit ${inst.code}).` })
       emit({ type: 'state', state: 'error' })
       res.end()
       return
     }
-    emit({ type: 'progress', label: 'Dependencies installed', current: 100, overall: 95 })
+    emit({ type: 'progress', label: 'Dependencies installed', current: 100, overall: 90 })
 
-    // Step 4 — smoke test.
+    // ── Phase 6 — smoke test + device report. The device line answers
+    //    "did the graphics card take?" without waiting for a first job.
     const smoke = await runPipelineNdjson(venvPython, ['-m', 'demucs', '--help'], emit)
     if (smoke.code !== 0) {
-      emit({ type: 'error', msg: `Demucs smoke test failed (exit ${smoke.code})` })
+      emit({ type: 'error', msg: `Stem engine smoke test failed (exit ${smoke.code})` })
       emit({ type: 'state', state: 'error' })
       res.end()
       return
     }
+    let deviceLine = ''
+    await runPipelineNdjson(
+      venvPython,
+      [
+        '-c',
+        "import torch; print('cuda' if torch.cuda.is_available() else ('mps' if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available() else 'cpu'))",
+      ],
+      (ev) => {
+        if (ev.type === 'log' && ev.msg) deviceLine = ev.msg.trim()
+      },
+    )
+    if (deviceLine) emit({ type: 'log', msg: `Compute device: ${deviceLine}` })
+
+    // Make the bundled audio converter spawnable under a canonical name
+    // (used by MP3 transcodes and demucs on machines without a system copy).
+    await ensureManagedFfmpegBinary().catch(() => null)
 
     emit({ type: 'progress', label: 'Done', current: 100, overall: 100 })
     emit({ type: 'done', venvPython })
@@ -4735,25 +4936,27 @@ async function handleSetupYoutubeImport(req, res, cors) {
   const reqPath = path.join(getNativePythonRoot(), 'youtube', 'requirements.txt')
 
   try {
+    if (!uvBinaryIsReady()) {
+      emit({ type: 'progress', label: 'Preparing audio import', current: 0, overall: 5 })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+    const uvBin = getUvBinaryPath()
+
     if (!existsSync(venvPython)) {
-      const seed = bootstrapPythonExe()
-      emit({ type: 'progress', label: 'Preparing audio import', current: 0, overall: 10 })
-      const { code } = await runPipelineNdjson(seed, ['-m', 'venv', venvDir], emit)
+      emit({ type: 'progress', label: 'Preparing audio import', current: 0, overall: 15 })
+      const { code } = await runPipelineNdjson(uvBin, ['venv', '--python', '3.12', venvDir], emit)
       if (code !== 0 || !existsSync(venvPython)) {
         emit({ type: 'error', msg: `Could not prepare audio import tools (exit ${code}).` })
         emit({ type: 'state', state: 'error' })
         res.end()
         return
       }
-    }
-
-    emit({ type: 'progress', label: 'Updating audio import tools', current: 0, overall: 30 })
-    const pipUp = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-U', 'pip'], emit)
-    if (pipUp.code !== 0) {
-      emit({ type: 'error', msg: `Could not update audio import tools (exit ${pipUp.code}).` })
-      emit({ type: 'state', state: 'error' })
-      res.end()
-      return
     }
 
     if (!existsSync(reqPath)) {
@@ -4763,7 +4966,11 @@ async function handleSetupYoutubeImport(req, res, cors) {
       return
     }
     emit({ type: 'progress', label: 'Installing audio import tools', current: 0, overall: 45 })
-    const inst = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-r', reqPath], emit)
+    const inst = await runPipelineNdjson(
+      uvBin,
+      ['pip', 'install', '--python', venvPython, '-r', reqPath],
+      emit,
+    )
     if (inst.code !== 0) {
       emit({ type: 'error', msg: `Could not install audio import tools (exit ${inst.code}).` })
       emit({ type: 'state', state: 'error' })
@@ -4779,6 +4986,9 @@ async function handleSetupYoutubeImport(req, res, cors) {
       res.end()
       return
     }
+
+    // Expose the bundled audio converter under a canonical spawnable name.
+    await ensureManagedFfmpegBinary().catch(() => null)
 
     emit({ type: 'progress', label: 'Audio import ready', current: 100, overall: 100 })
     emit({ type: 'done', venvPython })
@@ -5388,34 +5598,34 @@ async function handleSetupPiperTts(req, res, cors) {
   emit({ type: 'log', msg: `Piper TTS venv target: ${venvDir}` })
 
   try {
+    if (!uvBinaryIsReady()) {
+      emit({ type: 'progress', label: 'Preparing the voice engine…', current: 0, overall: 5 })
+      const r = await downloadAndExtractUv(emit)
+      if (!r.ok) {
+        emit({ type: 'error', msg: r.error })
+        emit({ type: 'state', state: 'error' })
+        res.end()
+        return
+      }
+    }
+    const uvBin = getUvBinaryPath()
+
     if (!existsSync(venvPython)) {
-      const seed = bootstrapPythonExe()
-      emit({ type: 'progress', label: 'Creating Piper venv…', current: 0, overall: 15 })
-      logInfo(`setup/piper-tts: creating venv with ${seed}`)
-      const { code } = await runPipelineNdjson(seed, ['-m', 'venv', venvDir], emit)
+      emit({ type: 'progress', label: 'Preparing the voice engine…', current: 0, overall: 15 })
+      const { code } = await runPipelineNdjson(uvBin, ['venv', '--python', '3.12', venvDir], emit)
       if (code !== 0 || !existsSync(venvPython)) {
         emit({
           type: 'error',
-          msg: `Could not create Python venv (exit ${code}). Install Python 3.10+ and retry.`,
+          msg: `Voice engine setup failed (exit ${code}). Check the log above for the underlying reason.`,
         })
         emit({ type: 'state', state: 'error' })
         res.end()
         return
       }
-      emit({ type: 'progress', label: 'Venv created', current: 100, overall: 30 })
+      emit({ type: 'progress', label: 'Environment ready', current: 100, overall: 30 })
     } else {
       emit({ type: 'log', msg: 'Piper venv already present — skipping create' })
     }
-
-    emit({ type: 'progress', label: 'Upgrading pip…', current: 0, overall: 35 })
-    const pipUp = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-U', 'pip'], emit)
-    if (pipUp.code !== 0) {
-      emit({ type: 'error', msg: `Failed to upgrade pip (exit ${pipUp.code})` })
-      emit({ type: 'state', state: 'error' })
-      res.end()
-      return
-    }
-    emit({ type: 'progress', label: 'pip upgraded', current: 100, overall: 45 })
 
     if (!existsSync(reqPath)) {
       emit({ type: 'error', msg: `Missing requirements.txt at ${reqPath}` })
@@ -5425,18 +5635,22 @@ async function handleSetupPiperTts(req, res, cors) {
     }
     emit({
       type: 'progress',
-      label: 'Installing piper-tts (downloads wheels — may take a minute)…',
+      label: 'Installing the voice engine (may take a minute)…',
       current: 0,
       overall: 50,
     })
-    const inst = await runPipelineNdjson(venvPython, ['-m', 'pip', 'install', '-r', reqPath], emit)
+    const inst = await runPipelineNdjson(
+      uvBin,
+      ['pip', 'install', '--python', venvPython, '-r', reqPath],
+      emit,
+    )
     if (inst.code !== 0) {
-      emit({ type: 'error', msg: `pip install failed (exit ${inst.code})` })
+      emit({ type: 'error', msg: `Install failed (exit ${inst.code})` })
       emit({ type: 'state', state: 'error' })
       res.end()
       return
     }
-    emit({ type: 'progress', label: 'piper-tts installed', current: 100, overall: 75 })
+    emit({ type: 'progress', label: 'Voice engine installed', current: 100, overall: 75 })
 
     emit({ type: 'progress', label: 'Downloading default voice…', current: 0, overall: 80 })
     await downloadPiperDefaultVoice(emit)
@@ -5622,22 +5836,26 @@ async function handleSetupBeats(req, res, cors) {
     // --no-build-isolation because madmom's setup.py imports
     // `numpy.get_include()` at build time — numpy must already exist
     // in the venv (it does, from Phase 4).
+    // Windows has no madmom wheel on PyPI and end users have no compiler —
+    // the desktop release CI builds a cp310 win_amd64 wheel and attaches it
+    // to every release; install that instead of the sdist there.
+    const madmomSpec =
+      process.platform === 'win32'
+        ? process.env.BARBRO_MADMOM_WHEEL?.trim() ||
+          'https://github.com/silverknet/fast_transcriber/releases/latest/download/madmom-0.16.1-cp310-cp310-win_amd64.whl'
+        : 'madmom==0.16.1'
     emit({
       type: 'progress',
-      label: 'Compiling madmom 0.16.1 (~30–60 s)…',
+      label:
+        process.platform === 'win32'
+          ? 'Installing the beat engine…'
+          : 'Compiling madmom 0.16.1 (~30–60 s)…',
       current: 0,
       overall: 80,
     })
     const madmomInstall = await runPipelineNdjson(
       uvBin,
-      [
-        'pip',
-        'install',
-        '--python',
-        venvPython,
-        '--no-build-isolation',
-        'madmom==0.16.1',
-      ],
+      ['pip', 'install', '--python', venvPython, '--no-build-isolation', madmomSpec],
       emit,
     )
     if (madmomInstall.code !== 0) {
@@ -6054,6 +6272,10 @@ function startBeaconServer() {
         ok: true,
         name: 'barbro-desktop',
         version,
+        platform: process.platform,
+        // Semantic capability flags — the web gates UI on these, so a future
+        // Windows suspend implementation flips one boolean, no web release.
+        capabilities: { pauseResume: process.platform !== 'win32' },
       })
       res.writeHead(200, {
         ...cors,
@@ -6131,6 +6353,15 @@ function startBeaconServer() {
 
     if (req.method === 'GET' && req.url === '/native/setup/sections/status') {
       handleSectionsSetupStatus(res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/analyze-bass') {
+      void handleAnalyzeBass(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/analyze-drums') {
+      void handleAnalyzeDrums(req, res, cors)
       return
     }
 
@@ -6387,6 +6618,14 @@ function startBeaconServer() {
     logError(`Beacon server error: ${err.message}`)
   })
 
+  beaconServer.on('error', (e) => {
+    if (e && e.code === 'EADDRINUSE') {
+      logError(`Port ${BARBRO_DESKTOP_BEACON_PORT} is already in use — another copy is running. Quitting.`)
+      app.quit()
+      return
+    }
+    logError(`Beacon server error: ${e instanceof Error ? e.message : String(e)}`)
+  })
   beaconServer.listen(BARBRO_DESKTOP_BEACON_PORT, '127.0.0.1', () => {
     logInfo(`Beacon listening on 127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
     // Kick off auto-setup right after the loopback is reachable. It
@@ -6594,7 +6833,7 @@ async function handleUpdateInstall(req, res, cors) {
   try {
     const body = await readRequestJson(req)
     const artifacts = body && typeof body.artifacts === 'object' && body.artifacts ? body.artifacts : {}
-    const key = `darwin-${process.arch}` // darwin-arm64 or darwin-x64
+    const key = process.platform === 'win32' ? 'win-x64' : `darwin-${process.arch}`
     const entry = artifacts[key]
     const url = entry && typeof entry.url === 'string' ? entry.url.trim() : ''
     if (!/^https:\/\//i.test(url)) {
@@ -6612,20 +6851,65 @@ async function handleUpdateInstall(req, res, cors) {
     }
     const bytes = Buffer.from(await dl.arrayBuffer())
     const dir = await mkdtemp(path.join(tmpdir(), 'barbro-update-'))
-    const dmgPath = path.join(dir, 'BarBro-Desktop-update.dmg')
-    await writeFile(dmgPath, bytes)
-    logInfo(`update: opening installer ${dmgPath} (${(bytes.length / 1_048_576).toFixed(1)} MB)`)
-    const openErr = await shell.openPath(dmgPath)
+    const installerPath = path.join(
+      dir,
+      process.platform === 'win32' ? 'BarBro-Desktop-update.exe' : 'BarBro-Desktop-update.dmg',
+    )
+    await writeFile(installerPath, bytes)
+    logInfo(`update: opening installer ${installerPath} (${(bytes.length / 1_048_576).toFixed(1)} MB)`)
+    const openErr = await shell.openPath(installerPath)
     if (openErr) {
       return sendJson(res, 500, { ok: false, error: `Could not open installer: ${openErr}` }, cors)
     }
     sendJson(res, 200, { ok: true }, cors)
+    if (process.platform === 'win32') {
+      // NSIS can't replace files of a running app — quit shortly after
+      // responding; runAfterFinish relaunches the new build.
+      setTimeout(() => app.quit(), 1500)
+    }
   } catch (e) {
     sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
   }
 }
 
+/**
+ * Windows quit affordance. The sidecar is headless (no window, and Windows
+ * has no dock), so without a tray icon the only way to stop it would be
+ * Task Manager. 16×16 PNG embedded as base64 — no packaged asset needed.
+ */
+let trayRef = null // module-level: prevents GC from eating the tray icon
+function createTrayIfNeeded() {
+  if (process.platform !== 'win32') return
+  try {
+    // Solid orange square with a dark border — legible at 16px on light and
+    // dark taskbars.
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOklEQVR4nGP8z8Dwn4ECwESJ5lED' +
+      'GBhYGBgYGP7DwH+kAIwMDIwMlLpg1IBRAxgZKc7OTJQaMPDZGQC66Qsjw1a1BQAAAABJRU5ErkJg' +
+      'gg=='
+    const icon = nativeImage.createFromDataURL(`data:image/png;base64,${png}`)
+    trayRef = new Tray(icon)
+    const version = readDesktopVersion()
+    trayRef.setToolTip(`BarBro Desktop v${version}`)
+    trayRef.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: `BarBro Desktop v${version}`, enabled: false },
+        { type: 'separator' },
+        { label: 'Quit BarBro Desktop', click: () => app.quit() },
+      ]),
+    )
+  } catch (e) {
+    logWarn(`tray: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
 app.whenReady().then(() => {
+  // Existing installs: surface the bundled audio converter under its
+  // canonical name (pure fs copy; no-op when absent or already done).
+  void ensureManagedFfmpegBinary().catch(() => null)
+
+  createTrayIfNeeded()
+
   const version = readDesktopVersion()
   logInfo(`BarBro desktop sidecar v${version} starting`)
   logInfo(`PID ${process.pid} · Node ${process.versions.node} · Electron ${process.versions.electron}`)
@@ -6636,6 +6920,8 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/analyze-downbeats`)
   logInfo(`  POST   /native/suggest-section-borders  (X-Bars-Json header; body = WAV)`)
   logInfo(`  POST   /native/analyze-chord-chroma     (X-Beats-Json header; body = WAV)`)
+  logInfo(`  POST   /native/analyze-drums            (JSON {stemAbsPath} → drum hits)`)
+  logInfo(`  POST   /native/analyze-bass             (JSON {stemAbsPath} → bass notes)`)
   logInfo(`  GET    /native/setup/sections/status    (check librosa venv readiness)`)
   logInfo(`  POST   /native/setup/sections           (create venv + pip install librosa)`)
   logInfo(`  POST   /native/separate-stems        (returns jobId immediately; queue runs serially)`)

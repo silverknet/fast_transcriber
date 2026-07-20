@@ -4,13 +4,11 @@
    *
    *   [ name ] [ M ][ S ] [ vol slider ] [ waveform canvas + playhead ]
    *
-   * Waveform is drawn once per buffer (downsampled to canvas width). The
-   * playhead line is overlaid via absolute positioning so we don't repaint
-   * the canvas on every rAF tick.
+   * Waveform drawing/resizing is centralized in `WaveformCanvas` so the
+   * mixer lanes and stage waveform keep the same block rendering behavior.
    */
   import { Button } from '$lib/components/ui/button'
-  import { computePeaks, drawPeaksToCanvas } from '$lib/audio/peaks'
-  import { waveformBlockBucketCount } from '$lib/audio/waveformBlocks'
+  import WaveformCanvas from '$lib/components/WaveformCanvas.svelte'
 
   let {
     label,
@@ -50,42 +48,12 @@
     onSeekFraction: (frac: number) => void
   }>()
 
-  let canvas = $state<HTMLCanvasElement | undefined>()
-  let waveWrap = $state<HTMLDivElement | undefined>()
-  let waveWidth = $state(0)
   const WAVE_HEIGHT = 44
 
   /** This lane's buffer duration; may be shorter than mix duration. */
   let bufferDur = $derived(buffer ? buffer.duration : 0)
   /** Where this lane's audio ends, expressed as a fraction of mix duration. */
   let endFrac = $derived(durationSec > 0 ? bufferDur / durationSec : 0)
-  let playheadFrac = $derived(durationSec > 0 ? Math.min(1, positionSec / durationSec) : 0)
-
-  $effect(() => {
-    if (!waveWrap) return
-    const ro = new ResizeObserver((entries) => {
-      const w = Math.floor(entries[0]?.contentRect.width ?? 0)
-      if (w > 0 && w !== waveWidth) waveWidth = w
-    })
-    ro.observe(waveWrap)
-    return () => ro.disconnect()
-  })
-
-  $effect(() => {
-    if (!canvas || !buffer || waveWidth <= 0) return
-    const peaks = computePeaks(buffer, 0, buffer.duration, waveformBlockBucketCount(waveWidth))
-    const ctx2 = canvas.getContext('2d')
-    if (ctx2) ctx2.strokeStyle = color
-    drawPeaksToCanvas(canvas, peaks, waveWidth, WAVE_HEIGHT)
-  })
-
-  function onWaveClick(e: MouseEvent) {
-    if (!waveWrap || durationSec <= 0) return
-    const rect = waveWrap.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const frac = Math.max(0, Math.min(1, x / rect.width))
-    onSeekFraction(frac)
-  }
 </script>
 
 <div class="border-foreground/30 bg-background flex items-center gap-2 border-2 px-2 py-1.5">
@@ -137,67 +105,19 @@
     {Math.round(volume * 100)}%
   </span>
 
-  <!-- Waveform + playhead -->
-  <div
-    bind:this={waveWrap}
-    class="bg-muted/30 relative min-w-0 flex-1 cursor-pointer"
-    style="height: {WAVE_HEIGHT}px"
-    onclick={onWaveClick}
-    onkeydown={(e) => {
-      if (e.key === 'ArrowLeft') onSeekFraction(Math.max(0, playheadFrac - 0.02))
-      else if (e.key === 'ArrowRight') onSeekFraction(Math.min(1, playheadFrac + 0.02))
-      else if (e.key === 'Home') onSeekFraction(0)
-    }}
-    role="slider"
-    tabindex="0"
-    aria-label="Seek {label}"
-    aria-valuemin="0"
-    aria-valuemax={durationSec || 0}
-    aria-valuenow={positionSec}
-  >
-    <!-- Section bands (behind the waveform): alternating tint + left divider so
-         sections read as continuous columns across every lane. -->
-    {#each sectionBands as band (band.index)}
-      <div
-        class="pointer-events-none absolute top-0 bottom-0"
-        style="left: {band.startFrac * 100}%; width: {(band.endFrac - band.startFrac) *
-          100}%; border-left: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent); {band.index %
-          2 ===
-        0
-          ? 'background: color-mix(in oklch, var(--foreground) 7%, transparent);'
-          : ''}"
-      ></div>
-    {/each}
-
-    {#if buffer}
-      <canvas bind:this={canvas} class="absolute inset-0"></canvas>
-      <!-- Boundary line where this buffer ends on the mix timeline -->
-      {#if endFrac < 1}
-        <div
-          class="bg-foreground/30 pointer-events-none absolute top-0 bottom-0 w-px"
-          style="left: {endFrac * 100}%"
-        ></div>
-      {/if}
-      <!-- Playhead -->
-      <div
-        class="bg-rose-500 pointer-events-none absolute top-0 bottom-0 w-px"
-        style="left: {playheadFrac * 100}%"
-      ></div>
-    {:else}
-      <div class="text-muted-foreground flex h-full items-center justify-center text-[10px]">
-        loading…
-      </div>
-    {/if}
-
-    <!-- Section labels sit on top, only on the labelled (top) lane. -->
-    {#if showSectionLabels}
-      {#each sectionBands as band (band.index)}
-        <span
-          class="text-foreground/70 pointer-events-none absolute top-0.5 truncate text-[9px] font-semibold uppercase leading-none tracking-wide"
-          style="left: {band.startFrac * 100}%; max-width: {(band.endFrac - band.startFrac) *
-            100}%; padding-left: 3px;"
-        >{band.label}</span>
-      {/each}
-    {/if}
-  </div>
+  <WaveformCanvas
+    class="flex-1"
+    {buffer}
+    {color}
+    height={WAVE_HEIGHT}
+    {positionSec}
+    {durationSec}
+    {sectionBands}
+    {showSectionLabels}
+    bufferEndFraction={endFrac < 1 ? endFrac : null}
+    label={`Seek ${label}`}
+    loadingLabel="loading..."
+    playheadClass="bg-rose-500 pointer-events-none absolute top-0 bottom-0 z-[2] w-px"
+    {onSeekFraction}
+  />
 </div>

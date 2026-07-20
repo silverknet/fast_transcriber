@@ -40,6 +40,17 @@ debugging with a different madmom version).
 | `BARBRO_PYTHON_SECTIONS` | Sections interpreter override (sections venv → this → `BARBRO_PYTHON` → `python3`) |
 | `BARBRO_PYTHON_STEMS` | Stems interpreter override (stems venv → this → `BARBRO_PYTHON` → `python3`) |
 | `BARBRO_PYTHON_PIPER_TTS` | Piper interpreter override (piper venv → this → `BARBRO_PYTHON` → `python3`) |
+| `BARBRO_TORCH_INDEX` | Stems torch wheel index. `off`/`cpu` forces CPU wheels; a URL picks a custom index (default on Windows+NVIDIA: cu124) |
+| `BARBRO_FFMPEG` | Absolute path to an ffmpeg binary (overrides the managed copy and PATH lookup) |
+| `BARBRO_MADMOM_WHEEL` | Beats: madmom wheel URL/path used on Windows instead of the PyPI sdist |
+
+### Packaged build (Windows x64, unsigned)
+
+Built by CI (`.github/workflows/desktop-release.yml`, `build-windows` job) on
+every `desktop-v*` tag: an NSIS one-click installer (`BarBro-Desktop-x64.exe`,
+per-user, no admin) plus the CI-built madmom wheel the beats setup consumes.
+Local cross-build from a Mac usually works too: `npm run dist:win`.
+Unsigned → SmartScreen shows "More info → Run anyway" on first run.
 
 ### Packaged build (Apple Silicon, unsigned dev)
 

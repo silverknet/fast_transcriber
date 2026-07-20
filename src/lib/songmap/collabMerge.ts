@@ -123,6 +123,19 @@ function classifyScalar(
   return { path, label, severity: 'safe', mine, theirs }
 }
 
+function audioIdentityDiffers(a: SongMap['audio'], b: SongMap['audio']): boolean {
+  if (!a && !b) return false
+  if (!a || !b) return true
+  if (a.sha256 && b.sha256) return a.sha256 !== b.sha256
+  return a.fileName !== b.fileName || a.fileSize !== b.fileSize
+}
+
+function stripAudioOriginalPath(audio: SongMap['audio']): SongMap['audio'] {
+  if (!audio) return undefined
+  const { originalPath: _originalPath, ...rest } = audio
+  return rest
+}
+
 function cueEventLabel(mine: CueEvent, theirs: CueEvent): string {
   if (mine.text !== theirs.text) return 'Cue text'
   if (!shallowEqual(mine.anchor, theirs.anchor)) return 'Cue timing'
@@ -221,7 +234,33 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const conflicts: Conflict[] = []
 
   // ── Lists keyed by id ──
-  const harmony = mergeByIdList<HarmonyEvent>(local.harmony, cloud.harmony, 'harmony', 'Chord at beat')
+  // Harmony: per-id merging is right for co-editing, but a sheet import /
+  // track switch REPLACES the whole list with fresh ids. Unioning those with
+  // the cloud's old chords produced a 244-chord soup — and worse, the silent
+  // no-conflict rebase then pushed it. Near-zero id overlap on two non-empty
+  // sides = a wholesale replacement: surface ONE dangerous conflict and keep
+  // the sides intact (cloud default, user can pick "mine").
+  const localHarmonyIds = new Set((local.harmony ?? []).map((h) => h.id))
+  const harmonyOverlap = (cloud.harmony ?? []).filter((h) => localHarmonyIds.has(h.id)).length
+  const harmonyWholesale =
+    (local.harmony?.length ?? 0) > 0 &&
+    (cloud.harmony?.length ?? 0) > 0 &&
+    harmonyOverlap / Math.max(local.harmony.length, cloud.harmony.length) < 0.1 &&
+    !canonicalEqual(local.harmony, cloud.harmony)
+  const harmony = harmonyWholesale
+    ? { merged: cloud.harmony, conflicts: [] as Conflict[] }
+    : mergeByIdList<HarmonyEvent>(local.harmony, cloud.harmony, 'harmony', 'Chord at beat')
+  if (harmonyWholesale) {
+    // mine/theirs carry the ACTUAL arrays so applyConflictDecisions can
+    // install the chosen side; the dialog's describe() truncates for display.
+    conflicts.push({
+      path: 'harmony',
+      label: `Chords (whole track: mine ${local.harmony.length} vs cloud ${cloud.harmony.length})`,
+      severity: 'dangerous',
+      mine: local.harmony,
+      theirs: cloud.harmony,
+    })
+  }
   conflicts.push(...harmony.conflicts)
   const sections = mergeByIdList<Section>(local.sections, cloud.sections, 'sections', 'Section')
   conflicts.push(...sections.conflicts)
@@ -283,6 +322,36 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   // (paste / re-align), so per-word merging isn't worth the complexity.
   const lyC = classifyScalar(local.lyrics, cloud.lyrics, 'lyrics', 'Lyrics')
   if (lyC) conflicts.push(lyC)
+  // Drum track: whole-field LWW like lyrics. Compare with renderExport
+  // stripped so a local re-render (new fingerprint/path) never conflicts.
+  const dmLocal = local.drumMidi ? { ...local.drumMidi, renderExport: undefined } : undefined
+  const dmCloud = cloud.drumMidi ? { ...cloud.drumMidi, renderExport: undefined } : undefined
+  const dmC = classifyScalar(dmLocal, dmCloud, 'drumMidi', 'Drum track')
+  if (dmC) conflicts.push(dmC)
+  const bmLocal = local.bassMidi ? { ...local.bassMidi, renderExport: undefined } : undefined
+  const bmCloud = cloud.bassMidi ? { ...cloud.bassMidi, renderExport: undefined } : undefined
+  const bmC = classifyScalar(bmLocal, bmCloud, 'bassMidi', 'Bass track')
+  if (bmC) conflicts.push(bmC)
+  // Whole-field LWW for stored chord tracks (v5) — layers are snapshots
+  // created/consumed wholesale (stash on import, switch), like lyrics.
+  const clC = classifyScalar(local.chordLayers, cloud.chordLayers, 'chordLayers', 'Chord tracks')
+  if (clC) conflicts.push(clC)
+  const clnC = classifyScalar(
+    local.activeChordLayerName,
+    cloud.activeChordLayerName,
+    'activeChordLayerName',
+    'Active chord track name',
+  )
+  if (clnC) conflicts.push(clnC)
+  const slC = classifyScalar(local.sectionLayers, cloud.sectionLayers, 'sectionLayers', 'Section layouts')
+  if (slC) conflicts.push(slC)
+  const slnC = classifyScalar(
+    local.activeSectionLayerName,
+    cloud.activeSectionLayerName,
+    'activeSectionLayerName',
+    'Active section layout name',
+  )
+  if (slnC) conflicts.push(slnC)
 
   // ── expectedAudio swap is dangerous (different master) ──
   if (
@@ -296,6 +365,21 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
       severity: 'dangerous',
       mine: local.expectedAudio,
       theirs: cloud.expectedAudio,
+    })
+  }
+
+  // ── Audio identity swap is dangerous (different master) ──
+  // `audio.originalPath` is per-machine and must never participate in the
+  // conflict value. Identity is intentionally narrow: sha when both sides
+  // have it, otherwise fileName/fileSize. Durations/rates pick up float
+  // noise through JSONB and are handled by reconciliation elsewhere.
+  if (audioIdentityDiffers(local.audio, cloud.audio)) {
+    conflicts.push({
+      path: 'audio',
+      label: 'Audio file',
+      severity: 'dangerous',
+      mine: stripAudioOriginalPath(local.audio),
+      theirs: stripAudioOriginalPath(cloud.audio),
     })
   }
 
@@ -417,7 +501,15 @@ export function applyConflictDecisions(
     else if (c.path === 'startBeatId') result = { ...result, startBeatId: c.mine as string | undefined }
     else if (c.path === 'transpose') result = { ...result, transpose: c.mine as SongMap['transpose'] }
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
+    else if (c.path === 'drumMidi') result = { ...result, drumMidi: c.mine as SongMap['drumMidi'] }
+    else if (c.path === 'bassMidi') result = { ...result, bassMidi: c.mine as SongMap['bassMidi'] }
+    else if (c.path === 'harmony') result = { ...result, harmony: c.mine as SongMap['harmony'] }
+    else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
+    else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }
+    else if (c.path === 'sectionLayers') result = { ...result, sectionLayers: c.mine as SongMap['sectionLayers'] }
+    else if (c.path === 'activeSectionLayerName') result = { ...result, activeSectionLayerName: c.mine as string | undefined }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
+    else if (c.path === 'audio') result = { ...result, audio: c.mine as SongMap['audio'] }
     // `timeline/bars-count` is informational — the per-id merges above
     // already determine which bars survive; no extra apply step.
   }

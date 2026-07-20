@@ -3,8 +3,8 @@
  * and the standardized stems venv under Electron's userData dir.
  */
 
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync } from 'node:fs'
+import { chmod, copyFile, mkdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
@@ -77,6 +77,14 @@ export function sectionsScriptPath() {
 /** Per-beat chroma + key detection (`desktop/native/python/sections/chord_chroma.py`). Reuses the sections venv. */
 export function chordChromaScriptPath() {
   return path.join(getNativePythonRoot(), 'sections', 'chord_chroma.py')
+}
+
+export function transcribeDrumsScriptPath() {
+  return path.join(getNativePythonRoot(), 'sections', 'transcribe_drums.py')
+}
+
+export function transcribeBassScriptPath() {
+  return path.join(getNativePythonRoot(), 'sections', 'transcribe_bass.py')
 }
 
 /** Piper TTS — isolated from beats/stems (`desktop/native/python/piper_tts/`). */
@@ -355,6 +363,134 @@ export function uvDownloadUrl() {
 }
 
 export const UV_PINNED_VERSION = UV_VERSION
+
+// ── Managed ffmpeg ───────────────────────────────────────────────────────────
+//
+// The youtube and stems venvs both carry `imageio-ffmpeg`, whose wheel ships
+// a static ffmpeg binary — but under a VERSIONED name
+// (`ffmpeg-win-x86_64-vX.Y.exe`, `ffmpeg-macos-arm64-vX.Y`), so it can never
+// be spawned as plain `ffmpeg`. We copy it once to a canonical path next to
+// the uv binary; `ffmpegExePath()` prefers it and falls back to PATH (which
+// keeps working for brew-equipped macs exactly as before).
+
+export function getManagedFfmpegPath() {
+  return path.join(getUvBinDir(), process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+}
+
+/** BARBRO_FFMPEG env → managed copy → bare `ffmpeg` (PATH). */
+export function ffmpegExePath() {
+  const env = process.env.BARBRO_FFMPEG?.trim()
+  if (env) return env
+  const managed = getManagedFfmpegPath()
+  if (existsSync(managed)) return managed
+  return 'ffmpeg'
+}
+
+/** site-packages dir of a venv, both POSIX and Windows layouts. */
+function venvSitePackagesDirs(venvDir) {
+  if (process.platform === 'win32') {
+    return [path.join(venvDir, 'Lib', 'site-packages')]
+  }
+  const libDir = path.join(venvDir, 'lib')
+  try {
+    return readdirSync(libDir)
+      .filter((n) => n.startsWith('python3'))
+      .map((n) => path.join(libDir, n, 'site-packages'))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Copy the imageio-ffmpeg binary out of the stems/youtube venv into the
+ * canonical managed path. Pure fs — safe to call at every boot and at the
+ * end of the setup handlers; no-op when already present or no venv has the
+ * wheel yet. Returns the managed path when available, else null.
+ */
+export async function ensureManagedFfmpegBinary() {
+  const dest = getManagedFfmpegPath()
+  if (existsSync(dest)) return dest
+  const candidates = [getStemsVenvDir(), getYoutubeImportVenvDir()]
+  for (const venvDir of candidates) {
+    for (const site of venvSitePackagesDirs(venvDir)) {
+      const binDir = path.join(site, 'imageio_ffmpeg', 'binaries')
+      let names = []
+      try {
+        names = readdirSync(binDir).filter((n) => n.startsWith('ffmpeg-'))
+      } catch {
+        continue
+      }
+      if (names.length === 0) continue
+      try {
+        await mkdir(path.dirname(dest), { recursive: true })
+        await copyFile(path.join(binDir, names[0]), dest)
+        if (process.platform !== 'win32') await chmod(dest, 0o755)
+        return dest
+      } catch {
+        /* fall through to the next candidate */
+      }
+    }
+  }
+  return null
+}
+
+// ── NVIDIA GPU detection (Windows CUDA wheel selection) ─────────────────────
+
+/**
+ * True when an NVIDIA driver is installed and reports at least one GPU.
+ * `nvidia-smi` ships with the driver and lands on PATH (System32); its
+ * presence IS the "CUDA-capable" signal we need — no wmic (removed on
+ * Win11 24H2), no registry spelunking.
+ */
+export function nvidiaGpuPresent() {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (v) => {
+      if (!settled) {
+        settled = true
+        resolve(v)
+      }
+    }
+    let child
+    try {
+      child = spawn('nvidia-smi', ['-L'], { stdio: ['ignore', 'pipe', 'ignore'] })
+    } catch {
+      done(false)
+      return
+    }
+    let out = ''
+    child.stdout?.on('data', (d) => {
+      out += String(d)
+    })
+    child.on('error', () => done(false))
+    child.on('close', (code) => done(code === 0 && /GPU \d/.test(out)))
+    setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* already gone */
+      }
+      done(false)
+    }, 5000)
+  })
+}
+
+/**
+ * Which extra torch index (if any) the stems install should use.
+ *   BARBRO_TORCH_INDEX=off|cpu  → null (explicit CPU wheels from PyPI)
+ *   BARBRO_TORCH_INDEX=<url>    → that index
+ *   win32 + NVIDIA driver       → the cu124 wheel index
+ *   otherwise                   → null (default PyPI resolution; mac uses MPS)
+ */
+export async function resolveTorchIndex() {
+  const raw = process.env.BARBRO_TORCH_INDEX?.trim()
+  if (raw) {
+    if (raw === 'off' || raw === 'cpu') return null
+    return raw
+  }
+  if (process.platform !== 'win32') return null
+  return (await nvidiaGpuPresent()) ? 'https://download.pytorch.org/whl/cu124' : null
+}
 
 /**
  * Download + extract the uv binary into `getUvBinDir()`. Returns

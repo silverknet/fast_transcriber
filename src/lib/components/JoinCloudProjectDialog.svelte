@@ -4,7 +4,9 @@
    * cloud project meta (passed as `cloudProject`); the user picks a
    * parent folder on disk and clicks Join. The dialog handles the
    * download + materialize flow via `joinCloudProject`, then navigates
-   * to `/project`.
+   * to `/project` — UNLESS one or more songs couldn't be materialized
+   * (malformed cloud data), in which case it stops on a warning screen
+   * with an explicit "Continue" instead of silently dropping them.
    *
    * Identical UX rhythm to `NewProjectDialog`: dialog opens first, native
    * picker is triggered from a button inside, errors land inline.
@@ -34,12 +36,18 @@
   let parentPath = $state<string | null>(null)
   let busy = $state(false)
   let error = $state('')
+  /** Set once the project has materialized locally; > 0 means some
+   * song(s) couldn't be added (malformed cloud data) — surfaced instead
+   * of silently dropped, with a manual "Continue" instead of auto-nav so
+   * the user actually sees it. */
+  let joinedWithSkips = $state<number | null>(null)
 
   $effect(() => {
     if (open) {
       parentPath = null
       busy = false
       error = ''
+      joinedWithSkips = null
     }
   })
 
@@ -73,6 +81,14 @@
         error = r.error
         return
       }
+      if (r.skippedSongs) {
+        // Non-fatal: everything else came through. Stop and show it
+        // instead of auto-navigating past it — the user should know to
+        // ask the project owner about the missing song(s).
+        joinedWithSkips = r.skippedSongs
+        onJoined?.()
+        return
+      }
       open = false
       onJoined?.()
       await goto('/project')
@@ -87,6 +103,11 @@
     if (busy) return
     open = false
   }
+
+  async function continueAfterSkips() {
+    open = false
+    await goto('/project')
+  }
 </script>
 
 <Dialog bind:open>
@@ -96,6 +117,18 @@
     </DialogHeader>
 
     <div class="space-y-4">
+      {#if joinedWithSkips !== null}
+        <p class="text-sm">
+          Joined, but {joinedWithSkips} {joinedWithSkips === 1 ? 'song' : 'songs'} couldn't be added
+          — the data for {joinedWithSkips === 1 ? "it" : "them"} looked corrupted. Ask the project
+          owner to check {joinedWithSkips === 1 ? 'that song' : 'those songs'} and re-share.
+        </p>
+        <div class="flex justify-end gap-2">
+          <Button class="" type="button" onclick={() => void continueAfterSkips()}>
+            Continue to project
+          </Button>
+        </div>
+      {:else}
       {#if cloudProject}
         <div class="border-foreground/20 border-2 px-3 py-2">
           <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Project</p>
@@ -143,6 +176,7 @@
           {busy ? 'Joining…' : 'Join'}
         </Button>
       </div>
+      {/if}
     </div>
   </DialogContent>
 </Dialog>

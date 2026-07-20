@@ -85,8 +85,20 @@ export function toCollabSongMap(sm: SongMap): SongMap {
     out.audio = audioRest
   }
 
-  out.cueTracks = sm.cueTracks.map(stripCueTrackLocalRender)
+  // `sm.cueTracks` is non-optional on the type, but this is a defensive
+  // BACKSTOP: cloud sync should migrate raw `song_map` rows to current
+  // shape first (`normalizeCloudSongMap` in `client/cloudSync.ts`), yet a
+  // legacy `formatVersion: 1` map has no `cueTracks` at all, and this must
+  // not crash if it's ever reached without that normalization. Tolerate
+  // the missing field rather than throwing a cryptic TypeError.
+  out.cueTracks = (sm.cueTracks ?? []).map(stripCueTrackLocalRender)
   out.clickExport = stripExport(sm.clickExport)
+  if (sm.drumMidi) {
+    out.drumMidi = { ...sm.drumMidi, renderExport: stripExport(sm.drumMidi.renderExport) }
+  }
+  if (sm.bassMidi) {
+    out.bassMidi = { ...sm.bassMidi, renderExport: stripExport(sm.bassMidi.renderExport) }
+  }
 
   return out
 }
@@ -162,6 +174,14 @@ export function collabContentFingerprint(sm: SongMap): string {
   // joiner's copy, not user content — the owner's map doesn't carry it, so
   // including it would make owner and joiner fingerprints disagree forever.
   delete normalized.expectedAudio
+  if (normalized.drumMidi && typeof normalized.drumMidi === 'object') {
+    const { renderExport: _re, ...dmRest } = normalized.drumMidi as Record<string, unknown>
+    normalized.drumMidi = dmRest
+  }
+  if (normalized.bassMidi && typeof normalized.bassMidi === 'object') {
+    const { renderExport: _re, ...bmRest } = normalized.bassMidi as Record<string, unknown>
+    normalized.bassMidi = bmRest
+  }
   if (Array.isArray(normalized.cueTracks)) {
     normalized.cueTracks = (normalized.cueTracks as Array<Record<string, unknown>>).map((t) => {
       const { renderExport: _renderExport, ...rest } = t
@@ -220,6 +240,24 @@ export function mergeLocalIntoCollab(local: SongMap, cloud: SongMap): SongMap {
     merged.clickExport = {
       ...merged.clickExport,
       relativePath: local.clickExport.relativePath,
+    }
+  }
+  if (merged.drumMidi?.renderExport && local.drumMidi?.renderExport?.relativePath) {
+    merged.drumMidi = {
+      ...merged.drumMidi,
+      renderExport: {
+        ...merged.drumMidi.renderExport,
+        relativePath: local.drumMidi.renderExport.relativePath,
+      },
+    }
+  }
+  if (merged.bassMidi?.renderExport && local.bassMidi?.renderExport?.relativePath) {
+    merged.bassMidi = {
+      ...merged.bassMidi,
+      renderExport: {
+        ...merged.bassMidi.renderExport,
+        relativePath: local.bassMidi.renderExport.relativePath,
+      },
     }
   }
 

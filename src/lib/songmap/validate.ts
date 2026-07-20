@@ -355,6 +355,96 @@ export function validateSongMap(map: SongMap): ValidationResult {
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
   else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
 
+  if (map.drumMidi !== undefined) {
+    const dm = map.drumMidi
+    if (!dm || typeof dm !== 'object') errors.push('drumMidi must be object')
+    else {
+      if (!Array.isArray(dm.events)) errors.push('drumMidi.events must be array')
+      else {
+        dm.events.forEach((e, i) => {
+          if (!Number.isFinite(e.timeSec) || e.timeSec < 0) {
+            errors.push(`drumMidi.events[${i}].timeSec must be a finite number ≥ 0`)
+          }
+          if (!Number.isFinite(e.velocity) || e.velocity < 0 || e.velocity > 1) {
+            errors.push(`drumMidi.events[${i}].velocity must be within [0, 1]`)
+          }
+        })
+      }
+      if (dm.renderExport !== undefined) validateRenderedExport(dm.renderExport, 'drumMidi.renderExport')
+    }
+  }
+
+  if (map.bassMidi !== undefined) {
+    const bm = map.bassMidi
+    if (!bm || typeof bm !== 'object') errors.push('bassMidi must be object')
+    else {
+      if (!Array.isArray(bm.events)) errors.push('bassMidi.events must be array')
+      else {
+        bm.events.forEach((e, i) => {
+          if (!Number.isFinite(e.timeSec) || e.timeSec < 0) {
+            errors.push(`bassMidi.events[${i}].timeSec must be a finite number ≥ 0`)
+          }
+          if (!Number.isFinite(e.durationSec) || e.durationSec <= 0) {
+            errors.push(`bassMidi.events[${i}].durationSec must be a finite number > 0`)
+          }
+          if (!Number.isInteger(e.midi) || e.midi < 0 || e.midi > 127) {
+            errors.push(`bassMidi.events[${i}].midi must be an integer within [0, 127]`)
+          }
+          if (!Number.isFinite(e.velocity) || e.velocity < 0 || e.velocity > 1) {
+            errors.push(`bassMidi.events[${i}].velocity must be within [0, 1]`)
+          }
+        })
+      }
+      if (bm.renderExport !== undefined) validateRenderedExport(bm.renderExport, 'bassMidi.renderExport')
+    }
+  }
+
+  if (map.chordLayers !== undefined) {
+    if (!Array.isArray(map.chordLayers)) errors.push('chordLayers must be array')
+    else {
+      const seenLayerIds = new Set<string>()
+      map.chordLayers.forEach((layer, i) => {
+        const path = `chordLayers[${i}]`
+        if (!layer || typeof layer !== 'object') {
+          errors.push(`${path}: must be object`)
+          return
+        }
+        if (typeof layer.id !== 'string' || !layer.id) errors.push(`${path}.id: required string`)
+        else if (seenLayerIds.has(layer.id)) errors.push(`${path}.id: duplicate layer id`)
+        else seenLayerIds.add(layer.id)
+        if (typeof layer.name !== 'string' || !layer.name) errors.push(`${path}.name: required string`)
+        if (!Array.isArray(layer.harmony)) errors.push(`${path}.harmony: must be array`)
+        else layer.harmony.forEach((h, j) => validateHarmony(h, `${path}.harmony[${j}]`, errors))
+      })
+    }
+  }
+  if (map.activeChordLayerName !== undefined && typeof map.activeChordLayerName !== 'string') {
+    errors.push('activeChordLayerName must be string')
+  }
+
+  if (map.sectionLayers !== undefined) {
+    if (!Array.isArray(map.sectionLayers)) errors.push('sectionLayers must be array')
+    else {
+      const seenSectionLayerIds = new Set<string>()
+      map.sectionLayers.forEach((layer, i) => {
+        const path = `sectionLayers[${i}]`
+        if (!layer || typeof layer !== 'object') {
+          errors.push(`${path}: must be object`)
+          return
+        }
+        if (typeof layer.id !== 'string' || !layer.id) errors.push(`${path}.id: required string`)
+        else if (seenSectionLayerIds.has(layer.id)) errors.push(`${path}.id: duplicate layer id`)
+        else seenSectionLayerIds.add(layer.id)
+        if (typeof layer.name !== 'string' || !layer.name) errors.push(`${path}.name: required string`)
+        if (!Array.isArray(layer.sections)) errors.push(`${path}.sections: must be array`)
+        else layer.sections.forEach((sec, j) => validateSection(sec, `${path}.sections[${j}]`, errors))
+      })
+    }
+  }
+  if (map.activeSectionLayerName !== undefined && typeof map.activeSectionLayerName !== 'string') {
+    errors.push('activeSectionLayerName must be string')
+  }
+
   if (!Array.isArray(map.harmony)) errors.push('harmony must be array')
   else {
     map.harmony.forEach((h, i) => validateHarmony(h, `harmony[${i}]`, errors))

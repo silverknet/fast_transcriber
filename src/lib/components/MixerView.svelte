@@ -47,8 +47,11 @@
   } from '$lib/audio/mastering'
   import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { loadProjectDrumKit } from '$lib/client/projectDrumKit'
   import { loadProjectSongIntoEditor, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
+  import { renderBassTrackWavBlob } from '$lib/audio/renderBassTrack'
+  import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
@@ -191,7 +194,7 @@
     // of their own buffer. Stems + original get the same preamble of silence
     // prepended so musical time aligns: the cue's "beat 1" sits at the same
     // mix-timeline second as each stem's `trim.startSec` sample.
-    if (forKey === 'cue' || forKey === 'click') return 0
+    if (forKey === 'cue' || forKey === 'click' || forKey === 'drums-gen' || forKey === 'bass-gen') return 0
     const preludeSec = titleCuePreludeSec(sm, getPrimaryCueTrack(sm))
     let prependSec = 0
     const countInBeats = effectiveCountInBeats(sm)
@@ -694,6 +697,61 @@
               includeClicks: true,
               cueTrack: primaryCueTrack,
             })
+            return r.blob
+          } catch {
+            return null
+          }
+        },
+      })
+    }
+
+    // BarBro's generated drum track — present whenever drum hits have been
+    // detected. Prefers the saved render (its presence == fingerprint-fresh,
+    // same auto-drop contract as clickExport); otherwise synthesizes from
+    // the events in memory (fast, no network).
+    if (sm && sm.drumMidi && sm.drumMidi.events.length > 0) {
+      const dmRel = sm.drumMidi.renderExport?.relativePath
+      // "Your kit" always re-synthesizes: the render fingerprint can't see
+      // the user's sample FILES change, so a saved render is never trusted.
+      const kitIsCustom = sm.drumMidi.kit === 'custom'
+      plan.push({
+        key: 'drums-gen',
+        label: 'BarBro Drums',
+        loader: async () => {
+          if (!kitIsCustom && dmRel && ps.osPath && ps.activeSongFolder) {
+            const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, dmRel)
+            if (r.ok) return r.blob
+          }
+          try {
+            const custom =
+              kitIsCustom && ps.osPath ? await loadProjectDrumKit(ps.osPath) : null
+            const r = await renderDrumTrackWavBlob(sm, custom ? { customKit: custom.kit } : {})
+            return r.blob
+          } catch {
+            return null
+          }
+        },
+      })
+    }
+
+    // BarBro's generated bass track — same contract as the drums lane. No
+    // `transposeSrcSubpath`: when the song is transposed we shift the NOTES
+    // and re-synthesize — exact pitch, no stretch artifacts — so the loaded
+    // buffer must not be pitch-shifted again. The saved render is at written
+    // pitch and only trusted untransposed.
+    if (sm && sm.bassMidi && sm.bassMidi.events.length > 0) {
+      const bmRel = sm.bassMidi.renderExport?.relativePath
+      const bassSemis = transposeAudioEnabled ? transposeSemitones : 0
+      plan.push({
+        key: 'bass-gen',
+        label: 'BarBro Bass',
+        loader: async () => {
+          if (bassSemis === 0 && bmRel && ps.osPath && ps.activeSongFolder) {
+            const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, bmRel)
+            if (r.ok) return r.blob
+          }
+          try {
+            const r = await renderBassTrackWavBlob(sm, { transposeSemitones: bassSemis })
             return r.blob
           } catch {
             return null

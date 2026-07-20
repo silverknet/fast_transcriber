@@ -9,6 +9,7 @@
 import { error, json } from '@sveltejs/kit'
 import {
   getCloudProject,
+  isPlausibleSongMap,
   listMemberProjects,
   rpcCreateCloudProject,
   type CreateCloudProjectArgs,
@@ -46,6 +47,10 @@ export const POST: RequestHandler = async ({ locals, request }) => {
   }
   if (!Array.isArray(body.songs)) {
     throw error(400, 'songs[] is required (may be empty).')
+  }
+  const badSong = body.songs.find((s) => !isPlausibleSongMap(s.songMap))
+  if (badSong) {
+    throw error(400, `songMap for song ${badSong.id} is missing required fields.`)
   }
 
   const args: CreateCloudProjectArgs = {

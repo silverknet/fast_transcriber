@@ -2,6 +2,7 @@
   /** Waveform timeline editor orchestration (viewport-driven model). */
   import { onDestroy, tick, untrack } from 'svelte'
   import { Button } from '$lib/components/ui/button'
+  import HelpHint from '$lib/components/HelpHint.svelte'
   import {
     ChevronLeft,
     ChevronRight,
@@ -1885,27 +1886,13 @@
       >
         <LocateFixed class="size-4" aria-hidden="true" />
       </Button>
+      <HelpHint
+        label="Waveform gestures"
+        text={isEditorVariant
+          ? 'Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select. In chord mode, double-click/tap edits and Space plays from the selected beat. Esc clears selection.'
+          : 'Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag handles to adjust the selection; drag the minimap to move around.'}
+      />
     </div>
-
-    <details
-      class="text-muted-foreground group mx-auto max-w-3xl text-center text-[11px]"
-      aria-label="Waveform gestures"
-    >
-      <summary
-        class="text-muted-foreground hover:text-foreground cursor-pointer list-none py-0.5 select-none marker:content-none [&::-webkit-details-marker]:hidden"
-      >
-        <span class="underline-offset-2 group-open:underline">Gestures</span>
-      </summary>
-      <p class="text-muted-foreground mt-2 text-left leading-relaxed">
-        {#if isEditorVariant}
-          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag bars or beats to select. In chord mode,
-          double-click/tap edits and Space plays from the selected beat. Esc clears selection.
-        {:else}
-          Ctrl/Cmd+scroll to zoom. Two-finger or Shift-scroll pans. Drag handles to adjust the selection; drag the minimap
-          to move around.
-        {/if}
-      </p>
-    </details>
 
     <div
       bind:this={detailEl}

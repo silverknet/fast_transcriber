@@ -211,3 +211,24 @@ Web unchanged: 0 check errors, 366 tests.
 
 This is as far as static verification goes — the only thing left is the live
 desktop run described in the earlier note.
+
+## 2026-07-12 (claude) — BarBro Bass shipped
+
+Bass sibling of the drums pipeline: `sections/transcribe_bass.py` (librosa.yin
++ RMS gate + attack-flake cleanup — stays on the SIGKILL-safe API surface),
+`POST /native/analyze-bass`, `bassMidi` on the smap (LWW like drumMidi,
+renderExport stripped/restored in collab), plucked-string synth in
+`renderBassTrack.ts` (no reverb, center pan, −18 dB RMS), "BarBro Bass" mixer
+lane, bass row in the (renamed) BarBro Band panel.
+
+Validated the transcriber against the user's hand-placed LNFSG chords: top
+transposition candidate is −2 semitones at 41.6% duration-on-the-bass-note
+(all other shifts ≤13%) — i.e. the recording is a whole step below the sheet
+key, and the tracker hears correct pitches. Two more songs smoke-tested with
+sane keys/coverage.
+
+Transposition note: the `bass-gen` lane deliberately has NO
+`transposeSrcSubpath` — on transpose it re-synthesizes with
+`renderBassTrackWavBlob(sm, { transposeSemitones })` (shifts the MIDI notes,
+skips the saved render). Don't add audio pitch-shifting to that lane; it
+would double-shift.

@@ -80,6 +80,36 @@ export type HarmonyEvent = {
   beatAnchor?: { indexInBar: number }
 }
 
+/**
+ * A stored, INACTIVE alternative chord track (v5). The active track is always
+ * `SongMap.harmony` — every consumer (grid, lead sheet, mixer rail, exports)
+ * keeps reading that one field; layers are parallel snapshots the user can
+ * switch to (see `songmap/chordLayers.ts`). Lets a sheet import land without
+ * destroying hand-entered chords.
+ */
+export type ChordLayer = {
+  id: string
+  /** User-facing track name, e.g. `My chords`, `Sheet import`. */
+  name: string
+  /** What produced this layer (display hint only). */
+  source?: 'manual' | 'sheet-import' | 'suggestions'
+  createdAt?: string
+  harmony: HarmonyEvent[]
+}
+
+/**
+ * A stored, INACTIVE alternative section layout (v5) — the sections twin of
+ * `ChordLayer`, with the same swap semantics (`songmap/sectionLayers.ts`).
+ * The active layout is always `SongMap.sections`.
+ */
+export type SectionLayer = {
+  id: string
+  name: string
+  source?: 'manual' | 'sheet-import' | 'suggestions'
+  createdAt?: string
+  sections: Section[]
+}
+
 export type SectionKind =
   | 'intro'
   | 'verse'
@@ -155,6 +185,87 @@ export type RenderedCueExport = {
 }
 
 export type CueTrackExport = RenderedCueExport
+
+// ── Drum track (drum stem → detected hits → rendered BarBro kit) ─────────────
+
+export type DrumClass = 'kick' | 'snare' | 'hihat' | 'tom' | 'cymbal'
+
+export type DrumMidiEvent = {
+  /** ORIGINAL audio time — same base as `Beat.timeSec` (stems are untrimmed). */
+  timeSec: number
+  cls: DrumClass
+  /** 0..1 — per-song relative (P95-normalized per class at analysis time). */
+  velocity: number
+}
+
+/** Render-time grid snapping. Events are always stored raw ("as played"). */
+export type DrumQuantize = 'off' | '1/8' | '1/16' | '1/16T'
+
+/**
+ * Detected drum hits + the settings BarBro renders its own drum track with.
+ * Events sync between collaborators (whole-field LWW, like `lyrics`);
+ * `renderExport.relativePath` is per-machine and stripped, like cue renders.
+ */
+export type DrumMidi = {
+  events: DrumMidiEvent[]
+  analyzedAt: string
+  /** Mirror of the sidecar analyzer's version — older results are stale. */
+  analyzerVersion: number
+  /** Song-relative path of the stem the events came from (provenance label). */
+  sourceStem: string
+  /** Fingerprint of the audio analyzed: sha256 if present, else `<name>:<size>`. */
+  audioFingerprint: string
+  /** Drum kit id (see `$lib/audio/drumKits`); absent = default kit. */
+  kit?: string
+  quantize?: DrumQuantize
+  /**
+   * 'steady' (default): play the INFERRED groove — per-section patterns,
+   * misses filled, flukes dropped (see `songmap/drumGroove.ts`).
+   * 'detected': play the raw detected hits.
+   */
+  style?: 'steady' | 'detected'
+  /** Saved render of the drum track, when written into the project. */
+  renderExport?: RenderedCueExport
+}
+
+// ── Bass track (bass stem → detected notes → rendered BarBro bass) ───────────
+
+export type BassMidiEvent = {
+  /** ORIGINAL audio time — same base as `Beat.timeSec` (stems are untrimmed). */
+  timeSec: number
+  /** Sounding length; the renderer sustains the voice for this long. */
+  durationSec: number
+  /** MIDI note number (open E on a bass guitar = E1 = 28). */
+  midi: number
+  /** 0..1 — per-song relative (P95-normalized at analysis time). */
+  velocity: number
+}
+
+/**
+ * Detected bass notes + render settings — `drumMidi`'s sibling, same
+ * lifecycle: events sync whole-field LWW, `renderExport.relativePath` is
+ * per-machine and stripped. Quantize snaps ONSETS only; durations are kept.
+ */
+export type BassMidi = {
+  events: BassMidiEvent[]
+  analyzedAt: string
+  /** Mirror of the sidecar analyzer's version — older results are stale. */
+  analyzerVersion: number
+  /** Song-relative path of the stem the events came from (provenance label). */
+  sourceStem: string
+  /** Fingerprint of the audio analyzed: sha256 if present, else `<name>:<size>`. */
+  audioFingerprint: string
+  /** Only applies to 'detected' style; 'steady' is grid-locked already. */
+  quantize?: DrumQuantize
+  /**
+   * 'steady' (default): the CONFIDENT-BASSIST pass — register-folded,
+   * grid-locked, legato phrasing, flattened dynamics (`songmap/bassGroove.ts`).
+   * 'detected': play the raw detected notes.
+   */
+  style?: 'steady' | 'detected'
+  /** Saved render of the bass track, when written into the project. */
+  renderExport?: RenderedCueExport
+}
 export type ClickTrackExport = RenderedCueExport
 
 export type CueAnchor =
@@ -450,6 +561,14 @@ export type SongMapV3 = {
   timeline: SongMapTimeline
   sections: Section[]
   harmony: HarmonyEvent[]
+  /** Inactive alternative chord tracks (v5); `harmony` is the active one. */
+  chordLayers?: ChordLayer[]
+  /** Name shown for the ACTIVE chord track when layers exist. */
+  activeChordLayerName?: string
+  /** Inactive alternative section layouts (v5); `sections` is the active one. */
+  sectionLayers?: SectionLayer[]
+  /** Name shown for the ACTIVE section layout when layers exist. */
+  activeSectionLayerName?: string
   cueTracks: CueTrack[]
   /**
    * Count-in beats before the song start, independent of cue speech. When
@@ -485,6 +604,10 @@ export type SongMapV3 = {
   sectionBorderHints?: SectionBorderHints
   /** Cached per-beat chroma + detected key (display-only / hint source). */
   chordHints?: ChordHints
+  /** Detected drum hits + BarBro's rendered drum-track settings. */
+  drumMidi?: DrumMidi
+  /** Detected bass notes + BarBro's rendered bass-track settings. */
+  bassMidi?: BassMidi
 }
 
 /** Current persistent shape (formatVersion 4). Name kept from the v3 era to

@@ -1,7 +1,7 @@
-# Unsigned Mac builds for now — no Developer ID; users see Gatekeeper "can't
-# be opened" on first launch and right-click → Open to bypass. Add signing
-# + notarization once we have an Apple Developer Program account.
-# See desktop/README.md.
+# Unsigned builds for now — no Apple Developer ID and no Windows Authenticode
+# cert. macOS shows the Gatekeeper block (Privacy & Security → Open Anyway);
+# Windows shows SmartScreen (More info → Run anyway). Add signing once the
+# accounts/certs exist. See desktop/README.md.
 
 appId: com.barbro.desktop
 productName: BarBro Desktop
@@ -38,6 +38,20 @@ mac:
 
 dmg:
   title: "${productName} ${version}"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+# Per-user, no admin prompt, silent-ish install that relaunches the app when
+# done — the closest Windows analog to "drag to Applications". latest.yml is
+# generated alongside for any future auto-updater wiring.
+nsis:
+  oneClick: true
+  perMachine: false
+  runAfterFinish: true
 
 # electron-builder uploads the built DMG/ZIP + latest-mac.yml directly to a
 # GitHub Release matching the git tag. `GH_TOKEN` is provided by the

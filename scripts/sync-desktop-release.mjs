@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// NOTE: mac-only by design. The win-x64 manifest entry points straight at the
+// GitHub release asset URL (releases/latest/download/BarBro-Desktop-x64.exe) —
+// a 100–300 MB installer does not belong in static/ hosting. Edit
+// static/desktop-downloads.json by hand after the first Windows release.
 /**
  * Copies the latest Apple Silicon DMG from desktop/release into static/releases/
  * so SvelteKit serves it at /releases/barbro-desktop-<version>-arm64.dmg (same origin).

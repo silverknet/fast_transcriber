@@ -5,7 +5,9 @@
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
   import MixerView from '$lib/components/MixerView.svelte'
+  import DrumTrackPanel from '$lib/components/DrumTrackPanel.svelte'
   import LeadSheet from '$lib/components/LeadSheet.svelte'
+  import EditSectionToolbar from '$lib/components/EditSectionToolbar.svelte'
   import SectionSuggestionBanner from '$lib/components/SectionSuggestionBanner.svelte'
   import ChordAutoFillBanner from '$lib/components/ChordAutoFillBanner.svelte'
   import RelinkAudioBanner from '$lib/components/RelinkAudioBanner.svelte'
@@ -90,7 +92,22 @@
     type ChordSuggestion,
   } from '$lib/chords/suggestFromChroma'
   import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
-  import { cleanLyricsText } from '$lib/lyrics/clean'
+  import { parseChordSheet } from '$lib/chords/sheet/parseChordSheet'
+  import {
+    activeChordTrackName,
+    deleteChordLayer,
+    stashActiveChords,
+    switchToChordLayer,
+  } from '$lib/songmap/chordLayers'
+  import {
+    activeSectionLayoutName,
+    deleteSectionLayer,
+    stashActiveSections,
+    switchToSectionLayer,
+  } from '$lib/songmap/sectionLayers'
+  import { placeChords } from '$lib/chords/sheet/placeChords'
+  import { applyChordPlacements } from '$lib/chords/sheet/applyPlacement'
+  import { deriveSectionsFromSheet } from '$lib/chords/sheet/deriveSections'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
@@ -114,14 +131,24 @@
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
   import {
+    beginPatchBatch,
     canRedo,
     canUndo,
+    endPatchBatch,
     patchSongMap,
     redoSongMap,
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, Pause, Pencil, Play, RefreshCw } from '@lucide/svelte'
+  import { ArrowLeft, Layers, Pause, Pencil, Play, RefreshCw, Trash2 } from '@lucide/svelte'
+  import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+  } from '$lib/components/ui/dialog'
   import { analyzeDownbeatsViaDesktop } from '$lib/client/desktopBridge'
   import { trimAudioFileToWav } from '$lib/audio/trimAudio'
   import { beatsToSongMap } from '$lib/analysis/beatsToSongMap'
@@ -1020,6 +1047,16 @@
   /** Main workspace mode. */
   let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'>(
     'overview',
+  )
+  let timelineToolbarTitle = $derived(
+    editMode === 'grid' ? 'Grid' : editMode === 'sections' ? 'Sections' : 'Chords',
+  )
+  let timelineToolbarHelp = $derived(
+    editMode === 'grid'
+      ? 'Edit bars and beats in the strip above the waveform. Add or remove bars at the ends, wheel to change beats per bar, and drag a bar edge to adjust timing.'
+      : editMode === 'sections'
+        ? 'Drag on the bar strip, or use Shift+click / Cmd/Ctrl+click, to select a range. Pick a section type to tag it.'
+        : 'Select beats on the chord strip, double-click/tap to edit, and press Space to play from the selected beat. Cmd/Ctrl+C and Cmd/Ctrl+V copy and paste chords.',
   )
 
   const NOTE_NAMES: NoteName[] = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
@@ -2410,7 +2447,14 @@
     lyricsDraft = untrack(() => sm.lyrics?.sourceText ?? '')
   })
 
-  const lyricsCleanedPreview = $derived(cleanLyricsText(lyricsDraft))
+  // Chord-sheet awareness: a paste that carries chord lines (Ultimate-Guitar
+  // style, chords above lyrics) yields both lyrics AND placeable chords. For
+  // plain lyrics `sheetParsed.lyricsText` equals `cleanLyricsText().text`.
+  const sheetParsed = $derived(parseChordSheet(lyricsDraft))
+  const lyricsCleanedPreview = $derived({
+    text: sheetParsed.lyricsText,
+    lines: sheetParsed.lyricsText.split('\n').filter((l) => l.length > 0),
+  })
   const lyricsSaved = $derived($songMap?.lyrics ?? null)
   const lyricsDraftMatchesSaved = $derived(
     (lyricsSaved?.sourceText ?? '') === lyricsCleanedPreview.text,
@@ -2418,7 +2462,10 @@
   let lyricsSaveMsg = $state('')
 
   function saveLyrics() {
-    const cleaned = cleanLyricsText(lyricsDraft)
+    const cleaned = {
+      text: sheetParsed.lyricsText,
+      lines: lyricsCleanedPreview.lines,
+    }
     const p = patchSongMap((m) => {
       if (!cleaned.text) {
         const { lyrics: _lyrics, ...rest } = m
@@ -2440,6 +2487,236 @@
     lyricsSaveMsg = cleaned.text
       ? `Saved ${cleaned.lines.length} line${cleaned.lines.length === 1 ? '' : 's'}.`
       : 'Lyrics removed.'
+  }
+
+  /** "13:04" / "yesterday" — so the layer picker shows WHICH import is which. */
+  function layerAgeLabel(iso: string | undefined): string {
+    if (!iso) return ''
+    const then = new Date(iso).getTime()
+    if (!Number.isFinite(then)) return ''
+    const mins = Math.round((Date.now() - then) / 60_000)
+    if (mins < 1) return 'just now'
+    if (mins < 60) return `${mins} min ago`
+    const d = new Date(iso)
+    const today = new Date()
+    const sameDay = d.toDateString() === today.toDateString()
+    if (sameDay) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  }
+
+  // ── Parallel chord tracks: active = sm.harmony; layers switch losslessly ──
+  const chordLayerList = $derived($songMap?.chordLayers ?? [])
+  const activeChordTrackLabel = $derived($songMap ? activeChordTrackName($songMap) : '')
+  let chordLayerMsg = $state('')
+
+  // ── Loadouts: a chord track + section layout that travel together ──────
+  // Pairing is by layer NAME — a sheet import stashes both sides under the
+  // same name, so "Sheet import" is one loadout with chords AND sections.
+  let loadoutsOpen = $state(false)
+  type LoadoutRow = {
+    name: string
+    chords?: (typeof chordLayerList)[number]
+    sections?: (typeof sectionLayerList)[number]
+  }
+  const storedLoadouts = $derived.by<LoadoutRow[]>(() => {
+    const byName = new Map<string, LoadoutRow>()
+    for (const l of chordLayerList) byName.set(l.name, { name: l.name, chords: l })
+    for (const l of sectionLayerList) {
+      const cur = byName.get(l.name)
+      if (cur) cur.sections = l
+      else byName.set(l.name, { name: l.name, sections: l })
+    }
+    return [...byName.values()].sort((a, b) =>
+      (b.chords?.createdAt ?? b.sections?.createdAt ?? '').localeCompare(
+        a.chords?.createdAt ?? a.sections?.createdAt ?? '',
+      ),
+    )
+  })
+
+  function useLoadout(row: LoadoutRow) {
+    chordLayerMsg = ''
+    beginPatchBatch()
+    try {
+      if (row.chords) {
+        patchSongMap((m) => {
+          const r = switchToChordLayer(m, row.chords!.id, newId)
+          return r.ok ? r.map : m
+        })
+      }
+      if (row.sections) {
+        patchSongMap((m) => {
+          const r = switchToSectionLayer(m, row.sections!.id, newId)
+          return r.ok ? r.map : m
+        })
+      }
+    } finally {
+      endPatchBatch()
+    }
+    chordLayerMsg = `Switched to “${row.name}” — the previous loadout is kept.`
+  }
+
+  function deleteLoadout(row: LoadoutRow) {
+    const parts = [
+      row.chords ? `${row.chords.harmony.length} chords` : null,
+      row.sections ? `${row.sections.sections.length} sections` : null,
+    ].filter(Boolean)
+    if (!window.confirm(`Delete the stored loadout “${row.name}” (${parts.join(' + ')})? The active chords and sections stay.`)) {
+      return
+    }
+    chordLayerMsg = ''
+    beginPatchBatch()
+    try {
+      if (row.chords) patchSongMap((m) => deleteChordLayer(m, row.chords!.id))
+      if (row.sections) patchSongMap((m) => deleteSectionLayer(m, row.sections!.id))
+    } finally {
+      endPatchBatch()
+    }
+    chordLayerMsg = `Deleted “${row.name}”.`
+  }
+
+  // ── Parallel section layouts: active = sm.sections; layers swap losslessly ──
+  const sectionLayerList = $derived($songMap?.sectionLayers ?? [])
+  const activeSectionLayoutLabel = $derived($songMap ? activeSectionLayoutName($songMap) : '')
+  let sectionLayerMsg = $state('')
+
+
+
+  // ── Chord inspector (debug): the stored truth, row by row ────────────────
+  // Lets the user verify what's IN the song against what the grid draws —
+  // when placement looks wrong, this splits "bad data" from "bad rendering".
+  let chordInspectorOpen = $state(false)
+  /** beatId → origin from the LAST import in this session (plan-only info). */
+  let lastImportOrigins = $state<Map<string, string>>(new Map())
+  const chordInspectorRows = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return []
+    const beatsById = new Map(sm.timeline.beats.map((b) => [b.id, b]))
+    const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
+    return [...sm.harmony]
+      .sort((a, b) => a.startSec - b.startSec)
+      .map((h) => {
+        const beat = h.beatId ? beatsById.get(h.beatId) : undefined
+        const bar = beat ? barsById.get(beat.barId) : undefined
+        const origin = h.beatId ? lastImportOrigins.get(h.beatId) : undefined
+        return {
+          id: h.id,
+          symbol: h.chord.displayRaw,
+          barIndex: bar?.index ?? null,
+          beatInBar: beat ? beat.indexInBar + 1 : null,
+          timeSec: beat?.timeSec ?? h.startSec,
+          origin:
+            origin === 'word'
+              ? 'from a sung word'
+              : origin === 'estimated'
+                ? 'estimated'
+                : origin === 'spread'
+                  ? 'filled in'
+                  : '',
+        }
+      })
+  })
+
+  function formatInspectorTime(t: number): string {
+    const m = Math.floor(t / 60)
+    const s = t - m * 60
+    return `${m}:${s.toFixed(2).padStart(5, '0')}`
+  }
+
+  let chordInspectorCopied = $state(false)
+  async function copyChordInspector() {
+    const header = '#\tbar.beat\ttime\tchord\tplaced'
+    const lines = chordInspectorRows.map(
+      (r, i) =>
+        `${i + 1}\t${r.barIndex !== null ? `${r.barIndex + 1}.${r.beatInBar}` : '—'}\t${formatInspectorTime(r.timeSec)}\t${r.symbol}\t${r.origin}`,
+    )
+    const text = [`track: ${activeChordTrackLabel} · ${chordInspectorRows.length} chords`, header, ...lines].join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      chordInspectorCopied = true
+      setTimeout(() => (chordInspectorCopied = false), 2000)
+    } catch {
+      /* clipboard unavailable — selection copy still works */
+    }
+  }
+
+  // ── "Import chord sheet" (Chords tab): its own paste box, independent of
+  // the lyrics. Sheet lyric lines fuzzy-match against the stored fitted
+  // lyrics, so a lazy UG sheet (skipped repeats, "Chorus x2") still anchors.
+  let chordSheetDraft = $state('')
+  const chordSheetParsed = $derived(parseChordSheet(chordSheetDraft))
+  let chordsPlaceBusy = $state(false)
+  let chordsPlaceMsg = $state('')
+  let chordsPlaceErr = $state('')
+
+  function placeChordsFromSheet() {
+    if (chordsPlaceBusy) return
+    chordsPlaceErr = ''
+    chordsPlaceMsg = ''
+    const sm = get(songMap)
+    if (!sm) return
+    const sheet = parseChordSheet(chordSheetDraft)
+    const r = placeChords(sheet, sm)
+    if (!r.ok) {
+      chordsPlaceErr = r.error
+      return
+    }
+    const hadChords = sm.harmony.length > 0
+    chordsPlaceBusy = true
+    try {
+      beginPatchBatch()
+      try {
+        // Never destroy existing work: current chords become a parallel
+        // track first, then the sheet's chords take over as the active one.
+        const applyRes = patchSongMap((m) => {
+          const stashed = stashActiveChords(m, newId)
+          const applied = applyChordPlacements({ ...stashed, harmony: [] }, r.plan, newId).map
+          return { ...applied, activeChordLayerName: 'Sheet import' }
+        })
+        let addedSections = 0
+        let stashedSections = false
+        const cur = get(songMap)
+        if (applyRes.ok && cur) {
+          const derived = deriveSectionsFromSheet(sheet, r.plan, cur, newId)
+          if (derived.length > 0) {
+            // Same rule as chords: existing sections become a parallel
+            // layout first, never overwritten.
+            stashedSections = cur.sections.length > 0
+            const sp = patchSongMap((m) => ({
+              ...stashActiveSections(m, newId),
+              sections: derived,
+              activeSectionLayerName: 'Sheet import',
+            }))
+            if (sp.ok) addedSections = derived.length
+            else stashedSections = false
+          }
+        }
+        if (!applyRes.ok) {
+          chordsPlaceErr = applyRes.errors.join('; ')
+          return
+        }
+        lastImportOrigins = new Map(r.plan.placements.map((p) => [p.beatId, p.origin]))
+        const { stats } = r.plan
+        const parts = [`Placed ${stats.placed} chord${stats.placed === 1 ? '' : 's'}`]
+        if (stats.estimated > 0) parts.push(`${stats.estimated} by estimate`)
+        if (stats.collisions > 0) parts.push(`${stats.collisions} overlapped`)
+        if (stats.unplaceable > 0) parts.push(`${stats.unplaceable} skipped`)
+        chordsPlaceMsg =
+          parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')}).` : `${parts[0]}.`
+        if (stats.totalLines > 0) {
+          chordsPlaceMsg += ` Matched ${stats.matchedLines} of ${stats.totalLines} sheet lines to your lyrics.`
+        }
+        if (addedSections > 0) {
+          chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}${stashedSections ? ' (your previous sections are kept as a separate layout)' : ''}.`
+        }
+        if (hadChords) {
+          chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time.'
+        }
+      } finally {
+        endPatchBatch()
+      }
+    } finally {
+      chordsPlaceBusy = false
+    }
   }
 
   // ── "Fit to song": transcribe the vocal → align imported words to it ──
@@ -2980,17 +3257,10 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Cue settings"
       >
-        <details class="text-muted-foreground mb-3 text-xs">
-          <summary
-            class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
-          >
-            <span class="underline-offset-2 group-open:underline">About the cue track</span>
-          </summary>
-          <p class="mt-2 leading-relaxed">
-            Cue tracks combine the click with optional spoken cues for headphone monitoring. Set the count-in in
-            <strong>Grid</strong>; BarBro renders the cue automatically when playback or export needs it.
-          </p>
-        </details>
+        <EditSectionToolbar
+          title="Cue"
+          helpText="Cue tracks combine the click with optional spoken cues for headphone monitoring. Set the count-in in Grid; BarBro renders the cue automatically when playback or export needs it. Use Overview for full multi-track playback with click and stems."
+        />
 
         <div class="space-y-4">
           {#if cueCountInBeats > 0 && cueCountInResult}
@@ -3224,9 +3494,6 @@
             </button>
           {/if}
 
-          <p class="text-muted-foreground text-xs leading-relaxed">
-            Use the <strong>Mix</strong> tab for full multi-track playback with click + stems.
-          </p>
         </div>
       </section>
     {/if}
@@ -3236,52 +3503,61 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Overview"
       >
-        <div
-          class="text-muted-foreground mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs tabular-nums"
-        >
-          <span>{sm.timeline.bars.length} bars</span>
-          <span>{sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}</span>
-          {#if sm.metadata.bpm != null}<span>{Math.round(sm.metadata.bpm)} BPM</span>{/if}
-          {#if keyLabel}<span>{keyLabel}</span>{/if}
-        </div>
-        <details class="text-muted-foreground mb-3 text-xs sm:mb-4">
-          <summary
-            class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
-          >
-            <span class="underline-offset-2 group-open:underline">How the mixer works</span>
-          </summary>
-          <p class="mt-2 leading-relaxed">
-            Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with
-            the song, and every lane stays aligned for playback and export. Click on a waveform to seek.
-          </p>
-        </details>
-
         {#if overviewHasCueContent}
-          <div class="border-foreground/15 mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-b pb-3 sm:mb-4">
-            <label class="flex cursor-pointer items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={overviewCuesActive}
-                disabled={cueGenBusy}
-                onchange={(e) => void toggleOverviewCues((e.currentTarget as HTMLInputElement).checked)}
-                class="accent-foreground size-4"
-              />
-              <span class="font-semibold">Play cues</span>
-            </label>
-            {#if cueGenBusy}
-              <span class="text-muted-foreground text-xs">Preparing cues…</span>
-            {/if}
-            {#if cueGenErr}
-              <span class="text-destructive text-xs">{cueGenErr}</span>
-            {:else if overviewCuesNeedCountIn}
-              <span class="text-muted-foreground text-xs" role="status">
-                Set a count-in for this song to hear the numbers (Project settings or the count-in control).
+          <EditSectionToolbar
+            title="Overview"
+            helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
+          >
+            {#snippet primary()}
+              <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
+              <span class="font-mono tabular-nums">
+                {sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}
               </span>
-            {:else if cueSpeechNote}
-              <span class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</span>
-            {/if}
-          </div>
+              {#if sm.metadata.bpm != null}<span class="font-mono tabular-nums">{Math.round(sm.metadata.bpm)} BPM</span>{/if}
+              {#if keyLabel}<span class="font-mono tabular-nums">{keyLabel}</span>{/if}
+            {/snippet}
+            {#snippet secondary()}
+              <label class="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={overviewCuesActive}
+                  disabled={cueGenBusy}
+                  onchange={(e) => void toggleOverviewCues((e.currentTarget as HTMLInputElement).checked)}
+                  class="accent-foreground size-4"
+                />
+                <span class="font-semibold">Play cues</span>
+              </label>
+              {#if cueGenBusy}
+                <span class="text-muted-foreground text-xs">Preparing cues...</span>
+              {/if}
+              {#if cueGenErr}
+                <span class="text-destructive text-xs">{cueGenErr}</span>
+              {:else if overviewCuesNeedCountIn}
+                <span class="text-muted-foreground text-xs" role="status">
+                  Set a count-in for this song to hear the numbers (Project settings or the count-in control).
+                </span>
+              {:else if cueSpeechNote}
+                <span class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</span>
+              {/if}
+            {/snippet}
+          </EditSectionToolbar>
+        {:else}
+          <EditSectionToolbar
+            title="Overview"
+            helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
+          >
+            {#snippet primary()}
+              <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
+              <span class="font-mono tabular-nums">
+                {sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}
+              </span>
+              {#if sm.metadata.bpm != null}<span class="font-mono tabular-nums">{Math.round(sm.metadata.bpm)} BPM</span>{/if}
+              {#if keyLabel}<span class="font-mono tabular-nums">{keyLabel}</span>{/if}
+            {/snippet}
+          </EditSectionToolbar>
         {/if}
+
+        <DrumTrackPanel onChanged={() => mixerReloadSignal++} />
 
         <MixerView reloadSignal={mixerReloadSignal} />
       </section>
@@ -3292,6 +3568,49 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Lyrics"
       >
+        <EditSectionToolbar
+          title="Lyrics"
+          helpText="Paste the lyric text, save it, then fit it to the song to time the words. Chord-sheet-looking lines are stripped here; place chords from the Chords tab loadout importer."
+        >
+          {#snippet primary()}
+            <span class="font-mono tabular-nums">
+              {lyricsCleanedPreview.lines.length} cleaned line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
+            </span>
+            {#if lyricsSaved?.words.length}
+              <span class="font-mono tabular-nums">{lyricsSaved.words.length} timed words</span>
+            {:else if lyricsSaved}
+              <span class="text-muted-foreground">Saved, not fitted yet</span>
+            {:else}
+              <span class="text-muted-foreground">Not saved yet</span>
+            {/if}
+            {#if lyricsSaveMsg && !lyricsFitBusy}
+              <span class="text-muted-foreground" role="status">{lyricsSaveMsg}</span>
+            {/if}
+          {/snippet}
+          {#snippet actions()}
+            <button
+              type="button"
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+              onclick={saveLyrics}
+              disabled={lyricsDraftMatchesSaved && !!lyricsSaved}
+            >
+              Save lyrics
+            </button>
+            <button
+              type="button"
+              class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
+              onclick={() => void fitLyricsToSong()}
+              disabled={lyricsFitBusy || !lyricsSaved?.sourceText || !lyricsDraftMatchesSaved || !$desktopCompanionStatus.reachable}
+              title={!$desktopCompanionStatus.reachable
+                ? 'BarBro Desktop must be running.'
+                : !lyricsDraftMatchesSaved
+                  ? 'Save the lyrics first.'
+                  : 'Listen to the song and time every word'}
+            >
+              {lyricsFitBusy ? 'Fitting...' : lyricsSaved?.words.length ? 'Fit to song again' : 'Fit to song'}
+            </button>
+          {/snippet}
+        </EditSectionToolbar>
         <div class="grid gap-4 md:grid-cols-2">
           <div class="flex flex-col gap-2">
             <label class="text-muted-foreground text-xs font-medium uppercase tracking-wide" for="lyrics-paste">
@@ -3305,32 +3624,6 @@
               class="border-foreground bg-background min-h-[24rem] w-full resize-y border-2 px-3 py-2 font-mono text-sm leading-relaxed focus:outline-none"
               spellcheck="false"
             ></textarea>
-            <div class="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
-                onclick={saveLyrics}
-                disabled={lyricsDraftMatchesSaved && !!lyricsSaved}
-              >
-                Save lyrics
-              </button>
-              <button
-                type="button"
-                class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
-                onclick={() => void fitLyricsToSong()}
-                disabled={lyricsFitBusy || !lyricsSaved?.sourceText || !lyricsDraftMatchesSaved || !$desktopCompanionStatus.reachable}
-                title={!$desktopCompanionStatus.reachable
-                  ? 'BarBro Desktop must be running.'
-                  : !lyricsDraftMatchesSaved
-                    ? 'Save the lyrics first.'
-                    : 'Listen to the song and time every word'}
-              >
-                {lyricsFitBusy ? 'Fitting…' : lyricsSaved?.words.length ? 'Fit to song again' : 'Fit to song'}
-              </button>
-              {#if lyricsSaveMsg && !lyricsFitBusy}
-                <span class="text-muted-foreground text-xs" role="status">{lyricsSaveMsg}</span>
-              {/if}
-            </div>
             {#if lyricsFitBusy && lyricsFitMsg}
               <p class="text-muted-foreground text-xs" role="status">✨ {lyricsFitMsg}</p>
             {/if}
@@ -3349,6 +3642,14 @@
             {#if lyricsSaved && lyricsSaved.words.length > 0 && !lyricsDraftMatchesSaved}
               <p class="text-amber-600 text-xs">
                 Changing the words clears the current timing — run “Fit to song” again after saving.
+              </p>
+            {/if}
+
+            {#if sheetParsed.chordCount > 0}
+              <p class="text-muted-foreground text-xs" role="status">
+                🎸 Looks like a chord sheet — the chord lines are stripped here, only the
+                words are saved. To place the chords, paste the sheet in the
+                <strong>Chords</strong> tab under “Import chord sheet”.
               </p>
             {/if}
           </div>
@@ -3425,6 +3726,10 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Lead sheet"
       >
+        <EditSectionToolbar
+          title="Lead sheet"
+          helpText="The lead sheet is a read-only performance view of the current song map: sections, lyrics, chords, key, and timing all come from the saved editor data."
+        />
         {#if $songMap}
           <LeadSheet songMap={$songMap} />
         {:else}
@@ -3438,31 +3743,40 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Edit timeline"
       >
-        <details class="text-muted-foreground mb-3 text-xs sm:mb-4">
-          <summary
-            class="hover:text-foreground cursor-pointer list-none font-medium select-none marker:content-none [&::-webkit-details-marker]:hidden"
-          >
-            <span class="underline-offset-2 group-open:underline">How this tab works</span>
-          </summary>
-          <div class="mt-2 space-y-2 leading-relaxed">
-            {#if editMode === 'grid'}
-              <p>
-                Edit bars and beats in the strip above the waveform. Add or remove bars at the ends, wheel to change
-                beats per bar, and drag a bar edge to adjust timing.
-              </p>
-            {:else if editMode === 'sections'}
-              <p>
-                Drag on the bar strip, or use Shift+click / ⌘/Ctrl+click, to select a range. Pick a section type to tag it.
-              </p>
-            {:else}
-              <p>
-                Select beats on the chord strip, double-click/tap to edit, and press Space to play from the selected beat.
-                ⌘/Ctrl+C and ⌘/Ctrl+V copy and paste chords.
-              </p>
+        <EditSectionToolbar title={timelineToolbarTitle} helpText={timelineToolbarHelp}>
+          {#snippet primary()}
+            <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
+            <span class="font-mono tabular-nums">{sm.timeline.beats.length} beats</span>
+            {#if editMode === 'sections'}
+              <span class="text-muted-foreground">{activeSectionLayoutLabel}</span>
+            {:else if editMode === 'chords'}
+              <span class="text-muted-foreground">{activeChordTrackLabel}</span>
             {/if}
-          </div>
-        </details>
+          {/snippet}
+        </EditSectionToolbar>
         {#if editMode === 'sections'}
+          <EditSectionToolbar
+            title="Section layout"
+            compact
+            statusText={sectionLayerMsg || undefined}
+            helpText="Loadouts store matched chord and section sets. Switching keeps the current layout stored, so trying another arrangement is non-destructive."
+          >
+            {#snippet actions()}
+              <Button
+                variant="outline"
+                size="sm"
+                class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
+                onclick={() => (loadoutsOpen = true)}
+                title="Loadouts — stored chord + section sets; switch, delete, or import a sheet"
+              >
+                <Layers class="size-3.5" aria-hidden="true" />
+                {activeSectionLayoutLabel}
+                {#if storedLoadouts.length > 0}
+                  <span class="text-muted-foreground font-normal">· {storedLoadouts.length} stored</span>
+                {/if}
+              </Button>
+            {/snippet}
+          </EditSectionToolbar>
           <SectionSuggestionBanner
             suggestion={activeSuggestion}
             index={activeSuggestionPosition}
@@ -3475,6 +3789,240 @@
           />
         {/if}
         {#if editMode === 'chords'}
+          <!-- ── Chords toolbar: one row instead of three stacked blocks.
+               Left: chord-track picker + sheet import. Right: suggestions. ── -->
+          <EditSectionToolbar
+            title="Chord controls"
+            compact
+            helpText="Loadouts switch between stored chord and section sets. Suggestions can be accepted for the selected section or hidden once the section is finished."
+          >
+            {#snippet primary()}
+              <Button
+                variant="outline"
+                size="sm"
+                class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
+                onclick={() => (loadoutsOpen = true)}
+                title="Loadouts — stored chord + section sets; switch, delete, or import a sheet"
+              >
+                <Layers class="size-3.5" aria-hidden="true" />
+                <span class="max-w-40 truncate">{activeChordTrackLabel}</span>
+                {#if storedLoadouts.length > 0}
+                  <span class="text-muted-foreground font-normal">· {storedLoadouts.length} stored</span>
+                {/if}
+              </Button>
+
+              <Button
+                variant="outline"
+                size="sm"
+                class="h-7 border-2 px-2 text-xs font-bold {chordInspectorOpen ? 'bg-foreground text-background' : ''}"
+                onclick={() => (chordInspectorOpen = !chordInspectorOpen)}
+                title="Show every stored chord with its exact bar, beat and time — for checking what you see against what's saved"
+              >
+                Inspect
+              </Button>
+
+              <span class="border-foreground/30 mx-1 h-5 border-l" aria-hidden="true"></span>
+
+              <label class="inline-flex items-center gap-2 font-bold">
+                <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
+                Suggestions
+              </label>
+              <span class="text-muted-foreground">
+                {currentChordSection
+                  ? sectionDisplayLabel(currentChordSection)
+                  : 'Select a beat in a section'}
+              </span>
+              {#if currentChordSection && currentChordSectionDone}
+                <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase">done</span>
+              {/if}
+              <button
+                type="button"
+                class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+                onclick={handleAcceptCurrentSectionSuggestions}
+                disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
+                title="Write every visible suggestion in the selected section"
+              >
+                Use section suggestions ({currentSectionSuggestionEntries.length})
+              </button>
+              <button
+                type="button"
+                class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+                onclick={toggleCurrentChordSectionDone}
+                disabled={!currentChordSection}
+                title={currentChordSectionDone
+                  ? 'Show chord suggestions in this section again'
+                  : 'Hide chord suggestions in this section'}
+              >
+                {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
+              </button>
+            {/snippet}
+          </EditSectionToolbar>
+          {#if chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
+            <p
+              class="mb-3 px-1 text-xs {chordsPlaceErr ? 'text-destructive' : 'text-muted-foreground'}"
+              role="status"
+            >
+              {chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
+            </p>
+          {/if}
+
+          {#if chordInspectorOpen}
+            <!-- The stored truth, row by row: compare against the grid/waveform.
+                 Bar and beat are 1-based here to match what a musician counts. -->
+            <div class="border-foreground bg-background mb-3 border-2 text-xs">
+              <div class="border-foreground/40 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
+                <span>Stored chords · {chordInspectorRows.length}</span>
+                <span>track: {activeChordTrackLabel}</span>
+                <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
+                <button
+                  type="button"
+                  class="border-foreground hover:bg-foreground hover:text-background ml-auto border px-1.5 py-0.5 normal-case"
+                  onclick={() => void copyChordInspector()}
+                >
+                  {chordInspectorCopied ? 'Copied ✓' : 'Copy all'}
+                </button>
+              </div>
+              <div class="max-h-64 overflow-auto">
+                <table class="w-full font-mono text-[11px] tabular-nums">
+                  <thead>
+                    <tr class="text-muted-foreground text-left">
+                      <th class="px-2 py-0.5 font-bold">#</th>
+                      <th class="px-2 py-0.5 font-bold">bar.beat</th>
+                      <th class="px-2 py-0.5 font-bold">time</th>
+                      <th class="px-2 py-0.5 font-bold">chord</th>
+                      <th class="px-2 py-0.5 font-bold">placed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each chordInspectorRows as row, ri (row.id)}
+                      <tr class="odd:bg-muted/40">
+                        <td class="text-muted-foreground px-2 py-0.5">{ri + 1}</td>
+                        <td class="px-2 py-0.5">
+                          {row.barIndex !== null ? `${row.barIndex + 1}.${row.beatInBar}` : '—'}
+                        </td>
+                        <td class="px-2 py-0.5">{formatInspectorTime(row.timeSec)}</td>
+                        <td class="px-2 py-0.5 font-bold">{row.symbol}</td>
+                        <td class="text-muted-foreground px-2 py-0.5">{row.origin}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+                {#if chordInspectorRows.length === 0}
+                  <p class="text-muted-foreground px-2 py-2 italic">No chords on the active track.</p>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
+          <!-- Loadouts: stored chord+section sets — list, switch, delete, and
+               import a new sheet, all in one place. -->
+          <Dialog open={loadoutsOpen} onOpenChange={(v: boolean) => (loadoutsOpen = v)}>
+            <DialogContent class="flex max-w-2xl flex-col gap-3 p-4">
+              <DialogHeader>
+                <DialogTitle class="flex items-center gap-2">
+                  <Layers class="size-4" aria-hidden="true" />
+                  Loadouts
+                </DialogTitle>
+                <DialogDescription>
+                  A loadout is a matched set of chords and sections. Importing a sheet creates
+                  one; switching keeps the current set stored. Nothing is ever overwritten.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div class="border-foreground bg-muted flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
+                <span class="border-foreground bg-foreground text-background border px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase">Active</span>
+                <span class="font-bold">{activeChordTrackLabel}</span>
+                <span class="text-muted-foreground">
+                  {$songMap?.harmony.length ?? 0} chords · {$songMap?.sections.length ?? 0} sections{activeSectionLayoutLabel !== activeChordTrackLabel ? ` · section layout: ${activeSectionLayoutLabel}` : ''}
+                </span>
+              </div>
+
+              {#if storedLoadouts.length === 0}
+                <p class="text-muted-foreground text-xs italic">
+                  No stored loadouts yet — import a sheet below to create one.
+                </p>
+              {:else}
+                <div class="flex max-h-44 flex-col gap-1 overflow-auto">
+                  {#each storedLoadouts as row (row.name)}
+                    <div class="border-foreground/50 flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
+                      <span class="font-bold">{row.name}</span>
+                      <span class="text-muted-foreground">
+                        {row.chords ? `${row.chords.harmony.length} chords` : 'no chords'} ·
+                        {row.sections ? `${row.sections.sections.length} sections` : 'no sections'}
+                        {layerAgeLabel(row.chords?.createdAt ?? row.sections?.createdAt) ? ` · ${layerAgeLabel(row.chords?.createdAt ?? row.sections?.createdAt)}` : ''}
+                      </span>
+                      <span class="ml-auto"></span>
+                      <Button
+                        size="sm"
+                        class="h-6 border-2 px-2 text-xs font-bold"
+                        onclick={() => useLoadout(row)}
+                        title={`Make “${row.name}” active — the current loadout is kept`}
+                      >
+                        Use
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        class="text-destructive hover:bg-destructive hover:text-background h-6 border-2 px-1.5"
+                        onclick={() => deleteLoadout(row)}
+                        aria-label={`Delete loadout ${row.name}`}
+                        title={`Delete “${row.name}”…`}
+                      >
+                        <Trash2 class="size-3" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              {#if chordLayerMsg}
+                <p class="text-muted-foreground text-xs" role="status">{chordLayerMsg}</p>
+              {/if}
+
+              <div class="border-foreground/40 border-t-2 border-dashed"></div>
+
+              <p class="text-muted-foreground text-[10px] font-bold uppercase tracking-wider">
+                Import chord sheet
+              </p>
+              <textarea
+                bind:value={chordSheetDraft}
+                rows="8"
+                placeholder={'Paste a chord sheet (chords above the words, Ultimate Guitar style).\nFor instrumental lines, (x2) repeats the line and | pipes | group chords into one bar.'}
+                class="border-foreground bg-background max-h-[35vh] w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
+                spellcheck="false"
+              ></textarea>
+              <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span class="text-muted-foreground">
+                  {#if chordSheetParsed.chordCount > 0}
+                    Detected {chordSheetParsed.chordCount} chords in
+                    {chordSheetParsed.sections.length} section{chordSheetParsed.sections.length === 1 ? '' : 's'}.
+                  {:else if chordSheetDraft.trim()}
+                    No chord lines detected yet — is this a chords-over-lyrics sheet?
+                  {:else}
+                    Works best after the lyrics are fitted to the song.
+                  {/if}
+                </span>
+              </div>
+              {#if chordsPlaceErr}
+                <p class="text-destructive text-xs">{chordsPlaceErr}</p>
+              {/if}
+              {#if chordsPlaceMsg}
+                <p class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</p>
+              {/if}
+              <DialogFooter class="gap-2">
+                <Button variant="outline" class="border-2 text-xs font-bold" onclick={() => (loadoutsOpen = false)}>
+                  Close
+                </Button>
+                <Button
+                  class="border-2 text-xs font-bold"
+                  onclick={placeChordsFromSheet}
+                  disabled={chordsPlaceBusy || chordSheetParsed.chordCount === 0}
+                >
+                  {chordsPlaceBusy ? 'Placing…' : 'Place chords on the grid'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           <ChordAutoFillBanner
             proposal={activeAutoFill}
             index={activeAutoFillPosition}
@@ -3485,120 +4033,88 @@
             onDismiss={handleDismissAutoFill}
             onUndoDismiss={handleUndoDismissAutoFill}
           />
-          <div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs">
-            <label class="inline-flex items-center gap-2 font-bold">
-              <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
-              Suggestions
-            </label>
-            <span class="text-muted-foreground">
-              {currentChordSection
-                ? sectionDisplayLabel(currentChordSection)
-                : 'Select a beat in a section'}
-            </span>
-            {#if currentChordSection && currentChordSectionDone}
-              <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase">done</span>
-            {/if}
-            <button
-              type="button"
-              class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
-              onclick={handleAcceptCurrentSectionSuggestions}
-              disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
-              title="Write every visible suggestion in the selected section"
+          <div data-song-key-picker>
+            <EditSectionToolbar
+              title="Song key"
+              compact
+              secondaryVisible={!!((showKeyHint && detectedKey) ||
+                chordChromaStatus === 'analyzing' ||
+                chordChromaStatus === 'installing' ||
+                (chordChromaStatus === 'error' && chordChromaError))}
+              helpText="Set the source song key used for display, transposed labels, suggestions, and exports. Detection is only a helper; the saved key is what matters."
             >
-              Use section suggestions ({currentSectionSuggestionEntries.length})
-            </button>
-            <button
-              type="button"
-              class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
-              onclick={toggleCurrentChordSectionDone}
-              disabled={!currentChordSection}
-              title={currentChordSectionDone
-                ? 'Show chord suggestions in this section again'
-                : 'Hide chord suggestions in this section'}
-            >
-              {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
-            </button>
-          </div>
-          <div
-            data-song-key-picker
-            class="border-foreground bg-muted mb-4 flex flex-wrap items-center gap-2 border-2 px-3 py-2"
-          >
-            <span class="text-muted-foreground text-xs font-medium tracking-wide uppercase">Song key</span>
-            <select
-              class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
-              value={keyDraft.root}
-              onchange={(e) =>
-                applyKeyPatch({ ...keyDraft, root: e.currentTarget.value as NoteName })}
-            >
-              {#each NOTE_NAMES as n (n)}
-                <option value={n}>{n}</option>
-              {/each}
-            </select>
-            <select
-              class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
-              value={keyDraft.accidental ?? ''}
-              onchange={(e) => {
-                const v = e.currentTarget.value
-                const accidental: Accidental | undefined =
-                  v === '' ? undefined : (v as Accidental)
-                applyKeyPatch({ ...keyDraft, accidental })
-              }}
-            >
-              <option value="">natural</option>
-              <option value="flat">♭</option>
-              <option value="sharp">♯</option>
-              <option value="natural">♮</option>
-            </select>
-            <select
-              class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
-              value={keyDraft.mode}
-              onchange={(e) =>
-                applyKeyPatch({
-                  ...keyDraft,
-                  mode: e.currentTarget.value as SongKey['mode'],
-                })}
-            >
-              <option value="major">major</option>
-              <option value="minor">minor</option>
-            </select>
-            {#if showKeyHint && detectedKey}
-              <div class="flex w-full items-center gap-2 border-t border-foreground/10 pt-2">
-                <span class="text-foreground/70 text-xs">✨</span>
-                <span class="text-foreground/80 text-xs">
-                  Detected:
-                  <span class="font-semibold">{detectedKeyDisplayLabel()}</span>
-                  <span class="text-muted-foreground">({confidenceLabel(detectedKey.confidence)})</span>
-                </span>
-                <button
-                  type="button"
-                  class="border-foreground bg-background hover:bg-foreground hover:text-background ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
-                  onclick={acceptDetectedKey}
+              {#snippet primary()}
+                <select
+                  class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
+                  value={keyDraft.root}
+                  onchange={(e) =>
+                    applyKeyPatch({ ...keyDraft, root: e.currentTarget.value as NoteName })}
                 >
-                  Use
-                </button>
-              </div>
-            {:else if chordChromaStatus === 'analyzing' || chordChromaStatus === 'installing'}
-              <div class="text-muted-foreground flex w-full items-center gap-2 border-t border-foreground/10 pt-2 text-xs italic">
-                <span>✨</span>
-                <span>
-                  {chordChromaStatus === 'installing'
-                    ? 'Installing harmony analyzer…'
-                    : 'Analyzing harmony to suggest a key…'}
-                </span>
-              </div>
-            {:else if chordChromaStatus === 'error' && chordChromaError}
-              <div class="text-destructive flex w-full items-center gap-2 border-t border-foreground/10 pt-2 text-xs">
-                <span>⚠</span>
-                <span>Key detection failed: {chordChromaError}</span>
-                <button
-                  type="button"
-                  class="border-destructive ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
-                  onclick={() => void runChordChromaAnalysis(true)}
+                  {#each NOTE_NAMES as n (n)}
+                    <option value={n}>{n}</option>
+                  {/each}
+                </select>
+                <select
+                  class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
+                  value={keyDraft.accidental ?? ''}
+                  onchange={(e) => {
+                    const v = e.currentTarget.value
+                    const accidental: Accidental | undefined =
+                      v === '' ? undefined : (v as Accidental)
+                    applyKeyPatch({ ...keyDraft, accidental })
+                  }}
                 >
-                  Retry
-                </button>
-              </div>
-            {/if}
+                  <option value="">natural</option>
+                  <option value="flat">♭</option>
+                  <option value="sharp">♯</option>
+                  <option value="natural">♮</option>
+                </select>
+                <select
+                  class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
+                  value={keyDraft.mode}
+                  onchange={(e) =>
+                    applyKeyPatch({
+                      ...keyDraft,
+                      mode: e.currentTarget.value as SongKey['mode'],
+                    })}
+                >
+                  <option value="major">major</option>
+                  <option value="minor">minor</option>
+                </select>
+              {/snippet}
+              {#snippet secondary()}
+                {#if showKeyHint && detectedKey}
+                  <span class="text-foreground/70 text-xs">✨</span>
+                  <span class="text-foreground/80 text-xs">
+                    Detected:
+                    <span class="font-semibold">{detectedKeyDisplayLabel()}</span>
+                    <span class="text-muted-foreground">({confidenceLabel(detectedKey.confidence)})</span>
+                  </span>
+                  <button
+                    type="button"
+                    class="border-foreground bg-background hover:bg-foreground hover:text-background ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
+                    onclick={acceptDetectedKey}
+                  >
+                    Use
+                  </button>
+                {:else if chordChromaStatus === 'analyzing' || chordChromaStatus === 'installing'}
+                  <span class="text-muted-foreground text-xs italic">
+                    ✨ {chordChromaStatus === 'installing'
+                      ? 'Installing harmony analyzer...'
+                      : 'Analyzing harmony to suggest a key...'}
+                  </span>
+                {:else if chordChromaStatus === 'error' && chordChromaError}
+                  <span class="text-destructive text-xs">⚠ Key detection failed: {chordChromaError}</span>
+                  <button
+                    type="button"
+                    class="border-destructive ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
+                    onclick={() => void runChordChromaAnalysis(true)}
+                  >
+                    Retry
+                  </button>
+                {/if}
+              {/snippet}
+            </EditSectionToolbar>
           </div>
         {/if}
         <WaveformPlayer
@@ -3729,75 +4245,75 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Edit history"
       >
-        <h2 class="text-muted-foreground mb-3 text-xs font-medium uppercase tracking-wide">History</h2>
-        <div class="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onclick={undoSongMap}
-            disabled={!$canUndo}
-            title="Undo (⌘Z / Ctrl+Z)"
-            class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
-          >
-            ↶ Undo
-          </button>
-          <button
-            type="button"
-            onclick={redoSongMap}
-            disabled={!$canRedo}
-            title="Redo (⌘⇧Z / Ctrl+Shift+Z)"
-            class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
-          >
-            Redo ↷
-          </button>
-          <span class="text-muted-foreground mx-2 text-xs">·</span>
-          {#if resetGridConfirming}
+        <EditSectionToolbar
+          title="History"
+          helpText="Cmd/Ctrl+Z undoes timeline edits. Hold Shift to redo. Reset restores the saved analyzed grid; re-analyze detects bars and beats again from the current audio."
+        >
+          {#snippet primary()}
             <button
               type="button"
-              onclick={commitResetGrid}
-              class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+              onclick={undoSongMap}
+              disabled={!$canUndo}
+              title="Undo (Cmd/Ctrl+Z)"
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
             >
-              Yes, reset
+              Undo
             </button>
             <button
               type="button"
-              onclick={cancelResetGridConfirm}
-              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+              onclick={redoSongMap}
+              disabled={!$canRedo}
+              title="Redo (Cmd/Ctrl+Shift+Z)"
+              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
             >
-              Cancel
+              Redo
             </button>
-            <span class="text-muted-foreground text-xs">
-              Erases ALL bar and beat edits.
-            </span>
-          {:else}
-            <button
-              type="button"
-              onclick={startResetGridConfirm}
-              disabled={resetGridDisabled}
-              title={sm.timeline.original
-                ? 'Restore to the originally analyzed grid'
-                : 'Re-analyze the song to enable. Old projects don’t have a snapshot of the analyzed grid.'}
-              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
-            >
-              Reset to analyzed
-            </button>
-            <button
-              type="button"
-              onclick={reanalyzeGrid}
-              disabled={reanalyzeBusy || !$audioSession.file}
-              title="Detect bars and beats again. You’ll be warned before chords or sections are cleared."
-              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
-            >
-              {reanalyzeBusy ? 'Re-analyzing…' : 'Re-analyze grid'}
-            </button>
-          {/if}
-        </div>
+            <span class="text-muted-foreground mx-1 text-xs">·</span>
+            {#if resetGridConfirming}
+              <button
+                type="button"
+                onclick={commitResetGrid}
+                class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+              >
+                Yes, reset
+              </button>
+              <button
+                type="button"
+                onclick={cancelResetGridConfirm}
+                class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+              >
+                Cancel
+              </button>
+              <span class="text-muted-foreground text-xs">
+                Erases ALL bar and beat edits.
+              </span>
+            {:else}
+              <button
+                type="button"
+                onclick={startResetGridConfirm}
+                disabled={resetGridDisabled}
+                title={sm.timeline.original
+                  ? 'Restore to the originally analyzed grid'
+                  : 'Re-analyze the song to enable. Old projects don’t have a snapshot of the analyzed grid.'}
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+              >
+                Reset to analyzed
+              </button>
+              <button
+                type="button"
+                onclick={reanalyzeGrid}
+                disabled={reanalyzeBusy || !$audioSession.file}
+                title="Detect bars and beats again. You’ll be warned before chords or sections are cleared."
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+              >
+                {reanalyzeBusy ? 'Re-analyzing...' : 'Re-analyze grid'}
+              </button>
+            {/if}
+          {/snippet}
+        </EditSectionToolbar>
         {#if reanalyzeError}
           <p class="text-destructive mt-2 text-xs" role="status">{reanalyzeError}</p>
         {/if}
-        <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
-          ⌘Z / Ctrl+Z undoes timeline edits. Hold ⇧ to redo. "Reset to analyzed" restores the saved grid;
-          "Re-analyze grid" detects bars and beats again.
-        </p>
       </section>
     {/if}
 
@@ -3806,7 +4322,10 @@
         class="brutalist-shadow border-foreground bg-background w-full space-y-4 border-2 p-3 sm:p-4 md:p-5"
         aria-label="Metronome"
       >
-        <h2 class="text-muted-foreground text-xs font-medium uppercase tracking-wide">Metronome</h2>
+        <EditSectionToolbar
+          title="Metronome"
+          helpText="Count-in adds clicks before playback starts. Start at beat sets the song-start anchor; moving it later lets earlier beats play under the count-in, for example a drum fill before the downbeat."
+        />
 
         <fieldset class="border-foreground border-2 px-3 py-3">
           <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Count-in beats</legend>
@@ -3870,10 +4389,6 @@
               </button>
             {/if}
           </div>
-          <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
-            The song-start anchor. Default is bar 1 beat 1. Move it later in the song to let
-            earlier beats play under the count-in (e.g. a drum-fill leading into the downbeat).
-          </p>
         </fieldset>
 
         <!-- "Play with click" toggle + Click / Song volume sliders

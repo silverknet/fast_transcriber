@@ -25,19 +25,34 @@ export type CleanedLyrics = {
   lines: string[]
 }
 
+/**
+ * Clean one raw line: nbsp → space, trim, drop trailing repeat tags.
+ * Returns `null` for lines that should vanish entirely (blank after
+ * cleaning, or a section-marker line). Shared between `cleanLyricsText`
+ * and the chord-sheet parser so both produce byte-identical lyric text.
+ */
+export function cleanLyricLine(rawLine: string): string | null {
+  let line = rawLine.replace(/ /g, ' ').trim()
+  if (line.length === 0) return null
+  if (SECTION_MARKER_LINE.test(line)) return null
+  line = line.replace(TRAILING_REPEAT, '').trim()
+  return line.length === 0 ? null : line
+}
+
 export function cleanLyricsText(raw: string): CleanedLyrics {
   const outLines: string[] = []
   let pendingBlank = false
 
   for (const rawLine of raw.split(/\r\n|\r|\n/)) {
-    let line = rawLine.replace(/ /g, ' ').trim()
-    if (line.length === 0) {
-      pendingBlank = outLines.length > 0
+    const line = cleanLyricLine(rawLine)
+    if (line === null) {
+      // Only truly blank input lines are stanza separators; dropped
+      // marker/repeat-tag lines don't create one (same as before).
+      if (rawLine.replace(/ /g, ' ').trim().length === 0) {
+        pendingBlank = outLines.length > 0
+      }
       continue
     }
-    if (SECTION_MARKER_LINE.test(line)) continue
-    line = line.replace(TRAILING_REPEAT, '').trim()
-    if (line.length === 0) continue
     if (pendingBlank) {
       outLines.push('')
       pendingBlank = false

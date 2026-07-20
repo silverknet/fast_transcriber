@@ -2,12 +2,14 @@ import {
   SONGMAP_CUE_TRACK_FORMAT_VERSION,
   SONGMAP_FORMAT_VERSION,
   SONGMAP_LEGACY_FORMAT_VERSION,
+  SONGMAP_LYRICS_FORMAT_VERSION,
   SONGMAP_TRANSPOSE_FORMAT_VERSION,
 } from './version'
 import type {
   AudioReference,
   Bar,
   Beat,
+  ChordLayer,
   ChordSymbol,
   CueAnchor,
   CueEvent,
@@ -19,6 +21,7 @@ import type {
   Meter,
   RenderedCueExport,
   Section,
+  SectionLayer,
   SongKey,
   SongMap,
   SongMapAppInfo,
@@ -216,6 +219,56 @@ function parseLyrics(raw: unknown, path: string): Lyrics | undefined {
   const tv = optNum(o.transcriberVersion)
   if (tv !== undefined) out.transcriberVersion = tv
   return out
+}
+
+function parseChordLayer(raw: unknown, path: string): ChordLayer {
+  const o = expectObject(raw, path)
+  const layer: ChordLayer = {
+    id: reqString(o.id, `${path}.id`),
+    name: reqString(o.name, `${path}.name`),
+    harmony: Array.isArray(o.harmony)
+      ? o.harmony.map((h, i) => parseHarmony(h, `${path}.harmony[${i}]`))
+      : [],
+  }
+  const source = optString(o.source)
+  if (source === 'manual' || source === 'sheet-import' || source === 'suggestions') {
+    layer.source = source
+  }
+  const createdAt = optString(o.createdAt)
+  if (createdAt) layer.createdAt = createdAt
+  return layer
+}
+
+function parseChordLayers(raw: unknown, path: string): ChordLayer[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (!Array.isArray(raw)) return undefined
+  const layers = raw.map((l, i) => parseChordLayer(l, `${path}[${i}]`))
+  return layers.length > 0 ? layers : undefined
+}
+
+function parseSectionLayer(raw: unknown, path: string): SectionLayer {
+  const o = expectObject(raw, path)
+  const layer: SectionLayer = {
+    id: reqString(o.id, `${path}.id`),
+    name: reqString(o.name, `${path}.name`),
+    sections: Array.isArray(o.sections)
+      ? o.sections.map((sec, i) => parseSection(sec, `${path}.sections[${i}]`))
+      : [],
+  }
+  const source = optString(o.source)
+  if (source === 'manual' || source === 'sheet-import' || source === 'suggestions') {
+    layer.source = source
+  }
+  const createdAt = optString(o.createdAt)
+  if (createdAt) layer.createdAt = createdAt
+  return layer
+}
+
+function parseSectionLayers(raw: unknown, path: string): SectionLayer[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (!Array.isArray(raw)) return undefined
+  const layers = raw.map((l, i) => parseSectionLayer(l, `${path}[${i}]`))
+  return layers.length > 0 ? layers : undefined
 }
 
 function parseAudio(raw: unknown, path: string): AudioReference {
@@ -444,6 +497,103 @@ function migrateLegacyCueTracks(opts: {
   ]
 }
 
+const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal'])
+const DRUM_QUANTIZE = new Set(['off', '1/8', '1/16', '1/16T'])
+
+/**
+ * Defensive like `parseChordHints`: malformed events are dropped rather than
+ * failing the whole song; velocity clamps to [0,1]; unknown kit ids pass
+ * through (forward compat with future kits).
+ */
+function parseDrumMidi(raw: unknown, path: string): import('./types').DrumMidi | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  if (typeof o.analyzedAt !== 'string' || typeof o.audioFingerprint !== 'string') return undefined
+  const analyzerVersion = optNum(o.analyzerVersion)
+  if (analyzerVersion === undefined) return undefined
+  const events: import('./types').DrumMidiEvent[] = []
+  if (Array.isArray(o.events)) {
+    for (const ev of o.events) {
+      if (!ev || typeof ev !== 'object') continue
+      const e = ev as Record<string, unknown>
+      const t = optNum(e.timeSec)
+      const v = optNum(e.velocity)
+      const cls = typeof e.cls === 'string' && DRUM_CLASSES.has(e.cls) ? e.cls : null
+      if (t === undefined || t < 0 || cls === null) continue
+      events.push({
+        timeSec: t,
+        cls: cls as import('./types').DrumClass,
+        velocity: Math.max(0, Math.min(1, v ?? 1)),
+      })
+    }
+  }
+  const out: import('./types').DrumMidi = {
+    events,
+    analyzedAt: o.analyzedAt,
+    analyzerVersion,
+    sourceStem: typeof o.sourceStem === 'string' ? o.sourceStem : '',
+    audioFingerprint: o.audioFingerprint,
+  }
+  const kit = optString(o.kit)
+  if (kit) out.kit = kit
+  const quantize = optString(o.quantize)
+  if (quantize && DRUM_QUANTIZE.has(quantize)) {
+    out.quantize = quantize as import('./types').DrumMidi['quantize']
+  }
+  const style = optString(o.style)
+  if (style === 'steady' || style === 'detected') out.style = style
+  const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
+  if (renderExport) out.renderExport = renderExport
+  return out
+}
+
+/** `parseDrumMidi`'s sibling: drop malformed notes, clamp velocity, round-trip the rest. */
+function parseBassMidi(raw: unknown, path: string): import('./types').BassMidi | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  if (typeof o.analyzedAt !== 'string' || typeof o.audioFingerprint !== 'string') return undefined
+  const analyzerVersion = optNum(o.analyzerVersion)
+  if (analyzerVersion === undefined) return undefined
+  const events: import('./types').BassMidiEvent[] = []
+  if (Array.isArray(o.events)) {
+    for (const ev of o.events) {
+      if (!ev || typeof ev !== 'object') continue
+      const e = ev as Record<string, unknown>
+      const t = optNum(e.timeSec)
+      const d = optNum(e.durationSec)
+      const midi = optNum(e.midi)
+      const v = optNum(e.velocity)
+      if (t === undefined || t < 0) continue
+      if (d === undefined || !(d > 0)) continue
+      if (midi === undefined || !Number.isInteger(midi) || midi < 0 || midi > 127) continue
+      events.push({
+        timeSec: t,
+        durationSec: d,
+        midi,
+        velocity: Math.max(0, Math.min(1, v ?? 1)),
+      })
+    }
+  }
+  const out: import('./types').BassMidi = {
+    events,
+    analyzedAt: o.analyzedAt,
+    analyzerVersion,
+    sourceStem: typeof o.sourceStem === 'string' ? o.sourceStem : '',
+    audioFingerprint: o.audioFingerprint,
+  }
+  const quantize = optString(o.quantize)
+  if (quantize && DRUM_QUANTIZE.has(quantize)) {
+    out.quantize = quantize as import('./types').BassMidi['quantize']
+  }
+  const style = optString(o.style)
+  if (style === 'steady' || style === 'detected') out.style = style
+  const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
+  if (renderExport) out.renderExport = renderExport
+  return out
+}
+
 function parseChordHints(raw: unknown, path: string): import('./types').ChordHints | undefined {
   if (raw === undefined || raw === null) return undefined
   const o = expectObject(raw, path)
@@ -549,7 +699,14 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const isLegacyV1 = formatVersion === SONGMAP_LEGACY_FORMAT_VERSION
   const isLegacyV2 = formatVersion === SONGMAP_CUE_TRACK_FORMAT_VERSION
   const isLegacyV3 = formatVersion === SONGMAP_TRANSPOSE_FORMAT_VERSION
-  if (formatVersion !== SONGMAP_FORMAT_VERSION && !isLegacyV1 && !isLegacyV2 && !isLegacyV3) {
+  const isLegacyV4 = formatVersion === SONGMAP_LYRICS_FORMAT_VERSION
+  if (
+    formatVersion !== SONGMAP_FORMAT_VERSION &&
+    !isLegacyV1 &&
+    !isLegacyV2 &&
+    !isLegacyV3 &&
+    !isLegacyV4
+  ) {
     // A file from a NEWER build (formatVersion above what we understand) gets a
     // user-facing "update BarBro" message wherever this error surfaces, instead
     // of a cryptic version number. Older/unknown versions keep the raw message.
@@ -591,6 +748,10 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     harmony: Array.isArray(raw.harmony)
       ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`))
       : [],
+    chordLayers: parseChordLayers(raw.chordLayers, 'chordLayers'),
+    activeChordLayerName: optString(raw.activeChordLayerName),
+    sectionLayers: parseSectionLayers(raw.sectionLayers, 'sectionLayers'),
+    activeSectionLayerName: optString(raw.activeSectionLayerName),
     cueTracks: isLegacyV1
       ? migrateLegacyCueTracks({ cues: legacyCues, cueTrackExport: legacyCueTrackExport })
       : parseCueTracks(raw.cueTracks),
@@ -611,6 +772,8 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
       raw.chordHints !== undefined && raw.chordHints !== null
         ? parseChordHints(raw.chordHints, 'chordHints')
         : undefined,
+    drumMidi: parseDrumMidi(raw.drumMidi, 'drumMidi'),
+    bassMidi: parseBassMidi(raw.bassMidi, 'bassMidi'),
   }
 }
 
@@ -647,6 +810,10 @@ const KNOWN_TOP_KEYS = new Set([
   'timeline',
   'sections',
   'harmony',
+  'chordLayers',
+  'activeChordLayerName',
+  'sectionLayers',
+  'activeSectionLayerName',
   'cueTracks',
   'cues',
   'countInBeats',
@@ -660,4 +827,6 @@ const KNOWN_TOP_KEYS = new Set([
   'expectedAudio',
   'sectionBorderHints',
   'chordHints',
+  'drumMidi',
+  'bassMidi',
 ])

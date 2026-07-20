@@ -143,6 +143,41 @@ auto-invalidate the marker): delete
 restart the sidecar. The auto-setup will see the venv missing and rerun
 from scratch.
 
+## Windows (win-x64)
+
+Same architecture, same uv bootstrap — differences only where the platform
+forces them:
+
+- **Paths**: everything lives under `%APPDATA%\BarBro Desktop\python\`
+  (`bin\uv.exe`, `bin\ffmpeg.exe`, `<feature>-venv\Scripts\python.exe`).
+- **No system Python required anywhere**: every venv (including stems,
+  youtube-import and piper, which historically used `python3 -m venv`) is
+  created by uv, which downloads a sealed CPython itself.
+- **Stems + GPU**: on Windows the stems setup first checks for an NVIDIA
+  driver (`nvidia-smi -L`); when present it preinstalls
+  `torch==2.6.0`/`torchaudio==2.6.0` from the cu124 wheel index before the
+  requirements install, so demucs runs on the GPU (`Device: cuda` in the job
+  log; the setup log also prints a `Compute device:` line). Overrides:
+  `BARBRO_TORCH_INDEX=off|cpu` forces CPU wheels, or set it to a custom index
+  URL (e.g. cu118 for older drivers).
+- **torchcodec is skipped on Windows** (it dlopens FFmpeg *shared libraries*
+  that aren't there); `torchaudio 2.6` still has its own WAV writer via the
+  `soundfile` backend. Markers in `stems/requirements.txt` encode all of this.
+- **madmom (beats)** has no Windows wheel on PyPI and users have no compiler:
+  the desktop-release CI builds `madmom-0.16.1-cp310-cp310-win_amd64.whl` and
+  attaches it to every release; the beats setup installs that URL on win32
+  (`BARBRO_MADMOM_WHEEL` overrides).
+- **ffmpeg**: the stems/youtube venvs carry `imageio-ffmpeg`; its (version-
+  named) static binary is copied to the canonical
+  `python\bin\ffmpeg[.exe]` after setup and at boot
+  (`ensureManagedFfmpegBinary()`); `ffmpegExePath()` prefers it, `BARBRO_FFMPEG`
+  overrides. Demucs children get `BARBRO_FFMPEG_DIR` on their PATH.
+- **Pause/resume of stem jobs is unavailable** (POSIX signals); the sidecar
+  answers 501 and advertises `capabilities.pauseResume: false` on `/ping`, so
+  the web hides those buttons.
+- The app is headless; on Windows a tray icon (with Quit) is the lifecycle
+  affordance.
+
 ## Path A (bundling) — roadmap
 
 This change implements **Path B**: auto-install on first boot. Path A

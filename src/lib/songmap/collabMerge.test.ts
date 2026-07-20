@@ -6,6 +6,7 @@ import {
   mergeForConflict,
   type Conflict,
 } from './collabMerge'
+import { mergeLocalIntoCollab } from './collab'
 
 function chord(id: string, root: string): HarmonyEvent {
   return {
@@ -42,6 +43,22 @@ function section(id: string, label: string, start: number, end: number): Section
   }
 }
 
+function audio(
+  fileName: string,
+  opts: Partial<NonNullable<SongMap['audio']>> = {},
+): NonNullable<SongMap['audio']> {
+  return {
+    fileName,
+    source: 'upload',
+    trim: { startSec: 0, endSec: 10 },
+    durationSec: 10,
+    sampleRate: 44100,
+    channels: 2,
+    fileSize: 12345,
+    ...opts,
+  }
+}
+
 function pathSet(conflicts: Conflict[]): Set<string> {
   return new Set(conflicts.map((c) => c.path))
 }
@@ -54,14 +71,18 @@ describe('collabMerge · mergeForConflict', () => {
     expect(merged.metadata.title).toBe(sm.metadata.title)
   })
 
-  it('keeps non-overlapping list items from both sides — no conflict', () => {
+  it('keeps non-overlapping list items from both sides — no conflict (co-editing)', () => {
     const base = createEmptySongMap()
-    const local: SongMap = { ...base, harmony: [chord('h-1', 'C'), chord('h-2', 'F')] }
-    const cloud: SongMap = { ...base, harmony: [chord('h-3', 'G'), chord('h-4', 'Am')] }
+    // A shared chord marks this as co-editing (same track, additions on both
+    // sides). Zero-overlap non-empty harmony is a wholesale replacement and
+    // is covered by the dedicated describe block below.
+    const shared = chord('h-0', 'Am')
+    const local: SongMap = { ...base, harmony: [shared, chord('h-1', 'C'), chord('h-2', 'F')] }
+    const cloud: SongMap = { ...base, harmony: [shared, chord('h-3', 'G'), chord('h-4', 'Am')] }
 
     const { merged, conflicts } = mergeForConflict(local, cloud)
     expect(conflicts).toEqual([])
-    expect(merged.harmony.map((h) => h.id).sort()).toEqual(['h-1', 'h-2', 'h-3', 'h-4'])
+    expect(merged.harmony.map((h) => h.id).sort()).toEqual(['h-0', 'h-1', 'h-2', 'h-3', 'h-4'])
   })
 
   it('does NOT flag a phantom conflict when a chord differs only by float round-trip noise', () => {
@@ -168,6 +189,62 @@ describe('collabMerge · mergeForConflict', () => {
     const cloud: SongMap = { ...base, expectedAudio: { fileName: 'a.wav' } }
     const { conflicts } = mergeForConflict(local, cloud)
     expect(conflicts.some((c) => c.path === 'expectedAudio')).toBe(false)
+  })
+
+  it('does not flag audio conflict for same identity with different local paths and duration noise', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = {
+      ...base,
+      audio: audio('song.wav', {
+        sha256: 'same-sha',
+        durationSec: 10.1234561,
+        originalPath: 'audio/local-song.wav',
+      }),
+    }
+    const cloud: SongMap = {
+      ...base,
+      audio: audio('song.wav', {
+        sha256: 'same-sha',
+        durationSec: 10.1234569,
+        originalPath: 'audio/other-machine.wav',
+      }),
+    }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts.some((c) => c.path === 'audio')).toBe(false)
+  })
+
+  it('flags different audio sha as dangerous and can keep mine', () => {
+    const base = createEmptySongMap()
+    const localAudio = audio('song.wav', { sha256: 'local-sha', originalPath: 'audio/song.wav' })
+    const cloudAudio = audio('song.mp3', { sha256: 'cloud-sha', fileSize: 22222 })
+    const local: SongMap = { ...base, audio: localAudio }
+    const cloud: SongMap = { ...base, audio: cloudAudio }
+
+    const report = mergeForConflict(local, cloud)
+    const audioConflicts = report.conflicts.filter((c) => c.path === 'audio')
+    expect(audioConflicts).toHaveLength(1)
+    expect(audioConflicts[0]).toMatchObject({
+      label: 'Audio file',
+      severity: 'dangerous',
+    })
+    expect(report.merged.audio?.sha256).toBe('cloud-sha')
+
+    const result = applyConflictDecisions(report, new Map([['audio', 'mine']]))
+    expect(result.audio?.sha256).toBe('local-sha')
+    expect(result.audio?.fileName).toBe('song.wav')
+    expect(result.audio?.originalPath).toBeUndefined()
+  })
+
+  it('flags audio conflict when local has audio and cloud has none', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = { ...base, audio: audio('song.wav', { sha256: 'local-sha' }) }
+    const cloud: SongMap = { ...base, audio: undefined }
+
+    const { conflicts } = mergeForConflict(local, cloud)
+    expect(conflicts).toContainEqual(
+      expect.objectContaining({ path: 'audio', severity: 'dangerous' }),
+    )
   })
 
   it('merges sections by id — non-overlapping kept, overlapping flagged', () => {
@@ -282,11 +359,12 @@ describe('collabMerge · applyConflictDecisions', () => {
 
   it('preserves non-conflicted local-only items regardless of decisions', () => {
     const base = createEmptySongMap()
-    const local: SongMap = { ...base, harmony: [chord('h-1', 'C'), chord('h-2', 'F')] }
-    const cloud: SongMap = { ...base, harmony: [chord('h-3', 'G')] }
+    const shared = chord('h-0', 'Am')
+    const local: SongMap = { ...base, harmony: [shared, chord('h-1', 'C'), chord('h-2', 'F')] }
+    const cloud: SongMap = { ...base, harmony: [shared, chord('h-3', 'G')] }
     const report = mergeForConflict(local, cloud)
     const result = applyConflictDecisions(report, new Map())
-    expect(result.harmony.map((h) => h.id).sort()).toEqual(['h-1', 'h-2', 'h-3'])
+    expect(result.harmony.map((h) => h.id).sort()).toEqual(['h-0', 'h-1', 'h-2', 'h-3'])
   })
 })
 
@@ -342,5 +420,56 @@ describe('collabMerge · invariant: no silent data loss', () => {
     expect(result.metadata.bpm).toBe(100)
     expect(result.harmony[0]?.chord.displayRaw).toBe('C')
     expect(result.countInBeats).toBe(4)
+  })
+
+  it('rehydrates local-only fields after adopting a collab merge result', () => {
+    const base = createEmptySongMap()
+    const local: SongMap = {
+      ...base,
+      audio: audio('song.wav', {
+        sha256: 'same-sha',
+        originalPath: 'audio/song.wav',
+      }),
+      stemRefs: { Vocals: 'stems/best/vocals.wav' },
+      mixState: { master: 0.8, tracks: [{ key: 'original', volume: 0.7, muted: true }] },
+    }
+    const cloud: SongMap = {
+      ...base,
+      audio: audio('song.wav', { sha256: 'same-sha' }),
+    }
+
+    const report = mergeForConflict(local, cloud)
+    const hydrated = mergeLocalIntoCollab(local, report.merged)
+    expect(hydrated.audio?.originalPath).toBe('audio/song.wav')
+    expect(hydrated.stemRefs).toEqual(local.stemRefs)
+    expect(hydrated.mixState).toEqual(local.mixState)
+  })
+})
+
+describe('wholesale harmony replacement (sheet import vs stale cloud)', () => {
+  function withHarmony(harmony: HarmonyEvent[]): SongMap {
+    const m = createEmptySongMap()
+    return { ...m, harmony }
+  }
+  it('near-zero id overlap surfaces ONE dangerous harmony conflict instead of a union', () => {
+    const local = withHarmony([chord('n1', 'A'), chord('n2', 'C')])
+    const cloud = withHarmony([chord('o1', 'G'), chord('o2', 'D'), chord('o3', 'E')])
+    const report = mergeForConflict(local, cloud)
+    const row = report.conflicts.find((c) => c.path === 'harmony')
+    expect(row).toBeTruthy()
+    expect(row!.severity).toBe('dangerous')
+    // Default = cloud; no 5-chord union soup.
+    expect(report.merged.harmony.map((x) => x.id)).toEqual(['o1', 'o2', 'o3'])
+    // "Keep mine" installs the local track wholesale.
+    const resolved = applyConflictDecisions(report, new Map([['harmony', 'mine']]))
+    expect(resolved.harmony.map((x) => x.id)).toEqual(['n1', 'n2'])
+  })
+  it('normal co-editing (shared ids) keeps the per-chord merge', () => {
+    const shared = chord('s1', 'A')
+    const local = withHarmony([shared, chord('n2', 'C')])
+    const cloud = withHarmony([shared, chord('o2', 'D')])
+    const report = mergeForConflict(local, cloud)
+    expect(report.conflicts.find((c) => c.path === 'harmony')).toBeUndefined()
+    expect(report.merged.harmony.map((x) => x.id).sort()).toEqual(['n2', 'o2', 's1'])
   })
 })

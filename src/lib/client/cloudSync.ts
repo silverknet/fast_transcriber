@@ -33,6 +33,7 @@ import {
 } from './desktopProjectFs'
 import { decodeSmapFile } from '$lib/songmap/persist'
 import { encodeSmapFile, SONG_PROJECT_FORMAT_VERSION } from '$lib/songmap/smapFile'
+import { parseSongMap } from '$lib/songmap/parse'
 import {
   metadataLiteFromSongMap,
   recordRecentProjectPath,
@@ -41,6 +42,37 @@ import {
 } from '$lib/project/commit'
 
 const BASE = '/api/cloud'
+
+/**
+ * Normalize a raw cloud `song_map` into a current, VALIDATED SongMap by
+ * running it through the same parser + migration the on-disk loader uses.
+ * Returns `null` when the payload is too broken to migrate (caller skips
+ * that one song rather than failing the whole join/pull).
+ *
+ * Why this is the real fix, not a field-by-field guard:
+ *   - Cloud rows are stored raw (`song_map jsonb`, no shape guarantee) and
+ *     can be ANY historical formatVersion. A legacy `formatVersion: 1`
+ *     row predates the `cueTracks` model entirely — reading `.cueTracks`
+ *     on it is the `undefined` crash that broke joins for old projects.
+ *   - Migrating at the boundary means every downstream consumer sees
+ *     current-format data with the old `cues` settings properly upgraded,
+ *     instead of an empty stand-in.
+ *   - Critically, it keeps fingerprints CONSISTENT: a v1 map and its
+ *     migrated form must hash identically or the autosave dirty-check
+ *     mistakes a freshly-pulled song for a local edit and push-loops.
+ *     A raw-v1 map (empty `cueTracks` via the defensive guard) and an
+ *     owner's migrated map would NOT — this closes that gap.
+ */
+export function normalizeCloudSongMap(raw: unknown): SongMap | null {
+  try {
+    // parseSongMap takes a JSON string; it validates + migrates legacy
+    // formats and throws on anything it can't make sense of.
+    return parseSongMap(JSON.stringify(raw))
+  } catch (e) {
+    console.warn('[cloudSync] could not normalize cloud song_map:', e)
+    return null
+  }
+}
 
 // ── Wire types (mirror the server responses) ──────────────────────────
 
@@ -359,7 +391,9 @@ export async function pullCloudChanges(): Promise<
 export async function joinCloudProject(
   cloudProjectId: string,
   parentPath: string,
-): Promise<{ ok: true; projectPath: string } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; projectPath: string; skippedSongs?: number } | { ok: false; error: string }
+> {
   // 1. Pull the cloud manifest + every song. Full snapshot since this
   //    is a cold-start; no `since=` revision filter.
   const manifest = await getCloudProjectManifest(cloudProjectId)
@@ -380,32 +414,49 @@ export async function joinCloudProject(
   //    pack lands later.
   const localSongs: ProjectSongEntry[] = []
   const meta: Record<string, ProjectSongMetadataLite> = {}
+  let skipped = 0
   for (const cs of cloudSongs) {
-    const sm = cs.song_map as SongMap
-    const withExpected: SongMap = cs.expected_audio
-      ? { ...sm, expectedAudio: cs.expected_audio }
-      : sm
-    const smapBlob = await encodeSmapFile({
-      project: { projectFormatVersion: SONG_PROJECT_FORMAT_VERSION, songMap: withExpected },
-    })
-    const smapBytes = new Uint8Array(await smapBlob.arrayBuffer())
-    const leaf = songFolderName(sm.metadata?.title ?? 'song', cs.id)
-    const folderRel = `${PROJECT_SONGS_DIR}/${leaf}`
-    const songCreate = await createProjectSong(projectPath, folderRel, smapBytes)
-    if (!songCreate.ok) {
-      console.warn(`[cloudSync] join: createProjectSong failed for ${cs.id}: ${songCreate.error}`)
-      continue
+    // `cs.song_map` is `unknown` on the wire (the DB column has no shape
+    // guarantee) and can be ANY legacy formatVersion. Migrate it to the
+    // current shape first (this is what makes OLD projects joinable —
+    // a raw v1 map has no `cueTracks` and crashes downstream). A row too
+    // broken to migrate is skipped, not fatal to the whole join.
+    try {
+      const sm = normalizeCloudSongMap(cs.song_map)
+      if (!sm) {
+        console.warn(`[cloudSync] join: skipping unmigratable song ${cs.id}`)
+        skipped++
+        continue
+      }
+      const withExpected: SongMap = cs.expected_audio
+        ? { ...sm, expectedAudio: cs.expected_audio }
+        : sm
+      const smapBlob = await encodeSmapFile({
+        project: { projectFormatVersion: SONG_PROJECT_FORMAT_VERSION, songMap: withExpected },
+      })
+      const smapBytes = new Uint8Array(await smapBlob.arrayBuffer())
+      const leaf = songFolderName(sm.metadata?.title ?? 'song', cs.id)
+      const folderRel = `${PROJECT_SONGS_DIR}/${leaf}`
+      const songCreate = await createProjectSong(projectPath, folderRel, smapBytes)
+      if (!songCreate.ok) {
+        console.warn(`[cloudSync] join: createProjectSong failed for ${cs.id}: ${songCreate.error}`)
+        skipped++
+        continue
+      }
+      const entry: ProjectSongEntry = {
+        id: cs.id,
+        folder: folderRel,
+        cloudSongId: cs.id,
+        lastSyncedRevision: cs.revision,
+        lastSyncedContentHash: collabContentFingerprint(withExpected),
+      }
+      if (cs.hidden) entry.hidden = true
+      localSongs.push(entry)
+      meta[folderRel] = metadataLiteFromSongMap(withExpected)
+    } catch (e) {
+      console.warn(`[cloudSync] join: skipping malformed song ${cs.id}:`, e)
+      skipped++
     }
-    const entry: ProjectSongEntry = {
-      id: cs.id,
-      folder: folderRel,
-      cloudSongId: cs.id,
-      lastSyncedRevision: cs.revision,
-      lastSyncedContentHash: collabContentFingerprint(withExpected),
-    }
-    if (cs.hidden) entry.hidden = true
-    localSongs.push(entry)
-    meta[folderRel] = metadataLiteFromSongMap(withExpected)
   }
 
   // 4. Rewrite the manifest: cloud id, cloud link, songs sorted by the
@@ -436,7 +487,7 @@ export async function joinCloudProject(
   writeLastProjectPath(projectPath)
   recordRecentProjectPath(projectPath)
 
-  return { ok: true, projectPath }
+  return skipped > 0 ? { ok: true, projectPath, skippedSongs: skipped } : { ok: true, projectPath }
 }
 
 /**
@@ -571,48 +622,64 @@ async function applyCloudSongIntoLocal(
   proj: ProjectFile,
   cloudSong: CloudSongView,
 ): Promise<{ songId: string; revision: number; contentHash: string } | null> {
-  const entry = proj.songs.find((s) => s.id === cloudSong.id)
-  if (!entry) {
-    // New song from another machine. For Phase 4 MVP we record the
-    // existence but don't create the folder/audio (Phase 6 covers
-    // missing-audio UX).
-    patchMetadataForFolder(`songs/${cloudSong.id.slice(0, 8)}`, {
-      title:
-        (cloudSong.song_map.metadata?.title as string | undefined) ?? cloudSong.id.slice(0, 8),
+  // Same "one bad row must not sink the sync" contract as `joinCloudProject`
+  // — `cloudSong.song_map` has no server-side shape guarantee, and this
+  // runs on every pull for every already-joined member. An uncaught throw
+  // here previously meant one malformed song broke sync for the whole
+  // project, forever, for everyone.
+  try {
+    // Migrate the raw cloud payload to current shape before anything reads
+    // it — same reason as the join path (legacy v1 rows have no cueTracks).
+    const incoming = normalizeCloudSongMap(cloudSong.song_map)
+    if (!incoming) {
+      console.warn(`[cloudSync] pull: skipping unmigratable song ${cloudSong.id}`)
+      return null
+    }
+    const entry = proj.songs.find((s) => s.id === cloudSong.id)
+    if (!entry) {
+      // New song from another machine. For Phase 4 MVP we record the
+      // existence but don't create the folder/audio (Phase 6 covers
+      // missing-audio UX).
+      patchMetadataForFolder(`songs/${cloudSong.id.slice(0, 8)}`, {
+        title: incoming.metadata?.title ?? cloudSong.id.slice(0, 8),
+      })
+      return null
+    }
+    const r = await readProjectSong(osPath, entry.folder)
+    if (!r.ok) {
+      console.warn('[cloudSync] readProjectSong failed during pull:', r.error)
+      return null
+    }
+    const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+    const data = await decodeSmapFile(blob)
+    const local = data.project.songMap
+    const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
+    const incomingHash = collabContentFingerprint(incoming)
+    // Self-echo guard: if the incoming content already matches what we last
+    // synced (our own push coming back via realtime, or an unchanged song),
+    // skip the disk rewrite entirely — just advance the revision watermark.
+    // Rewriting would re-stamp a fresh hash and, if it differed by a hair,
+    // make the autosave think the live song changed → push → 409 → loop.
+    if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
+      return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
+    }
+    const merged = mergeLocalIntoCollab(local, incoming)
+    // Stamp expectedAudio onto the local map so the Phase 5 reconciler
+    // can use it without re-fetching from the server.
+    merged.expectedAudio = cloudSong.expected_audio ?? undefined
+    // Encode + persist.
+    const { encodeSmapFile } = await import('$lib/songmap/smapFile')
+    const blobOut = await encodeSmapFile({
+      project: { projectFormatVersion: 1, songMap: merged },
     })
+    const { writeProjectSong } = await import('./desktopProjectFs')
+    await writeProjectSong(osPath, entry.folder, new Uint8Array(await blobOut.arrayBuffer()))
+    // Report the sync watermark for this song so the caller can stamp the
+    // manifest entry — this is what stops the autosave from immediately
+    // re-pushing freshly-pulled content (the phantom-conflict loop).
+    return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: collabContentFingerprint(merged) }
+  } catch (e) {
+    console.warn(`[cloudSync] pull: skipping malformed song ${cloudSong.id}:`, e)
     return null
   }
-  const r = await readProjectSong(osPath, entry.folder)
-  if (!r.ok) {
-    console.warn('[cloudSync] readProjectSong failed during pull:', r.error)
-    return null
-  }
-  const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
-  const data = await decodeSmapFile(blob)
-  const local = data.project.songMap
-  const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
-  const incomingHash = collabContentFingerprint(cloudSong.song_map as SongMap)
-  // Self-echo guard: if the incoming content already matches what we last
-  // synced (our own push coming back via realtime, or an unchanged song),
-  // skip the disk rewrite entirely — just advance the revision watermark.
-  // Rewriting would re-stamp a fresh hash and, if it differed by a hair,
-  // make the autosave think the live song changed → push → 409 → loop.
-  if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
-    return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
-  }
-  const merged = mergeLocalIntoCollab(local, cloudSong.song_map)
-  // Stamp expectedAudio onto the local map so the Phase 5 reconciler
-  // can use it without re-fetching from the server.
-  merged.expectedAudio = cloudSong.expected_audio ?? undefined
-  // Encode + persist.
-  const { encodeSmapFile } = await import('$lib/songmap/smapFile')
-  const blobOut = await encodeSmapFile({
-    project: { projectFormatVersion: 1, songMap: merged },
-  })
-  const { writeProjectSong } = await import('./desktopProjectFs')
-  await writeProjectSong(osPath, entry.folder, new Uint8Array(await blobOut.arrayBuffer()))
-  // Report the sync watermark for this song so the caller can stamp the
-  // manifest entry — this is what stops the autosave from immediately
-  // re-pushing freshly-pulled content (the phantom-conflict loop).
-  return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: collabContentFingerprint(merged) }
 }
