@@ -85,12 +85,12 @@ export function toCollabSongMap(sm: SongMap): SongMap {
     out.audio = audioRest
   }
 
-  // `sm.cueTracks` is non-optional on the type, but this function also runs
-  // on untrusted data pulled straight from the cloud DB (`song_map: unknown`
-  // there, no server-side shape validation before this codebase's write —
-  // see `normalizeCloudSongMap`) — a row written before that guard existed,
-  // or by a future buggy client, can genuinely lack the field. Tolerate it
-  // rather than crashing every future join/pull with a cryptic TypeError.
+  // `sm.cueTracks` is non-optional on the type, but this is a defensive
+  // BACKSTOP: cloud sync should migrate raw `song_map` rows to current
+  // shape first (`normalizeCloudSongMap` in `client/cloudSync.ts`), yet a
+  // legacy `formatVersion: 1` map has no `cueTracks` at all, and this must
+  // not crash if it's ever reached without that normalization. Tolerate
+  // the missing field rather than throwing a cryptic TypeError.
   out.cueTracks = (sm.cueTracks ?? []).map(stripCueTrackLocalRender)
   out.clickExport = stripExport(sm.clickExport)
   if (sm.drumMidi) {

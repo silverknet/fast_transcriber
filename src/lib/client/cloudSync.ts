@@ -33,6 +33,7 @@ import {
 } from './desktopProjectFs'
 import { decodeSmapFile } from '$lib/songmap/persist'
 import { encodeSmapFile, SONG_PROJECT_FORMAT_VERSION } from '$lib/songmap/smapFile'
+import { parseSongMap } from '$lib/songmap/parse'
 import {
   metadataLiteFromSongMap,
   recordRecentProjectPath,
@@ -41,6 +42,37 @@ import {
 } from '$lib/project/commit'
 
 const BASE = '/api/cloud'
+
+/**
+ * Normalize a raw cloud `song_map` into a current, VALIDATED SongMap by
+ * running it through the same parser + migration the on-disk loader uses.
+ * Returns `null` when the payload is too broken to migrate (caller skips
+ * that one song rather than failing the whole join/pull).
+ *
+ * Why this is the real fix, not a field-by-field guard:
+ *   - Cloud rows are stored raw (`song_map jsonb`, no shape guarantee) and
+ *     can be ANY historical formatVersion. A legacy `formatVersion: 1`
+ *     row predates the `cueTracks` model entirely — reading `.cueTracks`
+ *     on it is the `undefined` crash that broke joins for old projects.
+ *   - Migrating at the boundary means every downstream consumer sees
+ *     current-format data with the old `cues` settings properly upgraded,
+ *     instead of an empty stand-in.
+ *   - Critically, it keeps fingerprints CONSISTENT: a v1 map and its
+ *     migrated form must hash identically or the autosave dirty-check
+ *     mistakes a freshly-pulled song for a local edit and push-loops.
+ *     A raw-v1 map (empty `cueTracks` via the defensive guard) and an
+ *     owner's migrated map would NOT — this closes that gap.
+ */
+export function normalizeCloudSongMap(raw: unknown): SongMap | null {
+  try {
+    // parseSongMap takes a JSON string; it validates + migrates legacy
+    // formats and throws on anything it can't make sense of.
+    return parseSongMap(JSON.stringify(raw))
+  } catch (e) {
+    console.warn('[cloudSync] could not normalize cloud song_map:', e)
+    return null
+  }
+}
 
 // ── Wire types (mirror the server responses) ──────────────────────────
 
@@ -385,12 +417,17 @@ export async function joinCloudProject(
   let skipped = 0
   for (const cs of cloudSongs) {
     // `cs.song_map` is `unknown` on the wire (the DB column has no shape
-    // guarantee — see `normalizeCloudSongMap`'s doc comment) — one
-    // malformed row must not sink the whole join. Any failure while
-    // materializing THIS song is caught and skipped; the rest of the
-    // project still comes through.
+    // guarantee) and can be ANY legacy formatVersion. Migrate it to the
+    // current shape first (this is what makes OLD projects joinable —
+    // a raw v1 map has no `cueTracks` and crashes downstream). A row too
+    // broken to migrate is skipped, not fatal to the whole join.
     try {
-      const sm = cs.song_map as SongMap
+      const sm = normalizeCloudSongMap(cs.song_map)
+      if (!sm) {
+        console.warn(`[cloudSync] join: skipping unmigratable song ${cs.id}`)
+        skipped++
+        continue
+      }
       const withExpected: SongMap = cs.expected_audio
         ? { ...sm, expectedAudio: cs.expected_audio }
         : sm
@@ -591,14 +628,20 @@ async function applyCloudSongIntoLocal(
   // here previously meant one malformed song broke sync for the whole
   // project, forever, for everyone.
   try {
+    // Migrate the raw cloud payload to current shape before anything reads
+    // it — same reason as the join path (legacy v1 rows have no cueTracks).
+    const incoming = normalizeCloudSongMap(cloudSong.song_map)
+    if (!incoming) {
+      console.warn(`[cloudSync] pull: skipping unmigratable song ${cloudSong.id}`)
+      return null
+    }
     const entry = proj.songs.find((s) => s.id === cloudSong.id)
     if (!entry) {
       // New song from another machine. For Phase 4 MVP we record the
       // existence but don't create the folder/audio (Phase 6 covers
       // missing-audio UX).
       patchMetadataForFolder(`songs/${cloudSong.id.slice(0, 8)}`, {
-        title:
-          (cloudSong.song_map.metadata?.title as string | undefined) ?? cloudSong.id.slice(0, 8),
+        title: incoming.metadata?.title ?? cloudSong.id.slice(0, 8),
       })
       return null
     }
@@ -611,7 +654,7 @@ async function applyCloudSongIntoLocal(
     const data = await decodeSmapFile(blob)
     const local = data.project.songMap
     const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
-    const incomingHash = collabContentFingerprint(cloudSong.song_map as SongMap)
+    const incomingHash = collabContentFingerprint(incoming)
     // Self-echo guard: if the incoming content already matches what we last
     // synced (our own push coming back via realtime, or an unchanged song),
     // skip the disk rewrite entirely — just advance the revision watermark.
@@ -620,7 +663,7 @@ async function applyCloudSongIntoLocal(
     if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
       return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
     }
-    const merged = mergeLocalIntoCollab(local, cloudSong.song_map)
+    const merged = mergeLocalIntoCollab(local, incoming)
     // Stamp expectedAudio onto the local map so the Phase 5 reconciler
     // can use it without re-fetching from the server.
     merged.expectedAudio = cloudSong.expected_audio ?? undefined
