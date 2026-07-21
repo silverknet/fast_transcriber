@@ -105,9 +105,7 @@
     renameDraft,
     switchToDraft,
   } from '$lib/songmap/drafts'
-  import { placeChords } from '$lib/chords/sheet/placeChords'
-  import { applyChordPlacements } from '$lib/chords/sheet/applyPlacement'
-  import { deriveSectionsFromSheet } from '$lib/chords/sheet/deriveSections'
+  import { applySheetImport, prepareSheetImport } from '$lib/chords/sheet/importAsDraft'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { ensureAudioFingerprint } from '$lib/audio/importedAudio'
   import { selectBestStemSet } from '$lib/project/commit'
@@ -2672,9 +2670,11 @@
     const sm = get(songMap)
     if (!sm) return
     const sheet = parseChordSheet(chordSheetDraft)
-    const r = placeChords(sheet, sm)
-    if (!r.ok) {
-      chordsPlaceErr = r.error
+    // Chords onto the grid, sections derived from where they landed, both as
+    // one draft — see `importAsDraft.ts` for why that order is load-bearing.
+    const prep = prepareSheetImport(sheet, sm, newId)
+    if (!prep.ok) {
+      chordsPlaceErr = prep.error
       return
     }
     const hadChords = sm.harmony.length > 0
@@ -2683,38 +2683,17 @@
     try {
       beginPatchBatch()
       try {
-        // Build the sheet's chords on a scratch copy, derive its sections from
-        // those chords, then land BOTH as one new draft. Deriving before the
-        // patch is what keeps them together: in v5 chords and sections were
-        // written as two independent layers paired only by name, and the names
-        // drifted apart. A draft has no such seam.
-        const scratch = applyChordPlacements({ ...sm, harmony: [] }, r.plan, newId).map
-        const derived = deriveSectionsFromSheet(sheet, r.plan, scratch, newId)
-        const addedSections = derived.length
+        const addedSections = prep.prepared.sections.length
 
         // Never destroy existing work: the current sections, chords and lyrics
         // are preserved as a draft you can switch back to.
-        const applyRes = patchSongMap((m) =>
-          addDraftAndActivate(
-            ensureActiveDraftIdentity(m, newId),
-            {
-              sections: derived,
-              harmony: scratch.harmony,
-              // Lyrics carry over — the sheet was placed against THESE lyrics,
-              // so the new draft has to keep the timing that anchored it.
-              lyrics: m.lyrics,
-            },
-            'Sheet import',
-            newId,
-            'sheet-import',
-          ),
-        )
+        const applyRes = patchSongMap((m) => applySheetImport(m, prep.prepared, newId))
         if (!applyRes.ok) {
           chordsPlaceErr = applyRes.errors.join('; ')
           return
         }
-        lastImportOrigins = new Map(r.plan.placements.map((p) => [p.beatId, p.origin]))
-        const { stats } = r.plan
+        lastImportOrigins = new Map(prep.prepared.plan.placements.map((p) => [p.beatId, p.origin]))
+        const { stats } = prep.prepared.plan
         const parts = [`Placed ${stats.placed} chord${stats.placed === 1 ? '' : 's'}`]
         if (stats.estimated > 0) parts.push(`${stats.estimated} by estimate`)
         if (stats.collisions > 0) parts.push(`${stats.collisions} overlapped`)

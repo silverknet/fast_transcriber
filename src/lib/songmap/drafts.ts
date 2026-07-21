@@ -185,12 +185,22 @@ export function switchToDraft(
  * content is preserved as a stored draft — this is the path a chord-sheet
  * import takes, so an import can never destroy hand-made work.
  */
+/**
+ * NOTE ON PROVENANCE: there is deliberately no `source` parameter here.
+ * `SongDraft.source` exists only on STORED drafts, and the draft this creates
+ * becomes the ACTIVE one — whose identity on `SongMap` is just
+ * `activeDraftId` + `activeDraftName`, with nowhere to put it. An earlier
+ * version accepted a `source` argument and silently ignored it, so callers
+ * passing `'sheet-import'` believed they were recording something they weren't.
+ * Giving the active draft a source means adding `activeDraftSource` to the
+ * schema and carrying it through switch, parse and the cloud fingerprint; worth
+ * doing only if something actually displays it.
+ */
 export function addDraftAndActivate(
   map: SongMap,
   content: Pick<SongDraft, 'sections' | 'harmony' | 'lyrics'>,
   name: string,
   newId: IdFactory,
-  source: DraftSource = 'manual',
 ): SongMap {
   const withIdentity = ensureActiveDraftIdentity(map, newId)
   const outgoingContent = activeContent(withIdentity)
@@ -231,7 +241,7 @@ export function addDraftAndActivate(
  * under its own name — this is "try an alternative without losing this one".
  */
 export function duplicateActiveDraft(map: SongMap, name: string, newId: IdFactory): SongMap {
-  return addDraftAndActivate(map, activeContent(map), name, newId, 'manual')
+  return addDraftAndActivate(map, activeContent(map), name, newId)
 }
 
 /** Rename a draft — the active one when `draftId` matches it, else a stored one. */

@@ -55,7 +55,6 @@ describe('drafts — the active draft lives at the root', () => {
       { sections: [section('sec-b', 4, 7)], harmony: [chord('ch-b', 'G')], lyrics: undefined },
       'Sheet import',
       newId,
-      'sheet-import',
     )
     const rows = listDrafts(withSecond)
     expect(rows).toHaveLength(2)
@@ -74,7 +73,6 @@ describe('drafts — the active draft lives at the root', () => {
       { sections: [section('sec-b', 4, 7)], harmony: [chord('ch-b', 'G')], lyrics: undefined },
       'Sheet import',
       newId,
-      'sheet-import',
     )
     const before = listDrafts(withSecond).map((r) => r.name)
     const other = listDrafts(withSecond).find((r) => !r.active)!
@@ -113,7 +111,6 @@ describe('drafts — switching is lossless in both directions', () => {
       },
       'Sheet import',
       newId,
-      'sheet-import',
     )
     expect(imported.sections[0].label).toBe('Chorus B')
     expect(imported.harmony[0].chord.displayRaw).toBe('G')

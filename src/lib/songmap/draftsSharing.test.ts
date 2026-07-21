@@ -51,7 +51,6 @@ function sharedSong(): SongMap {
     },
     'Sheet import',
     newId,
-    'sheet-import',
   )
 }
 
@@ -166,7 +165,6 @@ describe('two people on DIFFERENT drafts', () => {
       },
       'Alice import',
       newId,
-      'sheet-import',
     )
     const switched = switchToDraft(base, base.drafts![0].id, newId)
     if (!switched.ok) throw new Error('fixture: switch failed')
