@@ -34,6 +34,7 @@ import {
 import { decodeSmapFile } from '$lib/songmap/persist'
 import { encodeSmapFile, SONG_PROJECT_FORMAT_VERSION } from '$lib/songmap/smapFile'
 import { parseSongMap } from '$lib/songmap/parse'
+import { applyRemoteSongMap } from '$lib/project/songSession'
 import {
   metadataLiteFromSongMap,
   recordRecentProjectPath,
@@ -596,6 +597,9 @@ function expectedAudioFromSongMap(sm: SongMap): ExpectedAudio | null {
   if (a.fileSize !== undefined) out.fileSize = a.fileSize
   if (a.sha256) out.sha256 = a.sha256
   if (a.originalSha256) out.originalSha256 = a.originalSha256
+  // Recording identity travels with the claim: it is what lets a collaborator
+  // tell "same master, different encoding" from "wrong audio entirely".
+  if (a.fingerprint) out.fingerprint = a.fingerprint
   return out
 }
 
@@ -653,7 +657,7 @@ async function applyCloudSongIntoLocal(
     const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
     const data = await decodeSmapFile(blob)
     const local = data.project.songMap
-    const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
+    const { collabContentFingerprint } = await import('$lib/songmap/collab')
     const incomingHash = collabContentFingerprint(incoming)
     // Self-echo guard: if the incoming content already matches what we last
     // synced (our own push coming back via realtime, or an unchanged song),
@@ -663,10 +667,24 @@ async function applyCloudSongIntoLocal(
     if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
       return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
     }
-    const merged = mergeLocalIntoCollab(local, incoming)
-    // Stamp expectedAudio onto the local map so the Phase 5 reconciler
-    // can use it without re-fetching from the server.
-    merged.expectedAudio = cloudSong.expected_audio ?? undefined
+    // Route through the song session so a pull lands in MEMORY as well as on
+    // disk when the editor has this song open. Writing disk alone left the
+    // editor holding a stale copy that its next autosave wrote back over the
+    // pull. When the song is open, the session merges against the IN-MEMORY
+    // map, which may hold edits from the last debounce window that disk
+    // doesn't have yet.
+    // `lastSyncedContentHash` lets the session tell an editor that is merely
+    // displaying this song from one holding unpushed edits — the latter must be
+    // merged into, not overwritten. `expectedAudio` (the Phase 5 reconciler's
+    // input) is folded in BEFORE the map is installed, never mutated after.
+    const plan = applyRemoteSongMap({
+      songId: cloudSong.id,
+      incoming,
+      disk: local,
+      lastSyncedContentHash: entry.lastSyncedContentHash,
+      expectedAudio: cloudSong.expected_audio ?? undefined,
+    })
+    const merged = plan.merged
     // Encode + persist.
     const { encodeSmapFile } = await import('$lib/songmap/smapFile')
     const blobOut = await encodeSmapFile({

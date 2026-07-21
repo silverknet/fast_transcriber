@@ -16,6 +16,7 @@
     probeDesktopSetupStatus,
   } from '$lib/client/desktopBeacon'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
+  import { startCloudAutoPull, stopCloudAutoPull } from '$lib/client/cloudAutoPull'
   import {
     ACTIVE_SONG_ID_KEY,
     loadProjectSongIntoEditor,
@@ -157,6 +158,8 @@
     void pollDesktopCompanion()
     companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
     startProjectAutosave()
+    // Remote changes must reach the app on every route, not just /project.
+    startCloudAutoPull()
 
     // Subscribe to client-side Supabase auth events (sign-in via OAuth
     // callback, sign-out, token refresh) and re-run the server load so
@@ -212,6 +215,7 @@
       authUnsub?.()
       authUnsub = null
       stopProjectAutosave()
+      stopCloudAutoPull()
     }
   })
 
