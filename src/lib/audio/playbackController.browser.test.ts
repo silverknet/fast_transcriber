@@ -161,6 +161,54 @@ function spyOnOscillators(): number[] {
   return calls
 }
 
+/**
+ * Record the times nodes are *scheduled to start at* — `osc.start(when)`
+ * for clicks and `src.start(when, offset)` for the song — rather than the
+ * times they were created at.
+ *
+ * `spyOnOscillators` above answers "how many clicks, created when"; that
+ * is blind to a click that is *created* early but *scheduled* correctly,
+ * and equally blind to the reverse. Scheduled start times are the actual
+ * contract with the audio hardware, and because both arrays are stamped
+ * on the same `AudioContext` clock as `songStart`, differences between
+ * them contain no wall-clock at all.
+ *
+ * Patched per-instance (on the node returned by the factory) rather than
+ * on the prototype, so it doesn't matter which class in the
+ * `AudioScheduledSourceNode` chain actually owns `start`.
+ */
+function spyOnScheduledStarts(): { clickStarts: number[]; songStarts: number[] } {
+  const clickStarts: number[] = []
+  const songStarts: number[] = []
+  const origOsc = AudioContext.prototype.createOscillator
+  const origSrc = AudioContext.prototype.createBufferSource
+
+  AudioContext.prototype.createOscillator = function (this: AudioContext) {
+    const node = origOsc.call(this)
+    const start = node.start.bind(node)
+    node.start = (when?: number) => {
+      clickStarts.push(when ?? this.currentTime)
+      start(when)
+    }
+    return node
+  }
+  AudioContext.prototype.createBufferSource = function (this: AudioContext) {
+    const node = origSrc.call(this)
+    const start = node.start.bind(node)
+    node.start = (when?: number, offset?: number, duration?: number) => {
+      songStarts.push(when ?? this.currentTime)
+      start(when, offset, duration)
+    }
+    return node
+  }
+
+  cleanups.push(() => {
+    AudioContext.prototype.createOscillator = origOsc
+    AudioContext.prototype.createBufferSource = origSrc
+  })
+  return { clickStarts, songStarts }
+}
+
 afterEach(async () => {
   while (cleanups.length) {
     const fn = cleanups.pop()!
@@ -330,6 +378,86 @@ describe('PlaybackController (real browser, buffer-based)', () => {
     // structurally rather than by tuning.
     await waitUntil(() => c.currentTime > 0.05, 'audio to start after the pre-roll', 8000)
     expect(performance.now() - startedAt).toBeGreaterThan(plan.prependSec * 1000)
+  })
+
+  /**
+   * THE DOWNBEAT. With a count-in running, bar 1 beat 1 must be clicked
+   * exactly when the song's first sample plays, and nothing beyond the
+   * count-in beats themselves may sound during the pre-roll.
+   *
+   * Regression guarded: the click loop used to read a plan-time that was
+   * PINNED to the song-start value for the whole pre-roll (the transport's
+   * position clamp leaking into scheduling). Beat 1 sits at `timeSec === 0`,
+   * so `0 <= planTime + CLICK_LOOKAHEAD_SEC` was already true on the very
+   * first rAF: the downbeat's click was emitted ~2 s early, in the middle
+   * of the count-in, and `#nextClickIdx` had stepped past it by the time
+   * the downbeat actually arrived. Measured before the fix (relative to
+   * song start): `-2.000 -1.500 -1.000 -0.500 -2.038 +0.500` — an extra
+   * tick in the count-in, and silence on the most important beat in a
+   * live set.
+   *
+   * Everything below is asserted on SCHEDULED start times relative to the
+   * song source's OWN scheduled start. Both come off the same
+   * `AudioContext` clock, so the pass condition contains no wall-clock and
+   * no context start-up lag; only the polling deadline does.
+   */
+  it('clicks bar 1 beat 1 on the downbeat and adds nothing to the count-in', async () => {
+    const c = new PlaybackController()
+    const buf = await decodeSilentBuffer(5)
+    cleanups.push(() => c.destroy())
+
+    const { clickStarts, songStarts } = spyOnScheduledStarts()
+
+    c.setSongMap(makeSong({ barCount: 4, countInBeats: 4 }))
+    c.setAudioBuffer(buf)
+    c.rangeEnd = buf.duration
+    c.playWithClick = true
+
+    // Pin expectations to the plan, not to hard-coded numbers. 4 count-in
+    // beats at -2/-1.5/-1/-0.5, then the song from 0. `mediaTimeOffsetSec`
+    // stays 0 because the fixture's trim starts at 0, so plan-time and
+    // buffer position coincide.
+    const plan = c.plan!
+    const expected = plan.clickPoints.slice(0, 6).map((p) => p.timeSec)
+    expect(expected).toEqual([-2, -1.5, -1, -0.5, 0, 0.5])
+    expect(c.mediaTimeOffsetSec).toBe(0)
+
+    c.play()
+
+    // `play()` schedules the source synchronously, so song start is known
+    // before any rAF has had a chance to run.
+    expect(songStarts.length).toBe(1)
+    const songStart = songStarts[0]!
+
+    await waitUntil(
+      () => clickStarts.length >= expected.length,
+      `${expected.length} clicks to be scheduled`,
+      10000,
+    )
+    c.pause()
+
+    const rel = clickStarts.slice(0, expected.length).map((t) => t - songStart)
+
+    // (1) A click lands ON the downbeat. Scheduling is exact by
+    // construction — `ctxNow + (0 − planTime)` collapses to the source's
+    // own `ctxStart` — so this tolerance only absorbs the
+    // `CLICK_SCHEDULE_LEAD_SEC` floor, not clock jitter.
+    const onDownbeat = rel.filter((t) => Math.abs(t) < 0.005)
+    expect(onDownbeat.length).toBe(1)
+
+    // (2) Nothing extra sounds during the pre-roll: every click scheduled
+    // before the downbeat must be one of the count-in beats. The old
+    // behaviour put a stray tick at −2.038, which matches no count-in time.
+    const countInTimes = expected.filter((t) => t < 0)
+    const strays = rel.filter(
+      (t) => t < -0.005 && !countInTimes.some((ct) => Math.abs(ct - t) < 0.005),
+    )
+    expect(strays).toEqual([])
+
+    // (3) The whole opening sequence, in order — count-in, downbeat, beat 2.
+    for (let i = 0; i < expected.length; i++) {
+      expect(Math.abs(rel[i]! - expected[i]!)).toBeLessThan(0.005)
+    }
   })
 
   /**

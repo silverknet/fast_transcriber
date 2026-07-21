@@ -129,8 +129,6 @@ export class PlaybackController {
   #playStartPositionSec = 0
   /** Buffer position where the current play range ends. */
   #playEndPositionSec = 0
-  /** When count-in pre-roll is active, this is how much wall-clock time elapses before the song's first sample plays. */
-  #playPreRollSec = 0
   /** Auto-stop setTimeout when the source reaches `#playEndPositionSec`. */
   #autoStopTimeoutId: ReturnType<typeof setTimeout> | null = null
   /** rAF for the position mirror (`currentTime` $state updates). */
@@ -300,7 +298,6 @@ export class PlaybackController {
     this.#playStartCtxTime = ctxStart
     this.#playStartPositionSec = startPos
     this.#playEndPositionSec = endPos
-    this.#playPreRollSec = preroll
 
     // Pre-schedule count-in clicks. They live in `ctx` time too, so
     // they're sample-aligned with the song's first sample.
@@ -435,18 +432,49 @@ export class PlaybackController {
   }
 
   /**
-   * Buffer position right now, derived purely from the ctx clock.
-   * `playStartPositionSec` was the buffer offset at `playStartCtxTime`,
-   * and the buffer advances 1:1 with `ctx.currentTime` after `ctxStart`.
-   * Before `ctxStart` (during count-in pre-roll), position stays at
-   * `playStartPositionSec` so the playhead doesn't jump backward.
+   * Signed position on the SCHEDULING timeline, derived purely from the
+   * ctx clock. `playStartPositionSec` is the buffer offset the source
+   * was started at, reached at `playStartCtxTime`; the buffer advances
+   * 1:1 with `ctx.currentTime` from there.
+   *
+   * Before `playStartCtxTime` this deliberately goes BELOW
+   * `playStartPositionSec` — i.e. plan-time goes NEGATIVE — because
+   * `playStartCtxTime` already has the count-in pre-roll baked into it
+   * (`ctx.currentTime + PLAY_START_LOOKAHEAD_SEC + preroll`). The
+   * shortfall IS "how long until the song's first sample plays",
+   * negated. No separate pre-roll field is needed to recover it.
+   *
+   * The click loop MUST use this rather than `#computeCurrentPosition()`.
+   * With the pinned position, `planTime` read `0` for the whole pre-roll,
+   * so bar 1 beat 1 (`timeSec === 0`) satisfied the lookahead window
+   * `timeSec <= planTime + CLICK_LOOKAHEAD_SEC` on the very first rAF:
+   * the downbeat's click fired a whole count-in early, and `#nextClickIdx`
+   * had already stepped past it by the time the downbeat arrived — so
+   * the most important click in the bar went missing. With the signed
+   * value, `planTime` starts at `−(preroll + lookahead)` and the
+   * existing window arithmetic lands the downbeat exactly on `ctxStart`.
+   */
+  #computeSchedulingPosition(): number {
+    if (!this.#ctx) return this.currentTime
+    const pos =
+      this.#playStartPositionSec + (this.#ctx.currentTime - this.#playStartCtxTime)
+    return Math.min(pos, this.#playEndPositionSec)
+  }
+
+  /**
+   * Buffer position right now, for the UI/transport contract:
+   * `currentTime`, `pause()` and the range-end check all read this.
+   *
+   * Same derivation as `#computeSchedulingPosition()`, but floored at
+   * `playStartPositionSec` so the playhead never reports a negative
+   * position during the count-in pre-roll. That floor is load-bearing
+   * for consumers — `WaveformPlayer`'s `playheadX` maps `currentTime`
+   * straight to an x-coordinate without clamping, and `pause()` writes
+   * the result back into `currentTime`.
    */
   #computeCurrentPosition(): number {
     if (!this.#ctx) return this.currentTime
-    const elapsed = this.#ctx.currentTime - this.#playStartCtxTime
-    if (elapsed <= 0) return this.#playStartPositionSec
-    const pos = this.#playStartPositionSec + elapsed
-    return Math.min(pos, this.#playEndPositionSec)
+    return Math.max(this.#playStartPositionSec, this.#computeSchedulingPosition())
   }
 
   #startTransport(): void {
@@ -485,7 +513,9 @@ export class PlaybackController {
     const plan = this.plan
     if (!plan) return
     // Sync next index to the first positive-time click ≥ current plan-time.
-    const planTime = this.#computeCurrentPosition() - this.mediaTimeOffsetSec
+    // Signed position: during a count-in pre-roll this is negative, so the
+    // downbeat at `timeSec === 0` is correctly still AHEAD of us.
+    const planTime = this.#computeSchedulingPosition() - this.mediaTimeOffsetSec
     let i = plan.clickPoints.findIndex((c) => !c.isCountIn || c.timeSec >= -1e-9)
     if (i < 0) i = plan.clickPoints.length
     while (i < plan.clickPoints.length && plan.clickPoints[i]!.timeSec < planTime - CLICK_PAST_GRACE_SEC) i++
@@ -512,8 +542,12 @@ export class PlaybackController {
     }
 
     // Position derives from the shared ctx clock — same source the
-    // song source is locked to. They CANNOT disagree.
-    const position = this.#computeCurrentPosition()
+    // song source is locked to. They CANNOT disagree. It is the SIGNED
+    // scheduling position, so during the count-in pre-roll (and during
+    // the PLAY_START_LOOKAHEAD_SEC before any ungated start) plan-time
+    // is negative and clicks are scheduled at their true distance ahead
+    // instead of being dumped into "now".
+    const position = this.#computeSchedulingPosition()
     const planTime = position - this.mediaTimeOffsetSec
     const ctxNow = ctx.currentTime
 
