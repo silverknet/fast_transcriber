@@ -212,6 +212,29 @@ export function generateCueTrackFromSections(
   }
 }
 
+/**
+ * Is this cue event still meaningful for the song's CURRENT sections?
+ *
+ * Cue tracks are shared by every draft, but a cue GENERATED from a section
+ * carries that section's id. Switch to a draft whose sections differ and the
+ * cue is left announcing a section that is not there — the speech renderer
+ * happily spoke "Chorus A" over a draft with no Chorus A, and the stale name
+ * went into the rendered cue WAV.
+ *
+ * Filtered at READ time rather than deleted on switch, deliberately:
+ *  - nothing the user edited is ever destroyed;
+ *  - switching back makes the cue live again by itself, no bookkeeping;
+ *  - it follows the "derive, don't bridge state" rule in CLAUDE.md.
+ *
+ * Manual cues (no `generatedSource`) always survive — they were placed by hand
+ * against bars, not sections, and are not ours to second-guess.
+ */
+export function isCueEventLiveForSections(songMap: SongMap, event: CueEvent): boolean {
+  const src = event.generatedSource
+  if (!src || src.kind !== 'section') return true
+  return songMap.sections.some((section) => section.id === src.sectionId)
+}
+
 export function cueTrackHasSharedData(track: CueTrack): boolean {
   return Boolean(
     track.name.trim() ||

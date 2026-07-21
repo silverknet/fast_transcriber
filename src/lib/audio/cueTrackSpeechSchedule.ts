@@ -7,7 +7,7 @@
  */
 import { computeCountIn } from '$lib/audio/computeCountIn'
 import { effectiveCountInBeats } from '$lib/songmap/countIn'
-import { getPrimaryCueTrack, NUMBER_WORDS } from '$lib/songmap/cueTracks'
+import { getPrimaryCueTrack, isCueEventLiveForSections, NUMBER_WORDS } from '$lib/songmap/cueTracks'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { Bar, Beat, CueAnchor, CueEvent, CueTrack, SongMap } from '$lib/songmap/types'
 
@@ -266,6 +266,9 @@ export function buildCueSpeechEvents(
 
   for (const event of track.events) {
     if (!event.enabled) continue
+    // A cue generated from a section that the ACTIVE draft no longer has must
+    // not be spoken — see `isCueEventLiveForSections`.
+    if (!isCueEventLiveForSections(sm, event)) continue
     const raw = event.text?.trim()
     if (!raw) continue
     const kind = speechKindForEvent(event)

@@ -385,21 +385,18 @@ describe('drafts × cue tracks', () => {
   })
 
   /**
-   * KNOWN BUG — deliberately NOT fixed here; see the agent report.
+   * A cue generated from a section carries that section's id. Cue tracks are
+   * shared by every draft, so after a switch those ids can reference sections
+   * the active draft does not have — and the speech renderer used to announce
+   * the OUTGOING draft's section names, at the outgoing draft's bar positions,
+   * over the incoming draft's grid. The stale names reached the rendered cue
+   * WAV, not just the data model.
    *
-   * Generated section/count cues carry `generatedSource.sectionId`. After a
-   * draft switch those ids reference sections that are no longer in
-   * `sm.sections`, yet nothing prunes, re-labels or flags them: the cue
-   * layer still announces the OUTGOING draft's section names, at the
-   * outgoing draft's bar positions, over the incoming draft's grid.
-   *
-   * Nothing catches it — `validateSongMap` has no cross-check between
-   * `generatedSource.sectionId` and `sections[]`, and `switchToDraft()`
-   * never touches `cueTracks`.
-   *
-   * When this is fixed, INVERT these assertions. Do not delete the test.
+   * Fixed by filtering at READ time (`isCueEventLiveForSections`) rather than
+   * pruning on switch: nothing the user edited is destroyed, and switching back
+   * makes the cues live again with no bookkeeping.
    */
-  it('KNOWN BUG: generated cues survive a switch and reference dead sections', () => {
+  it('a cue whose section is not in the active draft is not spoken', () => {
     const onA = songWithGeneratedCues()
     const onB = addDraftAndActivate(
       onA,
@@ -408,24 +405,65 @@ describe('drafts × cue tracks', () => {
       newId,
     )
 
-    // Draft B has one section, but the cue layer still speaks draft A's two.
-    expect(onB.sections.map((s) => s.label)).toEqual(['Verse B'])
+    // The events are still THERE — this is a read-time filter, not a delete.
     expect(sectionCueTexts(onB)).toEqual(['Intro A', 'Chorus A'])
-
-    // Every generated cue now points at a section id that no longer exists.
     const liveIds = new Set(onB.sections.map((s) => s.id))
     const orphans = onB.cueTracks[0]!.events.filter(
       (e) => e.generatedSource && !liveIds.has(e.generatedSource.sectionId),
     )
     expect(orphans.length).toBeGreaterThan(0)
-
-    // ...and nothing flags it.
     expect(validateSongMap(onB).ok).toBe(true)
 
-    // The stale names reach the rendered cue audio, not just the data model.
-    const spoken = buildCueSpeechEvents(onB).map((e) => e.text)
-    expect(spoken.join(' ')).toContain('Intro A')
-    expect(spoken.join(' ')).not.toContain('Verse B')
+    // ...but none of them reaches the spoken output.
+    const spoken = buildCueSpeechEvents(onB).map((e) => e.text).join(' ')
+    expect(spoken).not.toContain('Intro A')
+    expect(spoken).not.toContain('Chorus A')
+  })
+
+  it('switching back makes the original draft\'s cues audible again', () => {
+    // The point of filtering rather than pruning: nothing had to be restored.
+    const onA = songWithGeneratedCues()
+    const onB = addDraftAndActivate(
+      onA,
+      { sections: [section('b1', 2, 5, 'Verse B')], harmony: [], lyrics: undefined },
+      'Draft B',
+      newId,
+    )
+    expect(buildCueSpeechEvents(onB).map((e) => e.text).join(' ')).not.toContain('Intro A')
+
+    const back = switchToDraft(onB, onA.activeDraftId!, newId)
+    expect(back.ok).toBe(true)
+    if (!back.ok) return
+    expect(buildCueSpeechEvents(back.map).map((e) => e.text).join(' ')).toContain('Intro A')
+  })
+
+  it('manual cues are never filtered — they are anchored to bars, not sections', () => {
+    const onA = songWithGeneratedCues()
+    const withManual: SongMap = {
+      ...onA,
+      cueTracks: [
+        {
+          ...onA.cueTracks[0]!,
+          events: [
+            ...onA.cueTracks[0]!.events,
+            {
+              id: 'manual-1',
+              kind: 'section',
+              enabled: true,
+              text: 'HIT IT',
+              anchor: onA.cueTracks[0]!.events[0]!.anchor,
+            },
+          ],
+        },
+      ],
+    }
+    const onB = addDraftAndActivate(
+      withManual,
+      { sections: [section('b1', 2, 5, 'Verse B')], harmony: [], lyrics: undefined },
+      'Draft B',
+      newId,
+    )
+    expect(buildCueSpeechEvents(onB).map((e) => e.text).join(' ')).toContain('HIT IT')
   })
 
   /**
