@@ -11,6 +11,8 @@
   import SectionSuggestionBanner from '$lib/components/SectionSuggestionBanner.svelte'
   import ChordAutoFillBanner from '$lib/components/ChordAutoFillBanner.svelte'
   import RelinkAudioBanner from '$lib/components/RelinkAudioBanner.svelte'
+  import RecordingMismatchBanner from '$lib/components/RecordingMismatchBanner.svelte'
+  import SongDraftsDialog from '$lib/components/SongDraftsDialog.svelte'
   import {
     applyChordAutoFill,
     proposeChordAutoFillCandidates,
@@ -94,21 +96,20 @@
   import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
   import { parseChordSheet } from '$lib/chords/sheet/parseChordSheet'
   import {
-    activeChordTrackName,
-    deleteChordLayer,
-    stashActiveChords,
-    switchToChordLayer,
-  } from '$lib/songmap/chordLayers'
-  import {
-    activeSectionLayoutName,
-    deleteSectionLayer,
-    stashActiveSections,
-    switchToSectionLayer,
-  } from '$lib/songmap/sectionLayers'
+    activeDraftName,
+    addDraftAndActivate,
+    deleteDraft,
+    duplicateActiveDraft,
+    ensureActiveDraftIdentity,
+    listDrafts,
+    renameDraft,
+    switchToDraft,
+  } from '$lib/songmap/drafts'
   import { placeChords } from '$lib/chords/sheet/placeChords'
   import { applyChordPlacements } from '$lib/chords/sheet/applyPlacement'
   import { deriveSectionsFromSheet } from '$lib/chords/sheet/deriveSections'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
+  import { ensureAudioFingerprint } from '$lib/audio/importedAudio'
   import { selectBestStemSet } from '$lib/project/commit'
   import {
     applyBarGridAction,
@@ -2504,80 +2505,96 @@
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
   }
 
-  // ── Parallel chord tracks: active = sm.harmony; layers switch losslessly ──
-  const chordLayerList = $derived($songMap?.chordLayers ?? [])
-  const activeChordTrackLabel = $derived($songMap ? activeChordTrackName($songMap) : '')
-  let chordLayerMsg = $state('')
+  // ── Song drafts: sections + chords + lyrics as ONE switchable unit ───────
+  // The ACTIVE draft's content is sm.sections / sm.harmony / sm.lyrics; stored
+  // drafts live in sm.drafts. Switching swaps all three at once, so a draft can
+  // never end up with one song's chords over another's sections. The selected
+  // draft is what live mode plays and what the .als exports.
+  let draftMenuOpen = $state(false)
+  let draftMsg = $state('')
+  /** Chord-sheet import dialog (opened from the chords tab). */
+  let sheetImportOpen = $state(false)
+  const draftRows = $derived($songMap ? listDrafts($songMap) : [])
+  const activeDraftLabel = $derived($songMap ? activeDraftName($songMap) : '')
 
-  // ── Loadouts: a chord track + section layout that travel together ──────
-  // Pairing is by layer NAME — a sheet import stashes both sides under the
-  // same name, so "Sheet import" is one loadout with chords AND sections.
-  let loadoutsOpen = $state(false)
-  type LoadoutRow = {
-    name: string
-    chords?: (typeof chordLayerList)[number]
-    sections?: (typeof sectionLayerList)[number]
+  /** Chord + section counts for a draft row, for the switcher subtitle. */
+  function draftCounts(id: string, active: boolean): string {
+    const sm = $songMap
+    if (!sm) return ''
+    const d = active ? sm : sm.drafts?.find((x) => x.id === id)
+    if (!d) return ''
+    const chords = d.harmony.length
+    const sections = d.sections.length
+    const words = d.lyrics?.words.length ?? 0
+    const parts = [
+      `${chords} ${chords === 1 ? 'chord' : 'chords'}`,
+      `${sections} ${sections === 1 ? 'section' : 'sections'}`,
+    ]
+    if (words > 0) parts.push('lyrics')
+    return parts.join(' · ')
   }
-  const storedLoadouts = $derived.by<LoadoutRow[]>(() => {
-    const byName = new Map<string, LoadoutRow>()
-    for (const l of chordLayerList) byName.set(l.name, { name: l.name, chords: l })
-    for (const l of sectionLayerList) {
-      const cur = byName.get(l.name)
-      if (cur) cur.sections = l
-      else byName.set(l.name, { name: l.name, sections: l })
-    }
-    return [...byName.values()].sort((a, b) =>
-      (b.chords?.createdAt ?? b.sections?.createdAt ?? '').localeCompare(
-        a.chords?.createdAt ?? a.sections?.createdAt ?? '',
+
+  /** Rows for the drafts dialog — presentation only; the dialog stays dumb. */
+  const draftDialogRows = $derived(
+    draftRows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      active: row.active,
+      counts: draftCounts(row.id, row.active),
+      age: layerAgeLabel(row.createdAt),
+    })),
+  )
+
+  function useDraft(id: string) {
+    draftMsg = ''
+    const prev = activeDraftLabel
+    const res = patchSongMap((m) => {
+      const r = switchToDraft(ensureActiveDraftIdentity(m, newId), id, newId)
+      return r.ok ? r.map : m
+    })
+    // Stay open: the picker is a radio list, so the user should see the
+    // selection move to the row they clicked.
+    if (res.ok) draftMsg = `Switched to “${activeDraftLabel}” — “${prev}” is kept.`
+  }
+
+  function newDraftFromCurrent() {
+    draftMsg = ''
+    patchSongMap((m) =>
+      duplicateActiveDraft(ensureActiveDraftIdentity(m, newId), `${activeDraftName(m)} copy`, newId),
+    )
+    draftMenuOpen = false
+    draftMsg = `Created “${activeDraftLabel}”. Edits here won't touch the draft you copied it from.`
+  }
+
+  function newEmptyDraft() {
+    draftMsg = ''
+    patchSongMap((m) =>
+      addDraftAndActivate(
+        ensureActiveDraftIdentity(m, newId),
+        { sections: [], harmony: [], lyrics: undefined },
+        'New draft',
+        newId,
       ),
     )
-  })
-
-  function useLoadout(row: LoadoutRow) {
-    chordLayerMsg = ''
-    beginPatchBatch()
-    try {
-      if (row.chords) {
-        patchSongMap((m) => {
-          const r = switchToChordLayer(m, row.chords!.id, newId)
-          return r.ok ? r.map : m
-        })
-      }
-      if (row.sections) {
-        patchSongMap((m) => {
-          const r = switchToSectionLayer(m, row.sections!.id, newId)
-          return r.ok ? r.map : m
-        })
-      }
-    } finally {
-      endPatchBatch()
-    }
-    chordLayerMsg = `Switched to “${row.name}” — the previous loadout is kept.`
+    draftMenuOpen = false
+    draftMsg = `Created “${activeDraftLabel}” — empty sections, chords and lyrics.`
   }
 
-  function deleteLoadout(row: LoadoutRow) {
-    const parts = [
-      row.chords ? `${row.chords.harmony.length} chords` : null,
-      row.sections ? `${row.sections.sections.length} sections` : null,
-    ].filter(Boolean)
-    if (!window.confirm(`Delete the stored loadout “${row.name}” (${parts.join(' + ')})? The active chords and sections stay.`)) {
+  function renameDraftRow(id: string, currentName: string) {
+    const next = window.prompt('Draft name', currentName)
+    if (next === null) return
+    patchSongMap((m) => renameDraft(m, id, next))
+    draftMsg = ''
+  }
+
+  function deleteDraftRow(id: string, name: string) {
+    const counts = draftCounts(id, false)
+    if (!window.confirm(`Delete the draft “${name}” (${counts})? The draft you're on now stays.`)) {
       return
     }
-    chordLayerMsg = ''
-    beginPatchBatch()
-    try {
-      if (row.chords) patchSongMap((m) => deleteChordLayer(m, row.chords!.id))
-      if (row.sections) patchSongMap((m) => deleteSectionLayer(m, row.sections!.id))
-    } finally {
-      endPatchBatch()
-    }
-    chordLayerMsg = `Deleted “${row.name}”.`
+    patchSongMap((m) => deleteDraft(m, id))
+    draftMsg = `Deleted “${name}”.`
   }
-
-  // ── Parallel section layouts: active = sm.sections; layers swap losslessly ──
-  const sectionLayerList = $derived($songMap?.sectionLayers ?? [])
-  const activeSectionLayoutLabel = $derived($songMap ? activeSectionLayoutName($songMap) : '')
-  let sectionLayerMsg = $state('')
 
 
 
@@ -2629,7 +2646,7 @@
       (r, i) =>
         `${i + 1}\t${r.barIndex !== null ? `${r.barIndex + 1}.${r.beatInBar}` : '—'}\t${formatInspectorTime(r.timeSec)}\t${r.symbol}\t${r.origin}`,
     )
-    const text = [`track: ${activeChordTrackLabel} · ${chordInspectorRows.length} chords`, header, ...lines].join('\n')
+    const text = [`draft: ${activeDraftLabel} · ${chordInspectorRows.length} chords`, header, ...lines].join('\n')
     try {
       await navigator.clipboard.writeText(text)
       chordInspectorCopied = true
@@ -2661,35 +2678,37 @@
       return
     }
     const hadChords = sm.harmony.length > 0
+    const hadSections = sm.sections.length > 0
     chordsPlaceBusy = true
     try {
       beginPatchBatch()
       try {
-        // Never destroy existing work: current chords become a parallel
-        // track first, then the sheet's chords take over as the active one.
-        const applyRes = patchSongMap((m) => {
-          const stashed = stashActiveChords(m, newId)
-          const applied = applyChordPlacements({ ...stashed, harmony: [] }, r.plan, newId).map
-          return { ...applied, activeChordLayerName: 'Sheet import' }
-        })
-        let addedSections = 0
-        let stashedSections = false
-        const cur = get(songMap)
-        if (applyRes.ok && cur) {
-          const derived = deriveSectionsFromSheet(sheet, r.plan, cur, newId)
-          if (derived.length > 0) {
-            // Same rule as chords: existing sections become a parallel
-            // layout first, never overwritten.
-            stashedSections = cur.sections.length > 0
-            const sp = patchSongMap((m) => ({
-              ...stashActiveSections(m, newId),
+        // Build the sheet's chords on a scratch copy, derive its sections from
+        // those chords, then land BOTH as one new draft. Deriving before the
+        // patch is what keeps them together: in v5 chords and sections were
+        // written as two independent layers paired only by name, and the names
+        // drifted apart. A draft has no such seam.
+        const scratch = applyChordPlacements({ ...sm, harmony: [] }, r.plan, newId).map
+        const derived = deriveSectionsFromSheet(sheet, r.plan, scratch, newId)
+        const addedSections = derived.length
+
+        // Never destroy existing work: the current sections, chords and lyrics
+        // are preserved as a draft you can switch back to.
+        const applyRes = patchSongMap((m) =>
+          addDraftAndActivate(
+            ensureActiveDraftIdentity(m, newId),
+            {
               sections: derived,
-              activeSectionLayerName: 'Sheet import',
-            }))
-            if (sp.ok) addedSections = derived.length
-            else stashedSections = false
-          }
-        }
+              harmony: scratch.harmony,
+              // Lyrics carry over — the sheet was placed against THESE lyrics,
+              // so the new draft has to keep the timing that anchored it.
+              lyrics: m.lyrics,
+            },
+            'Sheet import',
+            newId,
+            'sheet-import',
+          ),
+        )
         if (!applyRes.ok) {
           chordsPlaceErr = applyRes.errors.join('; ')
           return
@@ -2706,10 +2725,11 @@
           chordsPlaceMsg += ` Matched ${stats.matchedLines} of ${stats.totalLines} sheet lines to your lyrics.`
         }
         if (addedSections > 0) {
-          chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}${stashedSections ? ' (your previous sections are kept as a separate layout)' : ''}.`
+          chordsPlaceMsg += ` Added ${addedSections} section${addedSections === 1 ? '' : 's'}.`
         }
-        if (hadChords) {
-          chordsPlaceMsg += ' Your previous chords are kept as a separate track — switch back any time.'
+        chordsPlaceMsg += ` This is now the “${activeDraftLabel}” draft.`
+        if (hadChords || hadSections) {
+          chordsPlaceMsg += ' Your previous version is kept as its own draft — switch back any time.'
         }
       } finally {
         endPatchBatch()
@@ -3044,6 +3064,10 @@
     </div>
   {:else if $audioSession.file && $songMap}
     {@const sm = $songMap}
+    <!-- Audio is present, but is it the SAME RECORDING everyone else is on?
+         Silent unless it definitely isn't — a different file format or quality
+         of the same master never triggers it. -->
+    <RecordingMismatchBanner />
 
     <!-- Song-first header, raw over the background (a <div>, NOT a <header>, so
          it escapes the `.edit-page > header` studio-box rule). -->
@@ -3061,7 +3085,11 @@
           />
         {:else}
           <h1 class="flex items-center gap-2 text-3xl font-bold tracking-tight">
-            <span class="truncate">{sm.metadata.title || 'Untitled song'}</span>
+            <!-- `min-w-0` is what makes `truncate` actually work on a flex
+                 item: without it the title refuses to shrink below its
+                 content width, overflows the row, and wraps the controls
+                 after it onto a second line. -->
+            <span class="min-w-0 truncate">{sm.metadata.title || 'Untitled song'}</span>
             <button
               type="button"
               class="text-muted-foreground/50 hover:text-foreground shrink-0 transition-colors"
@@ -3070,8 +3098,29 @@
             >
               <Pencil class="size-4" />
             </button>
+
+            <!-- ── Draft switcher. Song-level on purpose: a draft is the
+                 song's sections + chords + lyrics together, so it can't sit
+                 inside one editor tab. The selected draft is what the grid
+                 edits, what live mode plays, and what the .als exports. ── -->
+            <!-- `icon-xs` (a fixed 24×24 from the button variants) rather than
+                 hand-tuned padding: the button base is `whitespace-nowrap
+                 shrink-0`, so any text label sets a hard minimum width that
+                 squeezes the title. The draft name is in the tooltip, and the
+                 Sections/Chords toolbars show it in full. -->
+            <Button
+              variant="outline"
+              size="icon-xs"
+              class="shrink-0 border-2"
+              onclick={() => (draftMenuOpen = true)}
+              aria-label={`Draft: ${activeDraftLabel}. Switch drafts`}
+              title={`Draft: ${activeDraftLabel} — switch between this song's drafts`}
+            >
+              <Layers aria-hidden="true" />
+            </Button>
           </h1>
         {/if}
+
         <div
           class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums"
         >
@@ -3747,36 +3796,12 @@
           {#snippet primary()}
             <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
             <span class="font-mono tabular-nums">{sm.timeline.beats.length} beats</span>
-            {#if editMode === 'sections'}
-              <span class="text-muted-foreground">{activeSectionLayoutLabel}</span>
-            {:else if editMode === 'chords'}
-              <span class="text-muted-foreground">{activeChordTrackLabel}</span>
+            {#if editMode === 'sections' || editMode === 'chords'}
+              <span class="text-muted-foreground">{activeDraftLabel}</span>
             {/if}
           {/snippet}
         </EditSectionToolbar>
         {#if editMode === 'sections'}
-          <EditSectionToolbar
-            title="Section layout"
-            compact
-            statusText={sectionLayerMsg || undefined}
-            helpText="Loadouts store matched chord and section sets. Switching keeps the current layout stored, so trying another arrangement is non-destructive."
-          >
-            {#snippet actions()}
-              <Button
-                variant="outline"
-                size="sm"
-                class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
-                onclick={() => (loadoutsOpen = true)}
-                title="Loadouts — stored chord + section sets; switch, delete, or import a sheet"
-              >
-                <Layers class="size-3.5" aria-hidden="true" />
-                {activeSectionLayoutLabel}
-                {#if storedLoadouts.length > 0}
-                  <span class="text-muted-foreground font-normal">· {storedLoadouts.length} stored</span>
-                {/if}
-              </Button>
-            {/snippet}
-          </EditSectionToolbar>
           <SectionSuggestionBanner
             suggestion={activeSuggestion}
             index={activeSuggestionPosition}
@@ -3790,25 +3815,22 @@
         {/if}
         {#if editMode === 'chords'}
           <!-- ── Chords toolbar: one row instead of three stacked blocks.
-               Left: chord-track picker + sheet import. Right: suggestions. ── -->
+               Drafts moved up next to the song title — they cover chords,
+               sections AND lyrics, so they don't belong to one tab. ── -->
           <EditSectionToolbar
             title="Chord controls"
             compact
-            helpText="Loadouts switch between stored chord and section sets. Suggestions can be accepted for the selected section or hidden once the section is finished."
+            helpText="Suggestions can be accepted for the selected section or hidden once the section is finished."
           >
             {#snippet primary()}
               <Button
                 variant="outline"
                 size="sm"
-                class="h-7 gap-1.5 border-2 px-2 text-xs font-bold"
-                onclick={() => (loadoutsOpen = true)}
-                title="Loadouts — stored chord + section sets; switch, delete, or import a sheet"
+                class="h-7 border-2 px-2 text-xs font-bold"
+                onclick={() => (sheetImportOpen = true)}
+                title="Paste a chord sheet — its chords and sections land as a new draft"
               >
-                <Layers class="size-3.5" aria-hidden="true" />
-                <span class="max-w-40 truncate">{activeChordTrackLabel}</span>
-                {#if storedLoadouts.length > 0}
-                  <span class="text-muted-foreground font-normal">· {storedLoadouts.length} stored</span>
-                {/if}
+                Sheet
               </Button>
 
               <Button
@@ -3857,12 +3879,12 @@
               </button>
             {/snippet}
           </EditSectionToolbar>
-          {#if chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
+          {#if chordsPlaceErr || chordsPlaceMsg || draftMsg}
             <p
               class="mb-3 px-1 text-xs {chordsPlaceErr ? 'text-destructive' : 'text-muted-foreground'}"
               role="status"
             >
-              {chordsPlaceErr || chordsPlaceMsg || chordLayerMsg}
+              {chordsPlaceErr || chordsPlaceMsg || draftMsg}
             </p>
           {/if}
 
@@ -3872,7 +3894,7 @@
             <div class="border-foreground bg-background mb-3 border-2 text-xs">
               <div class="border-foreground/40 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
                 <span>Stored chords · {chordInspectorRows.length}</span>
-                <span>track: {activeChordTrackLabel}</span>
+                <span>draft: {activeDraftLabel}</span>
                 <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
                 <button
                   type="button"
@@ -3914,114 +3936,6 @@
             </div>
           {/if}
 
-          <!-- Loadouts: stored chord+section sets — list, switch, delete, and
-               import a new sheet, all in one place. -->
-          <Dialog open={loadoutsOpen} onOpenChange={(v: boolean) => (loadoutsOpen = v)}>
-            <DialogContent class="flex max-w-2xl flex-col gap-3 p-4">
-              <DialogHeader>
-                <DialogTitle class="flex items-center gap-2">
-                  <Layers class="size-4" aria-hidden="true" />
-                  Loadouts
-                </DialogTitle>
-                <DialogDescription>
-                  A loadout is a matched set of chords and sections. Importing a sheet creates
-                  one; switching keeps the current set stored. Nothing is ever overwritten.
-                </DialogDescription>
-              </DialogHeader>
-
-              <div class="border-foreground bg-muted flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
-                <span class="border-foreground bg-foreground text-background border px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase">Active</span>
-                <span class="font-bold">{activeChordTrackLabel}</span>
-                <span class="text-muted-foreground">
-                  {$songMap?.harmony.length ?? 0} chords · {$songMap?.sections.length ?? 0} sections{activeSectionLayoutLabel !== activeChordTrackLabel ? ` · section layout: ${activeSectionLayoutLabel}` : ''}
-                </span>
-              </div>
-
-              {#if storedLoadouts.length === 0}
-                <p class="text-muted-foreground text-xs italic">
-                  No stored loadouts yet — import a sheet below to create one.
-                </p>
-              {:else}
-                <div class="flex max-h-44 flex-col gap-1 overflow-auto">
-                  {#each storedLoadouts as row (row.name)}
-                    <div class="border-foreground/50 flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
-                      <span class="font-bold">{row.name}</span>
-                      <span class="text-muted-foreground">
-                        {row.chords ? `${row.chords.harmony.length} chords` : 'no chords'} ·
-                        {row.sections ? `${row.sections.sections.length} sections` : 'no sections'}
-                        {layerAgeLabel(row.chords?.createdAt ?? row.sections?.createdAt) ? ` · ${layerAgeLabel(row.chords?.createdAt ?? row.sections?.createdAt)}` : ''}
-                      </span>
-                      <span class="ml-auto"></span>
-                      <Button
-                        size="sm"
-                        class="h-6 border-2 px-2 text-xs font-bold"
-                        onclick={() => useLoadout(row)}
-                        title={`Make “${row.name}” active — the current loadout is kept`}
-                      >
-                        Use
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        class="text-destructive hover:bg-destructive hover:text-background h-6 border-2 px-1.5"
-                        onclick={() => deleteLoadout(row)}
-                        aria-label={`Delete loadout ${row.name}`}
-                        title={`Delete “${row.name}”…`}
-                      >
-                        <Trash2 class="size-3" aria-hidden="true" />
-                      </Button>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-              {#if chordLayerMsg}
-                <p class="text-muted-foreground text-xs" role="status">{chordLayerMsg}</p>
-              {/if}
-
-              <div class="border-foreground/40 border-t-2 border-dashed"></div>
-
-              <p class="text-muted-foreground text-[10px] font-bold uppercase tracking-wider">
-                Import chord sheet
-              </p>
-              <textarea
-                bind:value={chordSheetDraft}
-                rows="8"
-                placeholder={'Paste a chord sheet (chords above the words, Ultimate Guitar style).\nFor instrumental lines, (x2) repeats the line and | pipes | group chords into one bar.'}
-                class="border-foreground bg-background max-h-[35vh] w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
-                spellcheck="false"
-              ></textarea>
-              <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <span class="text-muted-foreground">
-                  {#if chordSheetParsed.chordCount > 0}
-                    Detected {chordSheetParsed.chordCount} chords in
-                    {chordSheetParsed.sections.length} section{chordSheetParsed.sections.length === 1 ? '' : 's'}.
-                  {:else if chordSheetDraft.trim()}
-                    No chord lines detected yet — is this a chords-over-lyrics sheet?
-                  {:else}
-                    Works best after the lyrics are fitted to the song.
-                  {/if}
-                </span>
-              </div>
-              {#if chordsPlaceErr}
-                <p class="text-destructive text-xs">{chordsPlaceErr}</p>
-              {/if}
-              {#if chordsPlaceMsg}
-                <p class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</p>
-              {/if}
-              <DialogFooter class="gap-2">
-                <Button variant="outline" class="border-2 text-xs font-bold" onclick={() => (loadoutsOpen = false)}>
-                  Close
-                </Button>
-                <Button
-                  class="border-2 text-xs font-bold"
-                  onclick={placeChordsFromSheet}
-                  disabled={chordsPlaceBusy || chordSheetParsed.chordCount === 0}
-                >
-                  {chordsPlaceBusy ? 'Placing…' : 'Place chords on the grid'}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
 
           <ChordAutoFillBanner
             proposal={activeAutoFill}
@@ -4144,6 +4058,7 @@
           audioBordersError={audioBordersError}
           bind:showAudioBorders
           onReanalyzeBorders={() => runSectionBorderAnalysis(true)}
+          onAudioDecoded={(buf) => patchSongMap((m) => ensureAudioFingerprint(m, buf))}
           sectionsInstallProgress={sectionsInstallProgress}
           bind:sectionsSelectionBarIds
           bind:chordsSelectionBeatIds
@@ -4485,6 +4400,91 @@
       <ArrowLeft class="size-4" aria-hidden="true" />
       Back to import
     </Button>
+
+    <!-- Song-level dialogs, at page level on purpose. They must NOT sit
+         inside the header column: that column is `sm:items-end` against the
+         tab toggle, so any height added there pushes the tabs down. Nor
+         inside a tab block: the draft switcher is reachable from every tab,
+         so its dialog has to be mounted on every tab. -->
+         draft switcher sits next to the song title and is reachable from
+         every tab, so its dialog has to exist on every tab too. -->
+    <!-- Drafts: switch, duplicate, rename, delete. One draft = one take
+         on the song (sections + chords + lyrics). -->
+    <SongDraftsDialog
+      bind:open={draftMenuOpen}
+      songTitle={sm.metadata.title || 'Untitled song'}
+      rows={draftDialogRows}
+      message={draftMsg}
+      onUse={useDraft}
+      onRename={renameDraftRow}
+      onDelete={deleteDraftRow}
+      onDuplicate={newDraftFromCurrent}
+      onNewEmpty={newEmptyDraft}
+    />
+
+    <!-- Import a chord sheet. The import lands as a new draft; the draft
+         switcher lives next to the song title. -->
+    <Dialog open={sheetImportOpen} onOpenChange={(v: boolean) => (sheetImportOpen = v)}>
+      <DialogContent class="flex max-w-2xl flex-col gap-3 p-4">
+        <DialogHeader>
+          <DialogTitle class="flex items-center gap-2">
+            <Layers class="size-4" aria-hidden="true" />
+            Import chord sheet
+          </DialogTitle>
+          <DialogDescription>
+            The sheet's chords and sections land together as a new draft. Your current
+            draft is kept — switch back from the draft picker by the song title.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="border-foreground bg-muted flex flex-wrap items-center gap-2 border-2 px-2 py-1.5 text-xs">
+          <span class="border-foreground bg-foreground text-background border px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase">Now editing</span>
+          <span class="font-bold">{activeDraftLabel}</span>
+          <span class="text-muted-foreground">
+            {$songMap?.harmony.length ?? 0} chords · {$songMap?.sections.length ?? 0} sections
+          </span>
+        </div>
+
+        <textarea
+          bind:value={chordSheetDraft}
+          rows="8"
+          placeholder={'Paste a chord sheet (chords above the words, Ultimate Guitar style).\nFor instrumental lines, (x2) repeats the line and | pipes | group chords into one bar.'}
+          class="border-foreground bg-background max-h-[35vh] w-full resize-y border-2 px-3 py-2 font-mono text-xs leading-relaxed focus:outline-none"
+          spellcheck="false"
+        ></textarea>
+        <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span class="text-muted-foreground">
+            {#if chordSheetParsed.chordCount > 0}
+              Detected {chordSheetParsed.chordCount} chords in
+              {chordSheetParsed.sections.length} section{chordSheetParsed.sections.length === 1 ? '' : 's'}.
+            {:else if chordSheetDraft.trim()}
+              No chord lines detected yet — is this a chords-over-lyrics sheet?
+            {:else}
+              Works best after the lyrics are fitted to the song.
+            {/if}
+          </span>
+        </div>
+        {#if chordsPlaceErr}
+          <p class="text-destructive text-xs">{chordsPlaceErr}</p>
+        {/if}
+        {#if chordsPlaceMsg}
+          <p class="text-muted-foreground text-xs" role="status">{chordsPlaceMsg}</p>
+        {/if}
+        <DialogFooter class="gap-2">
+          <Button variant="outline" class="border-2 text-xs font-bold" onclick={() => (sheetImportOpen = false)}>
+            Close
+          </Button>
+          <Button
+            class="border-2 text-xs font-bold"
+            onclick={placeChordsFromSheet}
+            disabled={chordsPlaceBusy || chordSheetParsed.chordCount === 0}
+          >
+            {chordsPlaceBusy ? 'Placing…' : 'Place chords on the grid'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
   {/if}
 </main>
 

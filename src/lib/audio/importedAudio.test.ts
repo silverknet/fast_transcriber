@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   audioReferenceFromImportedArtifact,
   prepareImportedAudio,
+  ensureAudioFingerprint,
   type ImportedAudioArtifact,
 } from './importedAudio'
 
@@ -61,5 +62,53 @@ describe('audioReferenceFromImportedArtifact', () => {
       originalPath: 'audio/yt-demo.wav',
       source: 'import',
     })
+  })
+})
+
+describe('ensureAudioFingerprint', () => {
+  const buffer = (seconds: number, level: number[]) => ({
+    numberOfChannels: 1,
+    sampleRate: 8000,
+    getChannelData: () => {
+      const n = seconds * 8000
+      const out = new Float32Array(n)
+      for (let i = 0; i < n; i++) {
+        out[i] = level[Math.min(level.length - 1, Math.floor((i / n) * level.length))]! * (i % 2 ? 1 : -1)
+      }
+      return out
+    },
+  })
+
+  const withAudio = (fingerprint?: unknown) =>
+    ({
+      audio: { fileName: 'a.wav', trim: { startSec: 0, endSec: 10 }, source: 'upload', fingerprint },
+    }) as never
+
+  it('stamps a fingerprint when the song has none', () => {
+    const out = ensureAudioFingerprint(withAudio(undefined), buffer(4, [0.1, 0.9, 0.4, 1]))
+    expect(out.audio?.fingerprint?.envelope).toHaveLength(64)
+    expect(out.audio?.fingerprint?.durationSec).toBeCloseTo(4, 2)
+  })
+
+  it('returns the SAME object when one is already stored', () => {
+    // Identity, not just equality: the caller uses `===` to decide whether to
+    // patch the store, and re-patching would loop autosave → push forever.
+    const map = withAudio({ version: 1, durationSec: 4, envelope: Array(64).fill(3) })
+    expect(ensureAudioFingerprint(map, buffer(4, [0.1, 0.9]))).toBe(map)
+  })
+
+  it('returns the SAME object when there is no audio at all', () => {
+    const map = {} as never
+    expect(ensureAudioFingerprint(map, buffer(4, [0.1, 0.9]))).toBe(map)
+  })
+
+  it('returns the SAME object when the audio is silent (nothing to fingerprint)', () => {
+    const silent = {
+      numberOfChannels: 1,
+      sampleRate: 8000,
+      getChannelData: () => new Float32Array(0),
+    }
+    const map = withAudio(undefined)
+    expect(ensureAudioFingerprint(map, silent)).toBe(map)
   })
 })

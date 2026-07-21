@@ -7,19 +7,27 @@
  *
  * Strict identity = sha256 match (either `sha256` of the stored file or
  *   `originalSha256` of the HQ source). Cheap and conclusive once
- *   computed.
+ *   computed — but it answers "same FILE", and collaborators routinely
+ *   hold the same recording as different files.
+ *
+ * Recording identity = the loudness-envelope fingerprint
+ *   (`$lib/audio/audioFingerprint.ts`). Answers "same PERFORMANCE",
+ *   which is the question that actually matters: `Bar.startSec` and
+ *   `Beat.timeSec` are absolute seconds, so the grid fits any encoding
+ *   of the same master and fits NO other cut. It both rescues a sha
+ *   disagreement and vetoes a metadata agreement.
  *
  * Loose identity = (durationSec ± 0.1s) AND sampleRate AND channels AND
- *   fileSize all match. Used as a high-confidence fallback when the
- *   strict path doesn't have hashes to compare (legacy songs, freshly
- *   imported files where sha256 hasn't been stamped yet). Still strong
- *   enough that a coincidental match is vanishingly unlikely for any
- *   real audio file.
+ *   fileSize all match. The weakest signal, used only when neither
+ *   hashes nor fingerprints are available on both sides (legacy songs,
+ *   freshly imported files). Two different masters CAN pass it — see
+ *   `audioReconcile.ts`, which refuses to auto-stamp on a loose match.
  *
  * Phase 5 reconciliation uses `identityMatches` against
  * `SongMap.expectedAudio` (cloud's claim) and the on-disk file's
  * computed identity (from the sidecar's wav-info / sha256 endpoints).
  */
+import { compareFingerprints, type AudioFingerprint } from '$lib/audio/audioFingerprint'
 import type { AudioReference, ExpectedAudio } from './types'
 
 /**
@@ -35,6 +43,8 @@ export interface AudioIdentity {
   channels?: number
   fileSize?: number
   fileName?: string
+  /** Recording identity — see `$lib/audio/audioFingerprint.ts`. */
+  fingerprint?: AudioFingerprint
 }
 
 export function identityFromAudioRef(audio: AudioReference | ExpectedAudio | null | undefined): AudioIdentity {
@@ -47,6 +57,7 @@ export function identityFromAudioRef(audio: AudioReference | ExpectedAudio | nul
     channels: audio.channels,
     fileSize: audio.fileSize,
     fileName: audio.fileName,
+    fingerprint: audio.fingerprint,
   }
 }
 
@@ -121,18 +132,40 @@ export function identityMatchesLoose(
   return compared > 0
 }
 
-/**
- * One-call matcher used by Phase 5 reconciliation:
- *   - 'strict'      — sha256 agreement
- *   - 'loose'       — strict undecided, but all loose fields match
- *   - 'mismatch'    — strict decided false OR a loose field disagreed
- *   - 'undecided'   — neither side has enough info to compare
- */
-export type IdentityMatch = 'strict' | 'loose' | 'mismatch' | 'undecided'
+export type IdentityMatch =
+  /** Byte-identical — same file. */
+  | 'strict'
+  /**
+   * Different bytes, same RECORDING (a transcode, a different bounce). The
+   * stored bars and beats still land correctly, so this is safe to accept.
+   */
+  | 'equivalent'
+  /** No hashes to compare, but every metadata field agrees. Weakest positive. */
+  | 'loose'
+  /** Decisively not the same audio. */
+  | 'mismatch'
+  /** Not enough information either way. */
+  | 'undecided'
 
+/**
+ * One-call matcher used by Phase 5 reconciliation.
+ *
+ * Order matters. The recording fingerprint is consulted BEFORE a sha
+ * disagreement is treated as fatal, because "different bytes" is the normal
+ * state between two collaborators — one has the WAV, one has the MP3. Calling
+ * that a mismatch is what trains people to click through the warning. The
+ * fingerprint is also allowed to VETO: if it says the recordings differ, that
+ * is decisive regardless of how well the metadata lines up, because a different
+ * cut means every stored `Bar.startSec` is wrong.
+ */
 export function identityMatches(local: AudioIdentity, expected: AudioIdentity): IdentityMatch {
   const strict = identityMatchesStrict(local, expected)
   if (strict === true) return 'strict'
+
+  const recording = compareFingerprints(local.fingerprint, expected.fingerprint)
+  if (recording === 'different') return 'mismatch'
+  if (recording === 'same') return 'equivalent'
+
   if (strict === false) return 'mismatch'
   return identityMatchesLoose(local, expected) ? 'loose' : 'undecided'
 }

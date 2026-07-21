@@ -399,50 +399,37 @@ export function validateSongMap(map: SongMap): ValidationResult {
     }
   }
 
-  if (map.chordLayers !== undefined) {
-    if (!Array.isArray(map.chordLayers)) errors.push('chordLayers must be array')
+  if (map.drafts !== undefined) {
+    if (!Array.isArray(map.drafts)) errors.push('drafts must be array')
     else {
-      const seenLayerIds = new Set<string>()
-      map.chordLayers.forEach((layer, i) => {
-        const path = `chordLayers[${i}]`
-        if (!layer || typeof layer !== 'object') {
+      const seenDraftIds = new Set<string>()
+      map.drafts.forEach((draft, i) => {
+        const path = `drafts[${i}]`
+        if (!draft || typeof draft !== 'object') {
           errors.push(`${path}: must be object`)
           return
         }
-        if (typeof layer.id !== 'string' || !layer.id) errors.push(`${path}.id: required string`)
-        else if (seenLayerIds.has(layer.id)) errors.push(`${path}.id: duplicate layer id`)
-        else seenLayerIds.add(layer.id)
-        if (typeof layer.name !== 'string' || !layer.name) errors.push(`${path}.name: required string`)
-        if (!Array.isArray(layer.harmony)) errors.push(`${path}.harmony: must be array`)
-        else layer.harmony.forEach((h, j) => validateHarmony(h, `${path}.harmony[${j}]`, errors))
-      })
-    }
-  }
-  if (map.activeChordLayerName !== undefined && typeof map.activeChordLayerName !== 'string') {
-    errors.push('activeChordLayerName must be string')
-  }
-
-  if (map.sectionLayers !== undefined) {
-    if (!Array.isArray(map.sectionLayers)) errors.push('sectionLayers must be array')
-    else {
-      const seenSectionLayerIds = new Set<string>()
-      map.sectionLayers.forEach((layer, i) => {
-        const path = `sectionLayers[${i}]`
-        if (!layer || typeof layer !== 'object') {
-          errors.push(`${path}: must be object`)
-          return
+        if (typeof draft.id !== 'string' || !draft.id) errors.push(`${path}.id: required string`)
+        else if (seenDraftIds.has(draft.id)) errors.push(`${path}.id: duplicate draft id`)
+        else seenDraftIds.add(draft.id)
+        // The ACTIVE draft's content lives at the root and must never also be
+        // listed here — two copies means two sources of truth for what plays.
+        if (map.activeDraftId !== undefined && draft.id === map.activeDraftId) {
+          errors.push(`${path}.id: active draft must not be stored in drafts[]`)
         }
-        if (typeof layer.id !== 'string' || !layer.id) errors.push(`${path}.id: required string`)
-        else if (seenSectionLayerIds.has(layer.id)) errors.push(`${path}.id: duplicate layer id`)
-        else seenSectionLayerIds.add(layer.id)
-        if (typeof layer.name !== 'string' || !layer.name) errors.push(`${path}.name: required string`)
-        if (!Array.isArray(layer.sections)) errors.push(`${path}.sections: must be array`)
-        else layer.sections.forEach((sec, j) => validateSection(sec, `${path}.sections[${j}]`, errors))
+        if (typeof draft.name !== 'string' || !draft.name) errors.push(`${path}.name: required string`)
+        if (!Array.isArray(draft.harmony)) errors.push(`${path}.harmony: must be array`)
+        else draft.harmony.forEach((h, j) => validateHarmony(h, `${path}.harmony[${j}]`, errors))
+        if (!Array.isArray(draft.sections)) errors.push(`${path}.sections: must be array`)
+        else draft.sections.forEach((sec, j) => validateSection(sec, `${path}.sections[${j}]`, errors))
       })
     }
   }
-  if (map.activeSectionLayerName !== undefined && typeof map.activeSectionLayerName !== 'string') {
-    errors.push('activeSectionLayerName must be string')
+  if (map.activeDraftId !== undefined && typeof map.activeDraftId !== 'string') {
+    errors.push('activeDraftId must be string')
+  }
+  if (map.activeDraftName !== undefined && typeof map.activeDraftName !== 'string') {
+    errors.push('activeDraftName must be string')
   }
 
   if (!Array.isArray(map.harmony)) errors.push('harmony must be array')
