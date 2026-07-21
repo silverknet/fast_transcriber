@@ -332,7 +332,8 @@ export async function createCloudProject(): Promise<
  * route same-song conflicts through `collabMerge.ts` before writing.
  */
 export async function pullCloudChanges(): Promise<
-  { ok: true; pulledSongs: number; revision: number } | { ok: false; error: string }
+  | { ok: true; pulledSongs: number; revision: number; changedTitles: string[] }
+  | { ok: false; error: string }
 > {
   const snap = get(projectStore)
   const proj = snap.data
@@ -352,9 +353,14 @@ export async function pullCloudChanges(): Promise<
   // simply append to the manifest and leave the audio missing for
   // Phase 6 to surface.
   const syncedBySong = new Map<string, { revision: number; contentHash: string }>()
+  // Only songs whose SHARED content actually moved — a self-echo of our own
+  // push is not something to tell the user about.
+  const changedTitles: string[] = []
   for (const cloudSong of songs) {
     const res = await applyCloudSongIntoLocal(osPath, proj, cloudSong)
-    if (res) syncedBySong.set(res.songId, { revision: res.revision, contentHash: res.contentHash })
+    if (!res) continue
+    syncedBySong.set(res.songId, { revision: res.revision, contentHash: res.contentHash })
+    if (res.changed) changedTitles.push(res.title || 'Untitled song')
   }
 
   const nextManifest: ProjectFile = {
@@ -374,7 +380,12 @@ export async function pullCloudChanges(): Promise<
   }
   setProjectData(nextManifest)
   await persistManifest(osPath, nextManifest)
-  return { ok: true, pulledSongs: songs.length, revision: manifest.project.revision }
+  return {
+    ok: true,
+    pulledSongs: songs.length,
+    revision: manifest.project.revision,
+    changedTitles,
+  }
 }
 
 /**
@@ -663,7 +674,19 @@ async function applyCloudSongIntoLocal(
   osPath: string,
   proj: ProjectFile,
   cloudSong: CloudSongView,
-): Promise<{ songId: string; revision: number; contentHash: string } | null> {
+): Promise<{
+  songId: string
+  revision: number
+  contentHash: string
+  /**
+   * False when this was our OWN push coming back (the self-echo guard). The
+   * caller uses it to decide whether the user should be told anything — being
+   * notified about your own edit is noise.
+   */
+  changed: boolean
+  /** For user-facing messages; empty when the song has no title yet. */
+  title: string
+} | null> {
   // Same "one bad row must not sink the sync" contract as `joinCloudProject`
   // — `cloudSong.song_map` has no server-side shape guarantee, and this
   // runs on every pull for every already-joined member. An uncaught throw
@@ -703,7 +726,13 @@ async function applyCloudSongIntoLocal(
     // Rewriting would re-stamp a fresh hash and, if it differed by a hair,
     // make the autosave think the live song changed → push → 409 → loop.
     if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
-      return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
+      return {
+        songId: cloudSong.id,
+        revision: cloudSong.revision,
+        contentHash: entry.lastSyncedContentHash,
+        changed: false,
+        title: incoming.metadata?.title ?? '',
+      }
     }
     // Route through the song session so a pull lands in MEMORY as well as on
     // disk when the editor has this song open. Writing disk alone left the
@@ -733,7 +762,13 @@ async function applyCloudSongIntoLocal(
     // Report the sync watermark for this song so the caller can stamp the
     // manifest entry — this is what stops the autosave from immediately
     // re-pushing freshly-pulled content (the phantom-conflict loop).
-    return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: collabContentFingerprint(merged) }
+    return {
+      songId: cloudSong.id,
+      revision: cloudSong.revision,
+      contentHash: collabContentFingerprint(merged),
+      changed: true,
+      title: merged.metadata?.title ?? '',
+    }
   } catch (e) {
     console.warn(`[cloudSync] pull: skipping malformed song ${cloudSong.id}:`, e)
     return null

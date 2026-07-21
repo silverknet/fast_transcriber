@@ -22,6 +22,7 @@ import { get } from 'svelte/store'
 import { subscribeToCloudProject, type Unsubscribe } from '$lib/client/cloudRealtime'
 import { pullCloudChanges } from '$lib/client/cloudSync'
 import { cloudPullActivity } from '$lib/stores/cloudPullActivity'
+import { notifyCloudChange } from '$lib/stores/cloudToast'
 import { project } from '$lib/stores/project'
 
 let started = false
@@ -40,7 +41,11 @@ async function pullOnce(): Promise<void> {
   pulling = true
   cloudPullActivity.set(true)
   try {
-    await pullCloudChanges()
+    const r = await pullCloudChanges()
+    // Only songs whose shared content actually moved — `pullCloudChanges`
+    // filters out our own push echoing back, so you are never told about
+    // your own edit.
+    if (r.ok && r.changedTitles.length > 0) notifyCloudChange(r.changedTitles)
   } catch {
     // A failed pull is not fatal: the next remote change (or reopening the
     // project) retries. Local work is never blocked on the network.

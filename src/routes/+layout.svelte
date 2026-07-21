@@ -17,6 +17,7 @@
   } from '$lib/client/desktopBeacon'
   import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
   import { startCloudAutoPull, stopCloudAutoPull } from '$lib/client/cloudAutoPull'
+  import CloudChangeToast from '$lib/components/CloudChangeToast.svelte'
   import {
     ACTIVE_SONG_ID_KEY,
     loadProjectSongIntoEditor,
@@ -319,6 +320,7 @@
     <slot />
   </div>
   <ConflictResolutionDialog />
+  <CloudChangeToast />
 </div>
 
 <style>
