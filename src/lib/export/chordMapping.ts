@@ -48,6 +48,13 @@ export function chordQualityToMusicXmlKind(quality?: string): MusicXmlChordKind 
       return { value: 'suspended-fourth' }
     case 'add9':
       return { value: 'major', text: 'add9' }
+    case 'major6':
+      return { value: 'major-sixth' }
+    case 'minor6':
+      return { value: 'minor-sixth' }
+    case '7sus4':
+    case '9sus4':
+      return { value: 'suspended-fourth', text: quality?.trim() }
     default:
       return { value: 'other', text: quality?.trim() || 'other' }
   }

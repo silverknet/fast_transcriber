@@ -74,7 +74,7 @@ function eatStrictRoot(s: string): { root: NoteName; accidental?: Accidental; re
 const ALTERATION = /^(?:[b#](?:5|6|9|11|13))+$/
 const PAREN_TENSION = /^\((?:add)?[b#]?(?:2|4|5|6|9|11|13)(?:[,/]\s*[b#]?(?:2|4|5|6|9|11|13))*\)$/
 
-type Interpreted = { quality: string; extensions?: string[] }
+type Interpreted = { quality: string; extensions?: string[]; alterations?: string[] }
 
 /**
  * Match the full post-root tail (before any slash bass). Returns the nearest
@@ -82,80 +82,110 @@ type Interpreted = { quality: string; extensions?: string[] }
  */
 function interpretTail(tail: string): Interpreted | null {
   // Peel trailing parenthesized tensions and bare alteration runs — they
-  // refine color but don't change the modeled quality.
+  // refine color but don't change the modeled quality. The peeled text is
+  // KEPT (v6, `ChordSymbol.alterations`) so the lead sheet, the mixer rail and
+  // transpose can all reproduce it; before v6 it was discarded here and an
+  // imported `Bm7b5` rendered as `Bm7`.
   let core = tail
+  const peeled: string[] = []
   for (;;) {
     const paren = core.match(/\((?:[^()]*)\)$/)
     if (paren && PAREN_TENSION.test(paren[0])) {
+      peeled.unshift(paren[0])
       core = core.slice(0, -paren[0].length)
       continue
     }
     const alt = core.match(/(?:[b#](?:5|6|9|11|13))+$/)
     if (alt && alt[0] !== core) {
+      // Split a run like `#9b13` into individual colour tones.
+      peeled.unshift(...(alt[0].match(/[b#](?:5|6|9|11|13)/g) ?? [alt[0]]))
       core = core.slice(0, -alt[0].length)
       continue
     }
     break
   }
+  const withColor = (i: Interpreted): Interpreted =>
+    peeled.length ? { ...i, alterations: [...peeled, ...(i.alterations ?? [])] } : i
 
   // 6/9 handled by caller (slash split); here core has no '/'.
   switch (core) {
     case '':
-      return { quality: 'major' }
+      return withColor({ quality: 'major' })
+    // Power chord: a bare fifth. Modeled as a major triad (no third is
+    // asserted) but keeps the `5` so it doesn't print as a plain `C`.
     case '5':
-      return { quality: 'major' } // power chord ≈ major triad
+      return withColor({ quality: 'major', alterations: ['5'] })
     case '6':
-      return { quality: 'major' }
+      return withColor({ quality: 'major6' })
     case '2':
-      return { quality: 'sus2' }
+      return withColor({ quality: 'sus2' })
     case '4':
-      return { quality: 'sus4' }
+      return withColor({ quality: 'sus4' })
     case '7':
-      return { quality: '7' }
+      return withColor({ quality: '7' })
     case '9':
-      return { quality: '7', extensions: ['9'] }
+      return withColor({ quality: '7', extensions: ['9'] })
     case '11':
-      return { quality: '7', extensions: ['11'] }
+      return withColor({ quality: '7', extensions: ['11'] })
     case '13':
-      return { quality: '7', extensions: ['13'] }
+      return withColor({ quality: '7', extensions: ['13'] })
   }
 
   // minor family: m, min, mi, - (lowercase only — 'M' means major)
   let m = core.match(/^(?:m|min|mi|-)(?![a-z])(6|7|9|11|13)?$/)
   if (m && /^(?:m|min|mi|-)/.test(core)) {
     const n = m[1]
-    if (!n || n === '6') return { quality: 'minor' }
-    if (n === '7') return { quality: 'min7' }
-    return { quality: 'min7', extensions: [n] }
+    if (!n) return withColor({ quality: 'minor' })
+    if (n === '6') return withColor({ quality: 'minor6' })
+    if (n === '7') return withColor({ quality: 'min7' })
+    return withColor({ quality: 'min7', extensions: [n] })
   }
-  // half-diminished: m7b5 already peeled to m7 by alteration strip; ø explicit
-  if (core === 'ø' || core === 'ø7') return { quality: 'min7' }
+  // half-diminished: `m7b5` reaches here as `m7` with `b5` already peeled; the
+  // `ø` shorthand carries no peelable text, so name the flat five explicitly.
+  if (core === 'ø' || core === 'ø7') {
+    return withColor({ quality: 'min7', alterations: ['b5'] })
+  }
 
   // major-7 family: maj7 / Maj9 / M7 / M9 / maj (bare)
   m = core.match(/^(?:maj|Maj|MAJ|M)(6|7|9|11|13)?$/)
   if (m) {
     const n = m[1]
-    if (!n || n === '6') return { quality: 'major' }
-    if (n === '7') return { quality: 'maj7' }
-    return { quality: 'maj7', extensions: [n] }
+    if (!n) return withColor({ quality: 'major' })
+    if (n === '6') return withColor({ quality: 'major6' })
+    if (n === '7') return withColor({ quality: 'maj7' })
+    return withColor({ quality: 'maj7', extensions: [n] })
   }
 
   // diminished: dim, dim7 (° normalized to dim); bare 'o' NOT accepted ("Do", "Go")
-  if (core === 'dim' || core === 'dim7' || core === 'o7') return { quality: 'dim' }
+  if (core === 'dim') return withColor({ quality: 'dim' })
+  // A diminished SEVENTH keeps its 7 in the name — `Bdim7`, not `Bdim`.
+  if (core === 'dim7' || core === 'o7') return withColor({ quality: 'dim', alterations: ['7'] })
 
   // augmented: aug, aug7, +, +7
-  if (core === 'aug' || core === 'aug7' || core === '+' || core === '+7') return { quality: 'aug' }
-
-  // suspensions: sus, sus2, sus4, 7sus4, 7sus2, 9sus4
-  m = core.match(/^(7|9)?sus(2|4)?$/)
-  if (m) {
-    return { quality: m[2] === '2' ? 'sus2' : 'sus4' }
+  if (core === 'aug' || core === 'aug7' || core === '+' || core === '+7') {
+    return withColor({ quality: 'aug' })
   }
 
-  // added tones: add9, add2, add4, add11, madd9…
+  // suspensions: sus, sus2, sus4, 7sus4, 7sus2, 9sus4. A dominant with a
+  // suspended fourth keeps the seventh in its name (`C7sus4`).
+  m = core.match(/^(7|9)?sus(2|4)?$/)
+  if (m) {
+    const seventh = m[1]
+    const which = m[2] === '2' ? 'sus2' : 'sus4'
+    if (seventh && which === 'sus4') return withColor({ quality: `${seventh}sus4` })
+    return withColor({ quality: which })
+  }
+
+  // added tones: add9, add2, add4, add11, madd9… The added degree is kept, so
+  // `Cadd11` no longer collapses onto the `add9` quality and print as `Cadd9`.
   m = core.match(/^(m)?add(2|4|9|11|13)$/)
   if (m) {
-    return m[1] ? { quality: 'minor' } : { quality: 'add9' }
+    const [, minorFlag, degree] = m
+    if (!minorFlag && degree === '9') return withColor({ quality: 'add9' })
+    return withColor({
+      quality: minorFlag ? 'minor' : 'major',
+      alterations: [`add${degree}`],
+    })
   }
 
   return null
@@ -175,10 +205,12 @@ export function parseStrictChordToken(rawToken: string): StrictChordParse {
   // Split off a slash bass — but "6/9" is a chord color, not a bass note.
   let mainPart = s
   let bassPart = ''
+  let sixNine = false
   const slashIdx = s.indexOf('/')
   if (slashIdx >= 0) {
     if (s.endsWith('6/9') && s.indexOf('/') === s.length - 2) {
       mainPart = s.slice(0, -2) // treat as ...6 → major family
+      sixNine = true // keep the "/9" so the chord prints as `C6/9`
     } else {
       mainPart = s.slice(0, slashIdx)
       bassPart = s.slice(slashIdx + 1)
@@ -208,6 +240,7 @@ export function parseStrictChordToken(rawToken: string): StrictChordParse {
       accidental: rootParsed.accidental,
       quality: tail.quality,
       extensions: tail.extensions,
+      alterations: sixNine ? [...(tail.alterations ?? []), '/9'] : tail.alterations,
       bass,
       bassAccidental,
       displayRaw: token,
