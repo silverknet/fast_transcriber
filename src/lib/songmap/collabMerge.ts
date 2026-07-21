@@ -485,6 +485,73 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   return { merged, conflicts }
 }
 
+// ── Resolving without a dialog ──────────────────────────────────────────
+
+/**
+ * Is this value "nothing"? Used to tell a real disagreement (two edits) from a
+ * one-sided ABSENCE (one copy simply never had the field).
+ *
+ * Numbers and booleans are always content — `0`, `false` and
+ * `{ baseSemitones: 0 }` are deliberate values, not blanks. Containers are
+ * empty when everything inside them is, so a never-populated
+ * `{ words: [], sourceText: '' }` reads as absent while
+ * `{ words: [], sourceText: 'hey' }` does not.
+ */
+function isEmptyValue(v: unknown): boolean {
+  if (v === undefined || v === null) return true
+  if (typeof v === 'string') return v.trim().length === 0
+  if (Array.isArray(v)) return v.length === 0
+  if (typeof v === 'object') {
+    return Object.values(v as Record<string, unknown>).every(isEmptyValue)
+  }
+  return false
+}
+
+/** Does this report contain anything a human must look at before it lands? */
+export function hasDangerousConflict(report: MergeReport): boolean {
+  return report.conflicts.some((c) => c.severity === 'dangerous')
+}
+
+/**
+ * Decisions for settling a report WITHOUT asking the user.
+ *
+ * "Cloud wins" is the right default for a genuine disagreement: two people
+ * edited the same field and the server's copy keeps everyone consistent. It is
+ * NOT right when the cloud side is simply EMPTY, because then "cloud wins" is
+ * not a choice between two edits — it is a deletion of content only this device
+ * has. Cloud sync was push-only-on-open for a long time, so a cloud row can be
+ * months behind and missing whole fields (a `formatVersion` 2 row predates both
+ * `transpose` and `lyrics`, so it has neither). Letting it win there would wipe
+ * work that never reached the server.
+ *
+ * So one asymmetry is corrected: when the cloud value is empty and the local one
+ * is not, keep the local value. That direction is provably lossless — the cloud
+ * had nothing to lose. The reverse (cloud has content, local is empty) still
+ * takes the cloud value, and two non-empty sides still resolve to cloud.
+ *
+ * Items keyed by id never qualify: a conflict there means BOTH sides hold the
+ * item, so neither is empty and per-id last-write-wins stands. Dangerous rows
+ * are skipped outright — they go to the dialog rather than being auto-applied.
+ *
+ * Pure and order-independent, so two devices settling the same pair agree.
+ */
+export function autoResolveDecisions(report: MergeReport): ConflictDecisions {
+  const decisions: ConflictDecisions = new Map()
+  for (const c of report.conflicts) {
+    if (c.severity === 'dangerous') continue
+    if (isEmptyValue(c.theirs) && !isEmptyValue(c.mine)) decisions.set(c.path, 'mine')
+  }
+  return decisions
+}
+
+/**
+ * The SongMap to adopt when a report can be settled without prompting.
+ * Only meaningful when `hasDangerousConflict(report)` is false.
+ */
+export function autoResolvedMerge(report: MergeReport): SongMap {
+  return applyConflictDecisions(report, autoResolveDecisions(report))
+}
+
 /**
  * Apply user choices over a merge report. For every conflict the user
  * picked "mine", swap that path's value in the merged SongMap.
