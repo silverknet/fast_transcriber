@@ -11,24 +11,39 @@ from five failed and semi-failed experiments on one song (Gyllene Tider's
 
 ## The finding that shapes everything
 
-Bar-level chroma reliably identifies a bar's **dominant** chord (the tonic and
-the other one or two chords the bar sits on longest) but is **too noisy to
-resolve passing chords** — the quick `E`, `Bm`, `F#m` that give a progression
-its character. Measured on Sommartider: pooled/aggregated chroma scored the
-dominant chord at Pearson 0.5–0.69, but individual passing bars sat at
-0.02–0.25 with the "wrong" chord often within 0.03 of the "right" one.
+**The bass stem is the strongest chord signal, and it beats both chroma and the
+agent's own musical assumptions.** A separated bass track is near-monophonic and
+plays the chord root, so detecting its pitch right after each beat gives the
+root unambiguously. On Sommartider this produced a clean, musically coherent
+chart in one pass — `A` verse vamp, `Bm E` build, `D E A D Bm E A` chorus (all
+four choruses consistent because the bass plays them the same), and even the
+`F#m` (vi) in verse two — where six prior attempts with chroma and hand-built
+charts had failed.
 
-Consequence: **an AI agent cannot reliably transcribe a full chord chart from
-chroma alone.** Every attempt to do so produced either jitter or a harmonically
-thin skeleton. What chroma IS reliable for: the **key**, the **dominant chord
-per bar**, and a **confidence signal** for flagging. Treat it as those three
-things, not as a transcriber.
+By contrast, **bar-level chroma is a 12-note blur of the whole mix** (vocals,
+guitar, cymbals) and reliably resolves only the *dominant* chord — the tonic and
+the one or two chords a bar sits on longest. Passing chords (`E`, `Bm`, `F#m`)
+sat at Pearson 0.02–0.25 with the wrong chord often within 0.03 of the right
+one. An agent **cannot** transcribe a full chart from chroma alone; every
+attempt jittered or collapsed to a thin `A`/`D` skeleton.
 
-Chord *identity* — the actual progression, including passing chords — should
-come from a **real chord sheet**, placed against the song's own audio-aligned
-lyrics. BarBro already has the tool for this: the sheet-import flow. The AI's
-value-add is everything AROUND chord identity: setting the key, detecting
-sections, and flagging where the audio disagrees with the sheet.
+The order of trust for CHORD IDENTITY, established by experiment:
+
+1. **Bass-stem root detection** — strongest. Autocorrelation pitch on the bass
+   stem in a ~90 ms window ~15 ms after each beat → pitch class → root.
+2. **A real Ultimate Guitar tab** — the only reliable source for chord QUALITY
+   beyond the diatonic default (7ths, sus, borrowed chords) and for extensions
+   the bass can't determine. A hand-transcribed or summarized tab is NOT
+   reliable — on Sommartider the agent's own tab guessed a `D/A E/A` verse that
+   both the bass and the guitar stem proved was just `A`.
+3. **Chroma** — for the KEY, for confirming the dominant chord, and as a
+   confidence/flagging signal. Not a transcriber.
+
+The agent's music theory supplies **quality** (in a detected key, map each bass
+root to its diatonic chord: in A major, A/D/E major, B/F#/C# minor) and
+**structure/consistency** (repeated choruses get the same chords). Aligned
+lyrics supply **timing**. That combination — bass root + theory quality + lyric
+timing + a real tab for extensions — is the strong pipeline.
 
 ---
 
@@ -79,7 +94,32 @@ audio-aligned lyrics instead:
 When using the sheet-import path, `deriveSectionsFromSheet` does the equivalent
 automatically from where chords landed.
 
-### Stage 4 — Place chords (use the existing tool, don't reinvent)
+### Stage 4a — Bass-driven chords (the primary path when a bass stem exists)
+If the song has a separated bass stem (`stemRefs.Bass`, e.g.
+`stems/best/bass.wav`), derive chords from it directly — this was the single
+biggest quality jump found. There is no client-side `bassMidi` unless the
+sidecar analysed it, but the stem WAV can be read and pitch-detected in a
+script:
+
+1. Decode the bass WAV to mono PCM.
+2. For each beat, take a ~90 ms window ~15 ms after `beat.timeSec`, Hann-window
+   it, autocorrelate, and pick the lag peak in the 38–330 Hz range → frequency →
+   MIDI → pitch class. Skip windows below an RMS floor (silence).
+3. **Snap the pitch class to the key's scale**, then map to its diatonic chord
+   (A major: `A Bm C#m D E F#m`). Snapping rejects octave/noise errors on a
+   firmly diatonic song; skip it if the song is chromatic.
+4. Take the **per-bar mode** of the beat roots (a bass walk within a chord must
+   not trigger a chord change), place a chord at each bar where the root
+   changes, on the downbeat.
+
+Two calibrations that mattered: per-BAR mode beat per-beat placement (passing
+notes jitter otherwise), and diatonic snapping beat raw pitch classes. A quality
+cross-check from the guitar/`other` stem (compare the major-third vs minor-third
+chroma bin at the root) was tested and is **too noisy to trust** (2 of 9 known
+chords wrong) — the diatonic default is better on a diatonic song. Use the tab,
+not the guitar stem, for quality.
+
+### Stage 4b — Sheet placement (when there is no bass stem, or for extensions)
 Build a chord sheet from the song's OWN aligned lyrics + the Stage-2 anchors,
 then call `prepareSheetImport(sheet, map, newId)` (`sheet/importAsDraft.ts`).
 It runs `placeChords`, which fuzzy-matches sheet lines to stored lyric lines
