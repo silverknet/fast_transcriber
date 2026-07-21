@@ -54,6 +54,7 @@ import {
 } from '$lib/client/desktopProjectFs'
 import { STEM_PRESET_PRIORITY } from '$lib/client/desktopBridge'
 import { reconcileSongAudio, applyReconcileMatch } from '$lib/project/audioReconcile'
+import { pushCloudManifest } from '$lib/client/cloudSync'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import { audioSession } from '$lib/stores/audioSession'
 import {
@@ -950,6 +951,7 @@ export async function moveProjectSong(songId: string, delta: -1 | 1): Promise<vo
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)
+  await syncManifestToCloud(next)
 }
 
 /**
@@ -979,6 +981,7 @@ export async function setSongOrder(orderedIds: string[]): Promise<void> {
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)
+  await syncManifestToCloud(next)
 }
 
 export async function setSongHidden(songId: string, hidden: boolean): Promise<void> {
@@ -994,6 +997,7 @@ export async function setSongHidden(songId: string, hidden: boolean): Promise<vo
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)
+  await syncManifestToCloud(next)
 }
 
 /**
@@ -1224,6 +1228,47 @@ export async function renameSongInProject(songId: string, newTitle: string): Pro
   patchMetadataForFolder(entry.folder, lite)
 }
 
+
+/**
+ * Mirror a project-level manifest change (rename / reorder / hide) to the cloud.
+ *
+ * These used to be LOCAL ONLY. The server side existed from the start —
+ * `cloud_patch_manifest` plus PATCH /api/cloud/projects/:id — but no client
+ * ever called it, so a rename never reached your bandmates. Worse, it was
+ * silently undone: `pullCloudChanges` overwrites the local name from the cloud
+ * manifest, so the rename survived only until the next pull.
+ *
+ * Best-effort and non-throwing: the on-disk manifest stays the source of truth
+ * and a failed push must never break the local operation. A 409 means someone
+ * else moved the project revision first; the next pull reconciles.
+ */
+async function syncManifestToCloud(next: ProjectFile): Promise<void> {
+  const cloud = next.cloud
+  if (!cloud) return
+  try {
+    const cloudIdFor = (s: ProjectSongEntry) => s.cloudSongId ?? s.id
+    const r = await pushCloudManifest({
+      cloudProjectId: cloud.projectId,
+      name: next.name,
+      orderedSongIds: next.songs.map(cloudIdFor),
+      hiddenMap: Object.fromEntries(next.songs.map((s) => [cloudIdFor(s), !!s.hidden])),
+      clientBaseRevision: cloud.lastSyncedRevision ?? 0,
+    })
+    if (!r.ok) return
+    // Advance the watermark, or the next manifest push 409s against our own write.
+    const cur = get(project)
+    if (!cur.data?.cloud || !cur.osPath) return
+    const advanced: ProjectFile = {
+      ...cur.data,
+      cloud: { ...cur.data.cloud, lastSyncedRevision: r.revision, lastPushedAt: nowIso() },
+    }
+    setProjectData(advanced)
+    void writeProjectManifest(cur.osPath, advanced).catch(() => {})
+  } catch {
+    // Offline or server down — local change stands, cloud catches up later.
+  }
+}
+
 export async function renameProject(newName: string): Promise<void> {
   const snap = get(project)
   if (!snap.osPath || !snap.data) throw new Error('No active project')
@@ -1235,6 +1280,7 @@ export async function renameProject(newName: string): Promise<void> {
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)
+  await syncManifestToCloud(next)
 }
 
 /**

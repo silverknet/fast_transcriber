@@ -544,6 +544,44 @@ export async function disableCloudProject(
  * trigger a `pullCloudChanges` and let the merge layer (Phase 8) sort
  * it out; for Phase 4 we just surface the conflict.
  */
+/**
+ * Push project-level manifest changes — name, song order, hidden flags.
+ *
+ * The server side for this existed from the start (`cloud_patch_manifest` +
+ * PATCH /api/cloud/projects/:id) but nothing ever called it, so renames,
+ * reorders and hide toggles were LOCAL ONLY. Worse, they were silently
+ * reverted: `pullCloudChanges` overwrites the local name from the cloud
+ * manifest, so a rename survived only until the next pull.
+ *
+ * Best-effort by design — the local manifest on disk stays the source of
+ * truth, exactly like `pushCloudSong`. A 409 means someone else moved the
+ * project revision first; the next pull reconciles.
+ */
+export async function pushCloudManifest(args: {
+  cloudProjectId: string
+  name?: string
+  orderedSongIds?: string[]
+  hiddenMap?: Record<string, boolean>
+  clientBaseRevision: number
+}): Promise<{ ok: true; revision: number } | { ok: false; conflict: boolean; error?: string }> {
+  const res = await fetch(`${BASE}/projects/${args.cloudProjectId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: args.name ?? null,
+      orderedSongIds: args.orderedSongIds ?? null,
+      hiddenMap: args.hiddenMap ?? null,
+      clientBaseRevision: args.clientBaseRevision,
+    }),
+  })
+  if (res.ok) {
+    const data = (await res.json()) as { ok: boolean; revision: number }
+    return { ok: true, revision: data.revision }
+  }
+  if (res.status === 409) return { ok: false, conflict: true }
+  return { ok: false, conflict: false, error: await res.text().catch(() => `HTTP ${res.status}`) }
+}
+
 export async function pushCloudSong(
   cloudProjectId: string,
   cloudSongId: string,
