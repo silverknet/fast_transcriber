@@ -411,12 +411,18 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   conflicts.push(...storedDrafts.conflicts)
 
   if (draftsDiverged) {
-    // ONE conflict carrying both drafts whole. Choosing "mine" swaps which one
-    // sits at the root; either way the other survives in `drafts[]`.
+    // Which draft is SELECTED is not a dangerous decision — it is lossless
+    // whichever way it goes, because both drafts are preserved in `drafts[]`
+    // regardless. It's just "which one am I looking at", and the picker changes
+    // that in one click. So it is `safe`: it settles without a dialog and
+    // auto-resolves toward MINE (see autoResolveDecisions), so a collaborator
+    // switching drafts on their machine never yanks the draft out from under
+    // you. Marking it dangerous forced a dialog on an ordinary open — exactly
+    // the interruption the whole auto-settle path exists to remove.
     conflicts.push({
       path: 'activeDraft',
       label: `Selected draft (mine “${localSide!.name}” vs cloud “${cloudSide!.name}”)`,
-      severity: 'dangerous',
+      severity: 'safe',
       mine: localSide,
       theirs: cloudSide,
     })
@@ -539,7 +545,12 @@ export function autoResolveDecisions(report: MergeReport): ConflictDecisions {
   const decisions: ConflictDecisions = new Map()
   for (const c of report.conflicts) {
     if (c.severity === 'dangerous') continue
-    if (isEmptyValue(c.theirs) && !isEmptyValue(c.mine)) decisions.set(c.path, 'mine')
+    // Which draft is selected keeps MINE: it's a view preference, and having a
+    // collaborator's selection replace yours mid-edit is jarring for no gain
+    // (both drafts are preserved either way). Everything else keeps local only
+    // when the cloud side is empty, so a stale row can't delete local content.
+    if (c.path === 'activeDraft') decisions.set(c.path, 'mine')
+    else if (isEmptyValue(c.theirs) && !isEmptyValue(c.mine)) decisions.set(c.path, 'mine')
   }
   return decisions
 }

@@ -104,9 +104,12 @@ describe('planRemoteApplication', () => {
     expect(JSON.stringify(viaMemory.merged)).toBe(JSON.stringify(viaDisk.merged))
   })
 
-  it('carries drafts through from the remote copy', () => {
-    // Drafts are collaborative; a pull must not strand the editor on a draft
-    // the rest of the band has moved off.
+  it('does not yank the open editor onto a draft a collaborator selected', () => {
+    // Drafts are ALTERNATIVES, not a shared position — switching away from one
+    // never deletes it. So when you have a draft open and a collaborator
+    // selects a different one, your view must stay put; theirs is preserved and
+    // one click away in the picker. Being silently moved to another draft
+    // mid-edit is the same disruption as the old dialog, just quieter.
     const disk = songWith([chord('c1', 'C')], {
       activeDraftId: 'd1',
       activeDraftName: 'Mine',
@@ -117,8 +120,9 @@ describe('planRemoteApplication', () => {
       drafts: [{ id: 'd1', name: 'Mine', sections: [], harmony: [chord('c1', 'C')] }],
     })
     const plan = planRemoteApplication({ incoming, memory: disk, disk })
-    expect(plan.merged.activeDraftId).toBe('d2')
-    expect(plan.merged.drafts?.map((d) => d.id)).toEqual(['d1'])
+    expect(plan.merged.activeDraftId).toBe('d1') // stayed on mine
+    // ...and the collaborator's draft still exists to switch to.
+    expect(plan.merged.drafts?.some((d) => d.id === 'd2')).toBe(true)
   })
 })
 

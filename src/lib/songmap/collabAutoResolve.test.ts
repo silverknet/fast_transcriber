@@ -111,13 +111,23 @@ describe('hasDangerousConflict — what still deserves an interruption', () => {
     expect(hasDangerousConflict(mergeForConflict(local, cloud))).toBe(true)
   })
 
-  it('is true when the two sides sit on different drafts', () => {
+  it('is FALSE when the two sides sit on different drafts — that settles without a dialog', () => {
+    // A divergent selected draft is lossless: both drafts stay in `drafts[]`,
+    // so the only thing decided is which one is displayed, and the picker
+    // changes that in a click. Treating it as dangerous forced a dialog on an
+    // ordinary open. It is a `safe` conflict that auto-resolves toward mine.
     const base = createEmptySongMap()
     const local: SongMap = { ...base, activeDraftId: 'draft-live', activeDraftName: 'Live' }
     const cloud: SongMap = { ...base, activeDraftId: 'draft-orig', activeDraftName: 'Original' }
     const report = mergeForConflict(local, cloud)
-    expect(hasDangerousConflict(report)).toBe(true)
     expect(report.conflicts.some((c) => c.path === 'activeDraft')).toBe(true)
+    expect(hasDangerousConflict(report)).toBe(false)
+
+    // Auto-resolution keeps the LOCAL selection — a collaborator switching
+    // drafts must not yank your view — while preserving the other draft.
+    const settled = autoResolvedMerge(report)
+    expect(settled.activeDraftId).toBe('draft-live')
+    expect(settled.drafts?.some((d) => d.id === 'draft-orig')).toBe(true)
   })
 
   it('is true when the analyzed flag flipped', () => {
@@ -391,8 +401,8 @@ describe('version skew: a v2 cloud row against a v4 local copy', () => {
     })
 
   it('every legacy version lands on the same active draft, so drafts do not diverge', () => {
-    // This is why `activeDraft` staying dangerous costs nothing here: the
-    // migration derives a fixed id, so version skew alone never trips it.
+    // Version skew alone never even trips activeDraft: the migration derives a
+    // fixed id, so all legacy versions land on the same active draft.
     const ids = [1, 2, 3, 4, 5].map((v) => legacy(v).activeDraftId)
     expect(new Set(ids).size).toBe(1)
   })
