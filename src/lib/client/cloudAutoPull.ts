@@ -68,6 +68,12 @@ function syncSubscription(projectId: string | null): void {
   if (!projectId) return
   try {
     unsubRealtime = subscribeToCloudProject(projectId, () => void pullOnce())
+    // Catch-up pull on subscribe. Realtime only delivers events that happen
+    // WHILE subscribed, so without this a reload, a fresh project open, or a
+    // websocket reconnect would silently miss everything pushed in the gap —
+    // the editor would sit on stale content until the next live change. Pull
+    // once now so subscribing is self-healing.
+    void pullOnce()
   } catch (e) {
     // Constructing the Supabase client throws when env isn't configured. That
     // must degrade to "no live updates", never break the app.

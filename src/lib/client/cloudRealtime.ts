@@ -78,7 +78,14 @@ export function subscribeToCloudProject(
       },
       fire,
     )
-    .subscribe()
+    .subscribe((status) => {
+      // Fire a catch-up on every successful (re)connect. Realtime delivers only
+      // events that occur WHILE connected, so a dropped-and-reconnected socket
+      // would otherwise silently miss everything pushed during the gap. This
+      // makes reconnection self-healing; `fire` is debounced so it coalesces
+      // with any real event arriving at the same moment.
+      if (status === 'SUBSCRIBED') fire()
+    })
 
   return () => {
     cancelled = true
