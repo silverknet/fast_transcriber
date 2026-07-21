@@ -236,6 +236,39 @@ against `lastSyncedContentHash`:
   item unique to either side and prefer cloud only on genuine collisions —
   the same resolution the dialog would apply, without the dialog.
 
+### The dialog is now the exception, not the rule
+
+Until Phase 4 lands, LWW still runs — but it stopped interrupting people. The
+409 handler settles any report with no `dangerous` conflict by itself, and only
+prompts for the five things that change what the song *is*: whole-timeline
+replacement, a wholesale chord-track swap, a divergent active draft, an
+`metadata.analyzed` flip, and an audio-identity swap.
+
+Two findings forced the shape of this, both worth keeping in mind for Phase 4:
+
+1. **Version skew is a conflict source in its own right.** A song's local
+   `.smap` and its `cloud_songs.song_map` can sit at different legacy
+   `formatVersion`s (observed: `4` on disk, `2` in the cloud). Both migrate to
+   v6 — locally through `parseSongMap`, on read through
+   `normalizeCloudSongMap` — but from different starting points, so the two
+   results genuinely differ and the merge honestly reports it. This fires on
+   ordinary first-open, for the whole band at once when a build ships.
+2. **"Cloud wins" is a deletion when the cloud side is empty.** Sync was
+   push-only-on-open, so a cloud row can be months stale *and* predate whole
+   fields — a v2 row has no `transpose` (v3) and no `lyrics` (v4). Auto-applying
+   the plain default there would wipe local work that never reached the server.
+   `autoResolvedMerge` corrects exactly that asymmetry and nothing else: where
+   the cloud value is empty and the local one is not, local is kept. Two
+   non-empty sides still resolve cloud-wins, and id-keyed items never qualify
+   because a conflict there means both sides hold the item.
+
+What version skew does *not* do, verified in
+[`collabAutoResolve.test.ts`](../../src/lib/songmap/collabAutoResolve.test.ts):
+it never trips `harmonyWholesale` (migration preserves chord ids) and never
+trips the `activeDraft` conflict (every legacy version derives the same fixed
+`MIGRATED_ACTIVE_DRAFT_ID`). Both classifications are therefore still correct
+and were left alone.
+
 ## 11. Anti-patterns
 
 - **Do not** let a `Y.Map` or `Y.Array` escape into a reader. If a module outside
