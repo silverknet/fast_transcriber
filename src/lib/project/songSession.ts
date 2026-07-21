@@ -20,7 +20,7 @@
  */
 import { get } from 'svelte/store'
 import { collabContentFingerprint, mergeLocalIntoCollab } from '$lib/songmap/collab'
-import { mergeForConflict } from '$lib/songmap/collabMerge'
+import { autoResolvedMerge, mergeForConflict } from '$lib/songmap/collabMerge'
 import { project } from '$lib/stores/project'
 import { patchSongMap, songMap } from '$lib/stores/songMap'
 import type { ExpectedAudio, SongMap } from '$lib/songmap/types'
@@ -76,6 +76,37 @@ export type RemoteApplicationPlan = {
  * not reached disk yet. Merging the remote change against the DISK copy would
  * silently discard them.
  */
+
+/**
+ * Re-attach id-keyed items that exist ONLY in the local copy.
+ *
+ * `mergeForConflict` can legitimately drop them: its `harmonyWholesale`
+ * heuristic reads near-zero id overlap as "this track was replaced wholesale"
+ * (a sheet import) and takes the cloud's list entire. That is right for a push
+ * conflict, where the user is shown a dialog. It is wrong for a pull landing on
+ * an editor with unsent edits, where nothing surfaces the decision — observed
+ * live as freshly typed chords vanishing a second later.
+ *
+ * TRADE-OFF, taken deliberately: without tombstones, an item the collaborator
+ * DELETED is indistinguishable from one only we have, so this can resurrect a
+ * deleted chord. Resurrecting is visible and one click to undo; deleting work
+ * the user just typed is invisible and unrecoverable. Only applied while local
+ * is dirty — once the local copy matches the last sync, deletes propagate
+ * normally.
+ */
+function keepLocalOnly(local: SongMap, merged: SongMap): SongMap {
+  const union = <T extends { id: string }>(mergedList: T[], localList: T[] | undefined): T[] => {
+    const present = new Set(mergedList.map((x) => x.id))
+    const extra = (localList ?? []).filter((x) => !present.has(x.id))
+    return extra.length > 0 ? [...mergedList, ...extra] : mergedList
+  }
+  return {
+    ...merged,
+    harmony: union(merged.harmony ?? [], local.harmony),
+    sections: union(merged.sections ?? [], local.sections),
+  }
+}
+
 export function planRemoteApplication(args: {
   incoming: SongMap
   /** The editor's copy, or `null` when this song is not the active one. */
@@ -95,10 +126,17 @@ export function planRemoteApplication(args: {
   // Is the local copy carrying edits that never reached the cloud? Only
   // meaningful for the open editor: an inactive song's disk copy is whatever
   // the last pull or autosave wrote.
+  // An UNKNOWN watermark counts as dirty. `lastSyncedContentHash` is only set
+  // by a successful push, so it is absent for every song that has never pushed
+  // from this machine — a freshly joined project, or a song whose cloud row
+  // predates this device. Treating "I don't know" as clean adopted the cloud
+  // copy wholesale and deleted edits the user had just made; observed live,
+  // chords vanishing a second after being typed. Only a watermark that EXISTS
+  // and MATCHES proves there is nothing local to protect.
   const dirty =
     args.memory !== null &&
-    args.lastSyncedContentHash !== undefined &&
-    collabContentFingerprint(args.memory) !== args.lastSyncedContentHash
+    (args.lastSyncedContentHash === undefined ||
+      collabContentFingerprint(args.memory) !== args.lastSyncedContentHash)
 
   // A clean local copy can simply adopt the remote one — that is the long
   // standing pull contract ("cloud wins for shared fields").
@@ -113,7 +151,9 @@ export function planRemoteApplication(args: {
   // `mergeForConflict` assembles from the CLOUD copy, which has local-only
   // fields stripped, so its result is run back through `mergeLocalIntoCollab`
   // to re-attach them.
-  const shared = dirty ? mergeForConflict(local, args.incoming).merged : args.incoming
+  const shared = dirty
+    ? keepLocalOnly(local, autoResolvedMerge(mergeForConflict(local, args.incoming)))
+    : args.incoming
   const merged = mergeLocalIntoCollab(local, shared)
 
   // Fold the audio claim in HERE rather than mutating the map after it has been

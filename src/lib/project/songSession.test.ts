@@ -58,15 +58,24 @@ describe('planRemoteApplication', () => {
     expect(plan.merged.projectFolder).toBe('FromDisk')
   })
 
-  it('takes the remote content for collaborative fields either way', () => {
-    // "Cloud wins for shared fields" is the pull contract; the local side only
-    // contributes local-only fields. This must not change with the new seam.
+  it('adopts remote content wholesale when the song is NOT open', () => {
+    // "Cloud wins for shared fields" is the pull contract for a song nobody is
+    // editing — there is no unsaved work to protect, so deletions propagate.
     const disk = songWith([chord('c1', 'C')])
     const incoming = songWith([chord('c9', 'Bm7b5')])
-    for (const memory of [null, disk]) {
-      const plan = planRemoteApplication({ incoming, memory, disk })
-      expect(plan.merged.harmony.map((h) => h.id)).toEqual(['c9'])
-    }
+    const plan = planRemoteApplication({ incoming, memory: null, disk })
+    expect(plan.merged.harmony.map((h) => h.id)).toEqual(['c9'])
+  })
+
+  it('protects the editor\'s content when the song IS open and unproven', () => {
+    // Same inputs, but the song is open and there is no watermark proving it
+    // synced. Cloud content still arrives; local content is not thrown away.
+    const disk = songWith([chord('c1', 'C')])
+    const incoming = songWith([chord('c9', 'Bm7b5')])
+    const plan = planRemoteApplication({ incoming, memory: disk, disk })
+    const ids = plan.merged.harmony.map((h) => h.id)
+    expect(ids).toContain('c9')
+    expect(ids).toContain('c1')
   })
 
   it('never mutates the maps it was given', () => {
@@ -159,11 +168,34 @@ describe('an open editor with unpushed edits is not overwritten', () => {
     expect(plan.merged.harmony[0].chord.displayRaw).toBe('Cm7')
   })
 
-  it('treats an unknown sync watermark as clean rather than guessing', () => {
+  it('treats an UNKNOWN sync watermark as dirty, not clean', () => {
+    // Regression, found live: chords vanished a second after being typed.
+    // `lastSyncedContentHash` is only set by a successful push, so it is absent
+    // for any song that has never pushed from this machine. The old code read
+    // that absence as "clean" and adopted the cloud copy wholesale, deleting
+    // the edit. Not knowing whether local work exists must mean PRESERVE it.
     const memory = songWith([chord('c1', 'C'), chord('mine', 'Am')])
     const incoming = songWith([chord('c1', 'C')])
     const plan = planRemoteApplication({ incoming, memory, disk: synced })
-    expect(plan.localState).toBe('clean')
+    expect(plan.localState).toBe('dirty')
+    expect(plan.merged.harmony.map((h) => h.id)).toContain('mine')
+  })
+
+  it('a never-pushed song does not lose edits when a remote change lands', () => {
+    // The exact live scenario: song has never synced from this machine, the
+    // user types chords, a collaborator's change arrives moments later.
+    const justTyped = songWith([chord('typed-1', 'Am'), chord('typed-2', 'F')])
+    const fromCollaborator = songWith([chord('theirs', 'Bb')])
+    const plan = planRemoteApplication({
+      incoming: fromCollaborator,
+      memory: justTyped,
+      disk: songWith([]),
+      lastSyncedContentHash: undefined,
+    })
+    const ids = plan.merged.harmony.map((h) => h.id)
+    expect(ids).toContain('typed-1')
+    expect(ids).toContain('typed-2')
+    expect(ids).toContain('theirs')
   })
 
   it('folds the audio claim in before the map is installed', () => {

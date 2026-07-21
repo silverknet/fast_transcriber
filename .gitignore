@@ -60,3 +60,6 @@ __pycache__/
 # intentional visual references and stay tracked; everything else here is a
 # by-product of a failing run.
 src/**/__screenshots__/
+
+# Agent worktrees (transient; created by parallel agent runs)
+.claude/worktrees/
