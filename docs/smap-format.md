@@ -3,7 +3,7 @@
 **Status:** v4 — stable
 **Container version (binary header `version`):** `2` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
 **JSON envelope version (`projectFormatVersion`):** `1` — [`SONG_PROJECT_FORMAT_VERSION`](../src/lib/songmap/smapFile.ts)
-**SongMap schema version (`formatVersion`):** `5` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
+**SongMap schema version (`formatVersion`):** `6` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
 **MIME type:** `application/vnd.barbro.smap` — [`SMAP_BLOB_TYPE`](../src/lib/songmap/smapFile.ts)
 **Extension:** `.smap`
 
@@ -75,7 +75,7 @@ Source of truth: [`SongMapV3`](../src/lib/songmap/types.ts). Runtime validator: 
 
 ```ts
 type SongMapV5 = {
-  formatVersion: 5
+  formatVersion: 6
   app?: { name: 'BarBro'; appVersion?: string }
   metadata: SongMetadata             // required
   transpose?: { baseSemitones: number } // shared reversible transpose, -12..12
@@ -84,8 +84,9 @@ type SongMapV5 = {
   timeline: { bars: Bar[]; beats: Beat[] }   // required (arrays can be empty)
   sections: Section[]                // required (can be empty)
   harmony: HarmonyEvent[]            // required (can be empty)
-  chordLayers?: ChordLayer[]         // inactive alternative chord tracks (v5)
-  activeChordLayerName?: string      // display name of the active track
+  drafts?: SongDraft[]               // inactive song drafts (v6)
+  activeDraftId?: string             // id of the active draft (content at root)
+  activeDraftName?: string           // display name of the active draft
   cueTracks: CueTrack[]              // shared editable cue data
   countInBeats?: number              // top-level click count-in
   startBeatId?: string               // optional song-start beat override
@@ -153,6 +154,49 @@ Audio **bytes** live in the binary audio chunk, NOT in this object.
 | `trim` | `{ startSec: number; endSec: number }` | ✓ | Half-open. `endSec > startSec`. Defines the song's playback region within the original audio. |
 | `sha256` | `string` (hex) | | SHA-256 of the stored (trimmed/compressed) audio chunk. |
 | `originalSha256` | `string` (hex) | | SHA-256 of the original HQ upload; used to verify re-uploads for full-quality re-analysis. |
+| `fingerprint` | `AudioFingerprint` | v6 | Recording identity — see below. |
+
+#### `AudioFingerprint` — "is this the same performance?" (v6)
+
+```ts
+type AudioFingerprint = {
+  version: 1
+  durationSec: number   // decoded duration
+  envelope: number[]    // 64 loudness buckets, dB, min-max normalised, 0-255
+}
+```
+
+`sha256` answers "same FILE". Collaborators routinely hold the same recording
+as different files — one has the 48 kHz WAV, one has the 320 kbps MP3 — and a
+byte comparison calls that a mismatch, which trains people to click through the
+warning until a genuinely wrong file gets in.
+
+What actually matters is whether the timeline still fits: `Bar.startSec` and
+`Beat.timeSec` are absolute seconds into the audio, so a different edit or a
+version with extra head silence makes every stored time wrong. The fingerprint
+is a coarse loudness envelope compared with a Pearson correlation, which is
+invariant to scale and offset. Measured against synthetic transforms
+([`audioFingerprint.test.ts`](../src/lib/audio/audioFingerprint.test.ts)):
+
+| transform | similarity | verdict |
+|---|---|---|
+| byte-identical / transcode / 0.25× gain / stereo↔mono / heavy compression | 1.00 | `same` |
+| same music shifted 3 s later | 0.62 | `different` |
+| different arrangement, same length | −0.63 | `different` |
+| different song | −0.17 | `different` |
+
+Threshold is 0.85, with duration gated independently at ±1.0 s first.
+
+Computed wherever PCM is already in hand — `decodeAudioBlobInfo()` on import,
+and `ensureAudioFingerprint()` from the editor's waveform decode for songs that
+predate v6 or came via the sidecar's no-decode fast path. It is never worth a
+decode of its own.
+
+In [`audioIdentity.ts`](../src/lib/songmap/audioIdentity.ts) it sits between the
+strict and loose tiers, and it both **rescues** and **vetoes**: a sha
+disagreement with a matching fingerprint is `'equivalent'` (safe to accept), and
+a fingerprint disagreement is `'mismatch'` no matter how well the cheap metadata
+lines up.
 | `source` | `'upload' \| 'import' \| 'unknown'` | ✓ | |
 
 ### 3.3 `timeline.bars[]` — `Bar`
@@ -200,33 +244,61 @@ Inclusive bar ranges (not half-open).
 | `chord` | `ChordSymbol` | Absolute pitch + quality (Roman numerals are derived, not stored). |
 | `beatAnchor` | `{ indexInBar: uint }` | Optional. |
 
-`ChordSymbol` = `{ root: NoteName, accidental?, quality?, extensions?, bass?, bassAccidental?, displayRaw }`.
+`ChordSymbol` = `{ root: NoteName, accidental?, quality?, extensions?, alterations?, bass?, bassAccidental?, displayRaw }`.
 
-### 3.6.1 `chordLayers[]` — parallel chord tracks (v5)
+`alterations[]` (v6) holds colour tones that refine the quality without
+changing it — `b5`, `#5`, `b9`, `#9`, `#11`, `b13`, plus bare `6` / `5`, the
+`7` of a `dim7`, and `add11`-style tails. They render verbatim after the
+quality suffix, so `min7` + `['b5']` prints `m7b5`.
 
-The ACTIVE chord track is always `harmony[]` — every consumer (grid, lead
-sheet, mixer chord rail, exports) reads only that field. `chordLayers` holds
-inactive alternatives; switching (see
-[`chordLayers.ts`](../src/lib/songmap/chordLayers.ts)) swaps a layer's events
-into `harmony` while the outgoing set is preserved as a layer. The chord-sheet
-importer stashes existing chords here instead of overwriting them.
+Colour MUST live here rather than only in `displayRaw`: the lead sheet and the
+mixer chord rail both render through `formatChordSymbol()`, and
+`transposeChord()` rebuilds the label the same way. Before v6 an imported
+`Bm7b5` displayed as `Bm7` and transposed to `C#m7` — a different chord
+function, silently.
+
+### 3.6.1 `drafts[]` — song drafts (v6)
+
+A **draft** is one complete take on the song: its `sections`, its `harmony`,
+and its `lyrics` as a single unit. A song can hold several and the user flips
+between them from the switcher next to the song title in `/edit`.
+
+The ACTIVE draft's content is always the three ROOT fields — `sections[]`,
+`harmony[]`, `lyrics` — identified by `activeDraftId` / `activeDraftName`.
+Every consumer (grid, lead sheet, mixer chord rail, live mode, PDF and Ableton
+exports) reads those root fields and needs no knowledge of drafts. `drafts[]`
+holds only the INACTIVE ones; the active draft is never duplicated in there, so
+there is exactly one source of truth for what the song plays. Switching (see
+[`drafts.ts`](../src/lib/songmap/drafts.ts)) swaps all three fields at once and
+stores the outgoing content under its own draft entry — lossless in both
+directions.
+
+The song's timeline (bars/beats), audio, cue tracks and count-in are **shared
+by every draft**. A draft cannot fork the beat grid, which is what keeps the
+editor and the exported `.als` in lockstep no matter which draft is selected.
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | `string` | Unique among layers. |
-| `name` | `string` | User-facing track name (`My chords`, `Sheet import`). |
+| `id` | `string` | Unique among drafts; never equal to `activeDraftId`. |
+| `name` | `string` | User-facing name (`My draft`, `Sheet import`). |
 | `source` | `'manual' \| 'sheet-import' \| 'suggestions'` | Optional display hint. |
 | `createdAt` | `string` | Optional ISO timestamp. |
+| `sections` | `Section[]` | Same shape/invariants as top-level `sections[]`. |
 | `harmony` | `HarmonyEvent[]` | Same shape/invariants as top-level `harmony[]`. |
+| `lyrics` | `Lyrics` | Optional; same shape as top-level `lyrics`. |
 
-`sectionLayers[]` / `activeSectionLayerName` (v5) mirror the same pattern for
-section layouts: the active layout is always `sections[]`; layers hold
-inactive alternatives with identical swap semantics
-([`sectionLayers.ts`](../src/lib/songmap/sectionLayers.ts)). Layer shape:
-`{ id, name, source?, createdAt?, sections: Section[] }`.
+All drafts are built through `makeDraft()` in
+[`drafts.ts`](../src/lib/songmap/drafts.ts) — the parser, the v5 migration and
+the runtime paths all go through it so stored drafts serialize with a stable
+key order (save → load → save stays byte-identical).
 
-`activeChordLayerName` (top-level, optional `string`) names the active track
-when layers exist; absent means the default "My chords".
+**Replaces v5's `chordLayers[]` + `sectionLayers[]`**, which were two
+independent stacks paired only by a matching `name` string. The two sides
+disambiguated duplicate names separately, so the pairing drifted apart: a real
+project carried five chord layers (`Sheet import`, `Sheet import 2`,
+`Sheet import 3`, `Sheet import 3 2`, `My chords`) against three section
+layouts (`My sections`, `Sheet import`, `Sheet import 2`), with the active
+chord track's name colliding with a different stored layer of the same name.
 
 ### 3.7 `cueTracks[]` — shared cue editor data
 
@@ -344,7 +416,7 @@ Consequence: `decode(encode(x)) ≡ x` modulo dropped `undefined`s, and `encode(
 - **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`.
 - **Legacy SongMap `formatVersion: 1` or `2` transpose:** absent transpose becomes untransposed.
 - **Legacy SongMap `formatVersion: 1`–`3` lyrics:** absent lyrics stay absent. New saves emit v4 only; builds older than v4 refuse newer files ("saved by a newer version of BarBro") instead of stripping lyrics on save.
-- **Legacy SongMap `formatVersion: 1`–`4` chord layers:** absent `chordLayers` stays absent. New saves emit v5 only; builds older than v5 refuse newer files instead of stripping stored chord tracks on save.
+- **Legacy SongMap `formatVersion: 1`–`5` → v6 drafts:** v5's `chordLayers`/`sectionLayers` fold into `drafts[]` at the read boundary ([`draftsMigrate.ts`](../src/lib/songmap/draftsMigrate.ts)). Matching names pair; an unmatched layer still becomes a draft with its missing side copied from the active draft. v5's single shared `lyrics` is copied into every draft. v1–v4 have no layers, so they migrate to a single `My draft`. The migration is **deterministic** (fixed ids, no invented timestamps) because cloud rows are migrated on every device and `collabContentFingerprint()` hashes the result — random ids would make two devices disagree and push each other in a loop. New saves emit v6 only; builds older than v6 refuse newer files instead of stripping stored drafts on save.
 - **Legacy `cueTrackExport` / `clickTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
 
 Unknown top-level JSON keys are stripped by default during parse. (See [`parse.ts`](../src/lib/songmap/parse.ts).)

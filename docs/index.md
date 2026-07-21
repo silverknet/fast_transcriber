@@ -18,6 +18,7 @@ the short files first and open domain docs only when you touch that area.
 |---|---|
 | Ableton `.als` export | [`domains/ableton-als.md`](domains/ableton-als.md) |
 | Cloud auth, invites, Supabase sync | [`domains/cloud-auth-sync.md`](domains/cloud-auth-sync.md) |
+| Collaborative sync — **target** architecture (CRDT/Yjs) | [`domains/collab-sync-architecture.md`](domains/collab-sync-architecture.md) |
 | Desktop sidecar and Python jobs | [`domains/desktop-sidecar.md`](domains/desktop-sidecar.md) |
 | Hardware control / live rig | [`domains/hardware-control.md`](domains/hardware-control.md) |
 | Chord suggestions | [`domains/chord-suggestions.md`](domains/chord-suggestions.md) |
