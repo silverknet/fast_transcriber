@@ -93,6 +93,8 @@
   let joinDialogOpen = $state(false)
   let joinTarget = $state<CloudProjectMeta | null>(null)
   let openingBrowserId = $state<string | null>(null)
+  /** Song currently being opened (esp. Collab mode, where audio downloads first). */
+  let openingSongId = $state<string | null>(null)
 
   // Pending invites visible to the signed-in user — surfaced as an
   // "Invited to" section on the no-project landing. Accept promotes the
@@ -390,6 +392,7 @@
 
   async function onEditSong(songId: string) {
     actionError = ''
+    openingSongId = songId
     try {
       // Browser cloud project (no local folder): load the song + its cloud audio
       // through the browser path. No analyze branch — that needs the sidecar.
@@ -424,6 +427,8 @@
       await goto(canAnalyze ? '/analyzing?project=1' : '/edit')
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'Could not open song'
+    } finally {
+      openingSongId = null
     }
   }
 
@@ -758,6 +763,16 @@
 <main
   class="project-page relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col gap-6 px-4 pt-14 pb-12 sm:px-6"
 >
+  {#if openingSongId}
+    <!-- Opening a song downloads its audio first (esp. Collab mode) — show it. -->
+    <div
+      class="border-foreground bg-background fixed left-1/2 top-20 z-50 flex -translate-x-1/2 items-center gap-2 rounded-md border-2 px-4 py-2 text-sm font-semibold shadow-lg"
+      role="status"
+    >
+      <RefreshCw class="size-4 animate-spin" aria-hidden="true" />
+      Loading song…
+    </div>
+  {/if}
   {#if restoring}
     <p class="text-muted-foreground text-sm">Restoring project…</p>
   {:else if !$project.data}

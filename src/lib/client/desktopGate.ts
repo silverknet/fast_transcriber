@@ -47,9 +47,9 @@ export function isSidecarActionAvailable(_action: SidecarAction, sidecarReachabl
   return sidecarReachable
 }
 
-/** User-facing explanation shown when an action is gated in browser mode. */
+/** User-facing explanation shown when an action is gated in Collab mode. */
 export function sidecarActionGateReason(action: SidecarAction): string {
-  return `${ACTION_LABEL[action]} needs the BarBro desktop app. Open it and this lights up.`
+  return `${ACTION_LABEL[action]} needs Studio mode (the BarBro desktop app). Open it and this lights up.`
 }
 
 /** Reactive gate for components. */
