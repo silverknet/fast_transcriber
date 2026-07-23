@@ -261,6 +261,12 @@
    */
   $effect(() => {
     if (!browser) return
+    // BROWSER-MODE deployment (e.g. barbro.app over HTTPS): the loopback sidecar
+    // is unreachable by construction (mixed-content), so funnelling to /download
+    // is a dead end — installing the desktop app can't help an HTTPS page reach
+    // 127.0.0.1. Let the user use the app in browser mode (open cloud projects,
+    // play the compressed audio). /download stays reachable via a link.
+    if (window.location.protocol === 'https:') return
     const status = $desktopCompanionStatus
     if (status.lastCheckedAt === null) return // no probe yet
     const here = $page.route?.id

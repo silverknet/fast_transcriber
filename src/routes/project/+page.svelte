@@ -890,19 +890,31 @@
                   rev {c.revision} · updated {new Date(c.updated_at).toLocaleDateString()}
                 </p>
               </div>
-              <Button
-                class=""
-                variant="outline"
-                size="sm"
-                disabled={openingBrowserId === c.id}
-                onclick={() => void onOpenInBrowser(c)}
-                title="Open in the browser — no desktop app needed. Plays the uploaded cloud audio."
-              >
-                {openingBrowserId === c.id ? 'Opening…' : 'Open in browser'}
-              </Button>
-              <Button class="" variant="outline" size="sm" onclick={() => startJoin(c)}>
-                Join here
-              </Button>
+              {#if $desktopCompanionStatus.reachable}
+                <!-- Desktop app present: copy the project to a local folder for
+                     full editing (analysis, stems, local HD audio). -->
+                <Button
+                  class=""
+                  variant="outline"
+                  size="sm"
+                  onclick={() => startJoin(c)}
+                  title="Copy this project to a folder on this computer to edit it with the desktop app."
+                >
+                  Add to this computer
+                </Button>
+              {:else}
+                <!-- Browser mode: open it right here, no desktop app. -->
+                <Button
+                  class=""
+                  variant="outline"
+                  size="sm"
+                  disabled={openingBrowserId === c.id}
+                  onclick={() => void onOpenInBrowser(c)}
+                  title="Open the project here in your browser and play the audio — no desktop app needed."
+                >
+                  {openingBrowserId === c.id ? 'Opening…' : 'Open'}
+                </Button>
+              {/if}
             </li>
           {/each}
         </ul>
