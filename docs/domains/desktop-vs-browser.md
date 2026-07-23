@@ -2,14 +2,17 @@
 
 BarBro runs in **two modes**, decided at runtime by whether the desktop sidecar
 is reachable (`desktopCompanionStatus.reachable`, surfaced as
-[`appMode`](../../src/lib/stores/appMode.ts) = `'desktop' | 'browser'`):
+[`appMode`](../../src/lib/stores/appMode.ts) = `'studio' | 'collab'`):
 
-- **Desktop mode** — the Electron sidecar is running. Full features + the
-  **local HD audio master**. This is the creator's environment.
-- **Browser mode** — no sidecar (a collaborator on a shared link, or Safari,
-  which can't reach the loopback sidecar at all). A **consumer/collaborator**
-  environment: play + edit + collaborate on **compressed cloud audio**, no local
-  files, no heavy compute.
+- **Studio mode** (`studio`) — the Electron sidecar is running. Full features +
+  the **local HD audio master**. This is the creator's environment.
+- **Collab mode** (`collab`) — no sidecar (a collaborator on a shared link, or
+  Safari / any HTTPS deployment, which can't reach the loopback sidecar at all).
+  A **consumer/collaborator** environment: play + edit + collaborate on
+  **compressed cloud audio**, no local files, no heavy compute.
+
+(User-facing labels live in `MODE_LABEL` / `MODE_TAGLINE` in `appMode.ts` —
+rename in that one place.)
 
 Both coexist. A creator analyses on desktop; a bandmate opens the same shared
 project in a browser. It is NOT a migration.

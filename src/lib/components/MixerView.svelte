@@ -652,6 +652,37 @@
       }
     }
 
+    // Collab mode (no local folder): stems come from the compressed cloud copy
+    // (the `project-audio` bucket) instead of disk. Same lane shape; the loader
+    // just fetches the AAC. The failsafe still applies — the fetch throws if
+    // Studio mode is somehow active.
+    if (!ps.osPath && ps.activeSongId) {
+      const songId = ps.activeSongId
+      const { getBrowserCloudAudio } = await import('$lib/client/browserCloudProject')
+      const ca = getBrowserCloudAudio(songId)
+      if (ca?.stems && Object.keys(ca.stems).length > 0) {
+        const { fetchCloudAudioBlob, cloudAudioCacheKey } = await import('$lib/client/cloudAudio')
+        const { desktopCompanionStatus } = await import('$lib/stores/desktopCompanionStatus')
+        const reachable = get(desktopCompanionStatus).reachable
+        for (const [stemName, obj] of Object.entries(ca.stems)) {
+          plan.push({
+            key: `stem:${stemName}`,
+            label: stemName,
+            loader: async () =>
+              await fetchCloudAudioBlob({
+                sidecarReachable: reachable,
+                path: obj.path,
+                cacheKey: cloudAudioCacheKey({
+                  songId,
+                  sourceSha256: ca.sourceSha256,
+                  kind: `stem:${stemName}`,
+                }),
+              }).catch(() => null),
+          })
+        }
+      }
+    }
+
     // Cue track (speech). Present whenever a rendered WAV exists on disk.
     // Whether you HEAR it is a local mute (mixState, per-machine) — the Overview
     // "Play cues" toggle drives that mute, never the shared `enabled` field, so

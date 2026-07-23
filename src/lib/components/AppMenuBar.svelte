@@ -32,6 +32,7 @@
   import { renderLeadSheetPdf } from '$lib/export/pdfLeadSheet'
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { MODE_LABEL, MODE_TAGLINE } from '$lib/stores/appMode'
   import { songMap } from '$lib/stores/songMap'
   import {
     project as projectStore,
@@ -106,11 +107,9 @@
   })
   // Explicit MODE badge: which mode am I in, and which audio am I hearing? The
   // desktop symbol is promoted from a plain status dot into a labelled badge.
-  let modeLabel = $derived(desktopConnected ? 'Desktop · HD' : 'Browser · cloud')
+  let modeLabel = $derived(desktopConnected ? MODE_LABEL.studio : MODE_LABEL.collab)
   let modeTooltip = $derived(
-    desktopConnected
-      ? `Desktop mode — using the local HD audio master. Analysis, stems, transcription & TTS available. ${desktopStatusTitle}`
-      : `Browser mode — streaming compressed cloud audio. You can play, edit chords/sections, and collaborate live. Analysis, stems & transcription need the BarBro desktop app. ${desktopStatusTitle}`,
+    `${desktopConnected ? MODE_TAGLINE.studio : MODE_TAGLINE.collab} · ${desktopStatusTitle}`,
   )
 
   const debugJsonText = $derived.by(() => {

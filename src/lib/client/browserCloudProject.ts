@@ -123,3 +123,8 @@ export async function loadCloudSongIntoEditor(
 export function hasBrowserCloudSong(songId: string): boolean {
   return registry.has(songId)
 }
+
+/** The cloud-audio manifest for a song in the open browser cloud project. */
+export function getBrowserCloudAudio(songId: string): CloudAudioManifest | null {
+  return registry.get(songId)?.cloudAudio ?? null
+}
