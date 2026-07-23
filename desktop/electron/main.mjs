@@ -2645,14 +2645,17 @@ function runFfmpegTranscode(srcAbs, dstAbs) {
 }
 
 /**
- * Run `ffmpeg -y -i SRC -c:a aac -b:a {bitrate}k -movflags +faststart DST`.
+ * Run `ffmpeg -y -i SRC -map 0:a:0 -vn -c:a aac -b:a {bitrate}k -movflags +faststart DST`.
  * Produces the compressed AAC/m4a playback copy for browser-only cloud audio.
- * `+faststart` moves the moov atom to the front so it streams/decodes without
- * the whole file. ffmpeg must be on PATH.
+ * `-map 0:a:0 -vn` takes ONLY the first audio stream and drops any embedded
+ * cover art / video — otherwise ffmpeg re-encodes the attached picture to h264
+ * and the `.m4a` (ipod) container rejects it (exit 234). `+faststart` moves the
+ * moov atom to the front so it streams/decodes without the whole file. ffmpeg
+ * must be on PATH.
  */
 function runFfmpegToAac(srcAbs, dstAbs, bitrateKbps) {
   return new Promise((resolve) => {
-    const args = ['-y', '-i', srcAbs, '-c:a', 'aac', '-b:a', `${bitrateKbps}k`, '-movflags', '+faststart', dstAbs]
+    const args = ['-y', '-i', srcAbs, '-map', '0:a:0', '-vn', '-c:a', 'aac', '-b:a', `${bitrateKbps}k`, '-movflags', '+faststart', dstAbs]
     const proc = spawn(ffmpegExePath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     proc.stderr?.on('data', (b) => {

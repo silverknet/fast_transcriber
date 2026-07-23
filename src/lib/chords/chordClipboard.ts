@@ -38,6 +38,10 @@ function parseChordSymbol(raw: unknown): ChordSymbol | null {
     if (!Array.isArray(o.extensions) || !o.extensions.every((x) => typeof x === 'string')) return null
     chord.extensions = o.extensions as string[]
   }
+  if (o.alterations !== undefined) {
+    if (!Array.isArray(o.alterations) || !o.alterations.every((x) => typeof x === 'string')) return null
+    chord.alterations = o.alterations as string[]
+  }
   if (o.bass !== undefined) {
     if (!isNoteName(o.bass)) return null
     chord.bass = o.bass

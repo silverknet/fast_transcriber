@@ -27,6 +27,7 @@
     resolveChordAtEachBeat,
     serializeChordClipboard,
     songKeyPreferFlats,
+    transposeChord,
   } from '$lib/chords'
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import {
@@ -36,7 +37,6 @@
   import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
   import {
     clampTransposeSemitones,
-    effectiveTransposeSemitones,
     formatTransposeLabel,
     transposeChordForDisplay,
     transposeChordForStorage,
@@ -685,7 +685,36 @@
   const detectedKey = $derived($songMap?.chordHints?.detectedKey ?? null)
 
   /** Key label for the header: the manual key if set, else the detected key. */
-  const transposeSemitones = $derived(effectiveTransposeSemitones($songMap))
+  // Personal, LOCAL-only song transpose — a per-viewer display overlay (e.g.
+  // "+2 because my piano is transposed"). It is NOT part of the shared `.smap`
+  // source of truth: it never syncs and never rewrites stored chords. The
+  // source of truth is the chords AS STORED — what you see at transpose 0 —
+  // which everyone shares; edit those (chord picker / select → transpose) to
+  // change the song for everyone. The offset is remembered per song locally.
+  let personalTransposeSemitones = $state(0)
+  function personalTransposeStorageKey(): string {
+    return `barbro::xpose::${$projectStore.activeSongId ?? 'standalone'}::${get(songMap)?.metadata.title ?? ''}`
+  }
+  // Load the personal offset when the ACTIVE SONG changes (keyed off songId so
+  // ordinary edits don't reset it). Seed once from any legacy stored transpose
+  // for back-compat, after which the offset lives purely local.
+  $effect(() => {
+    const songId = $projectStore.activeSongId ?? 'standalone'
+    if (!browser) return
+    const title = untrack(() => get(songMap))?.metadata.title ?? ''
+    const key = `barbro::xpose::${songId}::${title}`
+    let val = 0
+    try {
+      const raw = localStorage.getItem(key)
+      val = clampTransposeSemitones(
+        raw != null ? Number(raw) : (untrack(() => get(songMap))?.transpose?.baseSemitones ?? 0),
+      )
+    } catch {
+      /* private mode */
+    }
+    personalTransposeSemitones = val
+  })
+  const transposeSemitones = $derived(clampTransposeSemitones(personalTransposeSemitones))
   const displayedSongKey = $derived.by(() => {
     const kd = $songMap?.metadata.keyDetail
     return kd ? transposeSongKey(kd, transposeSemitones) : null
@@ -703,21 +732,19 @@
 
   function setTransposeBase(semitones: number) {
     const next = clampTransposeSemitones(semitones)
-    const resumeSnapshot = next !== transposeSemitones ? captureTransposePlaybackResume() : null
-    const p = patchSongMap((m) => ({
-      ...m,
-      transpose: next === 0 ? undefined : { baseSemitones: next },
-    }))
-    if (!p.ok) {
-      beatEditError = p.errors.join('; ')
-      transposePlaybackResume = null
-      if (resumeSnapshot) {
-        playbackController.seek(resumeSnapshot.timeSec)
-        if (resumeSnapshot.wasPlaying) queueMicrotask(() => playbackController.play())
+    if (next === transposeSemitones) return
+    // Display-only, personal, local: no source-of-truth change, no sync, and no
+    // audio re-render — so it never disturbs playback. Just persist the offset.
+    if (browser) {
+      try {
+        const key = personalTransposeStorageKey()
+        if (next === 0) localStorage.removeItem(key)
+        else localStorage.setItem(key, String(next))
+      } catch {
+        /* private mode */
       }
-    } else {
-      beatEditError = ''
     }
+    personalTransposeSemitones = next
   }
 
   /**
@@ -1047,6 +1074,19 @@
   let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'>(
     'overview',
   )
+  // The BarBro Band tools (drum/bass kit picker) are a big panel — hidden by
+  // default in the Overview; remembered per browser.
+  let showBandTools = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem('barbro::edit::bandTools') === '1',
+  )
+  function toggleBandTools() {
+    showBandTools = !showBandTools
+    try {
+      localStorage.setItem('barbro::edit::bandTools', showBandTools ? '1' : '0')
+    } catch {
+      /* private mode */
+    }
+  }
   let timelineToolbarTitle = $derived(
     editMode === 'grid' ? 'Grid' : editMode === 'sections' ? 'Sections' : 'Chords',
   )
@@ -1070,6 +1110,9 @@
   let chordPickerOpen = $state(false)
   let chordAnchorX = $state(0)
   let chordAnchorY = $state(0)
+  // Type-to-search: the first typed char that opens the picker straight into
+  // its search panel (empty = open the normal radial view).
+  let chordSearchInitialQuery = $state('')
 
   let keyDraft = $state<SongKey>({ root: 'C', mode: 'major' })
 
@@ -1496,6 +1539,7 @@
       if (!selectedBeatId) return
       if (!isChordOpenKey(e)) return
       e.preventDefault()
+      chordSearchInitialQuery = e.key // jump straight into search, pre-filled
       chordAnchorX = typeof window !== 'undefined' ? window.innerWidth / 2 : 0
       chordAnchorY = typeof window !== 'undefined' ? Math.min(200, window.innerHeight * 0.22) : 0
       chordPickerOpen = true
@@ -1535,6 +1579,7 @@
 
   function onChordBeatInteract(detail: { clientX: number; clientY: number }) {
     chordContextMenu = null
+    chordSearchInitialQuery = '' // double-tap opens the radial view, not search
     chordAnchorX = detail.clientX
     chordAnchorY = detail.clientY
     chordPickerOpen = true
@@ -1551,7 +1596,7 @@
       ? Math.max(8, Math.min(chordContextMenu.x, window.innerWidth - 216))
       : chordContextMenu.x
     const top = browser
-      ? Math.max(8, Math.min(chordContextMenu.y, window.innerHeight - 190))
+      ? Math.max(8, Math.min(chordContextMenu.y, window.innerHeight - 300))
       : chordContextMenu.y
     return `left: ${left}px; top: ${top}px;`
   }
@@ -1583,6 +1628,163 @@
   function toggleSectionDoneFromContextMenu() {
     toggleCurrentChordSectionDone()
     closeChordContextMenu()
+  }
+
+  // ── Select-all + transpose the chord selection (context-menu actions) ──────
+  let anyChordsPresent = $derived($songMap?.harmony?.some((h) => !!h.beatId) ?? false)
+
+  function selectAllChordBeats() {
+    const sm = get(songMap)
+    if (!sm) return
+    const withChords = new Set(sm.harmony.filter((h) => h.beatId).map((h) => h.beatId!))
+    if (withChords.size === 0) return
+    chordsSelectionBeatIds = sortBeatsByTime(sm.timeline.beats)
+      .filter((b) => withChords.has(b.id))
+      .map((b) => b.id)
+    selectedBeatId = null
+  }
+
+  /**
+   * Transpose the STORED chords at the selected beats by `delta` semitones — a
+   * real edit to the chord data (distinct from the display-only global
+   * transpose). Chords are re-spelled for the key `delta` semitones away.
+   */
+  function transposeSelectedChords(delta: number) {
+    const sm = get(songMap)
+    if (!sm) return
+    const ids = new Set(selectedChordTargetBeatIds())
+    if (ids.size === 0) return
+    const shiftedKey = sm.metadata.keyDetail ? transposeSongKey(sm.metadata.keyDetail, delta) : null
+    const preferFlats = shiftedKey ? songKeyPreferFlats(shiftedKey) : false
+    let changed = false
+    const p = patchSongMap((m) => ({
+      ...m,
+      harmony: m.harmony.map((h) => {
+        if (!h.beatId || !ids.has(h.beatId)) return h
+        changed = true
+        return { ...h, chord: transposeChord(h.chord, delta, preferFlats) }
+      }),
+    }))
+    if (!changed) {
+      beatEditError = 'Selection has no chords to transpose'
+      return
+    }
+    beatEditError = p.ok ? '' : p.errors.join('; ')
+  }
+
+  function selectAllChordsFromContextMenu() {
+    selectAllChordBeats()
+    // Keep the menu open so the fresh selection can be transposed right away.
+  }
+
+  function transposeSelectedFromContextMenu(delta: number) {
+    transposeSelectedChords(delta)
+    // Keep the menu open for repeated ± nudges.
+  }
+
+  /** Drag-move: shift the selected chords by `delta` beats (timeline order). */
+  function onChordsMove(detail: { delta: number }) {
+    const sm = get(songMap)
+    if (!sm || detail.delta === 0) return
+    const sorted = sortBeatsByTime(sm.timeline.beats)
+    const idToIndex = new Map(sorted.map((b, i) => [b.id, i]))
+    const targets = selectedChordTargetBeatIds()
+    if (targets.length === 0) return
+    const explicitByBeat = new Map(sm.harmony.filter((h) => h.beatId).map((h) => [h.beatId!, h.chord]))
+    const moves: Array<{ from: string; to: string; chord: (typeof sm.harmony)[number]['chord'] }> = []
+    for (const beatId of targets) {
+      const chord = explicitByBeat.get(beatId)
+      if (!chord) continue
+      const idx = idToIndex.get(beatId)
+      if (idx == null) continue
+      const targetIdx = idx + detail.delta
+      if (targetIdx < 0 || targetIdx >= sorted.length) return // out of bounds — abort the whole move
+      moves.push({ from: beatId, to: sorted[targetIdx].id, chord })
+    }
+    if (moves.length === 0) return
+    // Clear all sources first, then place at targets — avoids self-collision
+    // within the moving selection.
+    let map = sm
+    for (const m of moves) map = clearHarmonyAtBeat(map, m.from)
+    for (const m of moves) {
+      const out = upsertHarmonyAtBeat(map, m.to, m.chord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
+      }
+      map = out.map
+    }
+    const p = patchSongMap(() => map)
+    if (!p.ok) {
+      beatEditError = p.errors.join('; ')
+      return
+    }
+    beatEditError = ''
+    chordsSelectionBeatIds = moves.map((m) => m.to)
+    selectedBeatId = null
+  }
+
+  /**
+   * Section navigator: copy a source section's chords onto a target section's
+   * bars, aligned by position within the section (source bar N → target bar N)
+   * and beat-in-bar, overwriting the target's existing chords. Great for a
+   * repeated part — fill verse 2 from verse 1 in one click.
+   */
+  function onSectionFill(detail: { targetSectionId: string; sourceSectionId: string }) {
+    const sm = get(songMap)
+    if (!sm) return
+    const src = sm.sections.find((s) => s.id === detail.sourceSectionId)
+    const tgt = sm.sections.find((s) => s.id === detail.targetSectionId)
+    if (!src || !tgt) return
+    const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
+    const beatById = new Map(sm.timeline.beats.map((b) => [b.id, b]))
+    const sectionBars = (startIdx: number, endIdx: number) => {
+      const out: typeof sm.timeline.bars = []
+      for (let i = startIdx; i <= endIdx; i++) {
+        const b = barByIndex.get(i)
+        if (b) out.push(b)
+      }
+      return out
+    }
+    const srcBars = sectionBars(src.barRange.startBarIndex, src.barRange.endBarIndex)
+    const tgtBars = sectionBars(tgt.barRange.startBarIndex, tgt.barRange.endBarIndex)
+    if (srcBars.length === 0 || tgtBars.length === 0) return
+    const srcRelByBarId = new Map(srcBars.map((b, i) => [b.id, i]))
+    const tgtBeatIds = new Set(tgtBars.flatMap((b) => b.beatIds))
+    let map = sm
+    // 1) clear the target section's existing chords (overwrite)
+    for (const h of sm.harmony) {
+      if (h.beatId && tgtBeatIds.has(h.beatId)) map = clearHarmonyAtBeat(map, h.beatId)
+    }
+    // 2) copy each source chord to the target's matching bar + beat-in-bar
+    let placed = 0
+    for (const h of sm.harmony) {
+      if (!h.barId || !h.beatId) continue
+      const rel = srcRelByBarId.get(h.barId)
+      if (rel == null) continue
+      const beat = beatById.get(h.beatId)
+      const tgtBar = tgtBars[rel]
+      if (!beat || !tgtBar) continue
+      const tgtBeatId = tgtBar.beatIds[beat.indexInBar] ?? tgtBar.beatIds[0]
+      if (!tgtBeatId) continue
+      const out = upsertHarmonyAtBeat(map, tgtBeatId, h.chord, newId)
+      if (!out.ok) {
+        beatEditError = out.error
+        return
+      }
+      map = out.map
+      placed++
+    }
+    if (placed === 0) {
+      beatEditError = 'That section has no chords to copy'
+      return
+    }
+    const p = patchSongMap(() => map)
+    if (!p.ok) {
+      beatEditError = p.errors.join('; ')
+      return
+    }
+    beatEditError = ''
   }
 
   $effect(() => {
@@ -1620,9 +1822,11 @@
    * / stop() / seek()`.
    */
   const playbackController = new PlaybackController()
-  // Audio pitch-shift runs CLIENT-SIDE via signalsmith-stretch (MIT, WASM) —
-  // free to ship, no sidecar dependency. See $lib/audio/clientPitchShift.
-  const transposeAudioEnabled: boolean = true
+  // Audio pitch-shift is DISABLED for now: the client-side shift
+  // (signalsmith-stretch) doesn't sound good enough to ship. Transpose stays a
+  // chords-&-key-only feature; playback keeps the original audio. Flip back to
+  // true to re-enable the pitch-shifted audio path (all wiring is intact).
+  const transposeAudioEnabled: boolean = false
   let transposeAudioStatus = $state<'idle' | 'rendering' | 'ready' | 'error'>('idle')
   let transposeAudioError = $state('')
   let transposePlaybackBuffer = $state<AudioBuffer | null>(null)
@@ -3652,7 +3856,20 @@
           </EditSectionToolbar>
         {/if}
 
-        <DrumTrackPanel onChanged={() => mixerReloadSignal++} />
+        <div class="flex justify-end">
+          <button
+            type="button"
+            class="text-muted-foreground hover:text-foreground rounded-[var(--radius)] px-2 py-0.5 text-xs font-bold transition-colors"
+            onclick={toggleBandTools}
+            aria-expanded={showBandTools}
+          >
+            {showBandTools ? 'Hide' : 'Show'} BarBro Band tools
+          </button>
+        </div>
+
+        {#if showBandTools}
+          <DrumTrackPanel onChanged={() => mixerReloadSignal++} />
+        {/if}
 
         <MixerView reloadSignal={mixerReloadSignal} />
       </section>
@@ -3665,9 +3882,12 @@
       >
         <EditSectionToolbar
           title="Lyrics"
-          helpText="Paste the lyric text, save it, then fit it to the song to time the words. Chord-sheet-looking lines are stripped here; place chords from the Chords tab loadout importer."
+          helpText={`Lyrics belong to the CURRENT draft (“${activeDraftLabel || '—'}”) — “Save lyrics” stores the text ON THIS DRAFT (no new draft) and replaces that draft's lyrics. Timing each word to the audio is a SEPARATE, optional step — press “Fit to song” only when you want it (needs BarBro Desktop). So you can import lyrics now and fit them later. Chord-sheet lines are stripped here; import chords from the Chords tab.`}
         >
           {#snippet primary()}
+            <span class="text-muted-foreground">
+              draft <span class="text-foreground font-bold">{activeDraftLabel || '—'}</span>
+            </span>
             <span class="font-mono tabular-nums">
               {lyricsCleanedPreview.lines.length} cleaned line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
             </span>
@@ -3688,6 +3908,7 @@
               class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-3 py-1 text-xs font-bold"
               onclick={saveLyrics}
               disabled={lyricsDraftMatchesSaved && !!lyricsSaved}
+              title={`Store this text on the current draft (“${activeDraftLabel || '—'}”). Replaces that draft's lyrics; does NOT fit — that's the separate button.`}
             >
               Save lyrics
             </button>
@@ -4114,6 +4335,8 @@
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
           onChordContextMenu={onChordContextMenu}
+          onChordsMove={onChordsMove}
+          onSectionFill={onSectionFill}
           bind:audioElement={audioEl}
           playbackAudioBufferOverride={transposeAudioEnabled && transposeSemitones !== 0
             ? transposePlaybackBuffer
@@ -4170,6 +4393,50 @@
             <div class="bg-border/70 my-1 h-px"></div>
             <button
               type="button"
+              class="hover:bg-muted flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
+              role="menuitem"
+              disabled={!anyChordsPresent}
+              onclick={selectAllChordsFromContextMenu}
+            >
+              <span>Select all chords</span>
+              {#if selectedChordTargetBeatIds().length > 0}
+                <span class="text-muted-foreground font-mono text-[10px]">
+                  {selectedChordTargetBeatIds().length}
+                </span>
+              {/if}
+            </button>
+            <div class="flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5">
+              <span class={selectedChordTargetBeatIds().length === 0 ? 'opacity-40' : ''}>
+                Transpose selected
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <button
+                  type="button"
+                  class="border-foreground/30 hover:bg-foreground hover:text-background inline-flex size-6 items-center justify-center rounded-[var(--radius)] border font-mono text-sm font-black leading-none disabled:opacity-40"
+                  role="menuitem"
+                  disabled={selectedChordTargetBeatIds().length === 0}
+                  onclick={() => transposeSelectedFromContextMenu(-1)}
+                  aria-label="Transpose selected chords down a semitone"
+                  title="Down a semitone"
+                >
+                  −
+                </button>
+                <button
+                  type="button"
+                  class="border-foreground/30 hover:bg-foreground hover:text-background inline-flex size-6 items-center justify-center rounded-[var(--radius)] border font-mono text-sm font-black leading-none disabled:opacity-40"
+                  role="menuitem"
+                  disabled={selectedChordTargetBeatIds().length === 0}
+                  onclick={() => transposeSelectedFromContextMenu(1)}
+                  aria-label="Transpose selected chords up a semitone"
+                  title="Up a semitone"
+                >
+                  +
+                </button>
+              </span>
+            </div>
+            <div class="bg-border/70 my-1 h-px"></div>
+            <button
+              type="button"
               class="hover:bg-muted w-full rounded-[var(--radius)] px-2 py-1.5 text-left disabled:opacity-40"
               role="menuitem"
               disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
@@ -4195,6 +4462,7 @@
           songKey={chordPickerSongKey}
           selectedBeatId={selectedBeatId}
           suggestion={activeBeatSuggestion}
+          initialSearchQuery={chordSearchInitialQuery}
           onCommit={commitChord}
           onClearChord={clearChordAtBeat}
         />

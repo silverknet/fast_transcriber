@@ -145,6 +145,12 @@
     onChordContextMenu = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
+    /** Chords mode: drag a selected chord to move the selection by N beats. */
+    onChordsMove = undefined as ((detail: { delta: number }) => void) | undefined,
+    /** Chords mode: right-click a section → copy an earlier section's chords into it. */
+    onSectionFill = undefined as
+      | ((detail: { targetSectionId: string; sourceSectionId: string }) => void)
+      | undefined,
     /**
      * Two-way bind: lets the parent reach the underlying <audio>
      * element so volume slider / click-overlay scheduling can target
@@ -768,6 +774,81 @@
     return out
   })
 
+  /** Chords mode: clickable section jump-list so you can flip between parts
+   * (e.g. verse 1 ↔ verse 2) without scrubbing. */
+  type SectionNavItem = {
+    id: string
+    label: string
+    kind: string
+    startSec: number
+    leftPct: number
+    widthPct: number
+    active: boolean
+  }
+  let chordSectionNav = $derived.by((): SectionNavItem[] => {
+    if (!beatGrid || timelineStripMode !== 'chords' || mapSections.length === 0 || !(timelineSec > 0)) {
+      return []
+    }
+    const byIndex = new Map(beatGrid.bars.map((b) => [b.index, b]))
+    const now = controller.currentTime
+    const out: SectionNavItem[] = []
+    for (const sec of mapSections) {
+      const startBar = byIndex.get(sec.barRange.startBarIndex)
+      const endBar = byIndex.get(sec.barRange.endBarIndex)
+      if (!startBar || !endBar) continue
+      const t0 = startBar.startSec
+      const t1 = endBar.endSec
+      if (!(t1 > t0)) continue
+      out.push({
+        id: sec.id,
+        label: sec.label || sec.kind,
+        kind: sec.kind,
+        startSec: t0,
+        leftPct: (t0 / timelineSec) * 100,
+        widthPct: ((t1 - t0) / timelineSec) * 100,
+        active: now >= t0 && now < t1,
+      })
+    }
+    return out
+  })
+
+  function seekToSection(startSec: number) {
+    const t = Math.min(Math.max(0, startSec), timelineSec)
+    controller.seek(t)
+    const centered = recenterViewport(timelineSec, viewStart, viewEnd, t)
+    setViewport(centered.start, centered.end)
+  }
+
+  // Right-click a section → "fill chords from an earlier section".
+  let sectionFillMenu = $state<{ targetId: string; x: number; y: number } | null>(null)
+  const sectionFillSources = $derived.by(() => {
+    if (!sectionFillMenu) return [] as typeof chordSectionNav
+    return chordSectionNav.filter((s) => s.id !== sectionFillMenu!.targetId)
+  })
+  function openSectionFillMenu(e: MouseEvent, sectionId: string) {
+    e.preventDefault()
+    e.stopPropagation()
+    sectionFillMenu = { targetId: sectionId, x: e.clientX, y: e.clientY }
+  }
+  function chooseSectionFillSource(sourceId: string) {
+    if (!sectionFillMenu) return
+    onSectionFill?.({ targetSectionId: sectionFillMenu.targetId, sourceSectionId: sourceId })
+    sectionFillMenu = null
+  }
+  $effect(() => {
+    if (!sectionFillMenu) return
+    const close = () => (sectionFillMenu = null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  })
+
   function minimapXToTime(clientX) {
     if (!minimapEl || !(timelineSec > 0)) return 0
     const rect = minimapEl.getBoundingClientRect()
@@ -855,10 +936,18 @@
   /**
    * @param {PointerEvent} e
    */
+  /** Chords mode: clicking the waveform or the navigator clears the chord selection. */
+  function clearChordSelectionOnNavigate() {
+    if (timelineStripMode !== 'chords') return
+    if (chordsSelectionBeatIds.length > 0) chordsSelectionBeatIds = []
+    if (selectedBeatId != null) selectedBeatId = null
+  }
+
   function onMinimapPointerDown(e) {
     minimapHoverTarget = 'outside'
     if (e.button !== 0 || !minimapEl || !(timelineSec > 0)) return
     followPlayhead = false
+    clearChordSelectionOnNavigate()
     const rect = minimapEl.getBoundingClientRect()
     const rw = rect.width
     if (rw < 8) return
@@ -1484,6 +1573,7 @@
       detailMode === 'resize-selection-right' ||
       detailMode === 'move-selection'
     if (seekTap) {
+      clearChordSelectionOnNavigate()
       controller.seek(timeAtClientX(e.clientX))
     }
     scrubPreviewTime = null
@@ -1583,6 +1673,11 @@
   }
 
   function playFromSelectedChordBeat() {
+    // Space is a toggle: while playing, pause — do NOT restart from the beat.
+    if (isPlaying) {
+      controller.pause()
+      return
+    }
     if (!mediaReady || !(timelineSec > 0) || timelineStripMode !== 'chords' || !selectedBeatId) {
       togglePlay()
       return
@@ -1593,7 +1688,6 @@
       return
     }
     const t = Math.max(rangeStart, Math.min(beat.timeSec, rangeEnd > rangeStart ? rangeEnd - 0.02 : timelineSec))
-    if (isPlaying) controller.pause()
     controller.seek(t)
     controller.play()
   }
@@ -1932,6 +2026,7 @@
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}
           onChordBeatInteract={onChordBeatInteract}
           onChordContextMenu={onChordContextMenu}
+          onChordsMove={onChordsMove}
           suggestionPreview={suggestionPreview}
           onAcceptSuggestion={onAcceptSuggestion}
           onDismissSuggestion={onDismissSuggestion}
@@ -2251,6 +2346,57 @@
           </div>
         {/if}
       </div>
+      {#if timelineStripMode === 'chords' && chordSectionNav.length > 0}
+        <div class="relative mb-1.5 h-5 w-full" aria-label="Section navigator">
+          {#each chordSectionNav as s (s.id)}
+            <button
+              type="button"
+              class="border-background/50 text-foreground/90 absolute inset-y-0 overflow-hidden rounded-[2px] border-l px-1 text-left font-mono text-[10px] font-bold whitespace-nowrap transition-[filter] hover:brightness-90 {s.active
+                ? 'ring-foreground ring-1 ring-inset'
+                : ''}"
+              style="left: {s.leftPct}%; width: {s.widthPct}%; background-color: {SECTION_FILL_RGBA[s.kind] ?? 'var(--muted)'};"
+              onclick={() => seekToSection(s.startSec)}
+              oncontextmenu={(e) => openSectionFillMenu(e, s.id)}
+              title={`Jump to ${s.label} — right-click to fill its chords from another section`}
+            >
+              {s.label}
+            </button>
+          {/each}
+        </div>
+        {#if sectionFillMenu}
+          <div
+            class="bg-popover text-popover-foreground border-foreground/15 fixed z-[95] max-h-72 w-56 overflow-auto rounded-[var(--radius)] border p-1 text-xs shadow-lg"
+            style="left: {Math.max(
+              8,
+              Math.min(sectionFillMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 9999) - 232),
+            )}px; top: {Math.max(8, sectionFillMenu.y)}px;"
+            role="menu"
+            tabindex="-1"
+            aria-label="Fill section chords from"
+            onpointerdown={(e) => e.stopPropagation()}
+          >
+            <div class="text-muted-foreground px-2 py-1 font-bold uppercase tracking-wide">Fill chords from…</div>
+            {#if sectionFillSources.length === 0}
+              <div class="text-muted-foreground px-2 py-1.5">No earlier section</div>
+            {:else}
+              {#each sectionFillSources as src (src.id)}
+                <button
+                  type="button"
+                  class="hover:bg-muted flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left"
+                  role="menuitem"
+                  onclick={() => chooseSectionFillSource(src.id)}
+                >
+                  <span
+                    class="size-2.5 shrink-0 rounded-[2px]"
+                    style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
+                  ></span>
+                  <span class="truncate">{src.label}</span>
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      {/if}
       <div
         bind:this={minimapEl}
         class="text-foreground border-foreground/15 bg-foreground/5 relative h-[52px] w-full overflow-hidden overscroll-x-contain rounded-md border {minimapCursorClass}"

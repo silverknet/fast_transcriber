@@ -22,7 +22,7 @@
   import LiveHardwareStrip from '$lib/components/LiveHardwareStrip.svelte'
   import MixerTrackLane from '$lib/components/MixerTrackLane.svelte'
   import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
-  import { Pause, Play, Repeat1, RotateCcw, Square } from '@lucide/svelte'
+  import { Pause, Play, Repeat1, RotateCcw, Square, X } from '@lucide/svelte'
   import {
     formatChordSymbol,
     formatSongKeyLabel,
@@ -124,6 +124,7 @@
     opacity: number
     urgent: boolean
     active: boolean
+    row: number
   }
 
   interface SectionTimelineRange {
@@ -150,6 +151,10 @@
   let loadError = $state<string | null>(null)
   let playbackMode = $state(false)
   let initialPlaybackModeSeeded = false
+  // The playback stage is a fixed overlay, but the app navbar/context bar sit in
+  // their own stacking context above the editor — so the stage fills the area
+  // BELOW the chrome (measured) rather than fighting z-index with the navbar.
+  let chromeInsetPx = $state(0)
   let repeatSectionEnabled = $state(false)
   let repeatSectionId = $state<string | null>(null)
   let repeatSeekGuard = false
@@ -162,6 +167,34 @@
   let mixerDurationSec = $state(0)
   let lanes = $state<LaneView[]>([])
   const mixerCanPlay = $derived(!loading && !loadError && lanes.length > 0)
+
+  // Declutter: the generated BarBro Band (drums/bass) lanes and the live-rig
+  // hardware strips (XR18 / APC) are hidden by default and remembered per browser.
+  function lsBool(key: string): boolean {
+    try {
+      return typeof localStorage !== 'undefined' && localStorage.getItem(key) === '1'
+    } catch {
+      return false
+    }
+  }
+  function setLsBool(key: string, v: boolean): void {
+    try {
+      localStorage.setItem(key, v ? '1' : '0')
+    } catch {
+      /* private mode — remembering is best-effort */
+    }
+  }
+  let showBand = $state(lsBool('barbro::mixer::band'))
+  let showRig = $state(lsBool('barbro::mixer::rig'))
+  function toggleBand(): void {
+    showBand = !showBand
+    setLsBool('barbro::mixer::band', showBand)
+    void reload() // add/remove the generated lanes
+  }
+  function toggleRig(): void {
+    showRig = !showRig
+    setLsBool('barbro::mixer::rig', showRig)
+  }
 
   /** Pull the current saved state for one track-key from songMap. */
   function savedFor(key: string): MixTrackState | undefined {
@@ -358,10 +391,28 @@
     if (!seg) return fmtTime(0)
     return fmtTime(Math.max(0, seg.endSec - snapshot.positionSec))
   })
+  // Stable rows from ABSOLUTE chord times so chords don't jump vertically when
+  // the front one is consumed. Recomputed only when the chord data changes.
+  const chordRowById = $derived.by(() => {
+    const MIN_GAP_SEC = 0.9
+    const MAX_ROWS = 3
+    const rows = new Map<string, number>()
+    const rowEndTime: number[] = []
+    for (const seg of [...chordTimelineSegments]
+      .filter((s) => s.hasChord)
+      .sort((a, b) => a.startSec - b.startSec)) {
+      const end = seg.startSec + Math.max(seg.endSec - seg.startSec, MIN_GAP_SEC)
+      let row = rowEndTime.findIndex((t) => seg.startSec >= t)
+      if (row === -1) row = Math.min(rowEndTime.length, MAX_ROWS - 1)
+      rowEndTime[row] = end
+      rows.set(seg.id, row)
+    }
+    return rows
+  })
   const chordApproachViews = $derived.by<ChordApproachView[]>(() => {
     const approachWindowSec = CHORD_APPROACH_WINDOW_SEC
     const now = snapshot.positionSec
-    return chordTimelineSegments
+    const views = chordTimelineSegments
       .filter((seg) => seg.hasChord)
       .filter((seg) => seg.endSec > now + 1e-6 && seg.startSec < now + approachWindowSec - 1e-6)
       .map((seg) => {
@@ -382,9 +433,11 @@
           opacity: active ? 1 : 0.45 + closeness * 0.55,
           urgent: !active && distanceSec < 2,
           active,
+          row: chordRowById.get(seg.id) ?? 0,
         }
       })
-      .filter((seg) => seg.widthPct > 0.2)
+      .filter((seg) => seg.active || seg.widthPct > 0.2)
+    return views
   })
   const nextChordView = $derived(chordApproachViews.find((seg) => !seg.active) ?? null)
   const currentChordHeading = $derived(snapshot.state === 'playing' ? 'Playing chord' : 'Current chord')
@@ -740,7 +793,7 @@
     // detected. Prefers the saved render (its presence == fingerprint-fresh,
     // same auto-drop contract as clickExport); otherwise synthesizes from
     // the events in memory (fast, no network).
-    if (sm && sm.drumMidi && sm.drumMidi.events.length > 0) {
+    if (showBand && sm && sm.drumMidi && sm.drumMidi.events.length > 0) {
       const dmRel = sm.drumMidi.renderExport?.relativePath
       // "Your kit" always re-synthesizes: the render fingerprint can't see
       // the user's sample FILES change, so a saved render is never trusted.
@@ -770,7 +823,7 @@
     // and re-synthesize — exact pitch, no stretch artifacts — so the loaded
     // buffer must not be pitch-shifted again. The saved render is at written
     // pitch and only trusted untransposed.
-    if (sm && sm.bassMidi && sm.bassMidi.events.length > 0) {
+    if (showBand && sm && sm.bassMidi && sm.bassMidi.events.length > 0) {
       const bmRel = sm.bassMidi.renderExport?.relativePath
       const bassSemis = transposeAudioEnabled ? transposeSemitones : 0
       plan.push({
@@ -1183,10 +1236,57 @@
     void engine?.dispose()
     engine = null
   })
+
+  // Measure the app chrome (navbar + context bar + any banners) so the fixed
+  // playback stage starts right below it instead of being hidden behind it.
+  $effect(() => {
+    if (liveMode || !playbackMode || typeof document === 'undefined') return
+    const measure = () => {
+      const scroll = document.querySelector('.app-scroll')
+      chromeInsetPx = scroll ? Math.max(0, Math.round(scroll.getBoundingClientRect().top)) : 0
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    let ro: ResizeObserver | null = null
+    const chrome = document.querySelector('.app-scroll')?.previousElementSibling
+    if (chrome && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(measure)
+      ro.observe(chrome)
+    }
+    return () => {
+      window.removeEventListener('resize', measure)
+      ro?.disconnect()
+    }
+  })
+
+  // Spacebar toggles play/pause while the playback stage is open (unless typing).
+  $effect(() => {
+    if (liveMode || !playbackMode || typeof window === 'undefined') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' && e.key !== ' ') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (mixerCanPlay) onPlayPause()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
 </script>
 
-<div class="{liveMode ? 'min-h-full bg-transparent px-0 py-0' : 'border-foreground bg-background border-2 px-3 py-3'} space-y-3">
-  <!-- Transport bar -->
+<div
+  class={liveMode
+    ? 'min-h-full space-y-3 bg-transparent px-0 py-0'
+    : playbackMode
+      ? 'fixed bottom-0 left-0 right-0 z-[100] flex flex-col gap-3 overflow-hidden px-4 py-4 sm:px-8'
+      : 'border-foreground bg-background space-y-3 border-2 px-3 py-3'}
+  style={playbackMode && !liveMode
+    ? `top: ${chromeInsetPx}px; background-color: var(--background); background-image: repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px, transparent 1px 42px), repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 42px); background-position: 0 ${-(chromeInsetPx % 42)}px;`
+    : undefined}
+>
+  <!-- Transport bar — full controls in overview only; playback mode uses a clean header. -->
+  {#if !playbackMode}
   <div class="border-foreground/30 flex flex-wrap items-center gap-2 border-b-2 pb-2">
     <Button
       variant="default"
@@ -1245,13 +1345,37 @@
     </div>
     {#if !lockPlaybackMode}
       <label
-        class="border-foreground bg-background inline-flex h-8 items-center gap-2 rounded-[var(--radius)] border-2 px-2 text-xs font-bold"
+        class="text-foreground inline-flex h-8 items-center gap-2 rounded-[var(--radius)] px-2.5 text-xs font-bold shadow-sm"
+        style="background: linear-gradient(120deg, color-mix(in oklch, var(--studio-orange) 32%, var(--background)) 0%, color-mix(in oklch, var(--studio-orange-soft) 46%, var(--background)) 55%, color-mix(in oklch, var(--studio-orange) 28%, var(--background)) 100%);"
         title="Show a minimal band playback view"
       >
         <input type="checkbox" bind:checked={playbackMode} class="accent-foreground size-3.5" />
         Playback mode
       </label>
     {/if}
+    <!-- Declutter toggles: generated Band + live-rig hardware are off by default. -->
+    <button
+      type="button"
+      class="inline-flex h-8 items-center rounded-[var(--radius)] border-2 px-2 text-xs font-bold transition-colors {showBand
+        ? 'border-foreground bg-foreground text-background'
+        : 'border-foreground/40 bg-background text-muted-foreground'}"
+      onclick={toggleBand}
+      aria-pressed={showBand}
+      title="Show/hide the generated BarBro Band (drums + bass)"
+    >
+      Band
+    </button>
+    <button
+      type="button"
+      class="inline-flex h-8 items-center rounded-[var(--radius)] border-2 px-2 text-xs font-bold transition-colors {showRig
+        ? 'border-foreground bg-foreground text-background'
+        : 'border-foreground/40 bg-background text-muted-foreground'}"
+      onclick={toggleRig}
+      aria-pressed={showRig}
+      title="Show/hide the live-rig controls (XR18 mixer / APC Key 25)"
+    >
+      Live rig
+    </button>
     {#if projectSoundOn}
       <button
         type="button"
@@ -1359,7 +1483,9 @@
       </Button>
     {/if}
   </div>
+  {/if}
 
+  {#if showRig && !playbackMode}
   <LiveHardwareStrip
     lanes={liveHardwareLanes}
     projectId={$projectStore.data?.id ?? null}
@@ -1381,6 +1507,7 @@
     onPreviousSong={onPreviousProjectSong}
     onNextSong={onNextProjectSong}
   />
+  {/if}
 
   {#if loadError}
     <p class="text-destructive text-sm" role="status">{loadError}</p>
@@ -1389,14 +1516,42 @@
   {/if}
 
   {#if playbackMode}
-    <section class="space-y-4 py-2" aria-label="Playback mode">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div class="min-w-0">
-          <h2 class="text-foreground truncate text-3xl font-black leading-none sm:text-4xl">{songTitle}</h2>
-          <div class="text-muted-foreground mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-sm tabular-nums">
-            <span>{songKeyLabel}</span>
-            <span>{songBpmLabel}</span>
-            {#if currentSectionRange}<span>{currentSectionRange.label}</span>{/if}
+    <section class="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden" aria-label="Playback mode">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex min-w-0 items-center gap-3">
+          <button
+            type="button"
+            class="border-foreground bg-foreground text-background inline-flex size-12 shrink-0 items-center justify-center rounded-full border-2 shadow-md transition-transform hover:scale-105 disabled:opacity-40"
+            onclick={onPlayPause}
+            disabled={!mixerCanPlay}
+            aria-label={snapshot.state === 'playing' ? 'Pause' : 'Play'}
+          >
+            {#if snapshot.state === 'playing'}
+              <Pause class="size-6" aria-hidden="true" />
+            {:else}
+              <Play class="size-6 translate-x-0.5" aria-hidden="true" />
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="border-foreground/40 text-foreground hover:border-foreground inline-flex size-9 shrink-0 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-40"
+            onclick={onRestartSong}
+            disabled={!mixerCanPlay}
+            aria-label="Restart song"
+            title="Restart song"
+          >
+            <RotateCcw class="size-4" aria-hidden="true" />
+          </button>
+          <div class="min-w-0">
+            <h2 class="text-foreground truncate text-2xl font-black leading-none sm:text-3xl">{songTitle}</h2>
+            <div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-sm tabular-nums">
+              <span class="text-foreground font-black">
+                {fmtTime(snapshot.positionSec)} / {fmtTime(snapshot.durationSec)}
+              </span>
+              <span>{songKeyLabel}</span>
+              <span>{songBpmLabel}</span>
+              {#if currentSectionRange}<span>{currentSectionRange.label}</span>{/if}
+            </div>
           </div>
         </div>
         <div class="flex max-w-full flex-wrap items-center justify-end gap-1.5">
@@ -1417,16 +1572,26 @@
               {light.label}
             </button>
           {/each}
+          <button
+            type="button"
+            class="border-foreground/50 text-foreground hover:bg-foreground hover:text-background ml-1 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[var(--radius)] border-2 px-2.5 text-xs font-black uppercase transition-colors"
+            onclick={() => (playbackMode = false)}
+            title="Exit playback mode"
+          >
+            <X class="size-3.5" aria-hidden="true" />
+            Exit
+          </button>
         </div>
       </div>
 
-      <div class="grid gap-3 lg:grid-cols-[minmax(12rem,18rem)_1fr] lg:items-stretch">
-        <div class="bg-background ring-foreground/10 rounded-[var(--radius)] p-3 ring-1">
-          <div class="text-muted-foreground text-xs font-black uppercase">{currentChordHeading}</div>
-          <div class="mt-1 truncate font-mono text-6xl leading-none font-black tabular-nums sm:text-7xl">
+      <div class="flex min-h-0 flex-1 flex-col items-center justify-center gap-5">
+        <!-- Current chord — centered toward the middle, big but not overwhelming. -->
+        <div class="flex flex-col items-center text-center">
+          <div class="text-muted-foreground text-xs font-black uppercase tracking-wider">{currentChordHeading}</div>
+          <div class="font-mono text-7xl leading-none font-black tabular-nums sm:text-8xl">
             {currentChordLabel}
           </div>
-          <div class="bg-foreground/10 mt-3 h-3 overflow-hidden rounded-full">
+          <div class="bg-foreground/10 mt-3 h-2 w-56 max-w-[70vw] overflow-hidden rounded-full">
             <div
               class="bg-primary h-full rounded-full transition-[width] duration-100 ease-linear"
               style={`width: ${currentChordProgressPct}%`}
@@ -1437,8 +1602,9 @@
           </div>
         </div>
 
-        <div class="bg-muted/70 ring-foreground/10 rounded-[var(--radius)] p-3 ring-1">
-          <div class="flex items-center justify-between gap-3">
+        <!-- Upcoming chords approach lane (Guitar-Hero style) — half height. -->
+        <div class="w-full max-w-4xl">
+          <div class="flex items-center justify-between gap-3 px-1">
             <div class="text-muted-foreground text-xs font-black uppercase">Upcoming chords</div>
             <div class="text-muted-foreground flex items-center gap-1 font-mono text-[10px] font-bold tabular-nums">
               <span class="uppercase">Next</span>
@@ -1449,17 +1615,29 @@
             </div>
           </div>
           <div
-            class="bg-background/70 ring-foreground/10 relative mt-2 h-24 overflow-hidden rounded-[var(--radius)] ring-1"
+            class="border-foreground/20 relative mt-2 h-24 overflow-hidden rounded-[var(--radius)] border-2"
+            style="background: color-mix(in oklch, var(--foreground) 6%, var(--background));"
             aria-label="Upcoming chord approach lane"
           >
+            <!-- Faint time gridlines -->
+            <div class="bg-foreground/10 pointer-events-none absolute bottom-0 top-0 w-px" style="left: 33%"></div>
+            <div class="bg-foreground/10 pointer-events-none absolute bottom-0 top-0 w-px" style="left: 66%"></div>
+
+            <!-- Hit zone + playhead at the left edge: chords fire when they slide into it. -->
             <div
-              class="bg-foreground/15 pointer-events-none absolute bottom-0 top-0 w-px"
-              style="left: 33%"
+              class="pointer-events-none absolute inset-y-0 left-0 w-[12%]"
+              style="background: linear-gradient(90deg, color-mix(in oklch, var(--studio-orange) 28%, transparent), transparent);"
             ></div>
             <div
-              class="bg-foreground/15 pointer-events-none absolute bottom-0 top-0 w-px"
-              style="left: 66%"
+              class="pointer-events-none absolute inset-y-0 left-0 z-[5] w-1"
+              style="background: var(--studio-orange); box-shadow: 0 0 12px 1px color-mix(in oklch, var(--studio-orange) 75%, transparent);"
             ></div>
+            <div
+              class="pointer-events-none absolute bottom-0.5 left-2 z-[6] text-[9px] font-black uppercase tracking-wider"
+              style="color: var(--studio-orange);"
+            >
+              Now
+            </div>
 
             {#if chordApproachViews.length === 0}
               <div class="text-muted-foreground flex h-full items-center justify-center text-sm font-bold">
@@ -1468,25 +1646,23 @@
             {:else}
               {#each chordApproachViews as seg (seg.id)}
                 <div
-                  class="absolute top-1/2 h-12 -translate-y-1/2 transition-[left,width,opacity] duration-100 ease-linear"
-                  style={`left: ${seg.leftPct}%; width: ${seg.widthPct}%; opacity: ${seg.opacity}; z-index: ${seg.active ? 4 : seg.id === nextChordView?.id ? 3 : 1};`}
+                  class="absolute h-7 overflow-hidden rounded-[var(--radius)] transition-[left,top,width,opacity] duration-100 ease-linear {seg.active
+                    ? ''
+                    : 'min-w-[3.5rem]'}"
+                  style={`left: ${seg.leftPct}%; top: ${seg.row * 30 + 3}px; width: ${seg.widthPct}%; opacity: ${seg.opacity}; z-index: ${seg.active ? 4 : seg.id === nextChordView?.id ? 3 : 1};`}
                   title={`${seg.label} in ${seg.startsInLabel}`}
                 >
                   <div
-                    class="ring-foreground/10 flex h-full flex-col justify-center overflow-hidden rounded-[var(--radius)] px-2 shadow-sm ring-1 {seg.active
-                      ? 'bg-primary text-primary-foreground ring-primary/20'
+                    class="flex h-full items-center justify-center overflow-hidden rounded-[var(--radius)] border-2 px-1.5 shadow-sm {seg.active
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'text-foreground'}"
+                    style={seg.active
+                      ? ''
                       : seg.id === nextChordView?.id
-                        ? 'bg-primary/20 text-foreground ring-primary/40'
-                      : 'bg-background/95 text-foreground'}"
+                        ? 'background: color-mix(in oklch, var(--studio-orange) 88%, white); border-color: var(--studio-orange); color: var(--studio-ink);'
+                        : 'background: var(--background); border-color: color-mix(in oklch, var(--foreground) 32%, transparent);'}
                   >
-                    <div class="truncate font-mono text-lg leading-none font-black tabular-nums">{seg.label}</div>
-                    <div
-                      class="font-mono text-[10px] tabular-nums {seg.active
-                        ? 'text-primary-foreground/80'
-                        : 'text-muted-foreground'}"
-                    >
-                      {seg.startsInLabel}
-                    </div>
+                    <span class="whitespace-nowrap font-mono text-sm leading-none font-black tabular-nums">{seg.label}</span>
                   </div>
                 </div>
               {/each}
@@ -1501,7 +1677,7 @@
         {@const next = lyricLines[currentLyricIdx + 1] ?? null}
         {@const activeIdx = cur ? activeWordIndex(cur, lyricsSongTime) : -1}
         <div
-          class="bg-background ring-foreground/10 flex flex-col items-center gap-1 rounded-[var(--radius)] px-4 py-3 text-center ring-1"
+          class="flex shrink-0 flex-col items-center gap-1 px-4 py-2 text-center"
           aria-label="Lyrics"
           aria-live="polite"
         >
