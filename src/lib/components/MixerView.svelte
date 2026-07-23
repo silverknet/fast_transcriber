@@ -201,6 +201,32 @@
     return $songMap?.mixState?.tracks.find((t) => t.key === key)
   }
 
+  /** True when this mixer is showing a live/performance surface (the playback
+   *  page, or the editor's playback-mode toggle) rather than the arranging mixer. */
+  function inPlaybackContext(): boolean {
+    return initialPlaybackMode || lockPlaybackMode || playbackMode
+  }
+
+  /** Vocal stem detection across both naming schemes: disk keys `stem:vocals.wav`
+   *  and Collab cloud keys `stem:Vocals`. */
+  function isVocalStemKey(key: string): boolean {
+    return key.startsWith('stem:') && /vocal/i.test(key)
+  }
+
+  /** Initial mute for a lane. Live/playback mode ignores the saved arranging
+   *  mix and starts from a fixed backing-track default — every stem audible
+   *  EXCEPT vocals, and the original mix off — so playing along is consistent
+   *  regardless of editing-time solos/mutes. Non-stem lanes (click / cue /
+   *  generated band) keep their saved default. */
+  function initialMutedFor(key: string, saved: MixTrackState | undefined): boolean {
+    if (inPlaybackContext()) {
+      if (key === 'original') return true
+      if (isVocalStemKey(key)) return true
+      if (key.startsWith('stem:')) return false
+    }
+    return !!saved?.muted
+  }
+
   function nextColor(): string {
     return LANE_COLORS[lanes.length % LANE_COLORS.length]!
   }
@@ -872,8 +898,10 @@
           label: p.label,
           buffer: buf,
           volume: saved?.volume ?? 1,
-          muted: !!saved?.muted,
-          soloed: !!saved?.soloed,
+          muted: initialMutedFor(p.key, saved),
+          // A saved solo (from arranging) would silence every other lane in the
+          // live default, so ignore it in playback context.
+          soloed: inPlaybackContext() ? false : !!saved?.soloed,
         }
         engine.setTrack(track)
         syncLanesFromEngine()
@@ -1277,13 +1305,15 @@
 
 <div
   class={liveMode
-    ? 'min-h-full space-y-3 bg-transparent px-0 py-0'
+    ? 'flex min-h-0 flex-1 flex-col gap-3 px-0 py-0'
     : playbackMode
       ? 'fixed bottom-0 left-0 right-0 z-[100] flex flex-col gap-3 overflow-hidden px-4 py-4 sm:px-8'
       : 'border-foreground bg-background space-y-3 border-2 px-3 py-3'}
-  style={playbackMode && !liveMode
-    ? `top: ${chromeInsetPx}px; background-color: var(--background); background-image: repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px, transparent 1px 42px), repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 42px); background-position: 0 ${-(chromeInsetPx % 42)}px;`
-    : undefined}
+  style={liveMode
+    ? 'background-color: var(--background); background-image: repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px, transparent 1px 42px), repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 42px);'
+    : playbackMode
+      ? `top: ${chromeInsetPx}px; background-color: var(--background); background-image: repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px, transparent 1px 42px), repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 42px); background-position: 0 ${-(chromeInsetPx % 42)}px;`
+      : undefined}
 >
   <!-- Transport bar — full controls in overview only; playback mode uses a clean header. -->
   {#if !playbackMode}
@@ -1543,7 +1573,11 @@
             <RotateCcw class="size-4" aria-hidden="true" />
           </button>
           <div class="min-w-0">
-            <h2 class="text-foreground truncate text-2xl font-black leading-none sm:text-3xl">{songTitle}</h2>
+            <!-- In live mode the playback page's banner already shows the song
+                 title; suppress the duplicate here. -->
+            {#if !liveMode}
+              <h2 class="text-foreground truncate text-2xl font-black leading-none sm:text-3xl">{songTitle}</h2>
+            {/if}
             <div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-sm tabular-nums">
               <span class="text-foreground font-black">
                 {fmtTime(snapshot.positionSec)} / {fmtTime(snapshot.durationSec)}
