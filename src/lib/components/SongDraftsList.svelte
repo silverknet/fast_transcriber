@@ -19,6 +19,10 @@
     counts: string
     /** e.g. "2 days ago"; empty when unknown. */
     age?: string
+    /** Explicit created date, e.g. "Jul 23, 2026"; empty when unknown. */
+    created?: string
+    /** Full timestamp for the hover tooltip. */
+    createdTitle?: string
   }
 
   let {
@@ -58,19 +62,24 @@
           ? 'border-foreground bg-muted'
           : 'border-foreground/50'}"
       >
-        <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+        <!-- Name on its OWN line (full width, hover for the rest); the counts and
+             created date sit beneath it, so a long draft name is no longer
+             squeezed down to its first few letters by the metadata beside it. -->
+        <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-2">
           <input
             type="radio"
             name="song-draft"
-            class="accent-foreground size-3.5 shrink-0"
+            class="accent-foreground mt-0.5 size-3.5 shrink-0"
             value={row.id}
             checked={row.active}
             aria-label={row.name}
             onchange={() => onUse?.(row.id)}
           />
-          <span class="truncate font-bold">{row.name}</span>
-          <span class="text-muted-foreground truncate">
-            {row.counts}{row.age ? ` · ${row.age}` : ''}
+          <span class="flex min-w-0 flex-col gap-0.5">
+            <span class="truncate font-bold" title={row.name}>{row.name}</span>
+            <span class="text-muted-foreground truncate leading-tight" title={row.createdTitle}>
+              {row.counts}{row.created ? ` · created ${row.created}` : row.age ? ` · ${row.age}` : ''}
+            </span>
           </span>
         </label>
         <Button

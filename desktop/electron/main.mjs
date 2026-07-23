@@ -2178,6 +2178,66 @@ async function handleProjectTranscodeToWav(req, res, cors) {
   }
 }
 
+/**
+ * `POST /native/project/transcode-to-aac` — body
+ * `{ projectPath, songFolder, srcSubpath, dstSubpath, bitrateKbps }`.
+ *
+ * Transcodes project audio (the mix WAV or a stem WAV) to AAC/m4a — the
+ * compressed playback copy uploaded for browser-only ("cloud audio") members.
+ * Cache-aware (skips when dst is newer than src). Returns the output byte size
+ * for the cloud-audio manifest. This is the ONLY producer of the lossy copy;
+ * the HD WAV master never leaves the creator's disk.
+ */
+async function handleProjectTranscodeToAac(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
+    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
+    ensureAbsolutePath(projectPath, 'projectPath')
+    if (!existsSync(projectPath)) {
+      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
+    }
+    const songFolder = validateRelSongFolder(body.songFolder)
+    const srcSubpath = validateAssetSubpath(body.srcSubpath)
+    const dstSubpath = validateAssetSubpath(body.dstSubpath)
+    const bitrateKbps = Number.isFinite(body.bitrateKbps)
+      ? Math.max(64, Math.min(320, Math.round(body.bitrateKbps)))
+      : 128
+    const srcAbs = path.join(projectPath, songFolder, srcSubpath)
+    const dstAbs = path.join(projectPath, songFolder, dstSubpath)
+    if (!existsSync(srcAbs)) {
+      return sendJson(res, 404, { ok: false, error: `Source file not found: ${srcAbs}` }, cors)
+    }
+    // Cache: if dst is newer than src, skip re-encoding.
+    try {
+      const srcStat = statSync(srcAbs)
+      const dstStat = statSync(dstAbs)
+      if (dstStat.mtimeMs >= srcStat.mtimeMs && dstStat.size > 0) {
+        return sendJson(res, 200, { ok: true, cached: true, bytes: dstStat.size }, cors)
+      }
+    } catch {
+      /* dst doesn't exist — proceed to transcode */
+    }
+    // ffmpeg won't create the output directory (e.g. the new `cloud/` folder) —
+    // make it first or ffmpeg exits 254 ("No such file or directory").
+    mkdirSync(path.dirname(dstAbs), { recursive: true })
+    const result = await runFfmpegToAac(srcAbs, dstAbs, bitrateKbps)
+    if (!result.ok) {
+      return sendJson(res, 500, { ok: false, error: result.error }, cors)
+    }
+    let bytes = 0
+    try {
+      bytes = statSync(dstAbs).size
+    } catch {
+      /* stat failed — report 0, upload still proceeds */
+    }
+    sendJson(res, 200, { ok: true, cached: false, bytes }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendJson(res, 400, { ok: false, error: msg }, cors)
+  }
+}
+
 async function fileHashIdentity(absPath) {
   const st = statSync(absPath)
   const hash = createHash('sha256')
@@ -2580,6 +2640,30 @@ function runFfmpegTranscode(srcAbs, dstAbs) {
           error: `ffmpeg exited ${code}: ${stderr.slice(-2000)}`,
         })
       }
+    })
+  })
+}
+
+/**
+ * Run `ffmpeg -y -i SRC -c:a aac -b:a {bitrate}k -movflags +faststart DST`.
+ * Produces the compressed AAC/m4a playback copy for browser-only cloud audio.
+ * `+faststart` moves the moov atom to the front so it streams/decodes without
+ * the whole file. ffmpeg must be on PATH.
+ */
+function runFfmpegToAac(srcAbs, dstAbs, bitrateKbps) {
+  return new Promise((resolve) => {
+    const args = ['-y', '-i', srcAbs, '-c:a', 'aac', '-b:a', `${bitrateKbps}k`, '-movflags', '+faststart', dstAbs]
+    const proc = spawn(ffmpegExePath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (b) => {
+      stderr += b.toString()
+    })
+    proc.on('error', (e) => {
+      resolve({ ok: false, error: `ffmpeg failed to start: ${e.message}. Is ffmpeg on PATH?` })
+    })
+    proc.on('close', (code) => {
+      if (code === 0) resolve({ ok: true })
+      else resolve({ ok: false, error: `ffmpeg exited ${code}: ${stderr.slice(-2000)}` })
     })
   })
 }
@@ -6535,6 +6619,10 @@ function startBeaconServer() {
       void handleProjectTranscodeToWav(req, res, cors)
       return
     }
+    if (req.method === 'POST' && req.url === '/native/project/transcode-to-aac') {
+      void handleProjectTranscodeToAac(req, res, cors)
+      return
+    }
     if (req.method === 'POST' && req.url === '/native/project/pitch-shift-cache') {
       void handleProjectPitchShiftCache(req, res, cors)
       return
@@ -6948,6 +7036,7 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/project/asset/write     (write file at project root, e.g. setlist .als)`)
   logInfo(`  POST   /native/project/wav-info/batch  (batched WAV header info — duration/sr/channels)`)
   logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
+  logInfo(`  POST   /native/project/transcode-to-aac (ffmpeg: mix/stem WAV→AAC for cloud audio)`)
   logInfo(`  GET    /native/transpose/status          (Rubber Band availability)`)
   logInfo(`  POST   /native/project/pitch-shift-cache (Rubber Band transpose cache)`)
   logInfo(`  GET    /native/hardware/status           (MIDI/XR18 bridge state)`)

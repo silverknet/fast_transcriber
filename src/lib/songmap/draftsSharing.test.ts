@@ -41,7 +41,8 @@ function sharedSong(): SongMap {
     harmony: [chord('ch-a1', 'C'), chord('ch-a2', 'F')],
   }
   const withId = ensureActiveDraftIdentity(base, newId)
-  // Draft "Sheet import" becomes active; "My draft" is stored.
+  // Draft "Sheet import" becomes active; "My draft" is stored. Fixed clock so
+  // the fixture is byte-deterministic (the collab-merge guarantee depends on it).
   return addDraftAndActivate(
     withId,
     {
@@ -51,6 +52,7 @@ function sharedSong(): SongMap {
     },
     'Sheet import',
     newId,
+    () => '2020-01-01T00:00:00.000Z',
   )
 }
 

@@ -386,6 +386,32 @@ export async function transcodeProjectAudioToWav(
   })
 }
 
+export type TranscodeToAacResult =
+  | { ok: true; cached: boolean; bytes: number }
+  | { ok: false; error: string }
+
+/**
+ * Transcode project audio (the mix WAV, or a stem WAV) to AAC/m4a — the
+ * compressed playback copy uploaded for browser-only ("cloud audio") members.
+ * Cache-aware (mtime); returns the output byte size for the cloud-audio
+ * manifest. Only creators run this (they have the sidecar + the HD master).
+ */
+export async function transcodeProjectAudioToAac(
+  projectPath: string,
+  songFolder: string,
+  srcSubpath: string,
+  dstSubpath: string,
+  bitrateKbps = 128,
+): Promise<TranscodeToAacResult> {
+  return await postJson<TranscodeToAacResult>(`${BASE_URL}/native/project/transcode-to-aac`, {
+    projectPath,
+    songFolder,
+    srcSubpath,
+    dstSubpath,
+    bitrateKbps,
+  })
+}
+
 /**
  * Build/read a local tempo-preserved pitch-shift WAV cache for project audio.
  * Semitone 0 should bypass this helper and use the original file directly.

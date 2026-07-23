@@ -195,10 +195,14 @@
     <!-- Title (+ artist + hidden tag). min-w-0 lets the cell shrink so
          the next column doesn't overflow into it. -->
     <div class="flex min-w-0 items-center gap-1.5 overflow-hidden">
-      <span class="truncate font-semibold">{title}</span>
-      {#if artist}
-        <span class="text-muted-foreground truncate text-xs">— {artist}</span>
-      {/if}
+      <!-- Title stacked ABOVE the artist (not side-by-side): the two read as a
+           unit, and long titles/artists each truncate on their own line. -->
+      <div class="flex min-w-0 flex-col justify-center leading-tight">
+        <span class="truncate font-semibold">{title}</span>
+        {#if artist}
+          <span class="text-muted-foreground/70 truncate text-xs">{artist}</span>
+        {/if}
+      </div>
       {#if entry.hidden}
         <span class="border-foreground/40 text-muted-foreground shrink-0 border px-1 text-[9px] font-semibold uppercase tracking-wider">hidden</span>
       {/if}

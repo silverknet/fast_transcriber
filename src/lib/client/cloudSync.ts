@@ -17,6 +17,7 @@ import type {
 } from '$lib/project/types'
 import { PROJECT_FILE_VERSION, PROJECT_SONGS_DIR } from '$lib/project/types'
 import type { SongMap, ExpectedAudio } from '$lib/songmap/types'
+import type { CloudAudioManifest } from '$lib/client/cloudAudio'
 import { toCollabSongMap, collabContentFingerprint } from '$lib/songmap/collab'
 import {
   patchMetadataForFolder,
@@ -91,6 +92,7 @@ export interface CloudSongView {
   cloud_project_id: string
   song_map: SongMap
   expected_audio: ExpectedAudio | null
+  cloud_audio: CloudAudioManifest | null
   hidden: boolean
   sort_order: number
   updated_at: string
@@ -759,6 +761,12 @@ async function applyCloudSongIntoLocal(
     })
     const { writeProjectSong } = await import('./desktopProjectFs')
     await writeProjectSong(osPath, entry.folder, new Uint8Array(await blobOut.arrayBuffer()))
+    // Refresh the project-view metadata cache (title/artist/key/bpm/stems) from
+    // the just-merged map. Without this a pull wrote the new values to disk but
+    // the project LIST kept rendering the stale cache until the user opened the
+    // song and forced a sidecar re-scan — i.e. "I only see the edit after going
+    // in, and only some songs show a key". The list now updates on the pull.
+    patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(merged))
     // Report the sync watermark for this song so the caller can stamp the
     // manifest entry — this is what stops the autosave from immediately
     // re-pushing freshly-pulled content (the phantom-conflict loop).

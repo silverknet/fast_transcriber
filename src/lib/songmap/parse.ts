@@ -831,6 +831,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     drafts: draftState.drafts,
     activeDraftId: draftState.activeDraftId,
     activeDraftName: draftState.activeDraftName,
+    activeDraftCreatedAt: optString(raw.activeDraftCreatedAt),
     cueTracks: isLegacyV1
       ? migrateLegacyCueTracks({ cues: legacyCues, cueTrackExport: legacyCueTrackExport })
       : parseCueTracks(raw.cueTracks),

@@ -635,6 +635,13 @@ export type SongMapV3 = {
   activeDraftId?: string
   /** Display name of the ACTIVE draft. */
   activeDraftName?: string
+  /**
+   * ISO creation time of the ACTIVE draft. Stored drafts carry their own
+   * `createdAt`; this is the equivalent for the one living at the root, so the
+   * draft switcher can show every draft's date. Preserved across switches (a
+   * draft keeps its original creation time when it moves active↔stored).
+   */
+  activeDraftCreatedAt?: string
   cueTracks: CueTrack[]
   /**
    * Count-in beats before the song start, independent of cue speech. When

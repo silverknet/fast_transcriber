@@ -144,6 +144,7 @@ export function switchToDraft(
   map: SongMap,
   draftId: string,
   newId: IdFactory,
+  now: () => string = () => new Date().toISOString(),
 ): { ok: true; map: SongMap } | { ok: false; error: string } {
   if (draftId && draftId === map.activeDraftId) return { ok: true, map }
 
@@ -159,7 +160,9 @@ export function switchToDraft(
         id: map.activeDraftId ?? newId(),
         name: activeDraftName(map),
         source: 'manual',
-        createdAt: new Date().toISOString(),
+        // Preserve the active draft's REAL creation time as it moves to storage
+        // (was stamping the switch time, which lost the original date).
+        createdAt: map.activeDraftCreatedAt ?? now(),
         ...outgoingContent,
       })
   const nextDrafts = outgoing ? [...remaining, outgoing] : remaining
@@ -176,6 +179,8 @@ export function switchToDraft(
       drafts: nextDrafts.length > 0 ? nextDrafts : undefined,
       activeDraftId: target.id,
       activeDraftName: target.name,
+      // The draft becoming active keeps its own creation time.
+      activeDraftCreatedAt: target.createdAt,
     },
   }
 }
@@ -201,6 +206,7 @@ export function addDraftAndActivate(
   content: Pick<SongDraft, 'sections' | 'harmony' | 'lyrics'>,
   name: string,
   newId: IdFactory,
+  now: () => string = () => new Date().toISOString(),
 ): SongMap {
   const withIdentity = ensureActiveDraftIdentity(map, newId)
   const outgoingContent = activeContent(withIdentity)
@@ -211,7 +217,7 @@ export function addDraftAndActivate(
         id: withIdentity.activeDraftId!,
         name: activeDraftName(withIdentity),
         source: 'manual',
-        createdAt: new Date().toISOString(),
+        createdAt: withIdentity.activeDraftCreatedAt ?? now(),
         ...outgoingContent,
       })
   const nextDrafts = outgoing ? [...stored, outgoing] : stored
@@ -233,6 +239,8 @@ export function addDraftAndActivate(
     drafts: nextDrafts.length > 0 ? nextDrafts : undefined,
     activeDraftId: newId(),
     activeDraftName: resolvedName,
+    // A brand-new draft is created now.
+    activeDraftCreatedAt: now(),
   }
 }
 

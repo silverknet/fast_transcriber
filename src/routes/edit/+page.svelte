@@ -1096,6 +1096,23 @@
     patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: t } }))
   }
 
+  let editingArtist = $state(false)
+  let artistDraft = $state('')
+
+  function startArtistEdit() {
+    artistDraft = get(songMap)?.metadata.artist ?? ''
+    editingArtist = true
+  }
+
+  function commitArtistEdit() {
+    editingArtist = false
+    const a = artistDraft.trim()
+    const sm = get(songMap)
+    // Empty clears the field; unchanged is a no-op so we don't dirty the sync.
+    if (!sm || a === (sm.metadata.artist ?? '')) return
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, artist: a || undefined } }))
+  }
+
   function focusOnMount(el: HTMLElement) {
     el.focus()
     if (el instanceof HTMLInputElement) el.select()
@@ -2503,6 +2520,21 @@
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
   }
 
+  /** Explicit created date for a draft row (e.g. "Jul 23, 2026"); '' when unknown. */
+  function draftCreatedLabel(iso: string | undefined): string {
+    if (!iso) return ''
+    const d = new Date(iso)
+    if (!Number.isFinite(d.getTime())) return ''
+    return d.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })
+  }
+  /** Full timestamp for the row's hover tooltip. */
+  function draftCreatedTitle(iso: string | undefined): string {
+    if (!iso) return ''
+    const d = new Date(iso)
+    if (!Number.isFinite(d.getTime())) return ''
+    return `Created ${d.toLocaleString()}`
+  }
+
   // ── Song drafts: sections + chords + lyrics as ONE switchable unit ───────
   // The ACTIVE draft's content is sm.sections / sm.harmony / sm.lyrics; stored
   // drafts live in sm.drafts. Switching swaps all three at once, so a draft can
@@ -2534,13 +2566,20 @@
 
   /** Rows for the drafts dialog — presentation only; the dialog stays dumb. */
   const draftDialogRows = $derived(
-    draftRows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      active: row.active,
-      counts: draftCounts(row.id, row.active),
-      age: layerAgeLabel(row.createdAt),
-    })),
+    draftRows.map((row) => {
+      // The active draft's createdAt lives on the SongMap (`activeDraftCreatedAt`),
+      // not in the stored-draft record `listDrafts` returns for it.
+      const createdAtIso = row.active ? $songMap?.activeDraftCreatedAt : row.createdAt
+      return {
+        id: row.id,
+        name: row.name,
+        active: row.active,
+        counts: draftCounts(row.id, row.active),
+        age: layerAgeLabel(createdAtIso),
+        created: draftCreatedLabel(createdAtIso),
+        createdTitle: draftCreatedTitle(createdAtIso),
+      }
+    }),
   )
 
   function useDraft(id: string) {
@@ -3098,6 +3137,34 @@
               <Layers aria-hidden="true" />
             </Button>
           </h1>
+        {/if}
+
+        <!-- Artist — a grey subtitle right under the title, click-to-edit like
+             the title. Part of `metadata`, so it syncs across collaborators.
+             View and edit share the same left edge and line-height so clicking
+             to edit doesn't nudge the text. -->
+        {#if editingArtist}
+          <input
+            class="text-muted-foreground/70 bg-background border-muted-foreground/40 mt-0.5 w-full min-w-0 max-w-xs border-b px-0 text-base leading-tight outline-none"
+            bind:value={artistDraft}
+            onblur={commitArtistEdit}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingArtist = false } }}
+            use:focusOnMount
+            placeholder="Artist"
+            aria-label="Artist"
+          />
+        {:else}
+          <button
+            type="button"
+            class="mt-0.5 block max-w-full truncate px-0 text-left text-base leading-tight transition-colors hover:text-foreground {sm
+              .metadata.artist
+              ? 'text-muted-foreground/70'
+              : 'text-muted-foreground/40 italic'}"
+            onclick={startArtistEdit}
+            title="Edit artist"
+          >
+            {sm.metadata.artist || 'Add artist'}
+          </button>
         {/if}
 
         <div

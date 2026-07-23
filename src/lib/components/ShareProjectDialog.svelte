@@ -156,6 +156,48 @@
     }
   }
 
+  // ── Cloud audio (browser-only members) ───────────────────────────────────
+  // Uploads a compressed AAC copy (mix + stems) so members WITHOUT the desktop
+  // app can play in the browser. The HD WAV master stays on the creator's disk.
+  let cloudAudioBusy = $state(false)
+  let cloudAudioError = $state('')
+  let cloudAudioStatus = $state('')
+
+  async function onPrepareCloudAudio(limit?: number) {
+    cloudAudioError = ''
+    cloudAudioStatus = ''
+    if (!browser || !osPath || !proj) {
+      cloudAudioError = 'Open a project first.'
+      return
+    }
+    if (!cloud) {
+      cloudAudioError = 'Enable cloud sync for this project first.'
+      return
+    }
+    if (!$desktopCompanionStatus.reachable) {
+      cloudAudioError = 'Desktop client unreachable — start BarBro desktop and try again.'
+      return
+    }
+    cloudAudioBusy = true
+    try {
+      const { uploadProjectCloudAudio } = await import('$lib/client/cloudAudioSync')
+      const results = await uploadProjectCloudAudio({
+        limit,
+        onProgress: (m) => {
+          cloudAudioStatus = m
+        },
+      })
+      const ok = results.filter((r) => r.ok).length
+      const failed = results.filter((r) => !r.ok)
+      cloudAudioStatus = `Prepared ${ok}/${results.length} song(s) for browser members.`
+      if (failed.length) cloudAudioError = failed.map((f) => `${f.title}: ${f.error}`).join(' · ')
+    } catch (e) {
+      cloudAudioError = e instanceof Error ? e.message : String(e)
+    } finally {
+      cloudAudioBusy = false
+    }
+  }
+
   async function onImportAudioPackage() {
     hydrationError = ''
     hydrationStatus = ''
@@ -463,6 +505,47 @@
           {/if}
           {#if hydrationStatus}
             <p class="text-emerald-600 dark:text-emerald-400 text-xs" role="status">{hydrationStatus}</p>
+          {/if}
+        </div>
+
+        <!-- Cloud audio for browser-only members -->
+        <div class="border-foreground/15 space-y-2 border-t pt-3">
+          <h3 class="text-muted-foreground text-xs font-bold uppercase tracking-wider">
+            Browser audio (no desktop app needed)
+          </h3>
+          <p class="text-muted-foreground text-[11px]">
+            Upload a compressed copy (mix + stems) so members without the desktop app can play and
+            collaborate in the browser. Your local HD audio stays the master — the compressed copy
+            is only ever used in browser mode.
+          </p>
+          <div class="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              class="gap-1"
+              disabled={cloudAudioBusy || !cloud || !$desktopCompanionStatus.reachable}
+              onclick={() => void onPrepareCloudAudio(1)}
+              title="Prepare just the first song — a cheap way to confirm it works before the whole setlist."
+            >
+              <Upload class="size-3.5" aria-hidden="true" />
+              {cloudAudioBusy ? 'Preparing…' : 'Test (1 song)'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              class="gap-1"
+              disabled={cloudAudioBusy || !cloud || !$desktopCompanionStatus.reachable}
+              onclick={() => void onPrepareCloudAudio()}
+            >
+              <Upload class="size-3.5" aria-hidden="true" />
+              {cloudAudioBusy ? 'Preparing…' : 'Prepare all songs'}
+            </Button>
+          </div>
+          {#if cloudAudioError}
+            <p class="text-destructive text-xs" role="status">{cloudAudioError}</p>
+          {/if}
+          {#if cloudAudioStatus}
+            <p class="text-emerald-600 dark:text-emerald-400 text-xs" role="status">{cloudAudioStatus}</p>
           {/if}
         </div>
       </div>
