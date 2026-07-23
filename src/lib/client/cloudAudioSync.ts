@@ -13,6 +13,7 @@ import {
   transcodeProjectAudioToAac,
 } from './desktopProjectFs'
 import { decodeSmapFile } from '$lib/songmap/persist'
+import { reconcileSongAudio } from '$lib/project/audioReconcile'
 import { project } from '$lib/stores/project'
 import {
   buildCloudAudioManifest,
@@ -173,7 +174,17 @@ export async function uploadProjectCloudAudio(opts?: {
       const data = await decodeSmapFile(new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' }))
       const sm = data.project.songMap
       title = sm.metadata?.title || entry.folder
-      const originalPath = sm.audio?.originalPath
+      // Prefer the stamped local pointer. If it's missing (song never opened +
+      // saved since the file-reference migration), reconcile against
+      // <song>/audio/ by content identity — the same logic the editor's load
+      // path uses — and take the strict (sha256) match. This must NOT fall to a
+      // loose/duration match: a different, similar-length master would silently
+      // upload the wrong audio. Only a byte-identical file is accepted here.
+      let originalPath = sm.audio?.originalPath
+      if (!originalPath) {
+        const outcome = await reconcileSongAudio(sm, osPath, entry.folder)
+        if (outcome.kind === 'strict-match') originalPath = `audio/${outcome.fileName}`
+      }
       if (!originalPath) {
         results.push({ songId, title, ok: false, error: 'no local audio — relink it first' })
         continue

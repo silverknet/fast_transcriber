@@ -6,6 +6,7 @@
   import { get } from 'svelte/store'
   import AppMenuBar from '$lib/components/AppMenuBar.svelte'
   import DesktopUpdateBanner from '$lib/components/DesktopUpdateBanner.svelte'
+  import StudioLinkBanner from '$lib/components/StudioLinkBanner.svelte'
   import ProjectContextBar from '$lib/components/ProjectContextBar.svelte'
   import ConflictResolutionDialog from '$lib/components/ConflictResolutionDialog.svelte'
   import { page } from '$app/stores'
@@ -261,12 +262,6 @@
    */
   $effect(() => {
     if (!browser) return
-    // BROWSER-MODE deployment (e.g. barbro.app over HTTPS): the loopback sidecar
-    // is unreachable by construction (mixed-content), so funnelling to /download
-    // is a dead end — installing the desktop app can't help an HTTPS page reach
-    // 127.0.0.1. Let the user use the app in browser mode (open cloud projects,
-    // play the compressed audio). /download stays reachable via a link.
-    if (window.location.protocol === 'https:') return
     const status = $desktopCompanionStatus
     if (status.lastCheckedAt === null) return // no probe yet
     const here = $page.route?.id
@@ -280,16 +275,16 @@
     if (isDebugRouteId(here)) return
     // /analyzing?preview is a standalone animation preview — no sidecar needed.
     if (here === '/analyzing' && $page.url.searchParams.has('preview')) return
-    // Four reasons to lock the user to /download:
-    //   1. Sidecar unreachable (no companion running)
-    //   2. Sidecar reachable but its version is below the web app's
-    //      minimum — user needs to install a newer build
-    //   3. Sidecar reachable but its Python deps are missing (broken)
-    //   4. Auto-setup is currently installing deps — show the progress
-    //      UI on /download instead of letting the user wander into the
-    //      app where analyze endpoints will fail.
+    // Only lock the user to /download when the sidecar IS running but needs
+    // attention (all three imply it's reachable):
+    //   1. version below the web app's minimum — install a newer build
+    //   2. Python deps missing (broken)
+    //   3. auto-setup currently installing deps — show the progress UI
+    // A sidecar that simply ISN'T running is NOT a reason: that's Collab mode
+    // (browser-only) — the user opens cloud projects and plays/edits on cloud
+    // audio. Studio-only actions are gated individually, and /download stays
+    // reachable via the navbar badge for anyone who wants the desktop app.
     if (
-      !status.reachable ||
       status.versionStatus === 'outdated' ||
       status.pythonHealth === 'broken' ||
       status.pythonHealth === 'installing'
@@ -319,6 +314,7 @@
     <div class="relative z-20 shrink-0">
       <AppMenuBar />
       <DesktopUpdateBanner />
+      <StudioLinkBanner />
       <ProjectContextBar />
     </div>
   {/if}

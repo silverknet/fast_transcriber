@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte'
+  import { onDestroy, tick, untrack } from 'svelte'
   import { chordWithoutBass, rankChordSuggestions, withSlashBass } from '$lib/chords'
   import { diatonicDegreeRomanLabel, diatonicTriadsInKey, songKeyPreferFlats } from '$lib/chords/diatonic'
   import { formatChordSymbol } from '$lib/chords/formatChordSymbol'
@@ -10,7 +10,7 @@
   import { pitchClassToRootAcc } from '$lib/chords/pitchClass'
   import type { Accidental, ChordSymbol, NoteName, SongKey } from '$lib/songmap/types'
 
-  const HOLD_FOR_SLASH_MS = 1000
+  const HOLD_FOR_SLASH_MS = 700
   const ITEM_RING_RADIUS = 100
   const BASS_RING_RADIUS = 148
   const NODE_SIZE = 46
@@ -27,6 +27,7 @@
     suggestion = null as { primary: { chord: ChordSymbol; confidenceLabel: string }; alternatives: ChordSymbol[] } | null,
     onCommit,
     onClearChord,
+    initialSearchQuery = '',
   }: {
     open?: boolean
     anchorX?: number
@@ -40,6 +41,8 @@
     } | null
     onCommit?: (chord: ChordSymbol) => void
     onClearChord?: () => void
+    /** When opening, jump straight into search with this text (type-to-search). */
+    initialSearchQuery?: string
   } = $props()
 
   let searchInputEl = $state<HTMLInputElement | undefined>()
@@ -144,8 +147,11 @@
     if (!open) return
     drilledDegreeIndex = null
     stagedChord = null
-    searchOpen = false
-    searchQuery = ''
+    // type-to-search: if an initial query was supplied, open straight into
+    // the search panel pre-filled with it; otherwise the normal clock view.
+    const initial = untrack(() => initialSearchQuery)
+    searchOpen = initial.length > 0
+    searchQuery = initial
     searchHighlightIndex = 0
     longPressDidFire = false
     clearLongPressTimer()
@@ -154,8 +160,22 @@
   $effect(() => {
     if (!open || !searchOpen) return
     void tick().then(() => {
-      searchInputEl?.focus({ preventScroll: true })
-      searchInputEl?.select()
+      const el = searchInputEl
+      if (!el) return
+      el.focus({ preventScroll: true })
+      // Collapse the caret to the END (never select-all) so a type-to-search
+      // seed like "c" gets appended — typing "7" makes "c7", not "7". Do it
+      // immediately AND next frame to beat any browser select-on-focus.
+      const place = () => {
+        const len = el.value.length
+        try {
+          el.setSelectionRange(len, len)
+        } catch {
+          /* not a text input */
+        }
+      }
+      place()
+      requestAnimationFrame(place)
     })
   })
 

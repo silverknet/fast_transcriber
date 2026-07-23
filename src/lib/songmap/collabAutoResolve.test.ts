@@ -271,6 +271,43 @@ describe('autoResolveDecisions — cloud still wins where it has something to sa
   })
 })
 
+// ── Safety: a stale device can never unprompted-overwrite the cloud ─────────
+// The exact fear: a collaborator reconnects with an out-of-date `.smap` on disk
+// (e.g. chords still in the old key) and their autosave silently reverts the
+// newer cloud copy. Two layers stop it: (1) the `cloud_push_song` RPC rejects a
+// push whose base revision is behind current (SQL — 010_cloud_rpcs.sql), and if
+// that 409 forces a merge, (2) the merge resolves toward the cloud, never the
+// stale device. These lock the merge half of that guarantee.
+describe('safety: a stale device never unprompted-overwrites the cloud', () => {
+  it('REGRESSION: stale chords (same ids, old key) settle to the CLOUD silently — never the reverse', () => {
+    const base = createEmptySongMap()
+    // Same chord ids on both sides, but the disk is a whole step behind.
+    const staleDisk: SongMap = {
+      ...base,
+      harmony: [chord('h-0', 'A'), chord('h-1', 'C'), chord('h-2', 'G')],
+    }
+    const newerCloud: SongMap = {
+      ...base,
+      harmony: [chord('h-0', 'G'), chord('h-1', 'A'), chord('h-2', 'F')],
+    }
+    const report = mergeForConflict(staleDisk, newerCloud)
+    // Per-id disagreement is ordinary — no dialog — and the CLOUD wins each one.
+    expect(hasDangerousConflict(report)).toBe(false)
+    expect(autoResolveDecisions(report).size).toBe(0)
+    const settled = autoResolvedMerge(report)
+    expect(settled.harmony.find((h) => h.id === 'h-1')?.chord.displayRaw).toBe('A')
+    expect(settled.harmony.map((h) => h.chord.displayRaw).sort()).toEqual(['A', 'F', 'G'])
+  })
+
+  it('REGRESSION: a wholesale chord-track swap from a stale device is DANGEROUS → prompts, never silent', () => {
+    const base = createEmptySongMap()
+    const staleDisk: SongMap = { ...base, harmony: [chord('old-0', 'A'), chord('old-1', 'C')] }
+    const newerCloud: SongMap = { ...base, harmony: [chord('new-0', 'G'), chord('new-1', 'F')] }
+    // Disjoint ids = "the whole chord track was replaced" → the dialog, not silent.
+    expect(hasDangerousConflict(mergeForConflict(staleDisk, newerCloud))).toBe(true)
+  })
+})
+
 describe('autoResolvedMerge — structural guarantees', () => {
   it('keeps every list item that exists on only one side', () => {
     const base = createEmptySongMap()

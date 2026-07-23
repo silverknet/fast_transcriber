@@ -39,6 +39,44 @@ Everything a **consumer** needs — data sync, playback, mixer, chord/section
 editing, live collab — runs with **zero sidecar**. Everything gated to desktop is
 heavy native/Python compute or local-filesystem access.
 
+## Exactly two modes — the guarantee + every transition
+
+There are **only two modes**, and **one signal** chooses between them:
+`desktopCompanionStatus.reachable` → `appMode` (`'studio' | 'collab'`). Nothing
+else. Everything below is a consequence:
+
+| | **Studio** (`reachable`) | **Collab** (`!reachable`) |
+|---|---|---|
+| Project source | local folder on disk (via sidecar) | cloud project in memory + IndexedDB (no folder) |
+| Audio | local HD master | compressed cloud AAC |
+| Sidecar features | on | gated ("needs Studio mode") |
+| `.smap` sync | yes | yes |
+| Open a local folder | yes | **no** (needs the sidecar) |
+
+**The load-bearing invariant: a local folder is usable ONLY in Studio.** You can
+only *open* one with the sidecar up, so "local folder + no sidecar" is never a
+starting state — it can only arise if the sidecar *drops mid-session*, which is
+a **degraded Studio**, handled explicitly (below), not a third mode.
+
+### Transitions (all defined)
+- **Fresh load, sidecar down** → Collab. Restoring the last local folder needs
+  the sidecar and fails gracefully (`tryRestoreLastProject` returns null), so you
+  land on the Collab landing (cloud project list). Open a project with **"Open."**
+- **Fresh load, sidecar up** → Studio. Restores/opens the local folder as before.
+- **Sidecar drops mid-Studio-session** (local project open) → the badge flips to
+  **Collab** and a **"Studio disconnected"** banner appears. Audio already decoded
+  into memory keeps playing; anything needing the sidecar (switch song, reload
+  stems, analyze, disk autosave) is unavailable. The banner offers **Reconnect**
+  and, if the project is cloud-linked, **Open the cloud copy** (→ true Collab).
+  This is the ONLY way to reach "local folder + no sidecar", and it is never a
+  silent break.
+- **Sidecar comes up mid-Collab-session** (cloud project open) → stays Collab for
+  that project (it has no local files to analyse); offers **"Add to this
+  computer"** to get a local copy and full Studio features.
+
+So: two modes, chosen by the sidecar; the only in-between (local folder without a
+sidecar) is a clearly-signposted degraded Studio, never a usable third mode.
+
 ## Non-negotiable rule 1 — audio fidelity failsafe
 
 The local HD master must **always** win when the desktop client is connected; the

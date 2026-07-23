@@ -80,6 +80,8 @@
     onChordBeatInteract,
     /** Chords mode: right-click command menu request. */
     onChordContextMenu,
+    /** Chords mode: drag a selected chord to move the whole selection by N beats. */
+    onChordsMove,
     selectedBeatId = $bindable<string | null>(null),
     /** Chords mode: multi-select beats (timeline order); single-click also sets `selectedBeatId`. */
     chordsSelectionBeatIds = $bindable<string[]>([]),
@@ -139,6 +141,7 @@
     onViewportWheel?: (e: WheelEvent) => boolean
     onChordBeatInteract?: (detail: { clientX: number; clientY: number }) => void
     onChordContextMenu?: (detail: { clientX: number; clientY: number }) => void
+    onChordsMove?: (detail: { delta: number }) => void
     selectedBeatId?: string | null
     chordsSelectionBeatIds?: string[]
     chordLabelByBeatId?: Record<string, string>
@@ -1017,6 +1020,18 @@
     const startIdx = sorted.findIndex((b) => b.id === hit.id)
     if (startIdx < 0) return
 
+    // Grabbing a beat that's already in the selection → DRAG MOVES the whole
+    // selection by N beats (instead of starting a new range-select).
+    const inSelection = chordsSelectionBeatIds.length > 0 && chordsSelectionBeatIds.includes(hit.id)
+    const origSelection = inSelection ? [...chordsSelectionBeatIds] : []
+    const origIdxs = origSelection
+      .map((id) => sorted.findIndex((b) => b.id === id))
+      .filter((i) => i >= 0)
+      .sort((a, b) => a - b)
+    const minIdx = origIdxs[0] ?? 0
+    const maxIdx = origIdxs[origIdxs.length - 1] ?? 0
+    let moveDelta = 0
+
     const startX = e.clientX
     const startY = e.clientY
     let dragActive = false
@@ -1030,6 +1045,15 @@
       if (!cur) return
       const curIdx = sorted.findIndex((b) => b.id === cur.id)
       if (curIdx < 0) return
+      if (inSelection) {
+        // Clamp the shift so the whole selection stays in bounds; preview the
+        // destination beats via the selection highlight.
+        const delta = Math.max(-minIdx, Math.min(sorted.length - 1 - maxIdx, curIdx - startIdx))
+        moveDelta = delta
+        chordsSelectionBeatIds = origIdxs.map((i) => sorted[i + delta].id)
+        selectedBeatId = null
+        return
+      }
       const a = Math.min(startIdx, curIdx)
       const b = Math.max(startIdx, curIdx)
       chordsSelectionBeatIds = sorted.slice(a, b + 1).map((bt) => bt.id)
@@ -1046,6 +1070,13 @@
 
     const up = (ev: PointerEvent) => {
       teardown()
+      if (dragActive && inSelection) {
+        // Restore the original selection so the parent moves the right chords,
+        // then apply the shift (parent re-selects the destination beats).
+        chordsSelectionBeatIds = origSelection
+        if (moveDelta !== 0) onChordsMove?.({ delta: moveDelta })
+        return
+      }
       if (!dragActive) {
         const now = performance.now()
         const doubleTap =
