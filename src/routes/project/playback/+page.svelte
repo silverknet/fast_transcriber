@@ -7,7 +7,8 @@
   import { Button } from '$lib/components/ui/button'
   import { formatSongKeyLabel } from '$lib/chords'
   import { loadProjectSongIntoEditor, refreshProjectInfo } from '$lib/project/commit'
-  import { project as projectStore } from '$lib/stores/project'
+  import { loadCloudSongIntoEditor } from '$lib/client/browserCloudProject'
+  import { project as projectStore, isBrowserCloudProject } from '$lib/stores/project'
   import { songMap } from '$lib/stores/songMap'
   import { ArrowLeft, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
 
@@ -56,7 +57,15 @@
     loadingSongId = songId
     loadError = ''
     try {
-      await loadProjectSongIntoEditor(songId)
+      // Collab (browser-cloud) mode has no local folder (`osPath` is null), so
+      // the disk loader would throw "No active project". Route through the
+      // cloud loader instead — same path the project page uses to open a song.
+      if (isBrowserCloudProject(get(projectStore))) {
+        const r = await loadCloudSongIntoEditor(songId)
+        if (!r.ok) loadError = r.error
+      } else {
+        await loadProjectSongIntoEditor(songId)
+      }
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e)
     } finally {
@@ -234,8 +243,8 @@
           </ol>
         </aside>
 
-        <section class="min-h-0 overflow-y-auto rounded-[var(--radius)] border-2 border-foreground bg-background p-3">
-          <div class="mb-3 flex flex-wrap items-center gap-2">
+        <section class="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-background p-3">
+          <div class="mb-3 flex shrink-0 flex-wrap items-center gap-2">
             <div class="min-w-0 flex-1">
               <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
                 Now
