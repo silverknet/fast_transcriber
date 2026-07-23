@@ -18,9 +18,12 @@ the short files first and open domain docs only when you touch that area.
 |---|---|
 | Ableton `.als` export | [`domains/ableton-als.md`](domains/ableton-als.md) |
 | Cloud auth, invites, Supabase sync | [`domains/cloud-auth-sync.md`](domains/cloud-auth-sync.md) |
+| Collaborative sync — **target** architecture (CRDT/Yjs) | [`domains/collab-sync-architecture.md`](domains/collab-sync-architecture.md) |
 | Desktop sidecar and Python jobs | [`domains/desktop-sidecar.md`](domains/desktop-sidecar.md) |
+| Desktop vs browser — capability split & audio failsafe | [`domains/desktop-vs-browser.md`](domains/desktop-vs-browser.md) |
 | Hardware control / live rig | [`domains/hardware-control.md`](domains/hardware-control.md) |
 | Chord suggestions | [`domains/chord-suggestions.md`](domains/chord-suggestions.md) |
+| AI chord/section pipeline (for agents) | [`domains/ai-chord-pipeline.md`](domains/ai-chord-pipeline.md) |
 | `.smap` file format | [`smap-format.md`](smap-format.md) |
 | Python auto-setup internals | [`python-auto-setup.md`](python-auto-setup.md) |
 

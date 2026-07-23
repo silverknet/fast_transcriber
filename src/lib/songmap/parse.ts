@@ -1,4 +1,5 @@
 import {
+  SONGMAP_CHORD_LAYERS_FORMAT_VERSION,
   SONGMAP_CUE_TRACK_FORMAT_VERSION,
   SONGMAP_FORMAT_VERSION,
   SONGMAP_LEGACY_FORMAT_VERSION,
@@ -22,6 +23,7 @@ import type {
   RenderedCueExport,
   Section,
   SectionLayer,
+  SongDraft,
   SongKey,
   SongMap,
   SongMapAppInfo,
@@ -31,6 +33,13 @@ import type {
 } from './types'
 import { defaultCueSettings } from './defaults'
 import { createDefaultCueTrack } from './cueTracks'
+import { DEFAULT_DRAFT_NAME, makeDraft } from './drafts'
+import { MIGRATED_ACTIVE_DRAFT_ID, migrateLayersToDrafts } from './draftsMigrate'
+import {
+  AUDIO_FINGERPRINT_BUCKETS,
+  AUDIO_FINGERPRINT_VERSION,
+  type AudioFingerprint,
+} from '$lib/audio/audioFingerprint'
 import { validateSongMap } from './validate'
 
 export class SongMapParseError extends Error {
@@ -96,6 +105,7 @@ function parseChord(raw: unknown, path: string): ChordSymbol {
     accidental: optString(o.accidental) as ChordSymbol['accidental'] | undefined,
     quality: optString(o.quality),
     extensions: Array.isArray(o.extensions) ? o.extensions.map((x) => String(x)) : undefined,
+    alterations: Array.isArray(o.alterations) ? o.alterations.map((x) => String(x)) : undefined,
     bass: optString(o.bass) as ChordSymbol['bass'] | undefined,
     bassAccidental: optString(o.bassAccidental) as ChordSymbol['bassAccidental'] | undefined,
     displayRaw: reqString(o.displayRaw, `${path}.displayRaw`),
@@ -271,6 +281,46 @@ function parseSectionLayers(raw: unknown, path: string): SectionLayer[] | undefi
   return layers.length > 0 ? layers : undefined
 }
 
+function parseDraft(raw: unknown, path: string): SongDraft {
+  const o = expectObject(raw, path)
+  const source = optString(o.source)
+  return makeDraft({
+    id: reqString(o.id, `${path}.id`),
+    name: reqString(o.name, `${path}.name`),
+    source:
+      source === 'manual' || source === 'sheet-import' || source === 'suggestions'
+        ? source
+        : undefined,
+    createdAt: optString(o.createdAt),
+    sections: Array.isArray(o.sections)
+      ? o.sections.map((sec, i) => parseSection(sec, `${path}.sections[${i}]`))
+      : [],
+    harmony: Array.isArray(o.harmony)
+      ? o.harmony.map((h, i) => parseHarmony(h, `${path}.harmony[${i}]`))
+      : [],
+    lyrics: parseLyrics(o.lyrics, `${path}.lyrics`),
+  })
+}
+
+function parseDrafts(raw: unknown, path: string): SongDraft[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (!Array.isArray(raw)) return undefined
+  const drafts = raw.map((d, i) => parseDraft(d, `${path}[${i}]`))
+  return drafts.length > 0 ? drafts : undefined
+}
+
+function parseFingerprint(raw: unknown): AudioFingerprint | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  if (o.version !== AUDIO_FINGERPRINT_VERSION) return undefined
+  const dur = optNum(o.durationSec)
+  if (dur === undefined) return undefined
+  if (!Array.isArray(o.envelope)) return undefined
+  const envelope = o.envelope.map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0))
+  if (envelope.length !== AUDIO_FINGERPRINT_BUCKETS) return undefined
+  return { version: AUDIO_FINGERPRINT_VERSION, durationSec: dur, envelope }
+}
+
 function parseAudio(raw: unknown, path: string): AudioReference {
   const o = expectObject(raw, path)
   const trim = expectObject(o.trim, `${path}.trim`)
@@ -287,6 +337,7 @@ function parseAudio(raw: unknown, path: string): AudioReference {
     },
     sha256: optString(o.sha256),
     originalSha256: optString(o.originalSha256),
+    fingerprint: parseFingerprint(o.fingerprint),
     originalPath: optString(o.originalPath),
     source: reqString(o.source, `${path}.source`) as AudioReference['source'],
   }
@@ -304,6 +355,7 @@ function parseExpectedAudio(raw: unknown, path: string): import('./types').Expec
     fileSize: optNum(o.fileSize),
     sha256: optString(o.sha256),
     originalSha256: optString(o.originalSha256),
+    fingerprint: parseFingerprint(o.fingerprint),
   }
 }
 
@@ -700,12 +752,14 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const isLegacyV2 = formatVersion === SONGMAP_CUE_TRACK_FORMAT_VERSION
   const isLegacyV3 = formatVersion === SONGMAP_TRANSPOSE_FORMAT_VERSION
   const isLegacyV4 = formatVersion === SONGMAP_LYRICS_FORMAT_VERSION
+  const isLegacyV5 = formatVersion === SONGMAP_CHORD_LAYERS_FORMAT_VERSION
   if (
     formatVersion !== SONGMAP_FORMAT_VERSION &&
     !isLegacyV1 &&
     !isLegacyV2 &&
     !isLegacyV3 &&
-    !isLegacyV4
+    !isLegacyV4 &&
+    !isLegacyV5
   ) {
     // A file from a NEWER build (formatVersion above what we understand) gets a
     // user-facing "update BarBro" message wherever this error surfaces, instead
@@ -734,24 +788,50 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const countInBeats =
     optNum(raw.countInBeats) ??
     (isLegacyV1 && legacyCues.mode === 'countIn' ? legacyCues.countInBeats : undefined)
+
+  const sections = Array.isArray(raw.sections)
+    ? raw.sections.map((s, i) => parseSection(s, `sections[${i}]`))
+    : []
+  const harmony = Array.isArray(raw.harmony)
+    ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`))
+    : []
+  const lyrics = parseLyrics(raw.lyrics, 'lyrics')
+
+  // v6 drafts. Anything older (v1–v5) is folded up from the v5 layer stacks —
+  // for v1–v4 those are simply absent, which yields no stored drafts and just
+  // names the active one. See `draftsMigrate.ts` for why this is deterministic.
+  const storedDrafts = parseDrafts(raw.drafts, 'drafts')
+  const draftState =
+    storedDrafts !== undefined || optString(raw.activeDraftId) !== undefined
+      ? {
+          drafts: storedDrafts,
+          activeDraftId: optString(raw.activeDraftId) ?? MIGRATED_ACTIVE_DRAFT_ID,
+          activeDraftName: optString(raw.activeDraftName) ?? DEFAULT_DRAFT_NAME,
+        }
+      : migrateLayersToDrafts({
+          sections,
+          harmony,
+          lyrics,
+          chordLayers: parseChordLayers(raw.chordLayers, 'chordLayers'),
+          sectionLayers: parseSectionLayers(raw.sectionLayers, 'sectionLayers'),
+          activeChordLayerName: optString(raw.activeChordLayerName),
+          activeSectionLayerName: optString(raw.activeSectionLayerName),
+        })
+
   return {
     formatVersion: SONGMAP_FORMAT_VERSION,
     app: parseApp(raw.app, 'app'),
     metadata,
     transpose: parseTranspose(raw.transpose, 'transpose'),
-    lyrics: parseLyrics(raw.lyrics, 'lyrics'),
+    lyrics,
     audio: raw.audio !== undefined && raw.audio !== null ? parseAudio(raw.audio, 'audio') : undefined,
     timeline,
-    sections: Array.isArray(raw.sections)
-      ? raw.sections.map((s, i) => parseSection(s, `sections[${i}]`))
-      : [],
-    harmony: Array.isArray(raw.harmony)
-      ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`))
-      : [],
-    chordLayers: parseChordLayers(raw.chordLayers, 'chordLayers'),
-    activeChordLayerName: optString(raw.activeChordLayerName),
-    sectionLayers: parseSectionLayers(raw.sectionLayers, 'sectionLayers'),
-    activeSectionLayerName: optString(raw.activeSectionLayerName),
+    sections,
+    harmony,
+    drafts: draftState.drafts,
+    activeDraftId: draftState.activeDraftId,
+    activeDraftName: draftState.activeDraftName,
+    activeDraftCreatedAt: optString(raw.activeDraftCreatedAt),
     cueTracks: isLegacyV1
       ? migrateLegacyCueTracks({ cues: legacyCues, cueTrackExport: legacyCueTrackExport })
       : parseCueTracks(raw.cueTracks),
@@ -810,10 +890,15 @@ const KNOWN_TOP_KEYS = new Set([
   'timeline',
   'sections',
   'harmony',
+  // v5 layer stacks: still read so legacy files migrate (see draftsMigrate.ts).
   'chordLayers',
   'activeChordLayerName',
   'sectionLayers',
   'activeSectionLayerName',
+  // v6 drafts.
+  'drafts',
+  'activeDraftId',
+  'activeDraftName',
   'cueTracks',
   'cues',
   'countInBeats',

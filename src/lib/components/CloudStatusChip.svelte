@@ -14,40 +14,19 @@
   import { Cloud, Loader2, Users, Check } from '@lucide/svelte'
   import { project } from '$lib/stores/project'
   import { projectMembers } from '$lib/stores/projectRole'
-  import { pullCloudChanges } from '$lib/client/cloudSync'
-  import { subscribeToCloudProject, type Unsubscribe } from '$lib/client/cloudRealtime'
+  import { cloudPullActivity } from '$lib/stores/cloudPullActivity'
 
   let { onManage }: { onManage?: () => void } = $props()
 
   const cloud = $derived($project.data?.cloud ?? null)
   const pending = $derived(cloud?.pendingChanges ?? 0)
-  let pulling = $state(false)
 
-  // Realtime auto-pull: resubscribe when the cloud project changes. Any remote
-  // change → debounced pull inside the helper. No manual Pull button needed.
-  // Wrapped in try/catch: subscribeToCloudProject constructs the Supabase
-  // client synchronously and can throw if env isn't configured — that must NOT
-  // blank the whole box (this was why the chip could vanish on a cloud project).
-  $effect(() => {
-    const id = cloud?.projectId
-    if (!id) return
-    let unsub: Unsubscribe | null = null
-    try {
-      unsub = subscribeToCloudProject(id, () => {
-        pulling = true
-        void pullCloudChanges().finally(() => (pulling = false))
-      })
-    } catch (e) {
-      console.warn('[CloudStatusChip] realtime unavailable:', e)
-    }
-    return () => {
-      unsub?.()
-      unsub = null
-    }
-  })
+  // The realtime subscription used to live here, which meant remote changes
+  // only arrived while this page was mounted. It now runs app-wide in
+  // `cloudAutoPull.ts`; this chip just reflects its activity.
 
   const memberCount = $derived($projectMembers.length)
-  const status = $derived(pulling ? 'syncing' : pending > 0 ? 'pending' : 'synced')
+  const status = $derived($cloudPullActivity ? 'syncing' : pending > 0 ? 'pending' : 'synced')
 </script>
 
 <!--

@@ -28,9 +28,14 @@ import { writeProjectSong, writeProjectManifest } from '$lib/client/desktopProje
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
 import { exportRestorableStateAsSmapBlob } from '$lib/songmap/persist'
-import { mergeForConflict } from '$lib/songmap/collabMerge'
+import {
+  autoResolvedMerge,
+  hasDangerousConflict,
+  mergeForConflict,
+} from '$lib/songmap/collabMerge'
 import { collabContentFingerprint, mergeLocalIntoCollab } from '$lib/songmap/collab'
 import { cloudConflict } from '$lib/stores/cloudConflict'
+import { notifyCloudReconciled } from '$lib/stores/cloudToast'
 import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
 import { patchMetadataForFolder, project, setProjectData } from '$lib/stores/project'
@@ -209,17 +214,30 @@ async function tryCloudPushOnce(): Promise<void> {
 
     const report = mergeForConflict(sm, remote)
 
-    // No field-level conflict → the divergence is stuff the merge folds
-    // together cleanly (non-overlapping list items, server-only audio-identity
-    // fields, float re-serialization). REBASE onto the server's revision and
-    // actually re-push the merged result, then adopt it locally. The old code
-    // just `markSynced`-ed without pushing — that left the server stale and
-    // made every later edit re-race into another 409 (the toggle-cues loop).
-    // Bounded so a fast-moving server (concurrent stem/keys backfill push)
-    // can't spin forever.
-    if (report.conflicts.length === 0) {
+    // Nothing DANGEROUS → settle it without a dialog. Anything left is either
+    // folded cleanly by the merge (non-overlapping list items, server-only
+    // audio-identity fields, float re-serialization) or a last-write-wins pick
+    // the user would only have been asked to rubber-stamp. Interrupting a
+    // session for those is what made the dialog fire on ordinary first-open:
+    // a local `.smap` and its cloud row can sit at different legacy
+    // `formatVersion`s, and migrating both to v6 from different starting points
+    // legitimately diverges (a v2 row predates `transpose` and `lyrics`).
+    //
+    // `autoResolvedMerge` — not `report.merged` — because plain cloud-wins
+    // would DELETE the fields the stale side never had. It keeps the local
+    // value wherever the cloud's is empty; see `collabMerge.ts`.
+    //
+    // REBASE onto the server's revision and actually re-push the result, then
+    // adopt it locally. Pushing matters: `markSynced` alone would leave the
+    // server stale and make every later edit re-race into another 409 (the
+    // toggle-cues loop). Bounded so a fast-moving server (concurrent stem/keys
+    // backfill push) can't spin forever.
+    if (!hasDangerousConflict(report)) {
+      // Tell the user only when something was actually reconciled. A benign
+      // rebase (no conflicts at all) is invisible plumbing and needs no notice.
+      let reconciled = report.conflicts.length > 0
       let base = r.remote.revision
-      let merged = report.merged
+      let merged = autoResolvedMerge(report)
       // At most 2 inline attempts — one rebase, plus one if the server moved
       // once more. Beyond that the debounced tick retries, so a fast-moving
       // server can't make a single edit fire a slow burst of PUTs.
@@ -233,27 +251,35 @@ async function tryCloudPushOnce(): Promise<void> {
           patchSongMap(() => mergeLocalIntoCollab(local, merged))
           const stored = get(songMap) ?? merged
           markSynced(rr.revision, collabContentFingerprint(stored))
+          // Untitled songs still deserve the notice, hence the fallback —
+          // `mergeToast` drops blank titles and would show nothing at all.
+          if (reconciled) notifyCloudReconciled([stored.metadata?.title?.trim() || 'This song'])
           return
         }
         if (!('conflict' in rr) || !rr.conflict || !rr.remote?.song_map) break
-        // Server moved again mid-rebase. If it now genuinely conflicts, fall
-        // through to the dialog; otherwise re-merge and retry with the fresh base.
+        // Server moved again mid-rebase. If it now needs a human, fall through
+        // to the dialog; otherwise re-settle and retry with the fresh base.
         const rep2 = mergeForConflict(merged, rr.remote.song_map)
-        if (rep2.conflicts.length > 0) {
+        if (hasDangerousConflict(rep2)) {
           remoteForDialog = rr.remote.song_map
           remoteRevisionForDialog = rr.remote.revision
           break
         }
+        reconciled = reconciled || rep2.conflicts.length > 0
         base = rr.remote.revision
-        merged = rep2.merged
+        merged = autoResolvedMerge(rep2)
       }
       // Couldn't converge in a few tries and no real conflict surfaced — leave
       // pendingChanges below; the next debounced tick retries with a fresh base.
       if (remoteForDialog === null) return
     }
 
-    // Genuinely divergent content → surface the merge dialog once. The user
-    // picks per-row before applying; until then edits stack up locally.
+    // Something DANGEROUS is on the table — a whole-timeline replacement, a
+    // wholesale chord-track swap, a different active draft, or a different
+    // audio master. Those change what the song IS rather than which of two
+    // edits to a field wins, so they are the one case still worth an
+    // interruption. Surface the dialog once; the user picks per-row before
+    // applying, and until then edits stack up locally.
     const dialogRemote = remoteForDialog ?? remote
     const dialogRevision = remoteRevisionForDialog ?? r.remote.revision
     if (get(cloudConflict) === null) {

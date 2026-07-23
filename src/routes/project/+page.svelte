@@ -63,10 +63,14 @@
     tryRestoreLastProject,
   } from '$lib/project/commit'
   import { pickFolderViaDesktop, type YoutubeImportOutput } from '$lib/client/desktopBridge'
+  import {
+    openCloudProjectInBrowser,
+    loadCloudSongIntoEditor,
+  } from '$lib/client/browserCloudProject'
   import { dndzone } from 'svelte-dnd-action'
   import { STEM_TRACKS } from '$lib/export/abletonSet'
   import { syncStemJobsWithSidecar } from '$lib/stores/stemJobs'
-  import { project } from '$lib/stores/project'
+  import { project, isBrowserCloudProject } from '$lib/stores/project'
   import { audioSession } from '$lib/stores/audioSession'
   import { analyzingState } from '$lib/stores/analyzingState'
   import { readSmapJsonOnly } from '$lib/songmap/persist'
@@ -88,6 +92,7 @@
   let cloudProjectsLoading = $state(false)
   let joinDialogOpen = $state(false)
   let joinTarget = $state<CloudProjectMeta | null>(null)
+  let openingBrowserId = $state<string | null>(null)
 
   // Pending invites visible to the signed-in user — surfaced as an
   // "Invited to" section on the no-project landing. Accept promotes the
@@ -367,9 +372,36 @@
     })
   }
 
+  /** Open a shared cloud project in the browser — no local folder, no sidecar. */
+  async function onOpenInBrowser(c: CloudProjectMeta) {
+    openError = ''
+    openingBrowserId = c.id
+    try {
+      const r = await openCloudProjectInBrowser(c.id)
+      if (!r.ok) openError = r.error
+      // On success the project store is populated (osPath null) and the page
+      // re-renders into the open-project view with this project's songs.
+    } catch (e) {
+      openError = e instanceof Error ? e.message : 'Could not open in browser'
+    } finally {
+      openingBrowserId = null
+    }
+  }
+
   async function onEditSong(songId: string) {
     actionError = ''
     try {
+      // Browser cloud project (no local folder): load the song + its cloud audio
+      // through the browser path. No analyze branch — that needs the sidecar.
+      if (isBrowserCloudProject(get(project))) {
+        const r = await loadCloudSongIntoEditor(songId)
+        if (!r.ok) {
+          actionError = r.error
+          return
+        }
+        await goto('/edit')
+        return
+      }
       await loadProjectSongIntoEditor(songId)
       // If audio was attached but never analyzed (e.g. via the row's "Add
       // audio" button), jump straight into the analyze flow instead of the
@@ -858,6 +890,16 @@
                   rev {c.revision} · updated {new Date(c.updated_at).toLocaleDateString()}
                 </p>
               </div>
+              <Button
+                class=""
+                variant="outline"
+                size="sm"
+                disabled={openingBrowserId === c.id}
+                onclick={() => void onOpenInBrowser(c)}
+                title="Open in the browser — no desktop app needed. Plays the uploaded cloud audio."
+              >
+                {openingBrowserId === c.id ? 'Opening…' : 'Open in browser'}
+              </Button>
               <Button class="" variant="outline" size="sm" onclick={() => startJoin(c)}>
                 Join here
               </Button>

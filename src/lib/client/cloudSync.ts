@@ -17,6 +17,7 @@ import type {
 } from '$lib/project/types'
 import { PROJECT_FILE_VERSION, PROJECT_SONGS_DIR } from '$lib/project/types'
 import type { SongMap, ExpectedAudio } from '$lib/songmap/types'
+import type { CloudAudioManifest } from '$lib/client/cloudAudio'
 import { toCollabSongMap, collabContentFingerprint } from '$lib/songmap/collab'
 import {
   patchMetadataForFolder,
@@ -34,6 +35,7 @@ import {
 import { decodeSmapFile } from '$lib/songmap/persist'
 import { encodeSmapFile, SONG_PROJECT_FORMAT_VERSION } from '$lib/songmap/smapFile'
 import { parseSongMap } from '$lib/songmap/parse'
+import { applyRemoteSongMap } from '$lib/project/songSession'
 import {
   metadataLiteFromSongMap,
   recordRecentProjectPath,
@@ -90,6 +92,7 @@ export interface CloudSongView {
   cloud_project_id: string
   song_map: SongMap
   expected_audio: ExpectedAudio | null
+  cloud_audio: CloudAudioManifest | null
   hidden: boolean
   sort_order: number
   updated_at: string
@@ -331,7 +334,8 @@ export async function createCloudProject(): Promise<
  * route same-song conflicts through `collabMerge.ts` before writing.
  */
 export async function pullCloudChanges(): Promise<
-  { ok: true; pulledSongs: number; revision: number } | { ok: false; error: string }
+  | { ok: true; pulledSongs: number; revision: number; changedTitles: string[] }
+  | { ok: false; error: string }
 > {
   const snap = get(projectStore)
   const proj = snap.data
@@ -351,9 +355,14 @@ export async function pullCloudChanges(): Promise<
   // simply append to the manifest and leave the audio missing for
   // Phase 6 to surface.
   const syncedBySong = new Map<string, { revision: number; contentHash: string }>()
+  // Only songs whose SHARED content actually moved — a self-echo of our own
+  // push is not something to tell the user about.
+  const changedTitles: string[] = []
   for (const cloudSong of songs) {
     const res = await applyCloudSongIntoLocal(osPath, proj, cloudSong)
-    if (res) syncedBySong.set(res.songId, { revision: res.revision, contentHash: res.contentHash })
+    if (!res) continue
+    syncedBySong.set(res.songId, { revision: res.revision, contentHash: res.contentHash })
+    if (res.changed) changedTitles.push(res.title || 'Untitled song')
   }
 
   const nextManifest: ProjectFile = {
@@ -373,7 +382,12 @@ export async function pullCloudChanges(): Promise<
   }
   setProjectData(nextManifest)
   await persistManifest(osPath, nextManifest)
-  return { ok: true, pulledSongs: songs.length, revision: manifest.project.revision }
+  return {
+    ok: true,
+    pulledSongs: songs.length,
+    revision: manifest.project.revision,
+    changedTitles,
+  }
 }
 
 /**
@@ -543,6 +557,44 @@ export async function disableCloudProject(
  * trigger a `pullCloudChanges` and let the merge layer (Phase 8) sort
  * it out; for Phase 4 we just surface the conflict.
  */
+/**
+ * Push project-level manifest changes — name, song order, hidden flags.
+ *
+ * The server side for this existed from the start (`cloud_patch_manifest` +
+ * PATCH /api/cloud/projects/:id) but nothing ever called it, so renames,
+ * reorders and hide toggles were LOCAL ONLY. Worse, they were silently
+ * reverted: `pullCloudChanges` overwrites the local name from the cloud
+ * manifest, so a rename survived only until the next pull.
+ *
+ * Best-effort by design — the local manifest on disk stays the source of
+ * truth, exactly like `pushCloudSong`. A 409 means someone else moved the
+ * project revision first; the next pull reconciles.
+ */
+export async function pushCloudManifest(args: {
+  cloudProjectId: string
+  name?: string
+  orderedSongIds?: string[]
+  hiddenMap?: Record<string, boolean>
+  clientBaseRevision: number
+}): Promise<{ ok: true; revision: number } | { ok: false; conflict: boolean; error?: string }> {
+  const res = await fetch(`${BASE}/projects/${args.cloudProjectId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: args.name ?? null,
+      orderedSongIds: args.orderedSongIds ?? null,
+      hiddenMap: args.hiddenMap ?? null,
+      clientBaseRevision: args.clientBaseRevision,
+    }),
+  })
+  if (res.ok) {
+    const data = (await res.json()) as { ok: boolean; revision: number }
+    return { ok: true, revision: data.revision }
+  }
+  if (res.status === 409) return { ok: false, conflict: true }
+  return { ok: false, conflict: false, error: await res.text().catch(() => `HTTP ${res.status}`) }
+}
+
 export async function pushCloudSong(
   cloudProjectId: string,
   cloudSongId: string,
@@ -596,6 +648,9 @@ function expectedAudioFromSongMap(sm: SongMap): ExpectedAudio | null {
   if (a.fileSize !== undefined) out.fileSize = a.fileSize
   if (a.sha256) out.sha256 = a.sha256
   if (a.originalSha256) out.originalSha256 = a.originalSha256
+  // Recording identity travels with the claim: it is what lets a collaborator
+  // tell "same master, different encoding" from "wrong audio entirely".
+  if (a.fingerprint) out.fingerprint = a.fingerprint
   return out
 }
 
@@ -621,7 +676,19 @@ async function applyCloudSongIntoLocal(
   osPath: string,
   proj: ProjectFile,
   cloudSong: CloudSongView,
-): Promise<{ songId: string; revision: number; contentHash: string } | null> {
+): Promise<{
+  songId: string
+  revision: number
+  contentHash: string
+  /**
+   * False when this was our OWN push coming back (the self-echo guard). The
+   * caller uses it to decide whether the user should be told anything — being
+   * notified about your own edit is noise.
+   */
+  changed: boolean
+  /** For user-facing messages; empty when the song has no title yet. */
+  title: string
+} | null> {
   // Same "one bad row must not sink the sync" contract as `joinCloudProject`
   // — `cloudSong.song_map` has no server-side shape guarantee, and this
   // runs on every pull for every already-joined member. An uncaught throw
@@ -653,7 +720,7 @@ async function applyCloudSongIntoLocal(
     const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
     const data = await decodeSmapFile(blob)
     const local = data.project.songMap
-    const { mergeLocalIntoCollab, collabContentFingerprint } = await import('$lib/songmap/collab')
+    const { collabContentFingerprint } = await import('$lib/songmap/collab')
     const incomingHash = collabContentFingerprint(incoming)
     // Self-echo guard: if the incoming content already matches what we last
     // synced (our own push coming back via realtime, or an unchanged song),
@@ -661,12 +728,32 @@ async function applyCloudSongIntoLocal(
     // Rewriting would re-stamp a fresh hash and, if it differed by a hair,
     // make the autosave think the live song changed → push → 409 → loop.
     if (entry.lastSyncedContentHash && entry.lastSyncedContentHash === incomingHash) {
-      return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: entry.lastSyncedContentHash }
+      return {
+        songId: cloudSong.id,
+        revision: cloudSong.revision,
+        contentHash: entry.lastSyncedContentHash,
+        changed: false,
+        title: incoming.metadata?.title ?? '',
+      }
     }
-    const merged = mergeLocalIntoCollab(local, incoming)
-    // Stamp expectedAudio onto the local map so the Phase 5 reconciler
-    // can use it without re-fetching from the server.
-    merged.expectedAudio = cloudSong.expected_audio ?? undefined
+    // Route through the song session so a pull lands in MEMORY as well as on
+    // disk when the editor has this song open. Writing disk alone left the
+    // editor holding a stale copy that its next autosave wrote back over the
+    // pull. When the song is open, the session merges against the IN-MEMORY
+    // map, which may hold edits from the last debounce window that disk
+    // doesn't have yet.
+    // `lastSyncedContentHash` lets the session tell an editor that is merely
+    // displaying this song from one holding unpushed edits — the latter must be
+    // merged into, not overwritten. `expectedAudio` (the Phase 5 reconciler's
+    // input) is folded in BEFORE the map is installed, never mutated after.
+    const plan = applyRemoteSongMap({
+      songId: cloudSong.id,
+      incoming,
+      disk: local,
+      lastSyncedContentHash: entry.lastSyncedContentHash,
+      expectedAudio: cloudSong.expected_audio ?? undefined,
+    })
+    const merged = plan.merged
     // Encode + persist.
     const { encodeSmapFile } = await import('$lib/songmap/smapFile')
     const blobOut = await encodeSmapFile({
@@ -674,10 +761,22 @@ async function applyCloudSongIntoLocal(
     })
     const { writeProjectSong } = await import('./desktopProjectFs')
     await writeProjectSong(osPath, entry.folder, new Uint8Array(await blobOut.arrayBuffer()))
+    // Refresh the project-view metadata cache (title/artist/key/bpm/stems) from
+    // the just-merged map. Without this a pull wrote the new values to disk but
+    // the project LIST kept rendering the stale cache until the user opened the
+    // song and forced a sidecar re-scan — i.e. "I only see the edit after going
+    // in, and only some songs show a key". The list now updates on the pull.
+    patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(merged))
     // Report the sync watermark for this song so the caller can stamp the
     // manifest entry — this is what stops the autosave from immediately
     // re-pushing freshly-pulled content (the phantom-conflict loop).
-    return { songId: cloudSong.id, revision: cloudSong.revision, contentHash: collabContentFingerprint(merged) }
+    return {
+      songId: cloudSong.id,
+      revision: cloudSong.revision,
+      contentHash: collabContentFingerprint(merged),
+      changed: true,
+      title: merged.metadata?.title ?? '',
+    }
   } catch (e) {
     console.warn(`[cloudSync] pull: skipping malformed song ${cloudSong.id}:`, e)
     return null

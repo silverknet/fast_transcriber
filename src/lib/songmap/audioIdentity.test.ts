@@ -147,3 +147,59 @@ describe('audioIdentity · identityFromAudioRef', () => {
     expect(projected.originalSha256).toBe('def')
   })
 })
+
+describe('audioIdentity · recording identity (fingerprint)', () => {
+  const envelope = (shape: number[]): number[] =>
+    Array.from({ length: 64 }, (_, i) => shape[Math.floor((i / 64) * shape.length)]!)
+  const fp = (durationSec: number, shape: number[]) => ({
+    version: 1 as const,
+    durationSec,
+    envelope: envelope(shape),
+  })
+
+  const MASTER = fp(180, [10, 120, 240, 120, 240, 60, 255, 30])
+  /** Same recording, re-encoded: quantisation jitter, same shape. */
+  const TRANSCODE = fp(180.02, [12, 118, 238, 122, 242, 58, 255, 32])
+  const OTHER = fp(180, [240, 30, 60, 255, 10, 200, 90, 150])
+
+  it('rescues a sha disagreement when the recording is the same', () => {
+    // THE collaboration case: I have the WAV, my bandmate has the MP3.
+    // Different bytes, different size — but the grid fits both.
+    expect(
+      identityMatches(
+        { sha256: 'wav-hash', fileSize: 52_000_000, fingerprint: MASTER },
+        { sha256: 'mp3-hash', fileSize: 8_000_000, fingerprint: TRANSCODE },
+      ),
+    ).toBe('equivalent')
+  })
+
+  it('vetoes a metadata agreement when the recording differs', () => {
+    // Two different masters can agree on every cheap field. The fingerprint
+    // is the only thing that can tell them apart.
+    expect(
+      identityMatches(
+        { durationSec: 180, sampleRate: 44100, channels: 2, fileSize: 1000, fingerprint: MASTER },
+        { durationSec: 180, sampleRate: 44100, channels: 2, fileSize: 1000, fingerprint: OTHER },
+      ),
+    ).toBe('mismatch')
+  })
+
+  it('a byte-identical file is still reported as strict', () => {
+    expect(
+      identityMatches({ sha256: 'same', fingerprint: MASTER }, { sha256: 'same', fingerprint: MASTER }),
+    ).toBe('strict')
+  })
+
+  it('falls back to the old behaviour when one side has no fingerprint', () => {
+    expect(identityMatches({ sha256: 'a', fingerprint: MASTER }, { sha256: 'b' })).toBe('mismatch')
+    expect(
+      identityMatches({ durationSec: 180, fingerprint: MASTER }, { durationSec: 180 }),
+    ).toBe('loose')
+  })
+
+  it('a different cut is caught on duration even with a similar shape', () => {
+    expect(
+      identityMatches({ fingerprint: MASTER }, { fingerprint: fp(212, [10, 120, 240, 120, 240, 60, 255, 30]) }),
+    ).toBe('mismatch')
+  })
+})

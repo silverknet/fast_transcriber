@@ -1,5 +1,7 @@
 import type { AudioSession } from '$lib/stores/audioSession'
 import { emptySongMetadata } from './defaults'
+import { DEFAULT_DRAFT_NAME } from './drafts'
+import { MIGRATED_ACTIVE_DRAFT_ID } from './draftsMigrate'
 import { SONGMAP_FORMAT_VERSION } from './version'
 import type { SongMap } from './types'
 
@@ -23,6 +25,11 @@ export function createEmptySongMap(options: CreateEmptySongMapOptions = {}): Son
     sections: [],
     harmony: [],
     cueTracks: [],
+    // A new song starts on one draft. Stamping the identity here (rather than
+    // letting the parser fill it in on first load) is what keeps
+    // save → load → save byte-identical.
+    activeDraftId: MIGRATED_ACTIVE_DRAFT_ID,
+    activeDraftName: DEFAULT_DRAFT_NAME,
   }
 }
 

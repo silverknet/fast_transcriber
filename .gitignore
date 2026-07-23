@@ -54,3 +54,12 @@ answer.md
 .venv/
 __pycache__/
 *.py[cod]
+
+# Vitest browser-mode failure screenshots. The few committed under
+# src/lib/audio/__screenshots__/clientPitchShift.browser.test.ts/ are
+# intentional visual references and stay tracked; everything else here is a
+# by-product of a failing run.
+src/**/__screenshots__/
+
+# Agent worktrees (transient; created by parallel agent runs)
+.claude/worktrees/

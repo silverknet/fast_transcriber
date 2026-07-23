@@ -28,8 +28,9 @@
  * The merge is pure. `applyConflictDecisions` builds the final
  * SongMap from the conflict report + user choices.
  */
-import type { SongMap, HarmonyEvent, Section, Bar, Beat, CueEvent, CueTrack } from './types'
+import type { SongMap, HarmonyEvent, Section, SongDraft, Bar, Beat, CueEvent, CueTrack } from './types'
 import { canonicalEqual } from './collab'
+import { DEFAULT_DRAFT_NAME, makeDraft } from './drafts'
 
 /**
  * One disputed change. `path` identifies the field so the UI can label
@@ -230,8 +231,69 @@ function mergeCueTracks(
  * field to the cloud value; the UI can flip individual entries back
  * via `applyConflictDecisions`.
  */
+/** The active draft of one side: its identity AND its content. */
+type DraftSide = {
+  id: string
+  name: string
+  sections: Section[]
+  harmony: HarmonyEvent[]
+  lyrics: SongMap['lyrics']
+}
+
+function activeDraftSide(map: SongMap): DraftSide | null {
+  if (!map.activeDraftId) return null
+  return {
+    id: map.activeDraftId,
+    name: map.activeDraftName ?? DEFAULT_DRAFT_NAME,
+    sections: map.sections ?? [],
+    harmony: map.harmony ?? [],
+    lyrics: map.lyrics,
+  }
+}
+
+/**
+ * Store a side's active draft into `list`, REPLACING any entry with the same
+ * id rather than skipping it.
+ *
+ * Replacing matters: the other device may already hold a copy of this draft
+ * from before it switched away, and that copy is a stale snapshot. The side
+ * whose ROOT holds the draft has been editing it since, so its content is the
+ * live one. Skipping on id-match let the stale copy shadow those edits and
+ * silently dropped them.
+ */
+function preserveSide(list: SongDraft[], side: DraftSide): SongDraft[] {
+  // No `createdAt`: merge output is fingerprinted and pushed, so it must be
+  // byte-deterministic — a wall-clock stamp would make two devices merging
+  // the same pair disagree.
+  const draft = makeDraft({
+    id: side.id,
+    name: side.name,
+    source: 'manual',
+    sections: side.sections,
+    harmony: side.harmony,
+    lyrics: side.lyrics,
+  })
+  const at = list.findIndex((d) => d.id === side.id)
+  if (at === -1) return [...list, draft]
+  // Keep position stable so the merge stays deterministic.
+  return list.map((d, i) => (i === at ? draft : d))
+}
+
 export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const conflicts: Conflict[] = []
+
+  // ── Song drafts decide how the root content merges ────────────────────────
+  // `harmony` / `sections` / `lyrics` at the root are the ACTIVE DRAFT's
+  // content. Per-id merging of those fields is only meaningful when both sides
+  // are ON THE SAME DRAFT. When they diverge — one collaborator switched drafts
+  // or ran a sheet import — a per-id union blends two different arrangements
+  // into one: 15 sections from my draft plus 13 from theirs, an arrangement
+  // neither person made. So divergence is resolved at DRAFT level: one side's
+  // draft wins wholesale and the other is preserved in `drafts[]`, losing
+  // nothing and mixing nothing.
+  const localSide = activeDraftSide(local)
+  const cloudSide = activeDraftSide(cloud)
+  const draftsDiverged = localSide !== null && cloudSide !== null && localSide.id !== cloudSide.id
 
   // ── Lists keyed by id ──
   // Harmony: per-id merging is right for co-editing, but a sheet import /
@@ -247,10 +309,13 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     (cloud.harmony?.length ?? 0) > 0 &&
     harmonyOverlap / Math.max(local.harmony.length, cloud.harmony.length) < 0.1 &&
     !canonicalEqual(local.harmony, cloud.harmony)
-  const harmony = harmonyWholesale
-    ? { merged: cloud.harmony, conflicts: [] as Conflict[] }
-    : mergeByIdList<HarmonyEvent>(local.harmony, cloud.harmony, 'harmony', 'Chord at beat')
-  if (harmonyWholesale) {
+  const harmony =
+    draftsDiverged || harmonyWholesale
+      ? { merged: cloud.harmony, conflicts: [] as Conflict[] }
+      : mergeByIdList<HarmonyEvent>(local.harmony, cloud.harmony, 'harmony', 'Chord at beat')
+  // A draft divergence already raises ONE draft-level conflict below that
+  // carries the chords with it; don't also raise a chord-level one.
+  if (harmonyWholesale && !draftsDiverged) {
     // mine/theirs carry the ACTUAL arrays so applyConflictDecisions can
     // install the chosen side; the dialog's describe() truncates for display.
     conflicts.push({
@@ -262,7 +327,9 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     })
   }
   conflicts.push(...harmony.conflicts)
-  const sections = mergeByIdList<Section>(local.sections, cloud.sections, 'sections', 'Section')
+  const sections = draftsDiverged
+    ? { merged: cloud.sections, conflicts: [] as Conflict[] }
+    : mergeByIdList<Section>(local.sections, cloud.sections, 'sections', 'Section')
   conflicts.push(...sections.conflicts)
   const bars = mergeByIdList<Bar>(local.timeline?.bars, cloud.timeline?.bars, 'timeline/bars', 'Bar')
   conflicts.push(...bars.conflicts)
@@ -320,7 +387,13 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   if (trC) conflicts.push(trC)
   // Whole-field LWW for lyrics (like transpose) — lyric edits are wholesale
   // (paste / re-align), so per-word merging isn't worth the complexity.
-  const lyC = classifyScalar(local.lyrics, cloud.lyrics, 'lyrics', 'Lyrics')
+  // Lyrics belong to the ACTIVE DRAFT. When the drafts diverged, the
+  // draft-level conflict below already carries them; raising a separate lyrics
+  // row would let the user resolve it the opposite way and end up with one
+  // draft's lyrics over another draft's chords.
+  const lyC = draftsDiverged
+    ? null
+    : classifyScalar(local.lyrics, cloud.lyrics, 'lyrics', 'Lyrics')
   if (lyC) conflicts.push(lyC)
   // Drum track: whole-field LWW like lyrics. Compare with renderExport
   // stripped so a local re-render (new fingerprint/path) never conflicts.
@@ -332,26 +405,37 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const bmCloud = cloud.bassMidi ? { ...cloud.bassMidi, renderExport: undefined } : undefined
   const bmC = classifyScalar(bmLocal, bmCloud, 'bassMidi', 'Bass track')
   if (bmC) conflicts.push(bmC)
-  // Whole-field LWW for stored chord tracks (v5) — layers are snapshots
-  // created/consumed wholesale (stash on import, switch), like lyrics.
-  const clC = classifyScalar(local.chordLayers, cloud.chordLayers, 'chordLayers', 'Chord tracks')
-  if (clC) conflicts.push(clC)
-  const clnC = classifyScalar(
-    local.activeChordLayerName,
-    cloud.activeChordLayerName,
-    'activeChordLayerName',
-    'Active chord track name',
-  )
-  if (clnC) conflicts.push(clnC)
-  const slC = classifyScalar(local.sectionLayers, cloud.sectionLayers, 'sectionLayers', 'Section layouts')
-  if (slC) conflicts.push(slC)
-  const slnC = classifyScalar(
-    local.activeSectionLayerName,
-    cloud.activeSectionLayerName,
-    'activeSectionLayerName',
-    'Active section layout name',
-  )
-  if (slnC) conflicts.push(slnC)
+  // Stored drafts merge BY ID, not last-write-wins: two collaborators can each
+  // create a draft between syncs, and whole-field LWW would drop one of them.
+  const storedDrafts = mergeByIdList<SongDraft>(local.drafts, cloud.drafts, 'drafts', 'Draft')
+  conflicts.push(...storedDrafts.conflicts)
+
+  if (draftsDiverged) {
+    // Which draft is SELECTED is not a dangerous decision — it is lossless
+    // whichever way it goes, because both drafts are preserved in `drafts[]`
+    // regardless. It's just "which one am I looking at", and the picker changes
+    // that in one click. So it is `safe`: it settles without a dialog and
+    // auto-resolves toward MINE (see autoResolveDecisions), so a collaborator
+    // switching drafts on their machine never yanks the draft out from under
+    // you. Marking it dangerous forced a dialog on an ordinary open — exactly
+    // the interruption the whole auto-settle path exists to remove.
+    conflicts.push({
+      path: 'activeDraft',
+      label: `Selected draft (mine “${localSide!.name}” vs cloud “${cloudSide!.name}”)`,
+      severity: 'safe',
+      mine: localSide,
+      theirs: cloudSide,
+    })
+  } else {
+    // Same draft on both sides — only the display name can disagree.
+    const dfnC = classifyScalar(
+      local.activeDraftName,
+      cloud.activeDraftName,
+      'activeDraftName',
+      'Draft name',
+    )
+    if (dfnC) conflicts.push(dfnC)
+  }
 
   // ── expectedAudio swap is dangerous (different master) ──
   if (
@@ -384,10 +468,19 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   }
 
   // ── Assemble merged result, cloud wins by default ──
+  // Cloud's draft sits at the root, so LOCAL's active draft has to be moved
+  // into storage or its content would be dropped on the floor. The active
+  // draft is never also stored (see `validate.ts`), so filter it out.
+  let mergedDrafts = storedDrafts.merged
+  if (draftsDiverged) mergedDrafts = preserveSide(mergedDrafts, localSide!)
+  const activeId = cloud.activeDraftId ?? local.activeDraftId
+  mergedDrafts = mergedDrafts.filter((d) => d.id !== activeId)
+
   const merged: SongMap = {
     ...cloud,
     harmony: harmony.merged,
     sections: sections.merged,
+    drafts: mergedDrafts.length > 0 ? mergedDrafts : undefined,
     cueTracks: cueTracks.merged,
     timeline: {
       bars: bars.merged,
@@ -396,6 +489,78 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   }
 
   return { merged, conflicts }
+}
+
+// ── Resolving without a dialog ──────────────────────────────────────────
+
+/**
+ * Is this value "nothing"? Used to tell a real disagreement (two edits) from a
+ * one-sided ABSENCE (one copy simply never had the field).
+ *
+ * Numbers and booleans are always content — `0`, `false` and
+ * `{ baseSemitones: 0 }` are deliberate values, not blanks. Containers are
+ * empty when everything inside them is, so a never-populated
+ * `{ words: [], sourceText: '' }` reads as absent while
+ * `{ words: [], sourceText: 'hey' }` does not.
+ */
+function isEmptyValue(v: unknown): boolean {
+  if (v === undefined || v === null) return true
+  if (typeof v === 'string') return v.trim().length === 0
+  if (Array.isArray(v)) return v.length === 0
+  if (typeof v === 'object') {
+    return Object.values(v as Record<string, unknown>).every(isEmptyValue)
+  }
+  return false
+}
+
+/** Does this report contain anything a human must look at before it lands? */
+export function hasDangerousConflict(report: MergeReport): boolean {
+  return report.conflicts.some((c) => c.severity === 'dangerous')
+}
+
+/**
+ * Decisions for settling a report WITHOUT asking the user.
+ *
+ * "Cloud wins" is the right default for a genuine disagreement: two people
+ * edited the same field and the server's copy keeps everyone consistent. It is
+ * NOT right when the cloud side is simply EMPTY, because then "cloud wins" is
+ * not a choice between two edits — it is a deletion of content only this device
+ * has. Cloud sync was push-only-on-open for a long time, so a cloud row can be
+ * months behind and missing whole fields (a `formatVersion` 2 row predates both
+ * `transpose` and `lyrics`, so it has neither). Letting it win there would wipe
+ * work that never reached the server.
+ *
+ * So one asymmetry is corrected: when the cloud value is empty and the local one
+ * is not, keep the local value. That direction is provably lossless — the cloud
+ * had nothing to lose. The reverse (cloud has content, local is empty) still
+ * takes the cloud value, and two non-empty sides still resolve to cloud.
+ *
+ * Items keyed by id never qualify: a conflict there means BOTH sides hold the
+ * item, so neither is empty and per-id last-write-wins stands. Dangerous rows
+ * are skipped outright — they go to the dialog rather than being auto-applied.
+ *
+ * Pure and order-independent, so two devices settling the same pair agree.
+ */
+export function autoResolveDecisions(report: MergeReport): ConflictDecisions {
+  const decisions: ConflictDecisions = new Map()
+  for (const c of report.conflicts) {
+    if (c.severity === 'dangerous') continue
+    // Which draft is selected keeps MINE: it's a view preference, and having a
+    // collaborator's selection replace yours mid-edit is jarring for no gain
+    // (both drafts are preserved either way). Everything else keeps local only
+    // when the cloud side is empty, so a stale row can't delete local content.
+    if (c.path === 'activeDraft') decisions.set(c.path, 'mine')
+    else if (isEmptyValue(c.theirs) && !isEmptyValue(c.mine)) decisions.set(c.path, 'mine')
+  }
+  return decisions
+}
+
+/**
+ * The SongMap to adopt when a report can be settled without prompting.
+ * Only meaningful when `hasDangerousConflict(report)` is false.
+ */
+export function autoResolvedMerge(report: MergeReport): SongMap {
+  return applyConflictDecisions(report, autoResolveDecisions(report))
 }
 
 /**
@@ -504,10 +669,32 @@ export function applyConflictDecisions(
     else if (c.path === 'drumMidi') result = { ...result, drumMidi: c.mine as SongMap['drumMidi'] }
     else if (c.path === 'bassMidi') result = { ...result, bassMidi: c.mine as SongMap['bassMidi'] }
     else if (c.path === 'harmony') result = { ...result, harmony: c.mine as SongMap['harmony'] }
-    else if (c.path === 'chordLayers') result = { ...result, chordLayers: c.mine as SongMap['chordLayers'] }
-    else if (c.path === 'activeChordLayerName') result = { ...result, activeChordLayerName: c.mine as string | undefined }
-    else if (c.path === 'sectionLayers') result = { ...result, sectionLayers: c.mine as SongMap['sectionLayers'] }
-    else if (c.path === 'activeSectionLayerName') result = { ...result, activeSectionLayerName: c.mine as string | undefined }
+    else if (c.path === 'activeDraftName') {
+      result = { ...result, activeDraftName: c.mine as string | undefined }
+    } else if (c.path.startsWith('drafts/')) {
+      const id = c.path.slice('drafts/'.length)
+      const next = (result.drafts ?? []).map((d) => (d.id === id ? (c.mine as SongDraft) : d))
+      result = { ...result, drafts: next.length > 0 ? next : undefined }
+    } else if (c.path === 'activeDraft') {
+      // Swap which draft is at the root. The side being displaced must be
+      // stored, or choosing "mine" would discard the cloud collaborator's
+      // draft entirely — the merge stays lossless whichever way the user picks.
+      const mine = c.mine as DraftSide
+      const theirs = c.theirs as DraftSide
+      const stored = preserveSide(
+        (result.drafts ?? []).filter((d) => d.id !== mine.id),
+        theirs,
+      )
+      result = {
+        ...result,
+        sections: mine.sections,
+        harmony: mine.harmony,
+        lyrics: mine.lyrics,
+        drafts: stored.length > 0 ? stored : undefined,
+        activeDraftId: mine.id,
+        activeDraftName: mine.name,
+      }
+    }
     else if (c.path === 'expectedAudio') result = { ...result, expectedAudio: c.mine as SongMap['expectedAudio'] }
     else if (c.path === 'audio') result = { ...result, audio: c.mine as SongMap['audio'] }
     // `timeline/bars-count` is informational — the per-id merges above

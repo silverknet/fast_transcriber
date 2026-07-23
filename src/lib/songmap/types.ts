@@ -4,6 +4,7 @@
  */
 
 import { SONGMAP_FORMAT_VERSION } from './version'
+import type { AudioFingerprint } from '$lib/audio/audioFingerprint'
 
 export type NoteName = 'C' | 'D' | 'E' | 'F' | 'G' | 'A' | 'B'
 
@@ -20,6 +21,19 @@ export type ChordSymbol = {
   accidental?: Accidental
   quality?: string
   extensions?: string[]
+  /**
+   * Colour tones that refine the quality without changing it (v6): `b5`, `#5`,
+   * `b9`, `#9`, `#11`, `b13`, plus bare `6` / `5` and the `7` of a `dim7`.
+   * Rendered verbatim after the quality suffix, so `min7` + `['b5']` prints
+   * `m7b5`.
+   *
+   * These MUST live in the structure rather than only in `displayRaw`: the
+   * lead sheet and the mixer chord rail both render via `formatChordSymbol()`,
+   * which rebuilds the label from these fields, and `transposeChord()` does the
+   * same. Colour kept only in `displayRaw` was invisible to both — an imported
+   * `Bm7b5` displayed as `Bm7` and transposed to `C#m7`.
+   */
+  alterations?: string[]
   bass?: NoteName
   bassAccidental?: Accidental
   /** Original symbol string for display / round-trip UI */
@@ -81,11 +95,9 @@ export type HarmonyEvent = {
 }
 
 /**
- * A stored, INACTIVE alternative chord track (v5). The active track is always
- * `SongMap.harmony` — every consumer (grid, lead sheet, mixer rail, exports)
- * keeps reading that one field; layers are parallel snapshots the user can
- * switch to (see `songmap/chordLayers.ts`). Lets a sheet import land without
- * destroying hand-entered chords.
+ * LEGACY (v5, read-only). A stored, inactive alternative chord track, paired
+ * with its `SectionLayer` twin only by a matching `name` string. Superseded by
+ * `SongDraft` in v6 — kept so the v5 parser can read old `.smap` files.
  */
 export type ChordLayer = {
   id: string
@@ -98,9 +110,8 @@ export type ChordLayer = {
 }
 
 /**
- * A stored, INACTIVE alternative section layout (v5) — the sections twin of
- * `ChordLayer`, with the same swap semantics (`songmap/sectionLayers.ts`).
- * The active layout is always `SongMap.sections`.
+ * LEGACY (v5, read-only) — the sections twin of `ChordLayer`. Superseded by
+ * `SongDraft` in v6.
  */
 export type SectionLayer = {
   id: string
@@ -108,6 +119,40 @@ export type SectionLayer = {
   source?: 'manual' | 'sheet-import' | 'suggestions'
   createdAt?: string
   sections: Section[]
+}
+
+/** What produced a draft (display hint only). */
+export type DraftSource = 'manual' | 'sheet-import' | 'suggestions'
+
+/**
+ * A stored, INACTIVE song draft (v6) — one complete take on the song's
+ * arrangement: its sections, its chords, and its lyrics as ONE unit.
+ *
+ * The ACTIVE draft is never in this array. Its content lives at the SongMap
+ * root (`sections` / `harmony` / `lyrics`), identified by `activeDraftId` /
+ * `activeDraftName`. That keeps every consumer — grid, lead sheet, mixer rail,
+ * live mode, Ableton export — reading the same three root fields it always
+ * has, with no knowledge of drafts at all. Switching swaps all three fields
+ * with a stored draft in one atomic, lossless step (see `songmap/drafts.ts`).
+ *
+ * Replaces v5's `chordLayers` + `sectionLayers`, which were two independent
+ * stacks paired only by a matching name string — a pairing that silently broke
+ * whenever the two sides disambiguated duplicate names differently.
+ *
+ * The song's beat grid, audio, cues and count-in are NOT part of a draft: they
+ * are shared by every draft, so the timeline can never fork and the editor
+ * stays in lockstep with the exported `.als` across all drafts.
+ */
+export type SongDraft = {
+  id: string
+  /** User-facing draft name, e.g. `My draft`, `Sheet import`. */
+  name: string
+  source?: DraftSource
+  createdAt?: string
+  sections: Section[]
+  harmony: HarmonyEvent[]
+  /** Word-level lyrics for this draft; absent means "no lyrics imported". */
+  lyrics?: Lyrics
 }
 
 export type SectionKind =
@@ -359,6 +404,19 @@ export type AudioReference = {
   /** SHA-256 of the original HQ uploaded file — used to verify re-uploads for full-quality re-analysis. */
   originalSha256?: string
   /**
+   * Recording identity: a coarse loudness envelope of the decoded audio (v6).
+   *
+   * Answers "is this the same performance?" where `sha256` only answers "is
+   * this the same file". Two collaborators holding the same master as a WAV
+   * and an MP3 have different shas but the same fingerprint — and the same
+   * bar/beat grid fits both. A different edit, or the same music shifted by a
+   * few seconds of head silence, does NOT match, because every stored
+   * `Bar.startSec` would then be wrong.
+   *
+   * See `$lib/audio/audioFingerprint.ts`.
+   */
+  fingerprint?: AudioFingerprint
+  /**
    * POSIX-style path to the original audio file, **relative to the `.smap` file's directory**.
    * Typical value: `"audio/<fileName>"`. Resolves to `<projectPath>/<songFolder>/audio/<fileName>`
    * in project mode and to a sibling `audio/` folder when a single-song bundle is shared.
@@ -384,6 +442,8 @@ export type ExpectedAudio = {
   fileSize?: number
   sha256?: string
   originalSha256?: string
+  /** Recording identity — see `AudioReference.fingerprint` (v6). */
+  fingerprint?: AudioFingerprint
 }
 
 export type Meter = { numerator: number; denominator: number }
@@ -555,20 +615,33 @@ export type SongMapV3 = {
   app?: SongMapAppInfo
   metadata: SongMetadata
   transpose?: SongTranspose
-  /** Imported lyrics + word-level timing aligned to the audio (v4). */
+  /**
+   * Imported lyrics + word-level timing aligned to the audio (v4). Belongs to
+   * the ACTIVE draft (v6) — switching drafts swaps this field too.
+   */
   lyrics?: Lyrics
   audio?: AudioReference
   timeline: SongMapTimeline
+  /** Sections of the ACTIVE draft (v6). */
   sections: Section[]
+  /** Chords of the ACTIVE draft (v6). */
   harmony: HarmonyEvent[]
-  /** Inactive alternative chord tracks (v5); `harmony` is the active one. */
-  chordLayers?: ChordLayer[]
-  /** Name shown for the ACTIVE chord track when layers exist. */
-  activeChordLayerName?: string
-  /** Inactive alternative section layouts (v5); `sections` is the active one. */
-  sectionLayers?: SectionLayer[]
-  /** Name shown for the ACTIVE section layout when layers exist. */
-  activeSectionLayerName?: string
+  /**
+   * Stored INACTIVE drafts (v6). The active draft is NOT in here — its content
+   * is `sections` / `harmony` / `lyrics` above. See `songmap/drafts.ts`.
+   */
+  drafts?: SongDraft[]
+  /** Stable id of the ACTIVE draft, whose content lives at the root. */
+  activeDraftId?: string
+  /** Display name of the ACTIVE draft. */
+  activeDraftName?: string
+  /**
+   * ISO creation time of the ACTIVE draft. Stored drafts carry their own
+   * `createdAt`; this is the equivalent for the one living at the root, so the
+   * draft switcher can show every draft's date. Preserved across switches (a
+   * draft keeps its original creation time when it moves active↔stored).
+   */
+  activeDraftCreatedAt?: string
   cueTracks: CueTrack[]
   /**
    * Count-in beats before the song start, independent of cue speech. When

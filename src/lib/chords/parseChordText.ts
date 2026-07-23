@@ -48,11 +48,19 @@ function parseQuality(rest: string): QualityParse {
   const r = rest
   if (!r.length) return { quality: 'major', extensions: undefined, restConsumed: '' }
 
+  // CASE IS SIGNIFICANT for the single-letter forms: `M7` is a MAJOR seventh,
+  // `m7` a MINOR seventh. The spelled-out words (maj/min/mi/dim/aug/sus/add)
+  // stay case-insensitive because they're unambiguous.
+  //
+  // The `/i` flag used to be on the `M7` rule, which made it match lowercase
+  // `m7` as well — and because it sits above the `m7` rule, EVERY minor
+  // seventh parsed as a major seventh (`Dm7` → `Dmaj7`). The `(?![a-z])`
+  // guard was already there for exactly this reason; `/i` defeated it.
   const tryPatterns: { pattern: RegExp; quality: string; ext?: string[] }[] = [
     { pattern: /^maj7/i, quality: 'maj7' },
     { pattern: /^ma7/i, quality: 'maj7' },
-    { pattern: /^M7(?![a-z])/i, quality: 'maj7' },
-    { pattern: /^m7(?![a-z0-9])/i, quality: 'min7' },
+    { pattern: /^M7(?![a-z])/, quality: 'maj7' },
+    { pattern: /^m7(?![a-z0-9])/, quality: 'min7' },
     { pattern: /^min7/i, quality: 'min7' },
     { pattern: /^mi7/i, quality: 'min7' },
     { pattern: /^\-7/i, quality: 'min7' },
@@ -69,7 +77,9 @@ function parseQuality(rest: string): QualityParse {
     { pattern: /^sus2/i, quality: 'sus2' },
     { pattern: /^sus/i, quality: 'sus4' },
     { pattern: /^add9/i, quality: 'add9' },
-    { pattern: /^m(?![aj0-9])/i, quality: 'minor' },
+    // Lowercase only: bare `m` is minor, bare `M` is major (and falls through
+    // to the `major` default below).
+    { pattern: /^m(?![aj0-9])/, quality: 'minor' },
     { pattern: /^\-(?![0-9])/, quality: 'minor' },
     { pattern: /^7(?![0-9])/i, quality: '7' },
     { pattern: /^9\b/i, quality: '7', ext: ['9'] },
@@ -119,6 +129,11 @@ export function parseChordText(raw: string): ParseChordResult {
     }
   }
 
+  // Colour tones the quality patterns don't cover (`b5`, `#9`, `b13`…). Kept
+  // rather than dropped so a hand-typed `Bm7b5` survives display and transpose
+  // — see `ChordSymbol.alterations`.
+  const alterations = afterQ.match(/[b#](?:5|6|9|11|13)/g) ?? undefined
+
   let bass: NoteName | undefined
   let bassAccidental: Accidental | undefined
   if (bassPart.length) {
@@ -133,6 +148,7 @@ export function parseChordText(raw: string): ParseChordResult {
     accidental,
     quality,
     extensions,
+    alterations,
     bass,
     bassAccidental,
     displayRaw: '',

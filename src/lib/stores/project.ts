@@ -85,8 +85,11 @@ export type ProjectEditingMode = 'project-song' | 'standalone' | null
 
 export interface ProjectStoreState {
   /**
-   * Absolute OS path to the project folder. Null when no project is open;
-   * always non-null when `data` is non-null.
+   * Absolute OS path to the project folder. Null when no project is open, and
+   * — the one exception — null when a cloud project is open in BROWSER mode
+   * (no local folder; storage is the cloud + IndexedDB). Otherwise non-null
+   * whenever `data` is non-null. `osPath === null && data !== null` is the
+   * "browser mode" signal.
    */
   osPath: string | null
   data: ProjectFile | null
@@ -124,6 +127,30 @@ export function setActiveProject(
 
 export function setProjectData(data: ProjectFile): void {
   project.update((s) => ({ ...s, data }))
+}
+
+/**
+ * Open a cloud project in BROWSER mode — no local folder, `osPath` stays null.
+ * File I/O goes to the cloud + IndexedDB, not the sidecar. This is the only
+ * setter that leaves `data` non-null while `osPath` is null.
+ */
+export function setBrowserCloudProject(
+  data: ProjectFile,
+  metadataByFolder: Record<string, ProjectSongMetadataLite> = {},
+): void {
+  project.set({
+    osPath: null,
+    data,
+    metadataByFolder,
+    activeSongFolder: null,
+    activeSongId: null,
+    editingMode: null,
+  })
+}
+
+/** True when a project is open with no local folder (cloud + IndexedDB only). */
+export function isBrowserCloudProject(s: ProjectStoreState): boolean {
+  return s.osPath === null && s.data !== null
 }
 
 export function setMetadataByFolder(map: Record<string, ProjectSongMetadataLite>): void {

@@ -1667,10 +1667,13 @@ function escapeXmlAttr(s: string): string {
 // ---------------------------------------------------------------------------
 
 function xmlLocator(id: number, beatTime: number, name: string): string {
+  // `name` is a SECTION LABEL — user text, and chord-sheet import derives it
+  // straight from pasted material. An unescaped `&`, `<` or `"` produces
+  // malformed XML, and Live can crash on a malformed set (see AGENTS.md).
   return `<Locator Id="${id}">
 				<LomId Value="0" />
 				<Time Value="${beatTime.toFixed(6)}" />
-				<Name Value="${name}" />
+				<Name Value="${escapeXmlAttr(name)}" />
 				<Annotation Value="" />
 				<IsSongStart Value="false" />
 			</Locator>`

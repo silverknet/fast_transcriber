@@ -118,6 +118,12 @@
     showAudioBorders = $bindable(true),
     /** Sections mode toolbar — invoked when the user clicks "Reanalyze". */
     onReanalyzeBorders = undefined as (() => void) | undefined,
+    /**
+     * Fired once per successful decode with the decoded buffer. Lets the host
+     * derive things that need PCM (the recording fingerprint) without this
+     * component reaching into stores.
+     */
+    onAudioDecoded = undefined as ((buffer: AudioBuffer) => void) | undefined,
     /** Sections mode toolbar — install progress 0..100 while `status === 'installing'`. */
     sectionsInstallProgress = 0,
     sectionsSelectionBarIds = $bindable<string[]>([]),
@@ -1060,6 +1066,11 @@
       timelineSec = buf.duration
       decodedAudioBuffer = buf
       viewStart = 0
+
+      // Hand the decoded PCM to the host (see `onAudioDecoded`) — the editor
+      // uses it to backfill the recording fingerprint for songs imported
+      // before v6, or via the sidecar path that skips decoding.
+      onAudioDecoded?.(buf)
       viewEnd = buf.duration
 
       objectUrl = URL.createObjectURL(file)

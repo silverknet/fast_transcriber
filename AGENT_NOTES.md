@@ -232,3 +232,40 @@ Transposition note: the `bass-gen` lane deliberately has NO
 `renderBassTrackWavBlob(sm, { transposeSemitones })` (shifts the MIDI notes,
 skips the saved render). Don't add audio pitch-shifting to that lane; it
 would double-shift.
+
+## 2026-07-21 (claude) — Count-in swallowed the downbeat click
+
+Fourth sync bug, same family as the three in `HANDOFF_FOR_CODEX.md`.
+
+With a count-in enabled, bar 1 beat 1 got NO click and a stray tick fired
+~2 s early inside the count-in. Cause: `#computeCurrentPosition()` floors
+position at `playStartPositionSec` while `ctx.currentTime` is still short of
+`playStartCtxTime`, so the click loop's `planTime` read `0` for the whole
+pre-roll. Beat 1 sits at `clickPoints.timeSec === 0`, which satisfies
+`timeSec <= planTime + CLICK_LOOKAHEAD_SEC` on the very first rAF — the click
+was scheduled at `ctxNow + CLICK_SCHEDULE_LEAD_SEC` and `#nextClickIdx`
+stepped past it, so the real downbeat had nothing left to fire. The
+`c.timeSec >= -1e-9` guard skips the negative count-in points but not a point
+at exactly zero.
+
+Fix: split the derivation. `#computeSchedulingPosition()` returns the SIGNED
+position (negative during pre-roll) and is what the click loop uses;
+`#computeCurrentPosition()` is that value floored at `playStartPositionSec`
+and remains the UI/transport contract. Do NOT let the signed value reach
+`currentTime` — `WaveformPlayer`'s `playheadX` maps it straight to an
+x-coordinate with no clamp, and `pause()` writes it back.
+
+`#playPreRollSec` was dead state (assigned, never read) and is now deleted —
+it's redundant. `#playStartCtxTime` is `ctx.currentTime + lookahead + preroll`,
+so the signed shortfall already carries the pre-roll.
+
+Side benefit: the same floor was firing the first click up to
+`PLAY_START_LOOKAHEAD_SEC` (40 ms) early even with NO count-in. Also fixed.
+
+Measured scheduled oscillator starts relative to song start, count-in 4 @ 120bpm:
+  before: -2.000 -1.500 -1.000 -0.500 -2.038 +0.500
+  after:  -2.000 -1.500 -1.000 -0.500  0.000 +0.500
+Locked by `playbackController.browser.test.ts > "clicks bar 1 beat 1 on the
+downbeat and adds nothing to the count-in"`, which asserts on scheduled
+`osc.start(when)` times relative to the song source's own scheduled start —
+no wall-clock in the pass condition.

@@ -104,6 +104,14 @@
     }
     return `Desktop app: not running${$desktopCompanionStatus.lastError ? ` (${$desktopCompanionStatus.lastError})` : ''}${ping}`
   })
+  // Explicit MODE badge: which mode am I in, and which audio am I hearing? The
+  // desktop symbol is promoted from a plain status dot into a labelled badge.
+  let modeLabel = $derived(desktopConnected ? 'Desktop · HD' : 'Browser · cloud')
+  let modeTooltip = $derived(
+    desktopConnected
+      ? `Desktop mode — using the local HD audio master. Analysis, stems, transcription & TTS available. ${desktopStatusTitle}`
+      : `Browser mode — streaming compressed cloud audio. You can play, edit chords/sections, and collaborate live. Analysis, stems & transcription need the BarBro desktop app. ${desktopStatusTitle}`,
+  )
 
   const debugJsonText = $derived.by(() => {
     const sm = $songMap
@@ -433,11 +441,12 @@
     <CloudSyncPill />
     <a
       href="/download"
-      class="chrome-icon {desktopConnected ? 'is-connected' : ''}"
-      title={desktopStatusTitle}
-      aria-label={desktopStatusTitle}
+      class="chrome-icon chrome-mode {desktopConnected ? 'is-connected' : 'is-browser'}"
+      title={modeTooltip}
+      aria-label={modeTooltip}
     >
       <Monitor class="size-4" aria-hidden="true" />
+      <span class="mode-label">{modeLabel}</span>
     </a>
     <button
       type="button"
@@ -704,6 +713,38 @@
     border-color: color-mix(in oklch, #047857 72%, var(--foreground));
     background: color-mix(in oklch, #6ee7b7 22%, var(--card));
     color: var(--foreground);
+  }
+
+  /* The desktop symbol promoted to a labelled MODE badge (Desktop·HD vs
+     Browser·cloud) — the at-a-glance answer to "which mode + which audio". */
+  .chrome-icon.chrome-mode {
+    width: auto;
+    overflow: visible;
+    padding: 0 0.5rem;
+    gap: 0.3rem;
+  }
+  .chrome-mode .mode-label {
+    font-size: 0.6875rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  /* Browser mode: distinct amber tint so it never reads as the desktop state. */
+  .chrome-icon.is-browser {
+    border-color: color-mix(in oklch, #b45309 60%, var(--foreground));
+    background: color-mix(in oklch, #fcd34d 20%, var(--card));
+    color: var(--foreground);
+  }
+
+  @media (max-width: 920px) {
+    /* Tight nav: keep the badge to its icon; the tooltip still names the mode. */
+    .chrome-mode .mode-label {
+      display: none;
+    }
+    .chrome-icon.chrome-mode {
+      width: 1.6rem;
+      padding: 0;
+    }
   }
 
   .app-menu-error {

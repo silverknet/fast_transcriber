@@ -23,12 +23,14 @@ describe('parseStrictChordToken', () => {
       ['D7', { root: 'D', quality: '7' }],
       ['EbM9', { root: 'E', quality: 'maj7' }],
       ['F#m7b5', { root: 'F', quality: 'min7' }],
-      ['G7sus4', { root: 'G', quality: 'sus4' }],
+      // A dominant with a suspended 4th keeps its seventh: as plain `sus4` it
+      // rendered as `Gsus4` and the 7 vanished from the chart.
+      ['G7sus4', { root: 'G', quality: '7sus4' }],
       ['Dsus2', { root: 'D', quality: 'sus2' }],
       ['Cadd9', { root: 'C', quality: 'add9' }],
       ['Bb', { root: 'B', quality: 'major' }],
       ['Bbm', { root: 'B', quality: 'minor' }],
-      ['C6/9', { root: 'C', quality: 'major' }],
+      ['C6/9', { root: 'C', quality: 'major6' }],
       ['Caug', { root: 'C', quality: 'aug' }],
       ['C+', { root: 'C', quality: 'aug' }],
       ['C°7', { root: 'C', quality: 'dim' }],

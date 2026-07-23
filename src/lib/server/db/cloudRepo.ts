@@ -27,6 +27,7 @@ export interface CloudSongRow {
   cloud_project_id: string
   song_map: unknown // collaborative SongMap shape; consumers cast
   expected_audio: unknown | null
+  cloud_audio: unknown | null // CloudAudioManifest; consumers cast
   hidden: boolean
   sort_order: number
   updated_at: string
@@ -111,7 +112,7 @@ export async function listCloudSongs(
 ): Promise<CloudSongRow[]> {
   let q = supa
     .from('cloud_songs')
-    .select('id,cloud_project_id,song_map,expected_audio,hidden,sort_order,updated_at,updated_by,revision')
+    .select('id,cloud_project_id,song_map,expected_audio,cloud_audio,hidden,sort_order,updated_at,updated_by,revision')
     .eq('cloud_project_id', projectId)
     .order('sort_order', { ascending: true })
   if (typeof sinceRevision === 'number' && sinceRevision > 0) {
