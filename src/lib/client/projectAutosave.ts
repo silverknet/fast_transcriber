@@ -326,6 +326,35 @@ function scheduleCloudPush(): void {
 }
 
 /**
+ * Fire any DEBOUNCED-but-not-yet-sent cloud push immediately. Called when the
+ * tab is being hidden or torn down (`visibilitychange` → hidden, `pagehide`),
+ * so an edit made in the trailing debounce window isn't lost if the user closes
+ * or refreshes before the 7s timer elapses. Best-effort: the in-flight fetch may
+ * still be cut off by a hard kill, and song_map payloads are too large for
+ * `sendBeacon`/`keepalive` (64 KB cap), but this converts "always lose the last
+ * ~7s" into "only lose it on an abrupt mid-flight kill".
+ */
+function flushPendingCloudPush(): void {
+  if (!cloudDebounceTimer) return
+  clearTimeout(cloudDebounceTimer)
+  cloudDebounceTimer = null
+  if (cloudPushing) {
+    cloudPendingWhilePushing = true
+    return
+  }
+  cloudPushing = true
+  tryCloudPushOnce()
+    .catch(() => {})
+    .finally(() => {
+      cloudPushing = false
+      if (cloudPendingWhilePushing) {
+        cloudPendingWhilePushing = false
+        scheduleCloudPush()
+      }
+    })
+}
+
+/**
  * Phase 7 — let external code (the "online" event listener in
  * `startProjectAutosave`, or a manual "retry" button somewhere) ask
  * for a cloud push attempt to be queued through the same debounce
@@ -360,6 +389,19 @@ export function startProjectAutosave(): void {
   const onOnline = () => scheduleCloudPush()
   window.addEventListener('online', onOnline)
   unsubs.push(() => window.removeEventListener('online', onOnline))
+
+  // Flush the trailing debounce window when the tab is hidden or torn down, so
+  // the last edit before a refresh/close still reaches the cloud (see
+  // flushPendingCloudPush). visibilitychange→hidden is the reliable signal on
+  // both desktop tab-close and mobile; pagehide is the belt-and-suspenders.
+  const onHide = () => {
+    if (document.visibilityState === 'hidden') flushPendingCloudPush()
+  }
+  const onPageHide = () => flushPendingCloudPush()
+  document.addEventListener('visibilitychange', onHide)
+  window.addEventListener('pagehide', onPageHide)
+  unsubs.push(() => document.removeEventListener('visibilitychange', onHide))
+  unsubs.push(() => window.removeEventListener('pagehide', onPageHide))
 }
 
 export function stopProjectAutosave(): void {

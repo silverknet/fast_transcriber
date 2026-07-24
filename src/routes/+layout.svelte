@@ -22,9 +22,20 @@
   import {
     ACTIVE_SONG_ID_KEY,
     loadProjectSongIntoEditor,
-    tryRestoreLastProject,
+    openProjectByPath,
+    readLastProjectPath,
+    readLastCloudProjectId,
+    readCloudProjectDiskPath,
+    indexRecentCloudProjects,
   } from '$lib/project/commit'
+  import { chooseRestoreMode } from '$lib/project/restoreMode'
+  import {
+    openCloudProjectInBrowser,
+    loadCloudSongIntoEditor,
+    hasBrowserCloudSong,
+  } from '$lib/client/browserCloudProject'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { autoConnectMidiIfGranted } from '$lib/hardware/midiService'
   import { classifySidecarVersion } from '$lib/desktop/minSidecarVersion'
   import { songMap } from '$lib/stores/songMap'
   import { analyzingState } from '$lib/stores/analyzingState'
@@ -122,11 +133,79 @@
    *  - otherwise, if we were sitting on the import page (`/`) → `/project`
    *  - any other route stays put (user explicitly nav'd there).
    */
+  /**
+   * Browser-mode restore: re-open the last cloud project (no disk folder) and,
+   * if it was active, its song. Runs only when the disk restore found nothing —
+   * a sidecar-less collab session would otherwise vanish on every refresh even
+   * though the edits are safely in the cloud.
+   */
+  async function restoreLastCloudProjectIfAny(pendingActiveSongId: string | null) {
+    const cloudId = readLastCloudProjectId()
+    if (!cloudId) return
+    const opened = await openCloudProjectInBrowser(cloudId)
+    if (!opened.ok) return
+    let openedSong = false
+    if (pendingActiveSongId && hasBrowserCloudSong(pendingActiveSongId) && !get(songMap)) {
+      const loaded = await loadCloudSongIntoEditor(pendingActiveSongId)
+      openedSong = loaded.ok
+    }
+    const here = get(page).route?.id
+    const onAuthRoute = here === '/login' || here?.startsWith('/auth')
+    if (onAuthRoute || isDebugRouteId(here)) return
+    if (openedSong && here !== '/edit' && here !== '/project/playback') {
+      await goto('/edit', { replaceState: true })
+    } else if (!openedSong && here === '/') {
+      await goto('/project', { replaceState: true })
+    }
+  }
+
   async function restoreLastProjectIfAny(pendingActiveSongId: string | null) {
     if (get(projectStore).data) return
+    // Choose disk vs browser-cloud with the sidecar status FRESH — a stale
+    // "unreachable" would wrongly restore compressed cloud audio over a local HD
+    // copy (the mode-stranding bug). `chooseRestoreMode` prefers disk whenever
+    // the sidecar is up and a local copy of the project exists.
     try {
-      const restored = await tryRestoreLastProject()
-      if (!restored) return
+      await pollDesktopCompanion()
+    } catch {
+      /* status stays as-is */
+    }
+    // With the sidecar up, learn which recent projects also live on disk here —
+    // so the arbiter can prefer a local HD copy over a browser-cloud restore, and
+    // the badge can offer "switch to HD".
+    if (get(desktopCompanionStatus).reachable) {
+      try {
+        await indexRecentCloudProjects()
+      } catch {
+        /* best-effort */
+      }
+    }
+    const lastCloudId = readLastCloudProjectId()
+    const decision = chooseRestoreMode({
+      lastPath: readLastProjectPath(),
+      lastCloudId,
+      sidecarReachable: get(desktopCompanionStatus).reachable,
+      diskPathForCloudId: readCloudProjectDiskPath(lastCloudId),
+    })
+    if (decision.mode === 'none') return
+    try {
+      if (decision.mode === 'cloud') {
+        await restoreLastCloudProjectIfAny(pendingActiveSongId)
+        return
+      }
+      // decision.mode === 'disk'
+      let restored: Awaited<ReturnType<typeof openProjectByPath>> | null = null
+      try {
+        restored = await openProjectByPath(decision.path)
+      } catch {
+        restored = null
+      }
+      if (!restored) {
+        // Disk open failed (sidecar hiccup / folder moved) — fall back to a
+        // browser-cloud session if the user last had one open.
+        await restoreLastCloudProjectIfAny(pendingActiveSongId)
+        return
+      }
       let openedSong = false
       if (
         pendingActiveSongId &&
@@ -162,6 +241,9 @@
     startProjectAutosave()
     // Remote changes must reach the app on every route, not just /project.
     startCloudAutoPull()
+    // App-wide MIDI: reconnect + relight the controller if already permitted,
+    // so it confirms "connected" the moment BarBro opens (no prompt on load).
+    void autoConnectMidiIfGranted()
 
     // Subscribe to client-side Supabase auth events (sign-in via OAuth
     // callback, sign-out, token refresh) and re-run the server load so

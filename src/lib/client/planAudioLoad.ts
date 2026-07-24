@@ -17,6 +17,8 @@ export interface AudioLoadPlan {
 
 export function planAudioLoad(input: {
   sidecarReachable: boolean
+  /** This song belongs to a local disk project (`osPath !== null`). */
+  localProjectPresent: boolean
   /** A local HD master resolves (originalPath on disk / reconcile match). */
   localAudioAvailable: boolean
   songId: string | null
@@ -25,6 +27,7 @@ export function planAudioLoad(input: {
   const cloudAudioAvailable = !!input.cloudAudio?.mix?.path && !!input.songId
   const resolution = resolveAudioSource({
     sidecarReachable: input.sidecarReachable,
+    localProjectPresent: input.localProjectPresent,
     localAudioAvailable: input.localAudioAvailable,
     cloudAudioAvailable,
   })
@@ -47,6 +50,8 @@ export function planAudioLoad(input: {
 /** Stem variant of `planAudioLoad` — for the mixer, per stem slot. */
 export function planStemLoad(input: {
   sidecarReachable: boolean
+  /** This song belongs to a local disk project (`osPath !== null`). */
+  localProjectPresent: boolean
   localStemAvailable: boolean
   songId: string | null
   stemName: string
@@ -56,6 +61,7 @@ export function planStemLoad(input: {
   const cloudAudioAvailable = !!stemObj?.path && !!input.songId
   const resolution = resolveAudioSource({
     sidecarReachable: input.sidecarReachable,
+    localProjectPresent: input.localProjectPresent,
     localAudioAvailable: input.localStemAvailable,
     cloudAudioAvailable,
   })

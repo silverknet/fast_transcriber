@@ -66,6 +66,12 @@ export interface ProjectFile {
    * `setProjectMastering`.
    */
   mastering?: ProjectMastering
+  /**
+   * The band roster (shared config): who performs in this project. Custom cues
+   * can target a performer, and live mode routes a performer to an output
+   * channel. Only ever written via `setProjectPerformers`.
+   */
+  performers?: Performer[]
 }
 
 /** How firmly a stem's levels are evened out (compression preset intensity). */
@@ -99,6 +105,23 @@ export interface ProjectMastering {
   masterGlue?: boolean
 }
 
+/**
+ * A performer in the band (shared config, syncs with collaborators). The
+ * optional `userId` links the performer to a signed-in account — not required.
+ * Custom cues can target a performer, and in live mode a performer maps to an
+ * output channel (both built on top of this).
+ */
+export interface Performer {
+  /** crypto.randomUUID() — stable identity. */
+  id: string
+  /** Display name, e.g. "Martin". */
+  name: string
+  /** Instrument / role, e.g. "Keyboards", "Vocals". */
+  role?: string
+  /** Optional link to a signed-in user's account id. Not compulsory. */
+  userId?: string
+}
+
 export interface ProjectDefaults {
   /** Default count-in beats for songs in this project (per-song overridable). */
   countInBeats?: number
@@ -107,15 +130,18 @@ export interface ProjectDefaults {
 }
 
 /**
- * The spoken cue played BEFORE the count-in clicks. `title` announces each
- * song's cue title; `custom` speaks a fixed `text` for every song; `off`
- * disables it. The count length + spoken count are derived from the song's
- * count-in.
+ * Project-wide SONG ANNOUNCEMENT (the spoken song name before a song):
+ *   - `auto`      speaks the name automatically when you start the song,
+ *   - `triggered` speaks it only when you fire it from the controller,
+ *   - `off`       never.
+ * The text is each song's own title (overridable per song). Applies to every
+ * song in the project — all or none.
  */
-export type PreCountInCueMode = 'off' | 'title' | 'custom'
+export type PreCountInCueMode = 'off' | 'auto' | 'triggered'
 
 export interface PreCountInCueConfig {
   mode: PreCountInCueMode
+  /** Legacy per-project custom phrase; announcements now default to each song's title. */
   text?: string
 }
 

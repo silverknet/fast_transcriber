@@ -7,8 +7,12 @@ import { writable } from 'svelte/store'
  *  - `sha-mismatch`: a file was found at the referenced path but its
  *    SHA-256 doesn't match the SongMap's `originalSha256` — the user
  *    is asked to confirm before we proceed.
+ *  - `cloud-audio-unavailable`: browser-cloud mode, but this song's
+ *    compressed cloud audio couldn't be obtained (not uploaded yet, or the
+ *    fidelity failsafe refused it). The song still opens for chord/section
+ *    editing; there's no local file to relink — the fix is Studio mode / disk.
  */
-export type AudioMissingReason = 'file-not-found' | 'sha-mismatch'
+export type AudioMissingReason = 'file-not-found' | 'sha-mismatch' | 'cloud-audio-unavailable'
 
 export type AudioSession = {
   file: File | null

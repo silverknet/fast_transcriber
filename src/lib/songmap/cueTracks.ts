@@ -46,6 +46,21 @@ function orderedSectionStarts(songMap: SongMap): Section[] {
   return [...songMap.sections].sort((a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex)
 }
 
+/**
+ * True iff this cue track will actually SAY something in live mode — an enabled
+ * event with spoken text, or the spoken count-in. A cue *track* can exist (and a
+ * cue WAV can linger on disk) with nothing to say; this is the honest "there are
+ * cues present" signal used for the project-card cue dot.
+ */
+export function cueTrackHasSpokenContent(track: CueTrack | undefined): boolean {
+  if (!track) return false
+  return track.events.some((e) => e.enabled && !!e.text?.trim()) || !!track.spokenCountIn
+}
+
+export function songMapHasCueContent(songMap: SongMap): boolean {
+  return cueTrackHasSpokenContent(getPrimaryCueTrack(songMap))
+}
+
 export function createDefaultCueTrack(opts: { id?: string; name?: string } = {}): CueTrack {
   return {
     id: opts.id ?? DEFAULT_CUE_TRACK_ID,
@@ -141,6 +156,20 @@ function generatedCountEvents(songMap: SongMap, section: Section, sectionBar: Ba
       source: 'generated',
     }
   })
+}
+
+/**
+ * The generated speech + count cue events for ONE section — for per-section
+ * toggles in the cue editor. `speech` reads the section name just before it
+ * starts; `count` is the beat count-in (one event per beat).
+ */
+export function buildSectionCueEvents(
+  songMap: SongMap,
+  section: Section,
+): { speech: CueEvent | null; count: CueEvent[] } {
+  const bar = barByIndex(songMap).get(section.barRange.startBarIndex)
+  if (!bar) return { speech: null, count: [] }
+  return { speech: generatedSectionEvent(songMap, section, bar), count: generatedCountEvents(songMap, section, bar) }
 }
 
 function generatedEventsFromSections(songMap: SongMap): CueEvent[] {

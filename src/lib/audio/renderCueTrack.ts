@@ -4,18 +4,18 @@
  */
 import { buildCueSpeechEvents } from '$lib/audio/cueTrackSpeechSchedule'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
-import { fetchDesktopTtsSynthesizeWav } from '$lib/client/desktopBridge'
+import { fetchTtsWavCached } from '$lib/client/ttsCache'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import type { CueTrack, SongMap } from '$lib/songmap/types'
 
-const CUE_SAMPLE_RATE = 44100
+export const CUE_SAMPLE_RATE = 44100
 /** How loud spoken clips are mixed vs clicks (still peak-limited at end). */
-const SPEECH_MIX_GAIN = 1.04
+export const SPEECH_MIX_GAIN = 1.04
 /** Count-in number clips: slightly shorter than Piper default so the grid feels tighter. */
-const COUNT_TTS_SPEEDUP = 1.11
+export const COUNT_TTS_SPEEDUP = 1.11
 
-function resampleMonoSpeedup(src: Float32Array, speed: number): Float32Array {
+export function resampleMonoSpeedup(src: Float32Array, speed: number): Float32Array {
   if (!(speed > 1) || src.length < 2) return src
   const outLen = Math.max(1, Math.floor(src.length / speed))
   const out = new Float32Array(outLen)
@@ -69,6 +69,21 @@ export function linearResampleMono(
     out[j] = (1 - frac) * s0 + frac * s1
   }
   return out
+}
+
+/**
+ * Drop the leading (near-)silence a TTS clip has before the first sound, so the
+ * word's AUDIBLE onset — not the clip's file start — lands on the scheduled time.
+ * Without this, count-in numbers and callouts arrive 50–150 ms late and feel off.
+ * A tiny pre-roll is kept so the attack transient isn't clipped.
+ */
+export function trimLeadingSilence(samples: Float32Array, sampleRate: number, threshold = 0.02): Float32Array {
+  let i = 0
+  while (i < samples.length && Math.abs(samples[i]!) < threshold) i++
+  if (i === 0) return samples
+  const preRoll = Math.floor(0.004 * sampleRate) // keep ~4 ms before the onset
+  const start = Math.max(0, i - preRoll)
+  return start > 0 ? samples.slice(start) : samples
 }
 
 /** Sum resampled mono clip into `dst` starting at `offsetSec` on `dstRate` timeline. */
@@ -196,7 +211,7 @@ export async function renderCueTrackWavBlob(
       speechRows.sort((a, b) => (a.t !== b.t ? a.t - b.t : a.order - b.order))
 
       const mixSpeechAt = async (t: number, text: string, opts?: { speedup?: number }): Promise<number> => {
-        const r = await fetchDesktopTtsSynthesizeWav(text)
+        const r = await fetchTtsWavCached(text)
         if (!r.ok) {
           speechOk = false
           speechFail = speechFail ?? r.error
@@ -210,8 +225,10 @@ export async function renderCueTrackWavBlob(
           speechFail = speechFail ?? 'Could not decode speech WAV'
           return 0
         }
-        let ch0 =
-          buf.numberOfChannels > 0 ? buf.getChannelData(0) : new Float32Array(0)
+        let ch0: Float32Array =
+          buf.numberOfChannels > 0 ? new Float32Array(buf.getChannelData(0)) : new Float32Array(0)
+        // Align the audible onset (not the file start) to the scheduled beat.
+        if (ch0.length > 0) ch0 = trimLeadingSilence(ch0, buf.sampleRate)
         const sp = opts?.speedup ?? 1
         if (sp > 1 && ch0.length > 0) ch0 = new Float32Array(resampleMonoSpeedup(ch0, sp))
         return addClipAtOffset(data, sampleRate, ch0, buf.sampleRate, t, SPEECH_MIX_GAIN)

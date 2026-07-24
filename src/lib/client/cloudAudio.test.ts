@@ -81,9 +81,17 @@ describe('buildCloudAudioManifest', () => {
 })
 
 describe('fetchCloudAudioBlob — fidelity failsafe at the I/O boundary', () => {
-  it('THROWS when the desktop client is connected (never fetch the lossy copy)', async () => {
+  it('THROWS for a DISK project when the desktop client is connected (never fetch the lossy copy)', async () => {
     await expect(
-      fetchCloudAudioBlob({ sidecarReachable: true, path: 'p/s/mix.m4a', cacheKey: 's@x#mix' }),
+      fetchCloudAudioBlob({ sidecarReachable: true, localProjectPresent: true, path: 'p/s/mix.m4a', cacheKey: 's@x#mix' }),
     ).rejects.toThrow(/desktop client is connected/i)
+  })
+
+  it('does NOT throw for a browser-cloud song even with the desktop client connected', async () => {
+    // No local folder → no HD master to protect → the cloud copy is legitimate.
+    // (It will fail later on the actual network/storage call, not the failsafe.)
+    await expect(
+      fetchCloudAudioBlob({ sidecarReachable: true, localProjectPresent: false, path: 'p/s/mix.m4a', cacheKey: 's@x#mix' }),
+    ).rejects.not.toThrow(/desktop client is connected/i)
   })
 })

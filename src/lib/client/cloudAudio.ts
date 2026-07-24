@@ -135,11 +135,13 @@ async function cachePut(key: string, blob: Blob): Promise<void> {
  */
 export async function fetchCloudAudioBlob(input: {
   sidecarReachable: boolean
+  /** This song belongs to a local disk project — see the failsafe. */
+  localProjectPresent: boolean
   path: string
   cacheKey: string
 }): Promise<Blob> {
   // Failsafe FIRST — before any cache read or network call.
-  assertCloudAudioAccessAllowed(input.sidecarReachable)
+  assertCloudAudioAccessAllowed(input.sidecarReachable, input.localProjectPresent)
   const cached = await cacheGet(input.cacheKey)
   if (cached) return cached
   const supa = getSupabaseBrowserClient()

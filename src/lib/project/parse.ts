@@ -139,6 +139,7 @@ export function parseProjectJson(text: string): ProjectFile {
   const autoStems = parseAutoStems(o.autoStems)
   const defaults = parseDefaults(o.defaults)
   const mastering = parseMastering(o.mastering)
+  const performers = parsePerformers(o.performers)
 
   return {
     formatVersion: PROJECT_FILE_VERSION,
@@ -151,7 +152,24 @@ export function parseProjectJson(text: string): ProjectFile {
     ...(autoStems ? { autoStems } : {}),
     ...(defaults ? { defaults } : {}),
     ...(mastering ? { mastering } : {}),
+    ...(performers ? { performers } : {}),
   }
+}
+
+/** Parse the optional `performers` roster defensively (skips malformed rows). */
+function parsePerformers(raw: unknown): ProjectFile['performers'] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: NonNullable<ProjectFile['performers']> = []
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue
+    const o = r as Record<string, unknown>
+    if (typeof o.id !== 'string' || typeof o.name !== 'string') continue
+    const p: NonNullable<ProjectFile['performers']>[number] = { id: o.id, name: o.name }
+    if (typeof o.role === 'string' && o.role.trim()) p.role = o.role
+    if (typeof o.userId === 'string' && o.userId) p.userId = o.userId
+    out.push(p)
+  }
+  return out.length > 0 ? out : undefined
 }
 
 /** Parse the optional project-wide `mastering` (project sound) block. */
@@ -198,8 +216,15 @@ function parseDefaults(raw: unknown): ProjectFile['defaults'] | undefined {
     out.countInBeats = r.countInBeats
   }
   const pc = r.preCountInCue as Record<string, unknown> | undefined
-  if (pc && (pc.mode === 'off' || pc.mode === 'title' || pc.mode === 'custom')) {
-    out.preCountInCue = { mode: pc.mode }
+  if (pc && typeof pc.mode === 'string') {
+    // Migrate legacy modes: 'title'/'custom' both announced the song → 'auto'.
+    const mode =
+      pc.mode === 'auto' || pc.mode === 'title' || pc.mode === 'custom'
+        ? 'auto'
+        : pc.mode === 'triggered'
+          ? 'triggered'
+          : 'off'
+    out.preCountInCue = { mode }
     if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
   }
   return Object.keys(out).length > 0 ? out : undefined

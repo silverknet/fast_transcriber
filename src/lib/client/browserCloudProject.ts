@@ -10,14 +10,19 @@
  * boundary refuses the cloud copy).
  */
 import { get } from 'svelte/store'
-import { fetchCloudSongs, getCloudProjectManifest, normalizeCloudSongMap } from './cloudSync'
-import { metadataLiteFromSongMap } from '$lib/project/commit'
+import { fetchCloudSongs, getCloudProjectManifest, normalizeCloudSongMap, type CloudSongView } from './cloudSync'
+import { collabContentFingerprint } from '$lib/songmap/collab'
+import { metadataLiteFromSongMap, writeLastCloudProjectId } from '$lib/project/commit'
 import { loadMixAudio } from '$lib/audio/loadAudio'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
+import { audioSession } from '$lib/stores/audioSession'
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import {
+  project,
   setActiveSong,
   setBrowserCloudProject,
+  setProjectData,
+  patchMetadataForFolder,
   type ProjectSongMetadataLite,
 } from '$lib/stores/project'
 import { PROJECT_FILE_VERSION, PROJECT_SONGS_DIR } from '$lib/project/types'
@@ -68,7 +73,18 @@ export async function openCloudProjectInBrowser(
     }
     registry.set(folder, bs)
     registry.set(cs.id, bs)
-    entries.push({ id: cs.id, folder, cloudSongId: cs.id, ...(cs.hidden ? { hidden: true } : {}) })
+    // Seed the per-song sync watermark from the fetched row, exactly like the
+    // desktop `joinCloudProject` does. Without this the first push computes its
+    // conflict base from the coarser PROJECT revision (a fragile coincidence),
+    // and 409 handling can't tell "user changed nothing" from a real conflict.
+    entries.push({
+      id: cs.id,
+      folder,
+      cloudSongId: cs.id,
+      lastSyncedRevision: cs.revision,
+      lastSyncedContentHash: collabContentFingerprint(sm),
+      ...(cs.hidden ? { hidden: true } : {}),
+    })
     meta[folder] = metadataLiteFromSongMap(sm)
   }
 
@@ -83,6 +99,9 @@ export async function openCloudProjectInBrowser(
     cloud: { projectId: cloudProjectId, lastSyncedRevision: manifest.project.revision },
   }
   setBrowserCloudProject(data, meta)
+  // Remember this as the last session so a hard refresh re-opens it (browser
+  // mode has no disk folder for the desktop restore path to find).
+  writeLastCloudProjectId(cloudProjectId)
   return { ok: true, songCount: entries.length }
 }
 
@@ -100,6 +119,9 @@ export async function loadCloudSongIntoEditor(
     const loaded = await loadMixAudio(
       {
         sidecarReachable: get(desktopCompanionStatus).reachable,
+        // Browser-cloud song: no local disk folder, so the failsafe must NOT
+        // block the cloud copy even when the sidecar happens to be running.
+        localProjectPresent: false,
         songId: bs.cloudSongId,
         localAudioAvailable: false, // browser mode: there is no local master
         cloudAudio: bs.cloudAudio,
@@ -112,6 +134,14 @@ export async function loadCloudSongIntoEditor(
       },
     )
     hydrateRestorableSong({ songMap: bs.songMap, audioBlob: loaded.blob, songId: bs.cloudSongId })
+    // Fresh song → clear the previous "ignore missing audio" opt-out. Then, if
+    // the audio genuinely couldn't be obtained, flag the session so the editor
+    // shows a REAL "audio unavailable here" message instead of the generic
+    // "No analyzed clip in session" dead-end (the song itself loaded fine).
+    audioSession.update((s) => ({ ...s, missingAudioIgnored: false }))
+    if (loaded.source === 'missing') {
+      audioSession.update((s) => ({ ...s, missingReason: 'cloud-audio-unavailable' }))
+    }
     setActiveSong(bs.folder, bs.cloudSongId)
     return { ok: true, source: loaded.source }
   } catch (e) {
@@ -122,6 +152,61 @@ export async function loadCloudSongIntoEditor(
 /** True if `songId` (or folder) is in the open browser cloud project. */
 export function hasBrowserCloudSong(songId: string): boolean {
   return registry.has(songId)
+}
+
+/**
+ * The in-memory base map held for a browser cloud song — the "disk" equivalent a
+ * live pull merges a remote change against for a NON-active song (the active song
+ * merges against the live `songMap` store instead). Null when the song isn't in
+ * the open project.
+ */
+export function getBrowserCloudSongMap(songId: string): SongMap | null {
+  return registry.get(songId)?.songMap ?? null
+}
+
+/**
+ * Replace a browser cloud song's held map (and optionally its cloud-audio
+ * manifest) after a live pull merged a remote change in. The registry keys both
+ * `folder` and `cloudSongId` to the SAME object, so this refreshes both — so a
+ * later `loadCloudSongIntoEditor` for a non-active song opens the fresh copy.
+ */
+export function updateBrowserCloudSong(
+  songId: string,
+  songMap: SongMap,
+  cloudAudio?: CloudAudioManifest | null,
+): void {
+  const bs = registry.get(songId)
+  if (!bs) return
+  bs.songMap = songMap
+  if (cloudAudio !== undefined) bs.cloudAudio = cloudAudio
+}
+
+/**
+ * Materialize a song a collaborator ADDED while we had the project open — create
+ * its registry entry (so it's openable), append it to the project's song list
+ * with the sync watermark seeded (so it appears in the list and its next pull
+ * doesn't 409), and refresh its card metadata. Takes the already-normalized
+ * `songMap` the pull worker computed, to avoid re-parsing. Idempotent on id.
+ */
+export function addBrowserCloudSong(cs: CloudSongView, songMap: SongMap): void {
+  const folder = folderFor(cs.id)
+  const bs: BrowserSong = { cloudSongId: cs.id, folder, songMap, cloudAudio: cs.cloud_audio }
+  registry.set(folder, bs)
+  registry.set(cs.id, bs)
+
+  const cur = get(project)
+  if (cur.data && !cur.data.songs.some((s) => s.id === cs.id)) {
+    const entry: ProjectSongEntry = {
+      id: cs.id,
+      folder,
+      cloudSongId: cs.id,
+      lastSyncedRevision: cs.revision,
+      lastSyncedContentHash: collabContentFingerprint(songMap),
+      ...(cs.hidden ? { hidden: true } : {}),
+    }
+    setProjectData({ ...cur.data, songs: [...cur.data.songs, entry] })
+  }
+  patchMetadataForFolder(folder, metadataLiteFromSongMap(songMap))
 }
 
 /** The cloud-audio manifest for a song in the open browser cloud project. */

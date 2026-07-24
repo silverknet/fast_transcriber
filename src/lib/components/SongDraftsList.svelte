@@ -76,7 +76,17 @@
             onchange={() => onUse?.(row.id)}
           />
           <span class="flex min-w-0 flex-col gap-0.5">
-            <span class="truncate font-bold" title={row.name}>{row.name}</span>
+            <span class="flex min-w-0 items-center gap-1.5">
+              <span class="truncate font-bold" title={row.name}>{row.name}</span>
+              {#if row.active}
+                <span
+                  class="bg-foreground text-background inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-black uppercase leading-none tracking-wide"
+                  title="This draft is live — it's what plays and what the editor shows"
+                >
+                  ● Live
+                </span>
+              {/if}
+            </span>
             <span class="text-muted-foreground truncate leading-tight" title={row.createdTitle}>
               {row.counts}{row.created ? ` · created ${row.created}` : row.age ? ` · ${row.age}` : ''}
             </span>

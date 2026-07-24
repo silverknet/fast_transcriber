@@ -323,7 +323,7 @@
   }
 </script>
 
-{#if open && selectedBeatId}
+{#if open}
   <div
     class="fixed inset-0 z-[9999] bg-foreground/20"
     role="presentation"

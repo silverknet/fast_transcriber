@@ -20,8 +20,10 @@
     setProjectAutoStems,
     setProjectDefaults,
     setProjectMastering,
+    setProjectPerformers,
     applyDefaultsToAllSongs,
   } from '$lib/project/commit'
+  import { userStore } from '$lib/stores/user'
   import {
     watchProjectForAutoStems,
     unwatchProjectForAutoStems,
@@ -33,9 +35,10 @@
     type AutoStemName,
     type AutoStemQuality,
     type MasteringIntensity,
+    type Performer,
     type PreCountInCueMode,
   } from '$lib/project/types'
-  import { Music4 } from '@lucide/svelte'
+  import { Music4, Plus, Trash2, User } from '@lucide/svelte'
 
   let {
     open = $bindable(false),
@@ -68,7 +71,21 @@
   let quality = $state<AutoStemQuality>('balanced')
   let countInBeats = $state(0)
   let cueMode = $state<PreCountInCueMode>('off')
-  let cueText = $state('')
+  let performers = $state<Performer[]>([])
+
+  function addPerformer() {
+    performers = [...performers, { id: crypto.randomUUID(), name: '', role: '' }]
+  }
+  function removePerformer(id: string) {
+    performers = performers.filter((p) => p.id !== id)
+  }
+  function toggleLinkToMe(id: string) {
+    const me = get(userStore)?.id
+    if (!me) return
+    performers = performers.map((p) =>
+      p.id === id ? { ...p, userId: p.userId === me ? undefined : me } : p,
+    )
+  }
   // Project sound (mastering)
   type StemSoundForm = { intensity: MasteringIntensity; trimDb: number; tone: boolean }
   // Defaults aim "live ready" out of the box: rich bass, punchy clear drums.
@@ -122,7 +139,7 @@
     countInBeats = snap.data?.defaults?.countInBeats ?? 0
     const pc = snap.data?.defaults?.preCountInCue
     cueMode = pc?.mode ?? 'off'
-    cueText = pc?.text ?? ''
+    performers = (snap.data?.performers ?? []).map((p) => ({ ...p }))
     const ms = snap.data?.mastering
     soundEnabled = ms?.enabled ?? false
     soundMatchLoudness = ms?.matchLoudness ?? true
@@ -152,10 +169,7 @@
   const canExportSetlist = $derived(
     songCount > 0 && $desktopCompanionStatus.reachable && typeof onOpenSetlistExport === 'function',
   )
-  const preCountInCue = $derived({
-    mode: cueMode,
-    ...(cueMode === 'custom' && cueText.trim() ? { text: cueText.trim() } : {}),
-  })
+  const preCountInCue = $derived({ mode: cueMode })
 
   function requestSetlistExport() {
     if (!canExportSetlist) return
@@ -171,6 +185,11 @@
       // Shared project config (source of truth).
       await setProjectAutoStems({ enabled, stems: chosenStems, quality })
       await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0, preCountInCue })
+      await setProjectPerformers(
+        performers
+          .map((p) => ({ ...p, name: p.name.trim(), role: p.role?.trim() || undefined }))
+          .filter((p) => p.name.length > 0),
+      )
       {
         const stems: NonNullable<Parameters<typeof setProjectMastering>[0]['stems']> = {}
         for (const name of AUTO_STEM_NAMES) {
@@ -317,19 +336,19 @@
           </span>
         </div>
 
-        <!-- Pre-count-in spoken cue -->
+        <!-- Song announcement (project-wide) -->
         <div class="border-foreground/10 flex flex-col gap-1.5 border-t pt-3">
-          <span class="text-sm font-semibold">Spoken count-in</span>
+          <span class="text-sm font-semibold">Song announcement</span>
           <span class="text-muted-foreground text-xs">
-            Before the clicks, a voice announces the song and count length, then counts the beats in
-            time (e.g. “Valerie… 8… one, two, three…”).
+            A voice that says the song’s name. Applies to every song in the project — all or none.
+            Each song announces its own title (override the words per song in the Cue section).
           </span>
           <div class="mt-1 flex flex-col gap-1.5">
-            {#each [{ value: 'off', label: 'Off', hint: 'Clicks only' }, { value: 'title', label: 'Announce the song', hint: 'Uses each song’s cue title' }, { value: 'custom', label: 'Custom phrase', hint: 'Same words for every song' }] as opt (opt.value)}
+            {#each [{ value: 'auto', label: 'Auto', hint: 'Speaks the name on play, before the count-in' }, { value: 'triggered', label: 'Triggered', hint: 'Speaks the name when you fire it from the controller' }, { value: 'off', label: 'Off', hint: 'No announcement' }] as opt (opt.value)}
               <label class="flex cursor-pointer items-center gap-2 text-sm">
                 <input
                   type="radio"
-                  name="pre-count-in-cue"
+                  name="song-announcement"
                   value={opt.value}
                   checked={cueMode === opt.value}
                   onchange={() => (cueMode = opt.value as PreCountInCueMode)}
@@ -340,19 +359,71 @@
               </label>
             {/each}
           </div>
-          {#if cueMode === 'custom'}
-            <input
-              type="text"
-              bind:value={cueText}
-              placeholder="e.g. Here we go"
-              maxlength="60"
-              class="border-foreground/30 bg-background mt-1 border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
-            />
-          {/if}
-          <span class="text-muted-foreground text-[11px]">
-            The count length is taken from the count-in above. Override the spoken words per song in
-            the Cue section.
+        </div>
+
+        <!-- Performers -->
+        <div class="border-foreground/10 flex flex-col gap-2 border-t pt-3">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-semibold">Performers</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-7 gap-1 text-xs"
+              onclick={addPerformer}
+            >
+              <Plus class="size-3.5" aria-hidden="true" /> Add
+            </Button>
+          </div>
+          <span class="text-muted-foreground text-xs">
+            Who’s in the band. Custom cues can target a performer, and in live mode each is routed to
+            its own output channel.
           </span>
+          {#if performers.length === 0}
+            <span class="text-muted-foreground text-xs italic">No performers yet — add your band.</span>
+          {/if}
+          <div class="flex flex-col gap-1.5">
+            {#each performers as p (p.id)}
+              <div class="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  bind:value={p.name}
+                  placeholder="Name"
+                  maxlength="40"
+                  class="border-foreground/30 bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
+                />
+                <input
+                  type="text"
+                  bind:value={p.role}
+                  placeholder="Role (e.g. Keyboards)"
+                  maxlength="40"
+                  class="border-foreground/30 bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm focus:border-foreground focus:outline-none"
+                />
+                {#if $userStore}
+                  <button
+                    type="button"
+                    onclick={() => toggleLinkToMe(p.id)}
+                    title={p.userId === $userStore.id ? 'Linked to your account — click to unlink' : 'Link to your account'}
+                    aria-pressed={p.userId === $userStore.id}
+                    class="shrink-0 rounded border-2 p-1.5 transition-colors {p.userId === $userStore.id
+                      ? 'border-foreground bg-foreground text-background'
+                      : 'border-foreground/30 text-muted-foreground hover:text-foreground'}"
+                  >
+                    <User class="size-4" aria-hidden="true" />
+                  </button>
+                {/if}
+                <button
+                  type="button"
+                  onclick={() => removePerformer(p.id)}
+                  title="Remove performer"
+                  aria-label="Remove performer"
+                  class="text-muted-foreground hover:text-destructive shrink-0 p-1.5"
+                >
+                  <Trash2 class="size-4" aria-hidden="true" />
+                </button>
+              </div>
+            {/each}
+          </div>
         </div>
 
         <!-- Project sound (mastering) -->

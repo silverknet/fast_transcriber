@@ -141,6 +141,18 @@
     onChordBeatInteract = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
       | undefined,
+    /** Chords mode: single-click selects an off-grid (divided-bar) chord slot. */
+    onChordFractionSelect = undefined as
+      | ((detail: { barId: string; fraction: number }) => void)
+      | undefined,
+    /** Chords mode: double-click an off-grid slot → open the picker. */
+    onChordFractionInteract = undefined as
+      | ((detail: { barId: string; fraction: number; clientX: number; clientY: number }) => void)
+      | undefined,
+    /** barId → its off-grid fraction chord slots (label + fraction). */
+    chordFractionByBar = {} as Record<string, { fraction: number; label: string }[]>,
+    /** Key (`barId:fraction`) of the selected off-grid slot. */
+    selectedFractionKey = null as string | null,
     /** Chords mode: context menu request on the beat strip. */
     onChordContextMenu = undefined as
       | ((detail: { clientX: number; clientY: number }) => void)
@@ -2021,6 +2033,10 @@
           bind:selectedBeatId
           bind:chordsSelectionBeatIds
           chordLabelByBeatId={chordLabelByBeatId}
+          onChordFractionSelect={onChordFractionSelect}
+          onChordFractionInteract={onChordFractionInteract}
+          chordFractionByBar={chordFractionByBar}
+          selectedFractionKey={selectedFractionKey}
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           onSectionsSeekCommit={timelineStripMode === 'sections' ? seekToSectionsSelection : undefined}
           onViewportWheel={(e) => tryWheelPan(e, waveWidth, layoutViewEnd - layoutViewStart)}

@@ -12,9 +12,10 @@ const manifest: CloudAudioManifest = {
 }
 
 describe('planAudioLoad', () => {
-  it('desktop + local master → local, and NEVER a cloud fetch plan', () => {
+  it('desktop disk project + local master → local, and NEVER a cloud fetch plan', () => {
     const plan = planAudioLoad({
       sidecarReachable: true,
+      localProjectPresent: true,
       localAudioAvailable: true,
       songId: 'song',
       cloudAudio: manifest, // present, but must be ignored on desktop
@@ -23,9 +24,10 @@ describe('planAudioLoad', () => {
     expect(plan.cloud).toBeUndefined()
   })
 
-  it('desktop + local missing (cloud exists) → missing, still no cloud plan (failsafe)', () => {
+  it('desktop disk project + local missing (cloud exists) → missing, still no cloud plan (failsafe)', () => {
     const plan = planAudioLoad({
       sidecarReachable: true,
+      localProjectPresent: true,
       localAudioAvailable: false,
       songId: 'song',
       cloudAudio: manifest,
@@ -34,9 +36,22 @@ describe('planAudioLoad', () => {
     expect(plan.cloud).toBeUndefined()
   })
 
+  it('THE FIX: browser-cloud + sidecar reachable → cloud plan (no local folder to protect)', () => {
+    const plan = planAudioLoad({
+      sidecarReachable: true,
+      localProjectPresent: false,
+      localAudioAvailable: false,
+      songId: 'song',
+      cloudAudio: manifest,
+    })
+    expect(plan.resolution.source).toBe('cloud')
+    expect(plan.cloud?.path).toBe('proj/song/mix.m4a')
+  })
+
   it('browser + cloud → cloud plan with the manifest path + content cache key', () => {
     const plan = planAudioLoad({
       sidecarReachable: false,
+      localProjectPresent: false,
       localAudioAvailable: false,
       songId: 'song',
       cloudAudio: manifest,
@@ -49,6 +64,7 @@ describe('planAudioLoad', () => {
   it('browser + no cloud audio → missing', () => {
     const plan = planAudioLoad({
       sidecarReachable: false,
+      localProjectPresent: false,
       localAudioAvailable: false,
       songId: 'song',
       cloudAudio: null,
@@ -62,6 +78,7 @@ describe('planStemLoad', () => {
   it('browser + cloud stem present → cloud plan for that stem', () => {
     const plan = planStemLoad({
       sidecarReachable: false,
+      localProjectPresent: false,
       localStemAvailable: false,
       songId: 'song',
       stemName: 'Bass',
@@ -72,9 +89,10 @@ describe('planStemLoad', () => {
     expect(plan.cloud?.cacheKey).toContain('stem:Bass')
   })
 
-  it('desktop → local stem, never cloud', () => {
+  it('desktop disk project → local stem, never cloud', () => {
     const plan = planStemLoad({
       sidecarReachable: true,
+      localProjectPresent: true,
       localStemAvailable: true,
       songId: 'song',
       stemName: 'Bass',
@@ -87,6 +105,7 @@ describe('planStemLoad', () => {
   it('browser + that stem not uploaded → missing', () => {
     const plan = planStemLoad({
       sidecarReachable: false,
+      localProjectPresent: false,
       localStemAvailable: false,
       songId: 'song',
       stemName: 'Vocals', // not in manifest.stems

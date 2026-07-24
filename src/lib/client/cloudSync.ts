@@ -36,6 +36,8 @@ import { decodeSmapFile } from '$lib/songmap/persist'
 import { encodeSmapFile, SONG_PROJECT_FORMAT_VERSION } from '$lib/songmap/smapFile'
 import { parseSongMap } from '$lib/songmap/parse'
 import { applyRemoteSongMap } from '$lib/project/songSession'
+import { songMap } from '$lib/stores/songMap'
+import { cloudConflict } from '$lib/stores/cloudConflict'
 import {
   metadataLiteFromSongMap,
   recordRecentProjectPath,
@@ -340,6 +342,12 @@ export async function pullCloudChanges(): Promise<
   const snap = get(projectStore)
   const proj = snap.data
   const osPath = snap.osPath
+  // Browser/collab mode has a cloud project but NO local folder (`osPath === null`).
+  // Route to the in-memory pull worker (dynamic import avoids a static cycle:
+  // browserCloudProject → cloudSync). Everything below stays desktop-only.
+  if (proj?.cloud && osPath === null) {
+    return (await import('./browserCloudPull')).pullCloudChangesBrowser()
+  }
   if (!proj || !osPath || !proj.cloud) return { ok: false, error: 'No cloud project.' }
   const cloudProjectId = proj.cloud.projectId
 
@@ -753,6 +761,24 @@ async function applyCloudSongIntoLocal(
       lastSyncedContentHash: entry.lastSyncedContentHash,
       expectedAudio: cloudSong.expected_audio ?? undefined,
     })
+    if (plan.needsUserResolution && plan.report) {
+      // A structural remote change landed on a song with unpushed local edits.
+      // Don't pick a side silently — surface the conflict dialog (same one the
+      // push path uses). Skip: no disk write, no watermark advance, so the next
+      // realtime tick (or a push-409) re-fires until the user resolves it.
+      if (get(cloudConflict) === null) {
+        cloudConflict.set({
+          cloudProjectId: proj.cloud!.projectId,
+          cloudSongId: cloudSong.id,
+          localSongId: entry.id,
+          local: get(songMap) ?? local,
+          remote: incoming,
+          remoteRevision: cloudSong.revision,
+          report: plan.report,
+        })
+      }
+      return null
+    }
     const merged = plan.merged
     // Encode + persist.
     const { encodeSmapFile } = await import('$lib/songmap/smapFile')

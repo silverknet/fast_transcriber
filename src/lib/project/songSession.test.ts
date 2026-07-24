@@ -202,6 +202,43 @@ describe('an open editor with unpushed edits is not overwritten', () => {
     expect(ids).toContain('theirs')
   })
 
+  it('dirty + un-mergeable structural change (audio master) → needsUserResolution, no clobber', () => {
+    // A different audio-master identity can't be reconciled item-by-item — on a
+    // dirty editor it must surface the dialog rather than silently swap.
+    const memory = songWith([chord('c1', 'C')], { expectedAudio: { fileName: 'mine.wav', sha256: 'AAA' } })
+    const incoming = songWith([chord('c1', 'C')], { expectedAudio: { fileName: 'theirs.wav', sha256: 'BBB' } })
+    const plan = planRemoteApplication({ incoming, memory, disk: memory, lastSyncedContentHash: undefined })
+    expect(plan.needsUserResolution).toBe(true)
+    expect(plan.appliedToMemory).toBe(false)
+    expect(plan.merged).toBe(memory) // left untouched — no side silently chosen
+    expect(plan.report?.conflicts.some((c) => c.severity === 'dangerous' && c.path === 'expectedAudio')).toBe(true)
+  })
+
+  it('a wholesale-harmony divergence is NOT a dialog — keepLocalOnly merges it', () => {
+    // Disjoint chord ids trip the harmonyWholesale "dangerous" flag, but a real
+    // chord-track REPLACE is a draft divergence; this same-draft case is just an
+    // empty-base divergence, which keepLocalOnly unions losslessly. No dialog.
+    const memory = songWith([chord('mine1', 'Am'), chord('mine2', 'F'), chord('mine3', 'G')])
+    const incoming = songWith([chord('their1', 'Bb'), chord('their2', 'Eb'), chord('their3', 'C')])
+    const plan = planRemoteApplication({ incoming, memory, disk: memory, lastSyncedContentHash: undefined })
+    expect(plan.needsUserResolution).toBeUndefined()
+    const ids = plan.merged.harmony.map((h) => h.id)
+    expect(ids).toContain('mine1')
+    expect(ids).toContain('their1')
+  })
+
+  it('a dirty + SAFE change still merges silently (no dialog)', () => {
+    // Overlapping ids → safe per-item merge; dirty → both sides kept, no dialog.
+    const memory = songWith([chord('c1', 'C'), chord('mine', 'Am')])
+    const incoming = songWith([chord('c1', 'C'), chord('theirs', 'G')])
+    const plan = planRemoteApplication({ incoming, memory, disk: memory, lastSyncedContentHash: undefined })
+    expect(plan.needsUserResolution).toBeUndefined()
+    expect(plan.localState).toBe('dirty')
+    const ids = plan.merged.harmony.map((h) => h.id)
+    expect(ids).toContain('mine')
+    expect(ids).toContain('theirs')
+  })
+
   it('folds the audio claim in before the map is installed', () => {
     // Setting expectedAudio after patching the store would mutate a
     // store-held object without notifying subscribers.

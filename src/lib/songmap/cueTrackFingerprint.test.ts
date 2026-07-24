@@ -91,7 +91,7 @@ describe('fingerprintCueTrackInputs', () => {
   it('payload is JSON-stable for bar order', () => {
     const m = minimalMap()
     const p = cueTrackFingerprintPayload(m)
-    expect(JSON.stringify(p)).toContain('"v":6')
+    expect(JSON.stringify(p)).toContain('"v":7')
   })
 
   it('changes when intro cue text changes', () => {

@@ -92,6 +92,14 @@ export type HarmonyEvent = {
   endSec: number
   chord: ChordSymbol
   beatAnchor?: { indexInBar: number }
+  /**
+   * EDGE CASE (opt-in): position within the bar as a fraction [0,1), used
+   * INSTEAD of `beatId` so a chord can sit OFF the beat grid — e.g. 3 chords
+   * evenly across a 4-beat bar (fractions 0, 1/3, 2/3). The click/beat grid is
+   * untouched; only this chord's timing comes from `barId` + `barFraction`.
+   * When set, `beatId` is absent.
+   */
+  barFraction?: number
 }
 
 /**
@@ -368,6 +376,10 @@ export type CueTrack = {
   name: string
   enabled: boolean
   voiceId?: string
+  /** Links this cue track to a project `Performer` (their cues). Absent for
+   *  standalone/legacy tracks. In live mode a performer's cues route to their
+   *  own output channel. */
+  performerId?: string
   events: CueEvent[]
   suppressedGeneratedKeys: string[]
   renderExport?: RenderedCueExport

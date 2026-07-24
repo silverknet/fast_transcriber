@@ -2,7 +2,7 @@
   import { computePeaks, drawPeaksToCanvas } from '$lib/audio/peaks'
   import { waveformBlockBucketCount } from '$lib/audio/waveformBlocks'
 
-  type SectionBand = { startFrac: number; endFrac: number; label: string; index: number }
+  type SectionBand = { startFrac: number; endFrac: number; label: string; index: number; color?: string }
 
   let {
     buffer,
@@ -91,12 +91,11 @@
   {#each sectionBands as band (band.index)}
     <div
       class="pointer-events-none absolute top-0 bottom-0"
-      style="left: {band.startFrac * 100}%; width: {(band.endFrac - band.startFrac) *
-        100}%; border-left: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent); {band.index %
-        2 ===
-      0
-        ? 'background: color-mix(in oklch, var(--foreground) 7%, transparent);'
-        : ''}"
+      style="left: {band.startFrac * 100}%; width: {(band.endFrac - band.startFrac) * 100}%; border-left: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent); background: {band.color
+        ? `color-mix(in oklch, ${band.color} 26%, transparent)`
+        : band.index % 2 === 0
+          ? 'color-mix(in oklch, var(--foreground) 7%, transparent)'
+          : 'transparent'};"
     ></div>
   {/each}
 

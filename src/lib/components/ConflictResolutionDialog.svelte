@@ -84,7 +84,10 @@
     // Mark the project as synced at the cloud's revision so the next
     // push uses the right clientBaseRevision.
     const proj = get(projectStore)
-    if (proj.data?.cloud && proj.osPath) {
+    // Stamp the in-memory watermark in BOTH modes. Browser mode (osPath === null)
+    // needs this too — without it the next push reuses a stale base revision and
+    // 409s again, trapping browser collaborators in a repeating conflict dialog.
+    if (proj.data?.cloud) {
       const next: ProjectFile = {
         ...proj.data,
         cloud: {
@@ -152,7 +155,9 @@
       }
       // Push succeeded — sync local stores at the new revision.
       songMapStore.set(mergeLocalIntoCollab(currentLocal, resolved))
-      if (proj.data?.cloud && proj.osPath) {
+      // Stamp in both modes — see takeTheirs(); browser mode must not be skipped
+      // or the next push 409s on a stale base revision.
+      if (proj.data?.cloud) {
         const next: ProjectFile = {
           ...proj.data,
           cloud: {

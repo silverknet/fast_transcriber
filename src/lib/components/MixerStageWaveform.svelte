@@ -13,7 +13,7 @@
     color?: string
     positionSec: number
     durationSec: number
-    sectionBands?: { startFrac: number; endFrac: number; label: string; index: number }[]
+    sectionBands?: { startFrac: number; endFrac: number; label: string; index: number; color?: string }[]
     onSeekFraction: (frac: number) => void
   }>()
 

@@ -10,7 +10,8 @@
   import { loadCloudSongIntoEditor } from '$lib/client/browserCloudProject'
   import { project as projectStore, isBrowserCloudProject } from '$lib/stores/project'
   import { songMap } from '$lib/stores/songMap'
-  import { ArrowLeft, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
+  import { ArrowLeft, HelpCircle, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
+  import ApcKey25Guide from '$lib/components/ApcKey25Guide.svelte'
 
   type SetlistItem = {
     id: string
@@ -23,6 +24,7 @@
 
   let loadingSongId = $state<string | null>(null)
   let loadError = $state('')
+  let showGuide = $state(false)
   let refreshing = $state(false)
   let fullscreen = $state(false)
   let attemptedAutoLoadKey = ''
@@ -95,6 +97,20 @@
     }
   }
 
+  // Guarded exit: live performers must not drop out of the set on an accidental
+  // tap. First press arms ("Tap again to exit"); a second within 3s leaves.
+  let exitArmed = $state(false)
+  let exitTimer: ReturnType<typeof setTimeout> | null = null
+  function requestExit() {
+    if (exitArmed) {
+      if (exitTimer) clearTimeout(exitTimer)
+      void goto('/project')
+      return
+    }
+    exitArmed = true
+    exitTimer = setTimeout(() => (exitArmed = false), 3000)
+  }
+
   function backToProject() {
     void goto('/project')
   }
@@ -157,9 +173,15 @@
 <main class="live-playback-page min-h-dvh bg-background text-foreground">
   <div class="flex min-h-dvh flex-col gap-3 px-3 py-3 lg:px-4">
     <header class="flex shrink-0 flex-wrap items-center gap-2">
-      <Button variant="outline" size="sm" class="h-9 gap-1.5" onclick={backToProject}>
+      <Button
+        variant={exitArmed ? 'default' : 'outline'}
+        size="sm"
+        class="h-9 gap-1.5"
+        onclick={requestExit}
+        title="Leave live playback"
+      >
         <ArrowLeft class="size-4" aria-hidden="true" />
-        Project
+        {exitArmed ? 'Tap again to exit' : 'Project'}
       </Button>
       <div class="min-w-0 flex-1">
         <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">Live playback</p>
@@ -175,6 +197,16 @@
         <RefreshCw class="size-4 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
         Refresh
       </Button>
+      <Button
+        variant={showGuide ? 'default' : 'outline'}
+        size="sm"
+        class="h-9 gap-1.5"
+        onclick={() => (showGuide = !showGuide)}
+        title="How to drive live mode with keys + the APC Key 25"
+      >
+        <HelpCircle class="size-4" aria-hidden="true" />
+        Controls
+      </Button>
       <Button variant="outline" size="sm" class="h-9 gap-1.5" onclick={() => void toggleFullscreen()}>
         {#if fullscreen}
           <Minimize2 class="size-4" aria-hidden="true" />
@@ -185,6 +217,24 @@
         {/if}
       </Button>
     </header>
+
+    {#if showGuide}
+      <section class="border-foreground bg-card flex flex-col gap-4 border-2 p-4 sm:flex-row" aria-label="Live controls guide">
+        <div class="flex-1">
+          <h2 class="mb-2 text-sm font-black uppercase tracking-wide">Keyboard</h2>
+          <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+            {#each [['Space', 'Play / pause'], ['S', 'Stop (back to start)'], ['← / →', 'Previous / next song'], ['R', 'Replay section once (press again to cancel)'], ['L', 'Loop section on/off'], ['1–8', 'Toggle stems']] as [key, action] (key)}
+              <dt class="font-mono font-black"><kbd class="border-foreground/40 rounded border px-1.5 py-0.5 text-xs">{key}</kbd></dt>
+              <dd class="text-muted-foreground self-center">{action}</dd>
+            {/each}
+          </dl>
+        </div>
+        <div class="flex-1">
+          <h2 class="mb-2 text-sm font-black uppercase tracking-wide">APC Key 25</h2>
+          <ApcKey25Guide />
+        </div>
+      </section>
+    {/if}
 
     {#if loadError}
       <p class="border-destructive/40 bg-destructive/10 text-destructive rounded-[var(--radius)] border px-3 py-2 text-sm" role="status">

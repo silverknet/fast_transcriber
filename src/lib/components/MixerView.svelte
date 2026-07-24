@@ -18,11 +18,13 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import { get } from 'svelte/store'
   import ApcKey25Control from '$lib/components/ApcKey25Control.svelte'
+  import LiveMidiController from '$lib/components/LiveMidiController.svelte'
+  import type { LiveCommand, LiveLedState } from '$lib/hardware/liveMidiMap'
   import { Button } from '$lib/components/ui/button'
   import LiveHardwareStrip from '$lib/components/LiveHardwareStrip.svelte'
   import MixerTrackLane from '$lib/components/MixerTrackLane.svelte'
   import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
-  import { Pause, Play, Repeat1, RotateCcw, Square, X } from '@lucide/svelte'
+  import { Pause, Play, Repeat, Repeat1, RotateCcw, SkipBack, SkipForward, Square, X } from '@lucide/svelte'
   import {
     formatChordSymbol,
     formatSongKeyLabel,
@@ -49,7 +51,14 @@
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { loadProjectDrumKit } from '$lib/client/projectDrumKit'
   import { loadProjectSongIntoEditor, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
+  import { sectionKindColor } from '$lib/songmap/sectionColors'
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
+  import { LiveCueScheduler } from '$lib/audio/liveCueScheduler'
+  import { renderSectionCueClips } from '$lib/audio/sectionCueClips'
+  import { sectionCueSpecsFromSongMap } from '$lib/songmap/sectionCueSpecs'
+  import { fetchTtsWavCached } from '$lib/client/ttsCache'
+  import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+  import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { renderBassTrackWavBlob } from '$lib/audio/renderBassTrack'
   import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
@@ -130,6 +139,7 @@
   interface SectionTimelineRange {
     id: string
     label: string
+    kind: string
     startSec: number
     endSec: number
     index: number
@@ -223,6 +233,7 @@
       if (key === 'original') return true
       if (isVocalStemKey(key)) return true
       if (key.startsWith('stem:')) return false
+      if (key === 'cue') return false // spoken cues are ON by default live
     }
     return !!saved?.muted
   }
@@ -357,8 +368,12 @@
     const resolved = resolveChordAtEachBeat(sm)
     const key = displayedSongKey
     const preferFlats = key ? songKeyPreferFlats(key) : false
+    // Bars with OFF-GRID (fraction) chords are rendered from those chords below,
+    // so skip their per-beat segments here.
+    const offGridBarIds = new Set(sm.harmony.filter((h) => h.barFraction != null).map((h) => h.barId))
     for (let i = 0; i < beats.length; i++) {
       const beat = beats[i]!
+      if (offGridBarIds.has(beat.barId)) continue
       const nextBeat = beats[i + 1]
       const startSec = beat.timeSec + offset
       const endSec = nextBeat ? nextBeat.timeSec + offset : durationSec
@@ -375,6 +390,24 @@
         hasChord: !!chord,
       })
     }
+
+    // Off-grid (fraction) chords: emit one segment each, then merge into the
+    // timeline by start time (the skipped beat-bars leave exactly their slots).
+    for (const h of sm.harmony) {
+      if (h.barFraction == null) continue
+      const s = clamp(h.startSec + offset, 0, durationSec)
+      const e = clamp(h.endSec + offset, 0, durationSec)
+      if (e - s <= 0.01) continue
+      const disp = transposeChordForDisplay(h.chord, transposeSemitones, key ?? undefined)
+      segments.push({
+        id: `frac:${h.id}`,
+        label: formatChordSymbol(disp, { preferFlats }),
+        startSec: s,
+        endSec: e,
+        hasChord: true,
+      })
+    }
+    segments.sort((a, b) => a.startSec - b.startSec)
 
     if (segments.length === 0) {
       pushChordSegment(segments, {
@@ -475,21 +508,30 @@
     const offset = mixerSongOffsetSec
     const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
     const out: SectionTimelineRange[] = []
-    sm.sections.forEach((section, i) => {
+    // NOTE: sm.sections is NOT stored in song order. This array is the ONE
+    // canonical mapping that drives the APC pad grid (LED colours AND presses,
+    // both via padToSection over THIS array), so it must be chronological and
+    // stable — otherwise a pad's colour and where it jumps you disagree.
+    for (const section of sm.sections) {
       const startBar = barByIndex.get(section.barRange.startBarIndex)
       const endBar = barByIndex.get(section.barRange.endBarIndex)
-      if (!startBar || !endBar) return
+      if (!startBar || !endBar) continue
       const startSec = clamp(startBar.startSec + offset, 0, durationSec)
       const endSec = clamp(endBar.endSec + offset, 0, durationSec)
-      if (endSec <= startSec) return
+      if (endSec <= startSec) continue
       out.push({
         id: section.id,
         label: section.label,
+        kind: section.kind,
         startSec,
         endSec,
-        index: i,
+        index: 0, // set below, after sorting, to the canonical position
       })
-    })
+    }
+    // Chronological by start time, then index === array position so the pad
+    // grid reads top-left → bottom-right in song order and never shifts.
+    out.sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec)
+    out.forEach((r, i) => (r.index = i))
     return out
   })
 
@@ -502,6 +544,11 @@
       }) ?? null
     )
   })
+
+  /** Colour of the section under the playhead (falls back to the studio accent). */
+  const currentSectionColor = $derived(
+    currentSectionRange ? sectionKindColor(currentSectionRange.kind) : 'var(--studio-orange)',
+  )
 
   const repeatSectionRange = $derived.by(() => {
     if (!repeatSectionEnabled || !repeatSectionId) return null
@@ -643,7 +690,7 @@
    * are groundwork for future per-section stem control.
    */
   const sectionBands = $derived.by<
-    { startFrac: number; endFrac: number; label: string; index: number }[]
+    { startFrac: number; endFrac: number; label: string; index: number; color: string }[]
   >(() => {
     const dur = mixerDurationSec
     if (dur <= 0) return []
@@ -653,6 +700,7 @@
       endFrac: clamp01(section.endSec / dur),
       label: section.label,
       index: section.index,
+      color: sectionKindColor(section.kind),
     }))
   })
 
@@ -750,6 +798,9 @@
             loader: async () =>
               await fetchCloudAudioBlob({
                 sidecarReachable: reachable,
+                // Browser-cloud stems (no local folder) — the failsafe must not
+                // block them when the sidecar is running.
+                localProjectPresent: false,
                 path: obj.path,
                 cacheKey: cloudAudioCacheKey({
                   songId,
@@ -762,22 +813,10 @@
       }
     }
 
-    // Cue track (speech). Present whenever a rendered WAV exists on disk.
-    // Whether you HEAR it is a local mute (mixState, per-machine) — the Overview
-    // "Play cues" toggle drives that mute, never the shared `enabled` field, so
-    // toggling never causes a cloud conflict or a full reload.
-    const cueTrackPath = primaryCueTrack?.renderExport?.relativePath
-    if (cueTrackPath) {
-      plan.push({
-        key: 'cue',
-        label: primaryCueTrack?.name ? `Cue · ${primaryCueTrack.name}` : 'Cue',
-        loader: async () => {
-          if (!ps.osPath || !ps.activeSongFolder) return null
-          const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, cueTrackPath)
-          return r.ok ? r.blob : null
-        },
-      })
-    }
+    // NO baked cue lane in the mixer. Spoken cues here are played by the live
+    // dynamic scheduler (fired on approach AND on launch) — the single cue
+    // system. The baked cue WAV is still rendered to disk for Ableton/setlist
+    // export, but playing it here too would double with the dynamic cue.
 
     // Click track (clicks only). Always present for a song with beats —
     // either fetched from disk WHEN THE CACHE IS FRESH, or synthesized
@@ -1026,11 +1065,12 @@
     if (!mixerCanPlay) return
     if (!engine) return
     if (snapshot.state === 'playing') engine.pause()
-    else void engine.play()
+    else announcedPlay()
   }
 
   function onStop() {
     if (!engine) return
+    cueScheduler?.cancelPending()
     engine.stop()
   }
 
@@ -1041,7 +1081,7 @@
     if (snapshot.state === 'playing') {
       engine.seek(0)
     } else {
-      void engine.play(0)
+      announcedPlay(0)
     }
   }
 
@@ -1074,6 +1114,360 @@
     void loadProjectSongAt(activeProjectSongIndex + 1)
   }
 
+  // State pushed to the APC's LEDs so the pads mirror the app (lit = active).
+  // Declared here so the LED state below can read them (Svelte TDZ).
+  let queuedSectionIndex = $state<number | null>(null)
+  let awaitingStart = $state(false)
+
+  // ── Dynamic section cues: fire a section's spoken-name + count-in clip when
+  // that section is LAUNCHED (jump / loop / replay), so cues work even when you
+  // jump around — not just on a linear pass. Rendered per-section clips are
+  // scheduled sample-accurately against the same AudioContext clock as the jump.
+  let cueScheduler: LiveCueScheduler | null = null
+  // Reactive so the cue-render effect re-runs once the engine is created in
+  // onMount (`engine` itself is a plain let and not tracked).
+  let engineReady = $state(false)
+  let sectionCueClips = new Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>()
+  let sectionCueFp = ''
+  let sectionCueRenderToken = 0
+  // Guard so each loop/replay pass pre-fires its lead-in cue exactly once.
+  let loopCueArmedForId: string | null = null
+  // Playhead position at the previous transport tick — drives "fire a section's
+  // cue as we cross into its lead-in" during normal (non-launch) playback.
+  let lastLinearCuePos = 0
+
+  /** The lanes toggleable from the controller's bottom row: stems + cue + click
+   *  (not the original mix or the generated band). Stable order. */
+  const liveLanes = $derived.by(() => {
+    return laneLights
+      .filter((l) => l.key.startsWith('stem:') || l.key === 'cue' || l.key === 'click')
+      .slice(0, 8)
+      .map((l) => ({
+        key: l.key,
+        on: !l.muted,
+        kind: (l.key.startsWith('stem:') ? 'stem' : l.key === 'cue' ? 'cue' : 'click') as
+          | 'stem'
+          | 'cue'
+          | 'click',
+      }))
+  })
+
+  /** Beat-start times in MIXER time — drives the current-section beat blink. */
+  const beatStartsMixer = $derived.by<number[]>(() => {
+    const sm = $songMap
+    if (!sm?.timeline?.beats?.length) return []
+    const offset = mixerSongOffsetSec
+    return sm.timeline.beats.map((b) => b.timeSec + offset)
+  })
+
+  /** True on the first half of the current beat — a tempo-locked on/off gate. */
+  const beatOn = $derived.by(() => {
+    if (snapshot.state !== 'playing') return true
+    const beats = beatStartsMixer
+    const pos = snapshot.positionSec
+    if (beats.length === 0) return true
+    let i = -1
+    for (const b of beats) {
+      if (b <= pos) i++
+      else break
+    }
+    if (i < 0) return true
+    const start = beats[i]!
+    const end = beats[i + 1] ?? start + 0.5
+    return (pos - start) / Math.max(0.05, end - start) < 0.5
+  })
+
+  const liveLedState = $derived<LiveLedState>({
+    playing: snapshot.state === 'playing',
+    loopActive: !!repeatSectionRange,
+    replayArmed: !!replayOnceSectionRange,
+    canReplay: !!currentSectionRange,
+    canPrev: canGoPreviousProjectSong,
+    canNext: canGoNextProjectSong,
+    lanes: liveLanes.map((l) => ({ on: l.on, kind: l.kind })),
+    sectionKinds: sectionTimelineRanges.slice(0, 32).map((s) => s.kind),
+    currentSection: currentSectionRange
+      ? sectionTimelineRanges.findIndex((s) => s.id === currentSectionRange!.id)
+      : -1,
+    queuedSection: queuedSectionIndex ?? -1,
+    awaitingStart,
+    beatOn,
+  })
+
+  // Auto-advance: when a song finishes, load the next one (ready at 0) and arm
+  // "awaiting start" so the Play control blinks until the operator kicks it off.
+  let wasPlayingForEnd = false
+  let lastPosForEnd = 0
+  $effect(() => {
+    const st = snapshot.state
+    const pos = snapshot.positionSec
+    const dur = snapshot.durationSec
+    if (st === 'playing') {
+      wasPlayingForEnd = true
+      lastPosForEnd = pos
+      if (awaitingStart) awaitingStart = false // operator started it
+      return
+    }
+    if (wasPlayingForEnd) {
+      wasPlayingForEnd = false
+      // Stopping or ending cancels any pending one-shot launch, so its indicator
+      // stops flashing instead of sticking (the in-playback clear only runs
+      // while playing, so a stop/end would otherwise leave it armed forever).
+      replayOnceSectionId = null
+      replayOnceConsumed = false
+      queuedSectionIndex = null
+      loopCueArmedForId = null
+      // Natural end (playhead was at the tail), not a manual stop.
+      if (liveMode && dur > 0 && lastPosForEnd >= dur - 1.0) {
+        if (canGoNextProjectSong) {
+          onNextProjectSong()
+          awaitingStart = true
+        }
+      }
+    }
+  })
+
+  // Section launch is quantized to the bar (Ableton default): pressing a section
+  // arms a SAMPLE-ACCURATE jump in the engine that fires exactly on the next bar
+  // line — no polling, no slip. Pressing the section you're on re-triggers it.
+
+  /** Bar-start times in MIXER time (song bars + the mixer offset). */
+  const barStartsMixer = $derived.by<number[]>(() => {
+    const sm = $songMap
+    if (!sm?.timeline?.bars?.length) return []
+    const offset = mixerSongOffsetSec
+    return sm.timeline.bars.map((b) => b.startSec + offset)
+  })
+
+  /** The next bar-start strictly after `posSec` (mixer time), or null near end. */
+  function nextBarBoundary(posSec: number): number | null {
+    for (const b of barStartsMixer) if (b > posSec + 1e-3) return b
+    return null
+  }
+
+  // Render (and cache) the per-section lead-in cue clips whenever the cue setup
+  // or timing changes. Needs the desktop sidecar for TTS; a no-op in browser
+  // mode (dynamic cues simply don't fire there, same as the baked cue WAV).
+  $effect(() => {
+    const sm = $songMap
+    const reachable = $desktopCompanionStatus.reachable
+    void engineReady
+    const eng = engine
+    if (!eng || !sm || !reachable) return
+    const fp = fingerprintCueTrackInputs(sm)
+    if (fp === sectionCueFp) return
+    const specs = sectionCueSpecsFromSongMap(sm)
+    sectionCueFp = fp
+    if (specs.length === 0) {
+      sectionCueClips = new Map()
+      return
+    }
+    const token = ++sectionCueRenderToken
+    void (async () => {
+      // Positioning is pure frontend; only the spoken WORDS come from the
+      // sidecar, and those are cached by text — so moving sections / retiming
+      // re-lays-out cues here without re-synthesizing anything.
+      const clips = await renderSectionCueClips(specs, {
+        fetchTts: fetchTtsWavCached,
+        decodeWav: async (blob) => {
+          const buf = await eng.ac.decodeAudioData(await blob.arrayBuffer())
+          return { data: buf.getChannelData(0), sampleRate: buf.sampleRate }
+        },
+      })
+      if (token !== sectionCueRenderToken) return // superseded by a newer render
+      const map = new Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>()
+      for (const [id, clip] of clips) {
+        const buffer = eng.ac.createBuffer(1, clip.data.length, clip.sampleRate)
+        buffer.copyToChannel(new Float32Array(clip.data), 0, 0)
+        map.set(id, { buffer, downbeatOffsetSec: clip.downbeatOffsetSec })
+      }
+      sectionCueClips = map
+    })()
+  })
+
+  // Cues are on unless explicitly muted in mixState (persisted, per-song).
+  // There's no baked cue lane anymore, so this gates the dynamic scheduler.
+  const cuesEnabled = $derived(
+    !($songMap?.mixState?.tracks.find((t) => t.key === 'cue')?.muted ?? false),
+  )
+
+  /** Fire a section's lead-in cue so its downbeat lands at `arrivalCtxTime`. */
+  function fireSectionCue(sectionId: string, arrivalCtxTime: number) {
+    if (!cueScheduler || !cuesEnabled) return
+    const clip = sectionCueClips.get(sectionId)
+    if (!clip) return
+    cueScheduler.scheduleAt(clip.buffer, arrivalCtxTime - clip.downbeatOffsetSec)
+  }
+
+  /** Convert an arrival POSITION (song seconds) to ctx time and fire the cue.
+   *  Uses the engine's LIVE position (not the ~16 ms-stale snapshot) so the
+   *  count-in lands on the beat. */
+  function fireSectionCueLeadingTo(sectionId: string, arrivalPositionSec: number) {
+    if (!engine) return
+    fireSectionCue(sectionId, engine.ac.currentTime + (arrivalPositionSec - engine.positionSec()))
+  }
+
+  // ── Song announcement (project-wide: auto / triggered / off) ──────────────
+  const announcementMode = $derived($projectStore.data?.defaults?.preCountInCue?.mode ?? 'off')
+  /** What it says: the song's own title, or a per-song intro override. */
+  const announcementText = $derived.by(() => {
+    const sm = $songMap
+    if (!sm) return ''
+    const intro = getPrimaryCueTrack(sm)
+      ?.events.find((e) => e.kind === 'intro' && e.enabled)
+      ?.text?.trim()
+    return intro || sm.metadata.title?.trim() || ''
+  })
+  let announcementClip = $state<AudioBuffer | null>(null)
+  let announcementClipText = ''
+  let announcementRenderToken = 0
+  // Synthesize (cached by text) the announcement clip whenever it's in use.
+  $effect(() => {
+    void engineReady
+    const eng = engine
+    const mode = announcementMode
+    const text = announcementText
+    const reachable = $desktopCompanionStatus.reachable
+    if (!eng || mode === 'off' || !text || !reachable) {
+      announcementClip = null
+      announcementClipText = ''
+      return
+    }
+    if (text === announcementClipText && announcementClip) return
+    announcementClipText = text
+    const token = ++announcementRenderToken
+    void (async () => {
+      const r = await fetchTtsWavCached(text)
+      if (!r.ok || token !== announcementRenderToken) return
+      try {
+        const buf = await eng.ac.decodeAudioData(await r.blob.arrayBuffer())
+        if (token === announcementRenderToken) announcementClip = buf
+      } catch {
+        if (token === announcementRenderToken) announcementClip = null
+      }
+    })()
+  })
+
+  /** Speak the song name now — the 'triggered' Akai action, and 'auto' on play. */
+  function announceSongNow() {
+    if (announcementClip && cueScheduler && engine) {
+      cueScheduler.scheduleAt(announcementClip, engine.ac.currentTime)
+    }
+  }
+
+  /** Play, announcing the song first when starting from the top in 'auto' mode. */
+  function announcedPlay(fromSec?: number) {
+    if (!engine) return
+    const startAt = fromSec ?? snapshot.positionSec
+    const clip = announcementClip
+    if (startAt < 0.05 && announcementMode === 'auto' && clip) {
+      announceSongNow()
+      void engine.play(fromSec, { startDelaySec: clip.duration + 0.15 })
+    } else {
+      void engine.play(fromSec)
+    }
+  }
+
+  /**
+   * Launch a section, quantized. `mode`:
+   *   'next-bar'     — single tap: jump on the next bar line.
+   *   'section-end'  — double tap: jump when the CURRENT section finishes.
+   */
+  function jumpToSection(index: number, mode: 'next-bar' | 'section-end' = 'next-bar') {
+    const section = sectionTimelineRanges[index]
+    if (!engine || !section) return
+    replayOnceSectionId = null
+    replayOnceConsumed = false
+    // Not playing → nothing to quantize to; start there now.
+    if (snapshot.state !== 'playing') {
+      void engine.play(section.startSec)
+      return
+    }
+    const boundary =
+      mode === 'section-end' && currentSectionRange
+        ? currentSectionRange.endSec
+        : nextBarBoundary(snapshot.positionSec)
+    if (boundary == null || boundary <= snapshot.positionSec) {
+      seekSectionStartWithGuard(section.startSec)
+      return
+    }
+    engine.armJumpAtPosition(boundary, section.startSec)
+    queuedSectionIndex = index
+    // Lead the spoken name + count-in into the section's arrival at `boundary`.
+    fireSectionCueLeadingTo(section.id, boundary)
+  }
+
+  // Zero-latency double-tap: a single press launches on the next bar IMMEDIATELY
+  // (no waiting to detect a second tap). A quick second tap of the same section
+  // UPGRADES that still-pending launch to wait for the current section to end.
+  // If the next-bar launch already fired/committed, the second tap is ignored
+  // (never a double-jump). See the 'jump-section' handler.
+  let lastSectionTap: { index: number; at: number } | null = null
+  const DOUBLE_TAP_MS = 400
+
+  // Clear the "queued" LED once the scheduled jump has fired (engine idle).
+  $effect(() => {
+    void snapshot.positionSec
+    if (queuedSectionIndex != null && engine && !engine.jumpPending()) queuedSectionIndex = null
+  })
+
+  // A song switch cancels any pending launch.
+  $effect(() => {
+    void $projectStore.activeSongId
+    engine?.cancelJump()
+    cueScheduler?.cancelPending()
+    queuedSectionIndex = null
+    loopCueArmedForId = null
+  })
+
+  // Live MIDI (APC Key 25) → the SAME actions the keyboard + on-screen buttons
+  // use, so there is exactly one behaviour per command regardless of source.
+  function handleLiveMidiCommand(cmd: LiveCommand) {
+    switch (cmd.type) {
+      case 'play-pause':
+        if (mixerCanPlay) onPlayPause()
+        break
+      case 'stop':
+        onStop()
+        break
+      case 'prev-song':
+        if (canGoPreviousProjectSong) onPreviousProjectSong()
+        break
+      case 'next-song':
+        if (canGoNextProjectSong) onNextProjectSong()
+        break
+      case 'replay-once':
+        if (currentSectionRange || replayOnceSectionRange) replayCurrentSectionOnce()
+        break
+      case 'loop':
+        if (currentSectionRange || repeatSectionEnabled) toggleRepeatSection()
+        break
+      case 'announce-song':
+        announceSongNow()
+        break
+      case 'toggle-stem': {
+        const lane = liveLanes[cmd.index]
+        if (lane) onToggleMuted(lane.key)
+        break
+      }
+      case 'jump-section': {
+        const now = performance.now()
+        const isDouble =
+          !!lastSectionTap && lastSectionTap.index === cmd.index && now - lastSectionTap.at < DOUBLE_TAP_MS
+        lastSectionTap = { index: cmd.index, at: now }
+        if (isDouble) {
+          // Upgrade the still-pending launch to "wait for section end". If it
+          // already fired/committed, jumpPending() is false → do nothing, so a
+          // late second tap never triggers a second, unwanted jump.
+          if (engine?.jumpPending()) jumpToSection(cmd.index, 'section-end')
+        } else {
+          jumpToSection(cmd.index, 'next-bar')
+        }
+        break
+      }
+    }
+  }
+
   function toggleRepeatSection() {
     if (repeatSectionEnabled) {
       repeatSectionEnabled = false
@@ -1089,6 +1483,12 @@
 
   function replayCurrentSectionOnce() {
     if (!engine || !currentSectionRange) return
+    // Press again while it's still armed (before the replay has fired) cancels.
+    if (replayOnceSectionId && !replayOnceConsumed) {
+      replayOnceSectionId = null
+      replayOnceConsumed = false
+      return
+    }
     repeatSectionEnabled = false
     repeatSectionId = null
     replayOnceSectionId = currentSectionRange.id
@@ -1103,6 +1503,8 @@
     if (!engine) return
     repeatSeekGuard = true
     engine.seek(startSec)
+    // Re-arm the loop/replay lead-in cue for the next pass.
+    loopCueArmedForId = null
     window.setTimeout(() => {
       repeatSeekGuard = false
     }, 120)
@@ -1114,6 +1516,44 @@
       mixerDurationSec = s.durationSec
     }
     if (!engine || repeatSeekGuard || s.state !== 'playing') return
+
+    // Pre-fire the lead-in cue for a looping/replaying section so its count-in
+    // counts back into the top of the section right at the loop point.
+    const reentryRange =
+      repeatSectionEnabled && repeatSectionRange
+        ? repeatSectionRange
+        : replayOnceSectionRange && !replayOnceConsumed
+          ? replayOnceSectionRange
+          : null
+    if (reentryRange && loopCueArmedForId !== reentryRange.id) {
+      const clip = sectionCueClips.get(reentryRange.id)
+      if (clip) {
+        const fireAtPos = reentryRange.endSec - clip.downbeatOffsetSec
+        if (s.positionSec >= fireAtPos && s.positionSec < reentryRange.endSec) {
+          loopCueArmedForId = reentryRange.id
+          fireSectionCueLeadingTo(reentryRange.id, reentryRange.endSec)
+        }
+      }
+    }
+
+    // Normal-playback cue firing: speak each section's lead-in as the playhead
+    // crosses into it. Only during smooth forward playback (small tick delta);
+    // a seek/jump has a big delta and is skipped here (launches + loop/replay
+    // fire their own cue). `launchActive` guards against doubling a pending jump.
+    const launchActive =
+      engine.jumpPending() || repeatSectionEnabled || !!replayOnceSectionRange
+    const cueDelta = s.positionSec - lastLinearCuePos
+    if (!launchActive && cueDelta > 0 && cueDelta < 0.5) {
+      for (const range of sectionTimelineRanges) {
+        const clip = sectionCueClips.get(range.id)
+        if (!clip) continue
+        const triggerPos = range.startSec - clip.downbeatOffsetSec
+        if (triggerPos > lastLinearCuePos && triggerPos <= s.positionSec) {
+          fireSectionCueLeadingTo(range.id, range.startSec)
+        }
+      }
+    }
+    lastLinearCuePos = s.positionSec
 
     const continuousRange = repeatSectionRange
     if (
@@ -1234,6 +1674,15 @@
     if (activeId === lastActiveProjectSongId) return
     lastActiveProjectSongId = activeId
     if (!engine) return
+    // New song: reset the transport to a clean stopped-at-0 state. reload()
+    // only swaps the buffers — without this the engine clock would carry over
+    // and the next song would resume at the previous song's playhead. Also
+    // disarm any section replay/loop, which pointed at the old song's sections.
+    engine.stop()
+    replayOnceSectionId = null
+    replayOnceConsumed = false
+    repeatSectionEnabled = false
+    repeatSectionId = null
     void reload()
   })
 
@@ -1253,6 +1702,10 @@
   onMount(() => {
     engine = new MixerEngine()
     engine.onUpdate(handleTransportUpdate)
+    // Cues tap the master bus: they get master volume + master processing but
+    // are unaffected by individual stem mutes/solos.
+    cueScheduler = new LiveCueScheduler(engine.ac, engine.masterGain)
+    engineReady = true
     void syncAndLoad()
   })
 
@@ -1261,6 +1714,8 @@
       clearTimeout(persistTimer)
       persistTimer = null
     }
+    cueScheduler?.dispose()
+    cueScheduler = null
     void engine?.dispose()
     engine = null
   })
@@ -1287,16 +1742,56 @@
     }
   })
 
-  // Spacebar toggles play/pause while the playback stage is open (unless typing).
+  // Live keyboard surface — active whenever the playback stage is open (editor
+  // playback mode AND the live page). Deliberately small + safe: nothing here
+  // exits, restarts the project, or edits. Ignored while typing in a field.
+  //   Space play/pause · S stop · ←/→ prev/next song · R replay section once
+  //   · L loop section · 1–8 toggle stem
   $effect(() => {
-    if (liveMode || !playbackMode || typeof window === 'undefined') return
+    if (!playbackMode || typeof window === 'undefined') return
     const onKey = (e: KeyboardEvent) => {
-      if (e.code !== 'Space' && e.key !== ' ') return
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-      e.preventDefault()
-      e.stopPropagation()
-      if (mixerCanPlay) onPlayPause()
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault()
+        e.stopPropagation()
+        if (mixerCanPlay) onPlayPause()
+        return
+      }
+      if (e.key === 'ArrowRight') {
+        if (!canGoNextProjectSong) return
+        e.preventDefault()
+        void onNextProjectSong()
+        return
+      }
+      if (e.key === 'ArrowLeft') {
+        if (!canGoPreviousProjectSong) return
+        e.preventDefault()
+        void onPreviousProjectSong()
+        return
+      }
+      if (/^[1-8]$/.test(e.key)) {
+        const lane = laneLights[Number(e.key) - 1]
+        if (!lane) return
+        e.preventDefault()
+        onToggleMuted(lane.key)
+        return
+      }
+      const k = e.key.toLowerCase()
+      if (k === 's') {
+        e.preventDefault()
+        onStop()
+      } else if (k === 'r') {
+        if (!currentSectionRange) return
+        e.preventDefault()
+        replayCurrentSectionOnce()
+      } else if (k === 'l') {
+        if (!currentSectionRange && !repeatSectionEnabled) return
+        e.preventDefault()
+        toggleRepeatSection()
+      }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -1546,6 +2041,7 @@
   {/if}
 
   {#if playbackMode}
+    <LiveMidiController enabled={playbackMode} onCommand={handleLiveMidiCommand} led={liveLedState} />
     <section class="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden" aria-label="Playback mode">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex min-w-0 items-center gap-3">
@@ -1565,12 +2061,70 @@
           <button
             type="button"
             class="border-foreground/40 text-foreground hover:border-foreground inline-flex size-9 shrink-0 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-40"
+            onclick={onStop}
+            disabled={!mixerCanPlay}
+            aria-label="Stop"
+            title="Stop (S)"
+          >
+            <Square class="size-4" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="border-foreground/40 text-foreground hover:border-foreground inline-flex size-9 shrink-0 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-40"
             onclick={onRestartSong}
             disabled={!mixerCanPlay}
             aria-label="Restart song"
             title="Restart song"
           >
             <RotateCcw class="size-4" aria-hidden="true" />
+          </button>
+          <!-- Section replay-once (blinks while armed) + loop (lit while looping). -->
+          <button
+            type="button"
+            class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border-2 px-3 text-xs font-black transition-colors disabled:opacity-40 {replayOnceSectionRange
+              ? 'border-foreground bg-foreground text-background animate-pulse'
+              : 'border-foreground/40 text-foreground hover:border-foreground'}"
+            onclick={replayCurrentSectionOnce}
+            disabled={!currentSectionRange && !replayOnceSectionRange}
+            aria-pressed={!!replayOnceSectionRange}
+            title={replayOnceButtonLabel + ' — R'}
+          >
+            <Repeat1 class="size-4" aria-hidden="true" />
+            Once
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border-2 px-3 text-xs font-black transition-colors disabled:opacity-40 {repeatSectionRange
+              ? 'border-destructive bg-destructive text-white'
+              : 'border-foreground/40 text-foreground hover:border-foreground'}"
+            onclick={toggleRepeatSection}
+            disabled={!currentSectionRange && !repeatSectionEnabled}
+            aria-pressed={!!repeatSectionRange}
+            title={repeatSectionButtonLabel + ' — L'}
+          >
+            <Repeat class="size-4" aria-hidden="true" />
+            Loop
+          </button>
+          <!-- Setlist prev / next — the new song loads ready at its start. -->
+          <button
+            type="button"
+            class="border-foreground/40 text-foreground hover:border-foreground inline-flex size-9 shrink-0 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-40"
+            onclick={() => void onPreviousProjectSong()}
+            disabled={!canGoPreviousProjectSong}
+            aria-label="Previous song"
+            title="Previous song (←)"
+          >
+            <SkipBack class="size-4" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="border-foreground/40 text-foreground hover:border-foreground inline-flex size-9 shrink-0 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-40"
+            onclick={() => void onNextProjectSong()}
+            disabled={!canGoNextProjectSong}
+            aria-label="Next song"
+            title="Next song (→)"
+          >
+            <SkipForward class="size-4" aria-hidden="true" />
           </button>
           <div class="min-w-0">
             <!-- In live mode the playback page's banner already shows the song
@@ -1590,31 +2144,37 @@
         </div>
         <div class="flex max-w-full flex-wrap items-center justify-end gap-1.5">
           {#each laneLights as light (light.key)}
+            <!-- On/off reflects the ENABLED (unmuted) state so clicking gives
+                 immediate feedback whether or not the song is playing; the
+                 coloured glow is the secondary "sounding right now" cue. -->
             <button
               type="button"
-              class="ring-foreground/10 inline-flex h-7 items-center gap-1.5 rounded-full px-2 text-[11px] font-black ring-1 transition-colors {light.active
-                ? 'bg-foreground text-background'
-                : 'bg-muted/70 text-muted-foreground'}"
+              class="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-black transition-all hover:brightness-110 {light.muted
+                ? 'bg-muted/50 text-muted-foreground/70'
+                : 'bg-foreground text-background'}"
+              style={light.active ? `box-shadow: 0 0 0 2px ${light.color}` : ''}
               onclick={() => onToggleMuted(light.key)}
-              title={light.muted ? `Unmute ${light.label}` : `Mute ${light.label}`}
+              title={light.muted ? `Turn on ${light.label}` : `Turn off ${light.label}`}
               aria-pressed={!light.muted}
             >
               <span
-                class="size-2.5 rounded-full"
-                style={`background: ${light.active ? light.color : 'color-mix(in oklch, var(--foreground) 25%, transparent)'}`}
+                class="size-2.5 rounded-full transition-colors"
+                style={`background: ${light.muted ? 'color-mix(in oklch, var(--foreground) 20%, transparent)' : light.color}`}
               ></span>
               {light.label}
             </button>
           {/each}
-          <button
-            type="button"
-            class="border-foreground/50 text-foreground hover:bg-foreground hover:text-background ml-1 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[var(--radius)] border-2 px-2.5 text-xs font-black uppercase transition-colors"
-            onclick={() => (playbackMode = false)}
-            title="Exit playback mode"
-          >
-            <X class="size-3.5" aria-hidden="true" />
-            Exit
-          </button>
+          {#if !liveMode}
+            <button
+              type="button"
+              class="border-foreground/50 text-foreground hover:bg-foreground hover:text-background ml-1 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[var(--radius)] border-2 px-2.5 text-xs font-black uppercase transition-colors"
+              onclick={() => (playbackMode = false)}
+              title="Exit playback mode"
+            >
+              <X class="size-3.5" aria-hidden="true" />
+              Exit
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -1657,18 +2217,19 @@
             <div class="bg-foreground/10 pointer-events-none absolute bottom-0 top-0 w-px" style="left: 33%"></div>
             <div class="bg-foreground/10 pointer-events-none absolute bottom-0 top-0 w-px" style="left: 66%"></div>
 
-            <!-- Hit zone + playhead at the left edge: chords fire when they slide into it. -->
+            <!-- Hit zone + playhead at the left edge: chords fire when they slide
+                 into it. Coloured to match the current section. -->
             <div
               class="pointer-events-none absolute inset-y-0 left-0 w-[12%]"
-              style="background: linear-gradient(90deg, color-mix(in oklch, var(--studio-orange) 28%, transparent), transparent);"
+              style={`background: linear-gradient(90deg, color-mix(in oklch, ${currentSectionColor} 28%, transparent), transparent);`}
             ></div>
             <div
               class="pointer-events-none absolute inset-y-0 left-0 z-[5] w-1"
-              style="background: var(--studio-orange); box-shadow: 0 0 12px 1px color-mix(in oklch, var(--studio-orange) 75%, transparent);"
+              style={`background: ${currentSectionColor}; box-shadow: 0 0 12px 1px color-mix(in oklch, ${currentSectionColor} 75%, transparent);`}
             ></div>
             <div
               class="pointer-events-none absolute bottom-0.5 left-2 z-[6] text-[9px] font-black uppercase tracking-wider"
-              style="color: var(--studio-orange);"
+              style={`color: ${currentSectionColor};`}
             >
               Now
             </div>

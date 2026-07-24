@@ -13,9 +13,16 @@
  * manifest, with rollback if anything in between fails.
  */
 import { get } from 'svelte/store'
-import type { ProjectAutoStems, ProjectDefaults, ProjectFile, ProjectMastering, ProjectSongEntry } from './types'
+import type {
+  Performer,
+  ProjectAutoStems,
+  ProjectDefaults,
+  ProjectFile,
+  ProjectMastering,
+  ProjectSongEntry,
+} from './types'
 import { AUTO_STEM_NAMES } from './types'
-import { createDefaultCueTrack } from '$lib/songmap/cueTracks'
+import { songMapHasCueContent } from '$lib/songmap/cueTracks'
 import {
   PROJECT_FILE_VERSION,
   PROJECT_SONGS_DIR,
@@ -57,6 +64,7 @@ import { reconcileSongAudio, applyReconcileMatch } from '$lib/project/audioRecon
 import { pushCloudManifest } from '$lib/client/cloudSync'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import { audioSession } from '$lib/stores/audioSession'
+import { setCloudDiskPath, diskPathForCloudId } from '$lib/stores/cloudDiskPaths'
 import {
   patchMetadataForFolder,
   project,
@@ -114,10 +122,70 @@ export function readLastProjectPath(): string | null {
 
 export function writeLastProjectPath(p: string): void {
   lsSet(LAST_PROJECT_PATH_KEY, p)
+  // A disk project is now the most-recent session — forget any browser-cloud
+  // one so the two restore paths (disk vs. cloud) can't both fire on reload.
+  lsRemove(LAST_CLOUD_PROJECT_ID_KEY)
 }
 
 export function clearLastProjectPath(): void {
   lsRemove(LAST_PROJECT_PATH_KEY)
+}
+
+/**
+ * localStorage key for "cloud project id open in BROWSER mode (no disk folder)
+ * when the user last left BarBro". The browser-cloud twin of
+ * `LAST_PROJECT_PATH_KEY`; lets a reload re-open a sidecar-less collab session
+ * instead of dumping the user on an empty `/project`.
+ */
+export const LAST_CLOUD_PROJECT_ID_KEY = 'barbro::lastCloudProjectId'
+
+export function readLastCloudProjectId(): string | null {
+  const v = lsGet(LAST_CLOUD_PROJECT_ID_KEY)
+  return v && v.trim() ? v : null
+}
+
+export function writeLastCloudProjectId(id: string): void {
+  lsSet(LAST_CLOUD_PROJECT_ID_KEY, id)
+  // Browser-cloud is now the most-recent session — forget the disk one.
+  lsRemove(LAST_PROJECT_PATH_KEY)
+}
+
+export function clearLastCloudProjectId(): void {
+  lsRemove(LAST_CLOUD_PROJECT_ID_KEY)
+}
+
+/**
+ * Record that a cloud-linked project ALSO lives on disk here — so the reload
+ * arbiter can prefer the local HD copy, and the audio-mode badge can offer to
+ * switch to it. Delegates to the reactive `cloudDiskPaths` store.
+ */
+export function rememberCloudProjectDiskPath(cloudProjectId: string, osPath: string): void {
+  setCloudDiskPath(cloudProjectId, osPath)
+}
+
+export function readCloudProjectDiskPath(cloudProjectId: string | null): string | null {
+  return diskPathForCloudId(cloudProjectId)
+}
+
+/**
+ * Startup best-effort: read each RECENT project's manifest via the sidecar and
+ * record its `cloudProjectId → disk folder` mapping. This is what lets the app
+ * KNOW, right after launch, that a browser-cloud project also has a local HD copy
+ * here — so the badge can proactively offer "switch to HD" instead of silently
+ * streaming cloud audio. Skips paths that don't resolve; never throws.
+ */
+export async function indexRecentCloudProjects(): Promise<void> {
+  const paths = readRecentProjectPaths()
+  for (const path of paths) {
+    try {
+      const r = await getProjectInfo(path)
+      if (r.ok && r.manifest.cloud?.projectId) {
+        setCloudDiskPath(r.manifest.cloud.projectId, path)
+      }
+    } catch {
+      /* recent folder gone / sidecar hiccup — skip it */
+    }
+  }
 }
 
 /** Recents are pure paths — names are derived on read from `getProjectInfo`. */
@@ -177,6 +245,7 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
   if (map.audio?.sha256) out.audioSha256 = map.audio.sha256
   if (map.audio?.durationSec !== undefined) out.audioDurationSec = map.audio.durationSec
   if (map.audio?.fileName || map.audio?.originalPath) out.hasAudio = true
+  out.hasCueContent = songMapHasCueContent(map)
   return out
 }
 
@@ -295,6 +364,11 @@ export async function openProjectByPath(projectPath: string): Promise<ProjectFil
   setActiveProject(projectPath, r.manifest, meta)
   writeLastProjectPath(projectPath)
   recordRecentProjectPath(projectPath)
+  // Remember that this cloud project ALSO lives here on disk, so a later reload
+  // prefers this local HD copy over a browser-cloud restore (fixes stranding).
+  if (r.manifest.cloud?.projectId) {
+    rememberCloudProjectDiskPath(r.manifest.cloud.projectId, projectPath)
+  }
   // NOTE: no longer auto-registers the project for background stem prep on
   // open — that's now an explicit per-machine opt-in (Project settings →
   // "Prepare stems on this computer"). Prevents a collaborator's machine from
@@ -604,6 +678,17 @@ export async function refreshProjectInfo(): Promise<{ updatedSongs: number; erro
       } catch (e) {
         errors.push(`${entry.folder}: ${e instanceof Error ? e.message : 'unknown'}`)
       }
+    }
+  }
+
+  // The sidecar scan doesn't parse cue content, so carry over the last-known
+  // `hasCueContent` (computed from the .smap on edit/sync) — otherwise this
+  // wholesale replace would drop it and blink the cue dot off on every refresh.
+  const prevMeta = get(project).metadataByFolder
+  for (const folder of Object.keys(nextMeta)) {
+    const prev = prevMeta[folder]
+    if (prev?.hasCueContent !== undefined && nextMeta[folder]!.hasCueContent === undefined) {
+      nextMeta[folder]!.hasCueContent = prev.hasCueContent
     }
   }
 
@@ -925,7 +1010,11 @@ export async function loadProjectSongIntoEditor(songId: string): Promise<void> {
   // chance to show it. Then, if audio was referenced but not loaded,
   // flag the session so the relink banner renders.
   audioSession.update((s) => ({ ...s, missingAudioIgnored: false }))
-  if (!state.audioBlob && state.songMap.audio?.originalPath) {
+  // Any referenced-but-unloaded audio flags the relink banner — not just when an
+  // `originalPath` is present. A `.smap` that names audio only by `fileName`
+  // (pre-v2 / partial) used to fall through with no reason → the generic
+  // "No analyzed clip" dead-end instead of the relink affordance.
+  if (!state.audioBlob && state.songMap.audio) {
     audioSession.update((s) => ({ ...s, missingReason: 'file-not-found' }))
   }
   patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(state.songMap))
@@ -1325,6 +1414,20 @@ export async function setProjectDefaults(patch: Partial<ProjectDefaults>): Promi
   setProjectData(next)
 }
 
+/** The ONLY writer of the shared performer roster. */
+export async function setProjectPerformers(performers: Performer[]): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    performers,
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
 /** The ONLY writer of the shared project-sound (mastering) config. */
 export async function setProjectMastering(mastering: ProjectMastering): Promise<void> {
   const snap = get(project)
@@ -1371,49 +1474,9 @@ export async function applyDefaultsToAllSongs(): Promise<{ updated: number; erro
           changed = true
         }
       }
-      // Pre-count-in spoken cue: set the primary cue track's spokenCountIn flag
-      // (and, for a fixed custom phrase, seed an intro event). Per-song edits in
-      // the Cue section still override afterward.
-      const pc = defaults.preCountInCue
-      if (pc) {
-        const spoken = pc.mode !== 'off'
-        const tracks =
-          nextMap.cueTracks && nextMap.cueTracks.length > 0
-            ? nextMap.cueTracks.map((t) => ({ ...t, events: [...t.events] }))
-            : [createDefaultCueTrack()]
-        const primaryIdx = Math.max(
-          0,
-          tracks.findIndex((t) => t.enabled),
-        )
-        const primary = tracks[primaryIdx]!
-        if (primary.spokenCountIn !== spoken) {
-          primary.spokenCountIn = spoken
-          changed = true
-        }
-        if (pc.mode === 'custom' && pc.text?.trim()) {
-          const text = pc.text.trim()
-          const introIdx = primary.events.findIndex((e) => e.kind === 'intro')
-          if (introIdx >= 0) {
-            const cur = primary.events[introIdx]!
-            if (cur.text !== text || !cur.enabled) {
-              primary.events[introIdx] = { ...cur, text, enabled: true, edited: true }
-              changed = true
-            }
-          } else {
-            primary.events.unshift({
-              id: `cue_intro_${crypto.randomUUID().slice(0, 8)}`,
-              kind: 'intro',
-              enabled: true,
-              anchor: { kind: 'time', timeSec: 0 },
-              text,
-              source: 'custom',
-              edited: true,
-            })
-            changed = true
-          }
-        }
-        nextMap.cueTracks = tracks
-      }
+      // The song announcement (`preCountInCue.mode`) is a PROJECT-WIDE setting
+      // read at playback and spoken by the live dynamic cue engine — it's not
+      // written into each song's cue track, so nothing per-song to apply here.
       if (!changed) continue
       const enc = await encodeSmapFile({ project: { ...data.project, songMap: nextMap } })
       const w = await writeProjectSong(osPath, entry.folder, new Uint8Array(await enc.arrayBuffer()))

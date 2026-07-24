@@ -4,6 +4,8 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import { get } from 'svelte/store'
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte'
+  import CueTimeline from '$lib/components/CueTimeline.svelte'
+  import { sectionKindColor } from '$lib/songmap/sectionColors'
   import MixerView from '$lib/components/MixerView.svelte'
   import DrumTrackPanel from '$lib/components/DrumTrackPanel.svelte'
   import LeadSheet from '$lib/components/LeadSheet.svelte'
@@ -57,11 +59,19 @@
     createDefaultCueTrack,
     generateCueTrackFromSections,
     getPrimaryCueTrack,
+    buildSectionCueEvents,
+    generatedSectionKey,
   } from '$lib/songmap/cueTracks'
   import { safeExportBasename } from '$lib/songmap/persist'
   import { patchMetadataForFolder, project as projectStore } from '$lib/stores/project'
   import { newId } from '$lib/songmap/factory'
-  import { clearHarmonyAtBeat, upsertHarmonyAtBeat } from '$lib/songmap/harmonyEdit'
+  import {
+    clearHarmonyAtBeat,
+    upsertHarmonyAtBeat,
+    setBarChordDivision,
+    setBarFractionChord,
+    barChordDivision,
+  } from '$lib/songmap/harmonyEdit'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import {
     defaultSectionLabel,
@@ -84,9 +94,13 @@
     setupLyricsDeps,
     enqueueLyricsTranscription,
     subscribeToJobEvents,
+    pickOpenFileViaDesktop,
     type LyricsTranscriptionEvent,
     type LyricsTranscriptionWord,
   } from '$lib/client/desktopBridge'
+  import { importVocalStem, type AlignmentVerdict } from '$lib/client/importVocalStem'
+  import { uploadSongCloudAudio } from '$lib/client/cloudAudioSync'
+  import { vocalPresenceFromBuffer } from '$lib/audio/vocalPresence'
   import { tonicIntToNote } from '$lib/chords/keyDetect'
   import {
     CHORD_ANALYZER_VERSION,
@@ -106,9 +120,10 @@
     switchToDraft,
   } from '$lib/songmap/drafts'
   import { applySheetImport, prepareSheetImport } from '$lib/chords/sheet/importAsDraft'
+  import { shouldReseedLyricsDraft, pruneSelections } from '$lib/editor/liveEditGuards'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { ensureAudioFingerprint } from '$lib/audio/importedAudio'
-  import { selectBestStemSet } from '$lib/project/commit'
+  import { selectBestStemSet, refreshProjectInfo } from '$lib/project/commit'
   import {
     applyBarGridAction,
     resetTimelineToOriginal,
@@ -1236,6 +1251,148 @@
     return sectionForBeatId(sm, beatId)
   })
 
+  // ── Off-grid chords (edge case): N even chords across the focused bar ──────
+  const chordEditorBar = $derived.by(() => {
+    const sm = $songMap
+    const bid = selectedBeatId ?? chordsSelectionBeatIds[0] ?? null
+    if (!sm || !bid) return null
+    const beat = sm.timeline.beats.find((b) => b.id === bid)
+    return beat ? (sm.timeline.bars.find((b) => b.id === beat.barId) ?? null) : null
+  })
+  const chordBarDivision = $derived.by(() => {
+    const sm = $songMap
+    const bar = chordEditorBar
+    return sm && bar ? barChordDivision(sm, bar.id) : 0
+  })
+
+  /** barId → its off-grid fraction chords (label + fraction), for the strip. */
+  const chordFractionByBar = $derived.by(() => {
+    const sm = $songMap
+    const out: Record<string, { fraction: number; label: string }[]> = {}
+    if (!sm) return out
+    const key = displayedSongKey
+    const preferFlats = key ? songKeyPreferFlats(key) : false
+    for (const h of sm.harmony) {
+      if (h.barFraction == null) continue
+      const disp = transposeChordForDisplay(h.chord, transposeSemitones, key ?? undefined)
+      ;(out[h.barId] ??= []).push({ fraction: h.barFraction, label: formatChordSymbol(disp, { preferFlats }) })
+    }
+    for (const arr of Object.values(out)) arr.sort((a, b) => a.fraction - b.fraction)
+    return out
+  })
+
+  /** The SELECTED off-grid slot (mirrors selectedBeatId for the beat grid).
+   *  Chord edits + delete target this slot when set. */
+  let selectedFraction = $state<{ barId: string; fraction: number } | null>(null)
+  /** `barId:fraction` key of the selected slot, for the strip highlight. */
+  const selectedFractionKey = $derived(
+    selectedFraction ? `${selectedFraction.barId}:${selectedFraction.fraction.toFixed(4)}` : null,
+  )
+
+  // Drop selection ids that no longer exist after a song change — chiefly a LIVE
+  // remote edit (or a local structural edit) that removed/replaced beats or bars.
+  // `$effect` writing into non-reactive selection sinks; only writes what changed.
+  $effect(() => {
+    const sm = $songMap
+    if (!sm) return
+    const changes = pruneSelections(
+      sm,
+      untrack(() => ({
+        selectedBeatId,
+        chordsSelectionBeatIds,
+        sectionsSelectionBarIds,
+        selectedFraction,
+      })),
+    )
+    untrack(() => {
+      if (changes.selectedBeatId !== undefined) selectedBeatId = changes.selectedBeatId
+      if (changes.chordsSelectionBeatIds !== undefined) chordsSelectionBeatIds = changes.chordsSelectionBeatIds
+      if (changes.sectionsSelectionBarIds !== undefined) sectionsSelectionBarIds = changes.sectionsSelectionBarIds
+      if (changes.selectedFraction !== undefined) selectedFraction = changes.selectedFraction
+    })
+  })
+
+  /** Single-click an off-grid slot → select it (like clicking a beat). */
+  function onChordFractionSelect(detail: { barId: string; fraction: number }) {
+    selectedFraction = { barId: detail.barId, fraction: detail.fraction }
+    selectedBeatId = null
+    chordsSelectionBeatIds = []
+  }
+
+  /** Divide (n>=2) or un-divide (n<2) the focused bar's chords. */
+  function divideChordBar(n: number) {
+    const bar = chordEditorBar
+    if (!bar) return
+    chordContextMenu = null
+    patchSongMap((m) => {
+      const seed = m.harmony.find((h) => h.barId === bar.id)?.chord ?? {
+        root: 'C' as const,
+        displayRaw: 'C',
+      }
+      const r = setBarChordDivision(m, bar.id, n, seed, newId)
+      return r.ok ? r.map : m
+    })
+    selectedFraction = null
+  }
+
+  /** Strip click on a divided bar's slot → open the normal chord picker for it. */
+  function onChordFractionInteract(detail: {
+    barId: string
+    fraction: number
+    clientX: number
+    clientY: number
+  }) {
+    selectedFraction = { barId: detail.barId, fraction: detail.fraction }
+    selectedBeatId = null
+    chordsSelectionBeatIds = []
+    chordAnchorX = detail.clientX
+    chordAnchorY = detail.clientY
+    chordPickerOpen = true
+  }
+
+  // Selecting a beat clears any selected off-grid slot (and vice versa) — the
+  // two selections are mutually exclusive.
+  $effect(() => {
+    if (selectedBeatId || chordsSelectionBeatIds.length > 0) selectedFraction = null
+  })
+
+  /** Revert the given bar's off-grid division back to normal beat chords. */
+  function revertBarToBeats(barId: string) {
+    patchSongMap((m) => {
+      const r = setBarChordDivision(m, barId, 1, { root: 'C', displayRaw: 'C' }, newId)
+      return r.ok ? r.map : m
+    })
+    selectedFraction = null
+  }
+
+  // Delete / Backspace clears the selection: an off-grid slot's whole division
+  // reverts to beats; selected beats have their chords cleared.
+  $effect(() => {
+    if (!browser || editMode !== 'chords') return
+    const fn = (e: KeyboardEvent) => {
+      // Only skip when actually typing in a text field (the slot is a <button>,
+      // so `blocksChordGlobalShortcut` would wrongly swallow Delete on it).
+      const el = e.target
+      if (
+        el instanceof HTMLElement &&
+        (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+      ) {
+        return
+      }
+      if (chordPickerOpen) return
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return
+      if (selectedFraction) {
+        e.preventDefault()
+        revertBarToBeats(selectedFraction.barId)
+      } else if (selectedChordTargetBeatIds().length > 0) {
+        e.preventDefault()
+        clearChordAtBeat()
+      }
+    }
+    window.addEventListener('keydown', fn, true)
+    return () => window.removeEventListener('keydown', fn, true)
+  })
+
   const autoFinishedChordSectionIds = $derived.by(() => {
     return chordSuggestionVisibility
       ? [...chordSuggestionVisibility.coveredFromStartSectionIds]
@@ -1473,10 +1630,20 @@
   function commitChord(chord: ChordSymbol) {
     const sm = get(songMap)
     if (!sm) return
+    const sourceChord = transposeChordForStorage(chord, transposeSemitones, sm.metadata.keyDetail)
+    // Off-grid slot selected → set that fraction chord and we're done.
+    if (selectedFraction) {
+      const p = patchSongMap((m) => setBarFractionChord(m, selectedFraction!.barId, selectedFraction!.fraction, sourceChord))
+      if (!p.ok) beatEditError = p.errors.join('; ')
+      else {
+        beatEditError = ''
+        chordPickerOpen = false
+      }
+      return
+    }
     const targets = selectedChordTargetBeatIds()
     if (targets.length === 0) return
     let map = sm
-    const sourceChord = transposeChordForStorage(chord, transposeSemitones, sm.metadata.keyDetail)
     for (const beatId of targets) {
       const out = upsertHarmonyAtBeat(map, beatId, sourceChord, newId)
       if (!out.ok) {
@@ -1496,6 +1663,21 @@
   function clearChordAtBeat() {
     const sm = get(songMap)
     if (!sm) return
+    // Clearing an off-grid slot reverts the whole bar back to the beat grid.
+    if (selectedFraction) {
+      const barId = selectedFraction.barId
+      const p = patchSongMap((m) => {
+        const r = setBarChordDivision(m, barId, 1, { root: 'C', displayRaw: 'C' }, newId)
+        return r.ok ? r.map : m
+      })
+      if (!p.ok) beatEditError = p.errors.join('; ')
+      else {
+        beatEditError = ''
+        selectedFraction = null
+        chordPickerOpen = false
+      }
+      return
+    }
     const targets = selectedChordTargetBeatIds()
     if (targets.length === 0) return
     let map = sm
@@ -1536,7 +1718,7 @@
     const fn = (e: KeyboardEvent) => {
       if (blocksChordGlobalShortcut(e.target)) return
       if (chordPickerOpen) return
-      if (!selectedBeatId) return
+      if (!selectedBeatId && !selectedFraction) return
       if (!isChordOpenKey(e)) return
       e.preventDefault()
       chordSearchInitialQuery = e.key // jump straight into search, pre-filled
@@ -1579,6 +1761,7 @@
 
   function onChordBeatInteract(detail: { clientX: number; clientY: number }) {
     chordContextMenu = null
+    selectedFraction = null // editing a normal beat, not an off-grid slot
     chordSearchInitialQuery = '' // double-tap opens the radial view, not search
     chordAnchorX = detail.clientX
     chordAnchorY = detail.clientY
@@ -2176,6 +2359,58 @@
     selectedCueTrackId = sm.cueTracks[0]?.id ?? null
   })
 
+  // ── Performer-linked cue tracks (one cue track per project performer) ──────
+  const projectPerformers = $derived($projectStore.data?.performers ?? [])
+
+  /** One entry per performer, in roster order — or null when there's no roster
+   *  (then the legacy ad-hoc "Voice" tracks are used instead). */
+  const cuePerformerView = $derived.by(() => {
+    const perfs = projectPerformers
+    if (perfs.length === 0) return null
+    const tracks = $songMap?.cueTracks ?? []
+    return perfs.map((p) => ({
+      performerId: p.id,
+      name: p.name,
+      role: p.role,
+      track: tracks.find((t) => t.performerId === p.id) ?? null,
+    }))
+  })
+
+  /** Ensure every performer has a cue track. Claims a legacy unlinked track for
+   *  the first performer (existing cues carry over), then creates the rest. */
+  function ensurePerformerCueTracks() {
+    const perfs = get(projectStore).data?.performers ?? []
+    const sm = get(songMap)
+    if (!sm || perfs.length === 0) return
+    const tracks = sm.cueTracks.map((t) => ({ ...t }))
+    let changed = false
+    for (const p of perfs) {
+      if (tracks.some((t) => t.performerId === p.id)) continue
+      const unlinked = tracks.findIndex((t) => !t.performerId)
+      if (unlinked >= 0) {
+        tracks[unlinked] = { ...tracks[unlinked]!, performerId: p.id, name: p.name }
+      } else {
+        tracks.push({ ...createDefaultCueTrack({ id: newId(), name: p.name }), performerId: p.id })
+      }
+      changed = true
+    }
+    if (changed) patchSongMap((m) => ({ ...m, cueTracks: tracks }))
+  }
+
+  // Materialize the per-performer cue tracks when the Cue editor is open.
+  $effect(() => {
+    if (editMode !== 'cue') return
+    void projectPerformers
+    void $songMap
+    ensurePerformerCueTracks()
+  })
+
+  function selectPerformerCue(performerId: string) {
+    ensurePerformerCueTracks()
+    const t = get(songMap)?.cueTracks.find((x) => x.performerId === performerId)
+    if (t) selectedCueTrackId = t.id
+  }
+
   function cueTrackRelativePath(trackId: string): string {
     return `cue/tracks/${trackId}/cue-track.wav`
   }
@@ -2288,6 +2523,168 @@
     if (!p.ok) beatEditError = p.errors.join('; ')
     else beatEditError = ''
   }
+
+  // ── Visual cue timeline ────────────────────────────────────────────────────
+  let selectedCueEventId = $state<string | null>(null)
+
+  /** Per-section state: colour + whether its speech/count cues are on. */
+  const cueSectionRegions = $derived.by(() => {
+    const sm = $songMap
+    const dur = sm?.audio?.durationSec ?? 0
+    const track = selectedCueTrack
+    if (!sm?.sections?.length || !sm.timeline.bars.length || !(dur > 0)) return []
+    const barByIndex = new Map(sm.timeline.bars.map((b) => [b.index, b]))
+    const events = track?.events ?? []
+    return sm.sections
+      .map((s) => {
+        const sb = barByIndex.get(s.barRange.startBarIndex)
+        const eb = barByIndex.get(s.barRange.endBarIndex)
+        if (!sb || !eb) return null
+        const speechEvent = events.find((e) => e.kind === 'section' && e.generatedSource?.sectionId === s.id)
+        const speechOn = !!speechEvent?.enabled
+        const countOn = events.some((e) => e.kind === 'count' && e.generatedSource?.sectionId === s.id && e.enabled)
+        return {
+          id: s.id,
+          label: s.label,
+          startSec: sb.startSec,
+          endSec: eb.endSec,
+          color: sectionKindColor(s.kind),
+          speechOn,
+          countOn,
+          speechText: speechEvent?.text ?? s.label,
+        }
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+  })
+
+  /** Only the one-off custom/intro cues become free bubbles (section + count
+   *  cues are represented by the per-section toggles). */
+  const cueTimelineCues = $derived.by(() => {
+    const sm = $songMap
+    const dur = sm?.audio?.durationSec ?? 0
+    if (!sm || !(dur > 0)) return []
+    return selectedCueEvents
+      .filter((ev) => ev.kind !== 'section' && ev.kind !== 'count')
+      .map((ev) => {
+        const t = resolveCueEventOriginalTimeSec(sm, ev) ?? 0
+        const sec = cueSectionRegions.find((r) => t >= r.startSec - 1e-6 && t < r.endSec + 1e-6)
+        return { id: ev.id, text: ev.text || cueEventLabel(ev), timeSec: t, color: sec?.color ?? '#71717a', enabled: ev.enabled }
+      })
+  })
+
+  /** Toggle the spoken section-name cue for one section. */
+  function toggleSectionSpeech(sectionId: string) {
+    const track = selectedCueTrack
+    const sm = get(songMap)
+    const section = sm?.sections.find((s) => s.id === sectionId)
+    if (!track || !sm || !section) return
+    const key = generatedSectionKey(section)
+    const on = track.events.some((e) => e.kind === 'section' && e.generatedSource?.sectionId === sectionId && e.enabled)
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => {
+        if (t.id !== track.id) return t
+        const events = t.events.filter((e) => e.generatedKey !== key)
+        if (on) {
+          return { ...t, events, suppressedGeneratedKeys: [...new Set([...t.suppressedGeneratedKeys, key])] }
+        }
+        const built = buildSectionCueEvents(m, section)
+        return {
+          ...t,
+          events: built.speech ? [...events, built.speech] : events,
+          suppressedGeneratedKeys: t.suppressedGeneratedKeys.filter((k) => k !== key),
+        }
+      }),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+  }
+
+  /** Set the spoken-cue text for a section (updates its speech event). */
+  function setSectionSpeechText(sectionId: string, text: string) {
+    const track = selectedCueTrack
+    const sm = get(songMap)
+    const section = sm?.sections.find((s) => s.id === sectionId)
+    if (!track || !sm || !section) return
+    const key = generatedSectionKey(section)
+    const ev = track.events.find((e) => e.generatedKey === key)
+    if (ev) updateCueEvent(track.id, ev.id, { text })
+  }
+
+  /** Rename the current cue track (prompted). */
+  function promptRenameCueTrack(trackId: string) {
+    selectedCueTrackId = trackId
+    const track = get(songMap)?.cueTracks.find((t) => t.id === trackId)
+    const name = prompt('Voice track name', track?.name ?? '')?.trim()
+    if (name) renameSelectedCueTrack(name)
+  }
+
+  /** Toggle the count-in for one section (all its count events at once). */
+  function toggleSectionCount(sectionId: string) {
+    const track = selectedCueTrack
+    const sm = get(songMap)
+    const section = sm?.sections.find((s) => s.id === sectionId)
+    if (!track || !sm || !section) return
+    const countKeys = new Set(buildSectionCueEvents(sm, section).count.map((e) => e.generatedKey!))
+    const on = track.events.some((e) => e.kind === 'count' && e.generatedSource?.sectionId === sectionId && e.enabled)
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => {
+        if (t.id !== track.id) return t
+        const events = t.events.filter((e) => !(e.generatedKey && countKeys.has(e.generatedKey)))
+        if (on) {
+          return {
+            ...t,
+            events,
+            suppressedGeneratedKeys: [...new Set([...t.suppressedGeneratedKeys, ...countKeys])],
+          }
+        }
+        const built = buildSectionCueEvents(m, section)
+        return {
+          ...t,
+          events: [...events, ...built.count],
+          suppressedGeneratedKeys: t.suppressedGeneratedKeys.filter((k) => !countKeys.has(k)),
+        }
+      }),
+    }))
+    if (!p.ok) beatEditError = p.errors.join('; ')
+  }
+
+  const cueTimelineDuration = $derived($songMap?.audio?.durationSec ?? 0)
+
+  /** Insert a custom spoken cue at a clicked time on the timeline. */
+  function insertCueAtSec(sec: number) {
+    const track = selectedCueTrack
+    const sm = get(songMap)
+    if (!track || !sm) {
+      if (!track) addCueTrack()
+      return
+    }
+    // Anchor to the nearest beat so the cue stays on the grid through edits.
+    const beats = sortBeatsByTime(sm.timeline.beats)
+    let nearest = beats[0]
+    let best = Infinity
+    for (const b of beats) {
+      const d = Math.abs(b.timeSec - sec)
+      if (d < best) {
+        best = d
+        nearest = b
+      }
+    }
+    const anchor = nearest
+      ? { kind: 'beat' as const, beatId: nearest.id }
+      : { kind: 'time' as const, timeSec: sec }
+    const event: CueEvent = { id: newId(), kind: 'custom-text', enabled: true, anchor, text: '', source: 'custom' }
+    const p = patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === track.id ? { ...t, events: [...t.events, event] } : t)),
+    }))
+    if (p.ok) selectedCueEventId = event.id
+    else beatEditError = p.errors.join('; ')
+  }
+
+  const selectedCueEvent = $derived.by(
+    () => selectedCueEvents.find((e) => e.id === selectedCueEventId) ?? null,
+  )
 
   function updateCueEvent(trackId: string, eventId: string, patch: Partial<CueEvent>) {
     const p = patchSongMap((m) => ({
@@ -2655,16 +3052,33 @@
   // Timing (`lyrics.words`) comes from "Fit to song" (Phase C); editing the
   // text after an alignment clears the words — their timing is stale.
   let lyricsDraft = $state('')
-  /** Which song the draft was seeded for — re-seed on song switch, never on ticks. */
+  /** Which song the draft was seeded for — re-seed on song switch. */
   let lyricsSeededFor = ''
+  /** The stored text the draft was last seeded from — lets a LIVE remote lyrics
+   *  edit reseed the same song without clobbering text the user is typing. */
+  let lyricsSeededText = ''
+  let lyricsFocused = $state(false)
   $effect(() => {
     if (editMode !== 'lyrics') return
     const sm = $songMap
     if (!sm) return
     const key = `${$projectStore.activeSongId ?? 'session'}::${sm.metadata.title}`
-    if (lyricsSeededFor === key) return
-    lyricsSeededFor = key
-    lyricsDraft = untrack(() => sm.lyrics?.sourceText ?? '')
+    const stored = sm.lyrics?.sourceText ?? ''
+    untrack(() => {
+      if (
+        !shouldReseedLyricsDraft({
+          keyChanged: lyricsSeededFor !== key,
+          storedText: stored,
+          seededText: lyricsSeededText,
+          draft: lyricsDraft,
+          focused: lyricsFocused,
+        })
+      )
+        return
+      lyricsSeededFor = key
+      lyricsSeededText = stored
+      lyricsDraft = stored
+    })
   })
 
   // Chord-sheet awareness: a paste that carries chord lines (Ultimate-Guitar
@@ -2704,6 +3118,8 @@
       return
     }
     lyricsDraft = cleaned.text
+    // Track what we now consider "saved" so a later LIVE remote edit reseeds.
+    lyricsSeededText = cleaned.text
     lyricsSaveMsg = cleaned.text
       ? `Saved ${cleaned.lines.length} line${cleaned.lines.length === 1 ? '' : 's'}.`
       : 'Lyrics removed.'
@@ -2988,6 +3404,159 @@
     return { abs: `${ps.osPath}/${ps.activeSongFolder}/${rel}`, usedStem: false }
   }
 
+  // ── Import a vocals source (for instrumental songs with no vocals to fit) ──
+  let vocalImportBusy = $state(false)
+  let vocalImportMsg = $state('')
+  let vocalImportErr = $state('')
+  /** Set when the aligner is unsure — the UI offers "use it anyway". */
+  let vocalImportConfirm = $state<{ verdict: AlignmentVerdict; uploadAbs: string } | null>(null)
+  /** Best-effort: true once we've confirmed the current vocals stem is silent. */
+  let vocalStemEmpty = $state(false)
+  let vocalStemChecked = ''
+
+  /** The song's existing (instrumental) audio — the alignment reference. */
+  function resolveSongOriginalAudioAbs(): string | null {
+    const ps = get(projectStore)
+    const sm = get(songMap)
+    if (!ps.osPath || !ps.activeSongFolder || !sm?.audio?.originalPath) return null
+    return `${ps.osPath}/${ps.activeSongFolder}/${sm.audio.originalPath}`
+  }
+
+  /**
+   * Decode the current vocals stem (if any) and flag whether it's effectively
+   * empty — the signal that this is an instrumental and lyrics can't be fit
+   * until a vocals source is imported. Best-effort; failures leave it false.
+   */
+  async function checkVocalStemEmpty() {
+    const ps = get(projectStore)
+    if (!ps.osPath || !ps.activeSongFolder) return
+    const key = ps.activeSongFolder
+    if (vocalStemChecked === key) return
+    vocalStemChecked = key
+    vocalStemEmpty = false
+    try {
+      const meta = ps.metadataByFolder[ps.activeSongFolder]
+      const best = selectBestStemSet(meta)
+      const vocalsFile = best?.files.find((f) => /^vocals\.(wav|mp3)$/i.test(f))
+      if (!best || !vocalsFile) return
+      const got = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, `${best.pathPrefix}${vocalsFile}`)
+      if (!got.ok) return
+      const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
+      try {
+        const buf = await ctx.decodeAudioData(await got.blob.arrayBuffer())
+        vocalStemEmpty = !vocalPresenceFromBuffer(buf).hasVocals
+      } finally {
+        void ctx.close()
+      }
+    } catch {
+      /* best-effort — leave vocalStemEmpty false */
+    }
+  }
+
+  async function pickAndImportVocals() {
+    if (vocalImportBusy) return
+    vocalImportErr = ''
+    const picked = await pickOpenFileViaDesktop({
+      title: 'Choose a version of this song WITH vocals',
+      filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg', 'aiff'] }],
+    })
+    if (!picked.ok) {
+      if ('error' in picked) vocalImportErr = picked.error
+      return
+    }
+    await runVocalImport(picked.path, false)
+  }
+
+  async function runVocalImport(uploadAbs: string, force: boolean) {
+    const ps = get(projectStore)
+    const sm = get(songMap)
+    const refAbs = resolveSongOriginalAudioAbs()
+    if (!ps.osPath || !ps.activeSongFolder || !sm || !refAbs) {
+      vocalImportErr = 'This song needs its audio in the project first.'
+      return
+    }
+    const meta = ps.metadataByFolder[ps.activeSongFolder]
+    const best = selectBestStemSet(meta)
+    const bestStemPrefix = best?.pathPrefix ?? 'stems/best/'
+
+    vocalImportBusy = true
+    vocalImportErr = ''
+    vocalImportConfirm = null
+    try {
+      const result = await importVocalStem({
+        refAudioAbs: refAbs,
+        uploadAbs,
+        osPath: ps.osPath,
+        songFolder: ps.activeSongFolder,
+        bestStemPrefix,
+        songDurationSec: sm.audio?.durationSec ?? 0,
+        songId: ps.activeSongId,
+        force,
+        onProgress: (m) => (vocalImportMsg = m),
+      })
+      if (result.status === 'needs-confirmation') {
+        vocalImportConfirm = { verdict: result.verdict, uploadAbs }
+        return
+      }
+      if (result.status === 'error') {
+        vocalImportErr = result.error
+        return
+      }
+
+      // Installed. Point stemRefs at the new vocal stem so the mixer + cloud
+      // upload pick it up, and refresh the on-disk stem discovery.
+      patchSongMap((cur) => ({
+        ...cur,
+        stemRefs: { ...(cur.stemRefs ?? {}), Vocals: result.vocalStemSubpath },
+      }))
+      vocalStemEmpty = false
+      vocalStemChecked = '' // re-check next time
+      await refreshProjectInfo().catch(() => {})
+
+      // Compress + upload to the cloud like the other stems (best-effort).
+      const cloud = get(projectStore).data?.cloud
+      if (cloud && ps.activeSongId) {
+        try {
+          vocalImportMsg = 'Uploading the vocal stem to collaborators…'
+          const nextSm = get(songMap)
+          await uploadSongCloudAudio({
+            osPath: ps.osPath,
+            songFolder: ps.activeSongFolder,
+            projectId: cloud.projectId,
+            songId: ps.activeSongId,
+            mixSrcSubpath: nextSm?.audio?.originalPath ?? '',
+            stems: nextSm?.stemRefs ?? {},
+            sourceSha256: nextSm?.audio?.sha256,
+            durationSec: nextSm?.audio?.durationSec,
+            onProgress: (m) => (vocalImportMsg = m),
+          })
+        } catch (e) {
+          // Non-fatal — the local stem + fit still work.
+          console.warn('[vocal-import] cloud upload failed:', e)
+        }
+      }
+
+      // Auto-run Fit on the freshly imported vocals.
+      vocalImportBusy = false
+      vocalImportMsg = ''
+      if (get(songMap)?.lyrics?.sourceText) await fitLyricsToSong()
+      return
+    } catch (e) {
+      vocalImportErr = e instanceof Error ? e.message : String(e)
+    } finally {
+      vocalImportBusy = false
+      vocalImportMsg = ''
+    }
+  }
+
+  // When the lyrics tab opens (desktop only), quietly check whether the vocal
+  // stem is empty so the import affordance can lead with the right message.
+  $effect(() => {
+    if (editMode === 'lyrics' && $desktopCompanionStatus.reachable) {
+      void checkVocalStemEmpty()
+    }
+  })
+
   async function fitLyricsToSong() {
     if (lyricsFitBusy) return
     const sm = get(songMap)
@@ -3174,6 +3743,39 @@
     !!overviewCueTrack?.spokenCountIn && cueCountInBeats === 0,
   )
 
+  /** User-facing state of the cue render, for the Cue tab status badge. */
+  const cueRenderStatus = $derived.by<null | { kind: 'busy' | 'ready' | 'warn'; text: string }>(() => {
+    if (!overviewHasCueContent) return null
+    if (cueGenBusy) return { kind: 'busy', text: 'Rendering voice cues…' }
+    if (overviewCueRendered) return { kind: 'ready', text: 'Cues ready' }
+    if (!$desktopCompanionStatus.reachable) return { kind: 'warn', text: 'Start BarBro Desktop to hear voice cues' }
+    if (!piperCueReady) return { kind: 'warn', text: 'Finish voice setup to render cues' }
+    return { kind: 'busy', text: 'Preparing cues…' }
+  })
+
+  // Auto-render cues once they exist — no manual "Generate" needed. When a cue
+  // track has content but its rendered WAV is missing/stale, and the voice
+  // engine is ready, render it (debounced so editing text doesn't spam TTS).
+  // The fingerprint guard stops it retrying the same content on failure.
+  let cueAutoRenderTimer: ReturnType<typeof setTimeout> | null = null
+  let cueAutoRenderFp = ''
+  $effect(() => {
+    const sm = $songMap
+    const track = overviewCueTrack
+    const canRender = overviewHasCueContent && !overviewCueRendered && $desktopCompanionStatus.reachable && piperCueReady
+    if (cueAutoRenderTimer) {
+      clearTimeout(cueAutoRenderTimer)
+      cueAutoRenderTimer = null
+    }
+    if (!sm || !track || !canRender || cueGenBusy) return
+    const fp = fingerprintCueTrackInputs(sm, track)
+    if (fp === cueAutoRenderFp) return
+    cueAutoRenderTimer = setTimeout(() => {
+      cueAutoRenderFp = fp
+      void generateCueTrackWav().then(() => mixerReloadSignal++)
+    }, 1200)
+  })
+
   function setCueLaneMuted(muted: boolean) {
     patchSongMap((m) => {
       const tracks = m.mixState?.tracks ? m.mixState.tracks.map((t) => ({ ...t })) : []
@@ -3268,6 +3870,24 @@
       <p class="text-muted-foreground text-sm">
         Locate the audio file for <span class="text-foreground font-semibold">{$songMap.metadata.title}</span>
         to continue editing.
+      </p>
+      <Button type="button" variant="secondary" class="mt-6 gap-2" onclick={() => goto('/project')}>
+        <ArrowLeft class="size-4" aria-hidden="true" />
+        Back to project
+      </Button>
+    </div>
+  {:else if $songMap && !$audioSession.file && $audioSession.missingReason === 'cloud-audio-unavailable'}
+    <!-- Browser-cloud (Collab) mode: the song loaded fine but its compressed
+         cloud audio couldn't be obtained. NOT a dead-end — the chart is editable;
+         the fix for audio is Studio mode (open the project from disk). -->
+    <div
+      class="brutalist-shadow border-foreground bg-background mx-auto w-full max-w-md border-2 p-8 text-center"
+    >
+      <p class="text-foreground text-sm font-semibold">Audio isn't available here</p>
+      <p class="text-muted-foreground mt-2 text-sm">
+        <span class="text-foreground font-semibold">{$songMap.metadata.title}</span> opened in Collab (cloud)
+        mode, but its audio couldn't be loaded. Open this project from disk in Studio mode (the desktop app)
+        for HD audio + stems — you can still edit chords, sections and lyrics here.
       </p>
       <Button type="button" variant="secondary" class="mt-6 gap-2" onclick={() => goto('/project')}>
         <ArrowLeft class="size-4" aria-hidden="true" />
@@ -3554,245 +4174,107 @@
     {#if editMode === 'cue'}
       <section
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Cue settings"
+        aria-label="Cue editor"
       >
         <EditSectionToolbar
           title="Cue"
-          helpText="Cue tracks combine the click with optional spoken cues for headphone monitoring. Set the count-in in Grid; BarBro renders the cue automatically when playback or export needs it. Use Overview for full multi-track playback with click and stems."
+          helpText="Per section, toggle a spoken cue and/or a count-in — click a section to edit its voice line. Switch voice tracks with the pills; Auto-generate reads each section name just before it starts."
         />
-
-        <div class="space-y-4">
-          {#if cueCountInBeats > 0 && cueCountInResult}
-            <dl class="border-foreground border-2 px-3 py-3 font-mono text-xs">
-              <div class="flex justify-between gap-4 py-0.5">
-                <dt class="text-muted-foreground">Count-in beats</dt>
-                <dd class="tabular-nums">{cueCountInBeats}</dd>
-              </div>
-              <div class="flex justify-between gap-4 py-0.5">
-                <dt class="text-muted-foreground">Beat duration (at start anchor)</dt>
-                <dd class="tabular-nums">
-                  {cueCountInResult.beatDurationSec.toFixed(3)} s
-                  ({(60 / cueCountInResult.beatDurationSec).toFixed(1)} BPM)
-                </dd>
-              </div>
-              <div class="flex justify-between gap-4 py-0.5">
-                <dt class="text-muted-foreground">Song start (in trimmed audio)</dt>
-                <dd class="tabular-nums">{cueCountInResult.effectiveFirstDownbeatSec.toFixed(3)} s</dd>
-              </div>
-              <div class="flex justify-between gap-4 border-t border-foreground/20 pt-1 mt-1">
-                <dt class="text-foreground font-medium">Prepend before audio</dt>
-                <dd class="tabular-nums font-medium">{cueCountInResult.prependSec.toFixed(3)} s</dd>
-              </div>
-            </dl>
-          {:else}
-            <p class="text-muted-foreground text-xs italic">No count-in. Pick one in the Grid tab to see timing details.</p>
-          {/if}
-
-          <fieldset class="border-foreground border-2 px-3 py-3">
-            <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
-              Cue tracks
-            </legend>
-            <div class="flex flex-wrap items-center gap-2 pt-1">
-              <select
-                class="border-foreground bg-background min-w-48 border-2 px-2 py-1 text-sm"
-                value={selectedCueTrackId ?? ''}
-                onchange={(e) => (selectedCueTrackId = e.currentTarget.value || null)}
-                aria-label="Cue track"
-              >
-                {#if cueTracks.length === 0}
-                  <option value="">No cue tracks</option>
-                {:else}
-                  {#each cueTracks as track (track.id)}
-                    <option value={track.id}>{track.name}</option>
-                  {/each}
-                {/if}
-              </select>
+        <div class="mt-3 space-y-3">
+          <!-- Voice / performer track pills -->
+          <div class="flex flex-wrap items-center gap-1.5">
+            {#if cuePerformerView}
+              <span class="text-muted-foreground mr-1 text-[11px] font-bold uppercase tracking-wide">Performer</span>
+              {#each cuePerformerView as pv (pv.performerId)}
+                <button
+                  type="button"
+                  class="rounded-full border-2 px-3 py-1 text-xs font-bold transition-colors {pv.track &&
+                  pv.track.id === selectedCueTrack?.id
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-foreground/40 hover:border-foreground'}"
+                  onclick={() => selectPerformerCue(pv.performerId)}
+                  title={pv.role ? `${pv.name} · ${pv.role}` : pv.name}
+                >
+                  {pv.name}{pv.role ? ` · ${pv.role}` : ''}
+                </button>
+              {/each}
+              <span class="text-muted-foreground text-[11px]">— manage the band in Project settings</span>
+            {:else}
+              <span class="text-muted-foreground mr-1 text-[11px] font-bold uppercase tracking-wide">Voice</span>
+              {#each cueTracks as track (track.id)}
+                <button
+                  type="button"
+                  class="rounded-full border-2 px-3 py-1 text-xs font-bold transition-colors {track.id === selectedCueTrack?.id
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-foreground/40 hover:border-foreground'}"
+                  onclick={() => (selectedCueTrackId = track.id)}
+                  ondblclick={() => promptRenameCueTrack(track.id)}
+                  title="Click to select · double-click to rename"
+                >
+                  {track.name}{track.enabled ? '' : ' (off)'}
+                </button>
+              {/each}
               <button
                 type="button"
-                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                class="border-foreground/40 hover:border-foreground rounded-full border-2 px-2.5 py-1 text-xs font-black"
                 onclick={addCueTrack}
+                title="Add a voice track"
               >
-                Add
+                ＋
               </button>
-              <button
-                type="button"
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-2 py-1 text-xs font-bold"
-                disabled={!selectedCueTrack}
-                onclick={duplicateSelectedCueTrack}
-              >
-                Duplicate
-              </button>
-              <button
-                type="button"
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-2 py-1 text-xs font-bold"
-                disabled={!selectedCueTrack}
-                onclick={deleteSelectedCueTrack}
-              >
-                Delete
-              </button>
-            </div>
-
+              {#if selectedCueTrack}
+                <button
+                  type="button"
+                  class="border-foreground/40 hover:border-destructive hover:text-destructive rounded-full border-2 px-2.5 py-1 text-xs font-bold"
+                  onclick={deleteSelectedCueTrack}
+                  title="Delete this voice track"
+                >
+                  🗑
+                </button>
+              {/if}
+            {/if}
             {#if selectedCueTrack}
-              <div class="mt-3 flex flex-wrap items-center gap-3">
-                <input
-                  type="text"
-                  value={selectedCueTrack.name}
-                  onchange={(e) => renameSelectedCueTrack((e.currentTarget as HTMLInputElement).value)}
-                  class="border-foreground bg-background min-w-0 flex-1 border-2 px-2 py-1 text-sm"
-                  aria-label="Cue track name"
-                />
-                <label class="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={selectedCueTrack.enabled}
-                    onchange={(e) => setSelectedCueTrackEnabled(e.currentTarget.checked)}
-                    class="accent-foreground"
-                  />
-                  Enabled
-                </label>
-              </div>
-            {/if}
-          </fieldset>
-
-          {#if selectedCueTrack}
-            <fieldset class="border-foreground border-2 px-3 py-3">
-              <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
-                Intro cue
-              </legend>
-              <input
-                type="text"
-                value={selectedCueIntroText}
-                placeholder={$songMap?.metadata.title ?? 'Untitled song'}
-                onchange={(e) => setIntroCueText((e.currentTarget as HTMLInputElement).value)}
-                class="border-foreground bg-background w-full border-2 px-2 py-1 text-sm"
-                aria-label="Intro cue text"
-                maxlength="120"
-              />
-              <label class="mt-2 flex items-start gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={selectedCueTrack.spokenCountIn ?? false}
-                  onchange={(e) => setSelectedCueSpokenCountIn((e.currentTarget as HTMLInputElement).checked)}
-                  class="accent-foreground mt-0.5 size-4"
-                />
-                <span class="flex flex-col">
-                  <span class="font-medium">Speak the count-in</span>
-                  <span class="text-muted-foreground text-xs">
-                    Announces the intro above + the count length, then counts the beats aloud
-                    (e.g. “{selectedCueIntroText || $songMap?.metadata.title || 'Song'}… {cueCountInBeats || 4}… one, two…”).
-                  </span>
-                </span>
-              </label>
-            </fieldset>
-
-            <div class="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
+                class="border-foreground rounded-full border-2 px-3 py-1 text-xs font-bold hover:bg-foreground hover:text-background"
                 onclick={generateSelectedCueTrackFromSections}
+                title="Read each section name just before it starts"
               >
-                Generate from sections
+                ✨ Auto-generate
               </button>
-              <button
-                type="button"
-                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
-                onclick={addCustomCueAtPlayhead}
-              >
-                Add custom cue
-              </button>
-              <button
-                type="button"
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 border-2 px-2 py-1 text-xs font-bold"
-                disabled={!cueRenderGate.ok || cueGenBusy}
-                title={cueRenderGate.ok ? 'Render selected cue track' : cueRenderGate.reason}
-                onclick={() => void generateCueTrackWav()}
-              >
-                {cueGenBusy ? 'Rendering...' : 'Render track'}
-              </button>
-              {#if lastCueDownloadBlob}
-                <button
-                  type="button"
-                  class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
-                  onclick={downloadCueTrackFile}
-                >
-                  Download cue
-                </button>
-              {/if}
-              {#if lastClickDownloadBlob}
-                <button
-                  type="button"
-                  class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
-                  onclick={downloadClickTrackFile}
-                >
-                  Download click
-                </button>
-              {/if}
-              <span class="text-muted-foreground font-mono text-xs">{selectedCueRenderLabel}</span>
-            </div>
-
-            {#if cueGenErr}
-              <p class="text-destructive text-xs" role="status">{cueGenErr}</p>
-            {:else if cueSpeechNote}
-              <p class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</p>
-            {:else if !cueRenderGate.ok}
-              <p class="text-muted-foreground text-xs" role="status">{cueRenderGate.reason}</p>
             {/if}
+            {#if cueRenderStatus}
+              <span
+                class="ml-auto flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold {cueRenderStatus.kind ===
+                'ready'
+                  ? 'text-green-600'
+                  : cueRenderStatus.kind === 'warn'
+                    ? 'text-amber-600'
+                    : 'text-muted-foreground'}"
+                role="status"
+                aria-live="polite"
+              >
+                {#if cueRenderStatus.kind === 'busy'}
+                  <span class="border-foreground/30 border-t-foreground size-3 animate-spin rounded-full border-2"></span>
+                {:else if cueRenderStatus.kind === 'ready'}
+                  ✓
+                {:else}
+                  ⚠
+                {/if}
+                {cueRenderStatus.text}
+              </span>
+            {/if}
+          </div>
 
-            <fieldset class="border-foreground border-2 px-3 py-3">
-              <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">
-                Events
-              </legend>
-              {#if selectedCueEvents.length === 0}
-                <p class="text-muted-foreground text-sm">Generate from sections or add a custom cue.</p>
-              {:else}
-                <div class="divide-foreground/15 divide-y">
-                  {#each selectedCueEvents as event (event.id)}
-                    <div class="grid gap-2 py-2 md:grid-cols-[auto_7rem_1fr_auto] md:items-center">
-                      <label class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide">
-                        <input
-                          type="checkbox"
-                          checked={event.enabled}
-                          onchange={(e) =>
-                            updateCueEvent(selectedCueTrack.id, event.id, {
-                              enabled: e.currentTarget.checked,
-                            })}
-                          class="accent-foreground"
-                        />
-                        {cueEventLabel(event)}
-                      </label>
-                      <span class="text-muted-foreground font-mono text-xs">{cueEventTimeLabel(event)}</span>
-                      <input
-                        type="text"
-                        value={event.text ?? ''}
-                        onchange={(e) =>
-                          updateCueEvent(selectedCueTrack.id, event.id, {
-                            text: (e.currentTarget as HTMLInputElement).value,
-                          })}
-                        class="border-foreground bg-background min-w-0 border-2 px-2 py-1 text-sm"
-                        aria-label="Cue text"
-                      />
-                      <button
-                        type="button"
-                        class="border-foreground hover:bg-foreground hover:text-background border-2 px-2 py-1 text-xs font-bold"
-                        onclick={() => deleteCueEvent(selectedCueTrack.id, event.id)}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            </fieldset>
-          {:else}
-            <button
-              type="button"
-              class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-2 text-sm font-bold"
-              onclick={addCueTrack}
-            >
-              Create cue track
-            </button>
-          {/if}
-
+          <CueTimeline
+            sections={cueSectionRegions}
+            customCues={cueTimelineCues}
+            duration={cueTimelineDuration}
+            onToggleSpeech={toggleSectionSpeech}
+            onToggleCount={toggleSectionCount}
+            onSetSpeechText={setSectionSpeechText}
+            onInsertAtSec={insertCueAtSec}
+          />
         </div>
       </section>
     {/if}
@@ -3802,59 +4284,19 @@
         class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
         aria-label="Overview"
       >
-        {#if overviewHasCueContent}
-          <EditSectionToolbar
-            title="Overview"
-            helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
-          >
-            {#snippet primary()}
-              <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
-              <span class="font-mono tabular-nums">
-                {sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}
-              </span>
-              {#if sm.metadata.bpm != null}<span class="font-mono tabular-nums">{Math.round(sm.metadata.bpm)} BPM</span>{/if}
-              {#if keyLabel}<span class="font-mono tabular-nums">{keyLabel}</span>{/if}
-            {/snippet}
-            {#snippet secondary()}
-              <label class="flex cursor-pointer items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={overviewCuesActive}
-                  disabled={cueGenBusy}
-                  onchange={(e) => void toggleOverviewCues((e.currentTarget as HTMLInputElement).checked)}
-                  class="accent-foreground size-4"
-                />
-                <span class="font-semibold">Play cues</span>
-              </label>
-              {#if cueGenBusy}
-                <span class="text-muted-foreground text-xs">Preparing cues...</span>
-              {/if}
-              {#if cueGenErr}
-                <span class="text-destructive text-xs">{cueGenErr}</span>
-              {:else if overviewCuesNeedCountIn}
-                <span class="text-muted-foreground text-xs" role="status">
-                  Set a count-in for this song to hear the numbers (Project settings or the count-in control).
-                </span>
-              {:else if cueSpeechNote}
-                <span class="text-muted-foreground text-xs" role="status">{cueSpeechNote}</span>
-              {/if}
-            {/snippet}
-          </EditSectionToolbar>
-        {:else}
-          <EditSectionToolbar
-            title="Overview"
-            helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
-          >
-            {#snippet primary()}
-              <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
-              <span class="font-mono tabular-nums">
-                {sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}
-              </span>
-              {#if sm.metadata.bpm != null}<span class="font-mono tabular-nums">{Math.round(sm.metadata.bpm)} BPM</span>{/if}
-              {#if keyLabel}<span class="font-mono tabular-nums">{keyLabel}</span>{/if}
-            {/snippet}
-          </EditSectionToolbar>
-        {/if}
+        <EditSectionToolbar
+          title="Overview"
+          helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
+        >
+          {#snippet primary()}
+            <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
+            <span class="font-mono tabular-nums">
+              {sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}
+            </span>
+            {#if sm.metadata.bpm != null}<span class="font-mono tabular-nums">{Math.round(sm.metadata.bpm)} BPM</span>{/if}
+            {#if keyLabel}<span class="font-mono tabular-nums">{keyLabel}</span>{/if}
+          {/snippet}
+        </EditSectionToolbar>
 
         <div class="flex justify-end">
           <button
@@ -3935,6 +4377,8 @@
             <textarea
               id="lyrics-paste"
               bind:value={lyricsDraft}
+              onfocus={() => (lyricsFocused = true)}
+              onblur={() => (lyricsFocused = false)}
               rows="18"
               placeholder={'Paste the full lyrics here…\n\nSection markers like [Chorus] or (Verse 2) are removed automatically.'}
               class="border-foreground bg-background min-h-[24rem] w-full resize-y border-2 px-3 py-2 font-mono text-sm leading-relaxed focus:outline-none"
@@ -3959,6 +4403,76 @@
               <p class="text-amber-600 text-xs">
                 Changing the words clears the current timing — run “Fit to song” again after saving.
               </p>
+            {/if}
+
+            <!-- Import a vocals source — for instrumental/backing tracks whose
+                 separated vocal stem is empty, so Fit has nothing to hear. -->
+            {#if $desktopCompanionStatus.reachable}
+              <div class="border-foreground/40 bg-muted/30 mt-1 border-2 p-3">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="text-xs font-black uppercase tracking-wide">
+                      {vocalStemEmpty ? 'No vocals to transcribe' : 'Vocals too quiet or missing?'}
+                    </p>
+                    <p class="text-muted-foreground mt-1 text-xs leading-relaxed">
+                      {vocalStemEmpty
+                        ? 'This looks like an instrumental — there are no vocals for “Fit to song” to hear.'
+                        : 'If Fit can’t hear the singing,'}
+                      Upload a version of this exact song <strong>with vocals</strong>. BarBro checks it’s the
+                      same recording, lines it up, pulls a clean vocal stem, and fits your lyrics.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 shrink-0 border-2 px-3 py-1 text-xs font-bold"
+                    onclick={() => void pickAndImportVocals()}
+                    disabled={vocalImportBusy}
+                  >
+                    {vocalImportBusy ? 'Working…' : 'Add vocals source'}
+                  </button>
+                </div>
+                {#if vocalImportBusy && vocalImportMsg}
+                  <p class="text-muted-foreground mt-2 text-xs" role="status">✨ {vocalImportMsg}</p>
+                {/if}
+                {#if vocalImportErr}
+                  <p class="text-destructive mt-2 text-xs">{vocalImportErr}</p>
+                {/if}
+                {#if vocalImportConfirm}
+                  <div class="border-amber-500/60 bg-amber-500/10 mt-2 border-2 p-2">
+                    <p class="text-xs font-bold text-amber-700">This might not be the same recording:</p>
+                    <ul class="text-amber-700 mt-1 list-disc pl-4 text-xs">
+                      {#each vocalImportConfirm.verdict.reasons as reason (reason)}
+                        <li>{reason}</li>
+                      {/each}
+                    </ul>
+                    <p class="text-muted-foreground mt-1 font-mono text-[11px] tabular-nums">
+                      offset {vocalImportConfirm.verdict.alignment.offsetSec.toFixed(2)}s · match
+                      {Math.round(vocalImportConfirm.verdict.alignment.confidence * 100)}% · drift
+                      {Math.round(vocalImportConfirm.verdict.alignment.driftSec * 1000)}ms
+                    </p>
+                    <div class="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        class="border-foreground bg-foreground text-background hover:bg-foreground/85 border-2 px-3 py-1 text-xs font-bold"
+                        onclick={() => {
+                          const u = vocalImportConfirm!.uploadAbs
+                          vocalImportConfirm = null
+                          void runVocalImport(u, true)
+                        }}
+                      >
+                        Use it anyway
+                      </button>
+                      <button
+                        type="button"
+                        class="border-foreground/50 hover:bg-muted border-2 px-3 py-1 text-xs font-bold"
+                        onclick={() => (vocalImportConfirm = null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
             {/if}
 
             {#if sheetParsed.chordCount > 0}
@@ -4334,6 +4848,10 @@
           chordSuggestionByBeatId={chordSuggestionByBeatId}
           bind:selectedBeatId
           onChordBeatInteract={onChordBeatInteract}
+          onChordFractionSelect={onChordFractionSelect}
+          onChordFractionInteract={onChordFractionInteract}
+          chordFractionByBar={chordFractionByBar}
+          selectedFractionKey={selectedFractionKey}
           onChordContextMenu={onChordContextMenu}
           onChordsMove={onChordsMove}
           onSectionFill={onSectionFill}
@@ -4405,6 +4923,28 @@
                 </span>
               {/if}
             </button>
+            <div class="bg-border/70 my-1 h-px"></div>
+            <div class="text-muted-foreground px-2 pt-1 text-[10px] font-bold uppercase tracking-wide">
+              {chordEditorBar ? `Bar ${chordEditorBar.index + 1}: chords across bar` : 'Chords across bar'}
+            </div>
+            <div class="flex items-center gap-1 px-2 pb-1.5 pt-1">
+              {#each [1, 3, 5, 6] as n (n)}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="flex-1 rounded-[var(--radius)] border px-1.5 py-1 text-xs font-bold disabled:opacity-40 {(n === 1
+                    ? chordBarDivision === 0
+                    : chordBarDivision === n)
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-foreground/30 hover:bg-muted'}"
+                  disabled={!chordEditorBar}
+                  onclick={() => divideChordBar(n)}
+                  title={n === 1 ? 'Chords on the beat (normal)' : `${n} chords evenly across this bar`}
+                >
+                  {n === 1 ? 'Beats' : `÷${n}`}
+                </button>
+              {/each}
+            </div>
             <div class="flex w-full items-center justify-between rounded-[var(--radius)] px-2 py-1.5">
               <span class={selectedChordTargetBeatIds().length === 0 ? 'opacity-40' : ''}>
                 Transpose selected
@@ -4720,8 +5260,6 @@
          tab toggle, so any height added there pushes the tabs down. Nor
          inside a tab block: the draft switcher is reachable from every tab,
          so its dialog has to be mounted on every tab. -->
-         draft switcher sits next to the song title and is reachable from
-         every tab, so its dialog has to exist on every tab too. -->
     <!-- Drafts: switch, duplicate, rename, delete. One draft = one take
          on the song (sections + chords + lyrics). -->
     <SongDraftsDialog
