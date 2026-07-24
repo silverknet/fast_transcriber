@@ -269,3 +269,191 @@ Locked by `playbackController.browser.test.ts > "clicks bar 1 beat 1 on the
 downbeat and adds nothing to the count-in"`, which asserts on scheduled
 `osc.start(when)` times relative to the song source's own scheduled start —
 no wall-clock in the pass condition.
+
+---
+
+## Collab-mode data loss (browser/sidecar-less) — ROOT CAUSE was a DB RLS bug
+
+Symptom: on barbro.app in browser/collab mode a collaborator's chord edits +
+draft rename vanished on refresh, with no error.
+
+Root cause (server-side, not client): `cloud_push_song` / `cloud_patch_manifest`
+(`010_cloud_rpcs.sql`) ran `SECURITY INVOKER` and bumped `cloud_projects.revision`
+with a plain UPDATE, but `cloud_projects_owner_update` RLS is OWNER-ONLY. A
+non-owner editor's revision UPDATE matched 0 rows → `new_rev` NULL → `cloud_songs`
+INSERT hit `revision NOT NULL` (23502) → 500 → `cloudRepo.rpcPushSong` classifies
+`conflict:false` → client push `.catch()` swallows it. Owner passed RLS, so
+own-project testing looked fine.
+
+Fix — `017_cloud_push_member_write.sql`: both RPCs → `SECURITY DEFINER` + explicit
+`is_project_member` gate + cross-project song-id guard. **DO NOT revert to INVOKER.**
+
+Client fixes shipped alongside:
+- `browserCloudProject.ts` — stamp per-song `lastSyncedRevision`/`lastSyncedContentHash`
+  on open (was missing → coarse baseRev); persist `LAST_CLOUD_PROJECT_ID_KEY`.
+- `+layout.svelte` — `restoreLastCloudProjectIfAny` fallback so a refresh re-opens
+  the sidecar-less session (disk restore returns null in browser mode).
+- `commit.ts` — `LAST_CLOUD_PROJECT_ID_KEY` + read/write/clear; disk vs cloud keys
+  are mutually exclusive (most-recent wins) so the two restore paths can't fight.
+- `ConflictResolutionDialog.svelte` — dropped the `&& proj.osPath` gate on the
+  in-memory watermark stamp (browser mode was left with a stale base rev → 409 loop).
+- `projectAutosave.ts` — `flushPendingCloudPush()` on `visibilitychange`→hidden /
+  `pagehide` (shrinks the 7s debounce loss window).
+
+Status: typecheck 0 errors, unit 965 green, browser 43 green. **Migration 017 IS
+APPLIED to production (2026-07-24)** and proven end-to-end: a simulated non-owner
+editor push failed with 23502 before and persists (revision bumps) after; non-member
++ cross-project pushes rejected; owner push still works — all in rolled-back txns
+against prod, only the migration committed. So the data loss is fixed server-side
+now, even on the older deployed client. **The CLIENT fixes above are NOT yet
+deployed** (restore-on-refresh etc. are polish on top).
+
+Prod DB access note: direct `db.<ref>.supabase.co` is IPv6-only and unreachable
+here; use the IPv4 session pooler `aws-1-eu-north-1.pooler.supabase.com:5432`,
+user `postgres.<ref>`, and pass ssl as an OBJECT `{rejectUnauthorized:false}` —
+NOT `sslmode=require` in the URL (newer pg upgrades that to verify-full and fails
+on the self-signed chain).
+
+---
+
+## Browser-mode LIVE-RECEIVE (live collaboration for .smap data) — built
+
+Browser/collab mode (no sidecar, `osPath === null`) now RECEIVES others' edits
+live, not just sends. It was one line dropping it: `pullCloudChanges` bailed at
+`!osPath` (cloudSync.ts). The realtime subscription already fires in browser mode.
+
+Shipped in 5 phases (all leave the app working):
+- **A** `src/lib/editor/liveEditGuards.ts` (+test): `shouldReseedLyricsDraft`
+  (lyrics textarea reseeds on a LIVE remote change when the user isn't typing/
+  focused — fixes the clobber-on-Save) + `pruneSelections` (drop stale beat/bar
+  selection ids). Wired into edit/+page.svelte.
+- **B** `patchSongMapRemote(next)` in stores/songMap.ts (shares `computeNextMap`
+  with patchSongMap): installs a remote merge WITHOUT pushing the user's undo
+  stack and WITHOUT re-stamping updatedAt. `applyRemoteSongMap` uses it. Helps
+  desktop live-receive too.
+- **C** `src/lib/client/browserCloudPull.ts` (new): `pullCloudChangesBrowser` +
+  `applyCloudSongIntoBrowser` — mirrors the disk worker minus disk; base map from
+  the registry, merged back into registry + (open song) the songMap store, no
+  manifest persist. Registry mutators `getBrowserCloudSongMap` /
+  `updateBrowserCloudSong` / `addBrowserCloudSong` on browserCloudProject.ts.
+  `activeSongRef` no longer short-circuits on `!osPath` (sole caller reads only
+  songId). Dispatch: a branch in `pullCloudChanges` dynamic-imports the browser
+  worker (avoids the browserCloudProject→cloudSync static cycle).
+- **D** Symmetric dangerous-conflict dialog on PULL. `planRemoteApplication` now
+  returns `needsUserResolution`+`report` when dirty+dangerous; both workers set
+  `cloudConflict` (reusing the globally-mounted dialog, unchanged). **KEY nuance:
+  the `harmony` wholesale category is EXCLUDED** from the pull dialog — keepLocalOnly
+  already unions freshly-typed chords losslessly, and a real chord-track REPLACE
+  is a DRAFT divergence (safe, both kept). Only bar-count / analyzed / audio /
+  expectedAudio trigger the dialog. Do not "simplify" this back to plain
+  `hasDangerousConflict` — it would pop a dialog for benign empty-base typing and
+  broke two existing songSession tests when I tried.
+- **E** New song added by a collaborator materializes live (registry + list entry
+  + card) via `addBrowserCloudSong`.
+
+Out of scope (explicit): presence/live cursors, CRDT.
+Gates: check 0 errors, unit 986, browser 48, build clean, headless boot clean.
+NOT click-tested with two real users; the transport+apply is unit-proven.
+
+---
+
+## Real-use mode/audio breakage (bröllops incident) — 2 root causes fixed
+
+Symptom: sidecar ON, project shows all songs "not analysed", no stems, "No
+analyzed clip in session" on open. Data was 100% safe (disk .smap 219-483KB +
+stems intact; cloud 16 songs analysed rev 476). It was an APP bug, two parts:
+
+1. **Audio-fidelity failsafe deadlock.** `resolveAudioSource` assumed "sidecar
+   reachable ⟹ local HD master available" and refused cloud. A browser-cloud
+   project (osPath null) opened with the sidecar ON has NO local master → cloud
+   refused → no audio → songMap never finishes → "No analyzed clip". Fix: added
+   `localProjectPresent` (osPath!==null) to AudioSourceInput / planAudioLoad /
+   loadMixAudio / fetchCloudAudioBlob / assertCloudAudioAccessAllowed; the
+   failsafe now fires only for a real disk project. Browser-cloud streams cloud
+   even with the sidecar up; disk projects still HD-only. Threaded through all
+   call sites incl. MixerView.svelte cloud stems. resolveAudioSource.test.ts +
+   loadAudio/planAudioLoad/cloudAudio tests updated (16-case matrix).
+
+2. **Mode stranding.** A project opened in browser mode while the sidecar was
+   down stays browser-cloud forever — nothing re-evaluates mode when the sidecar
+   returns, and `writeLastCloudProjectId` erases `LAST_PROJECT_PATH_KEY`. Fix:
+   pure `chooseRestoreMode` arbiter (`src/lib/project/restoreMode.ts`, +tests)
+   that prefers DISK when sidecar up + a local copy exists; a `cloudId→diskPath`
+   map (`CLOUD_DISK_PATHS_KEY` in commit.ts, recorded on disk-open of a
+   cloud-linked project) so the arbiter knows a browser-cloud project also lives
+   on disk. Wired into `+layout.svelte restoreLastProjectIfAny` (awaits a fresh
+   sidecar poll first). Forward-looking: activates once the project is opened
+   from disk once (records the mapping) — which is also the immediate recovery.
+
+STILL OPEN (blueprint from the Explore agent):
+- P2/P3: a cloud song with no/missing audio returns `{ok:true, source:'missing'}`
+  and callers IGNORE `source` → route to /edit → generic "No analyzed clip"
+  dead-end with no message. Browser path never sets `missingReason` so the relink
+  banner (edit/+page.svelte:3861) can't render. Needs a real message.
+- Test harness gap: loadCloudSongIntoEditor / loadProjectSongIntoEditor have ZERO
+  tests; no restore-precedence test; NO integration test with a real sidecar+disk
+  folder or mode flips. This is the biggest structural gap.
+
+Gates after fixes: check 0 errors, unit 998 green.
+
+---
+
+## Mode/audio real-use hardening (continuation of bröllops incident)
+
+Systematized the 7 project mode/folder scenarios (disk vs browser-cloud × sidecar
+on/off × how opened). Fixes + tests added:
+
+- **Honest audio-source badge.** `appMode.ts` gained `audioSource` (derived from
+  project.osPath + sidecar) + `AUDIO_SOURCE_LABEL`; the navbar badge
+  (AppMenuBar.svelte) now shows the OPEN PROJECT's real source ("HD · local" vs
+  "Cloud audio ⚠") with a loud red pulsing `is-mismatch` state when on cloud while
+  the sidecar is up. Was: badge = sidecar reachability only → said "Studio" while
+  streaming cloud. Test: appMode.test.ts (4).
+- **Scenario test harness (TDD, agent-built):**
+  `src/lib/client/loadCloudSongIntoEditor.test.ts` (5) +
+  `src/lib/project/loadProjectSongIntoEditor.test.ts` (6) — the two song-open
+  loaders had ZERO coverage. Mocks the audio boundary (loadMixAudio) + sidecar FS
+  + persist + reconciler; drives stores directly.
+- **P2/P3 fix (revealed by the harness):** a song whose audio couldn't load
+  "opened successfully" ({ok:true, source:'missing'}) but never flagged the
+  session → generic "No analyzed clip in session" dead-end. Now:
+  `AudioMissingReason` gained `'cloud-audio-unavailable'`; `loadCloudSongIntoEditor`
+  stamps it on a missing outcome; the disk loader's missing-reason guard broadened
+  from `audio?.originalPath` to `audio` (pre-v2/partial smap edge); edit/+page.svelte
+  shows a real "Audio isn't available here — open from disk in Studio for HD"
+  message instead of the dead-end.
+
+Reconnect safety (verified read-only): bröllops cloud rev == disk manifest rev ==
+476, ZERO songs diverged → opening from disk is a clean no-merge switch to disk
+mode (HD + stems). Opening from disk also records the cloudId→diskPath mapping so
+the arbiter keeps it in disk mode on future reloads.
+
+STILL OPEN — the biggest structural gap: NO integration test with a real sidecar
+(127.0.0.1:47842) + a real disk project folder, and no test of live sidecar
+up/down transitions while a project is open (scenarios E/F/G). Everything above is
+unit/store-level with mocked I/O. Gates: check 0, unit 1013, build clean.
+
+---
+
+## Canonical audio-mode STATE MODEL + actionable badge
+
+Defined the 7 project audio states as `audioMode` (src/lib/stores/appMode.ts),
+documented in docs/audio-modes.md:
+no-project · studio-hd(ok) · studio-relink(warn) · offline-disk(warn) ·
+collab(info) · collab-switchable(warn, has switchToDiskPath) · collab-no-audio(error).
+Each carries {label, tone, detail}. Replaces the old sidecar-only "Studio/Collab".
+
+- Navbar badge (AppMenuBar) now shows the real state + a plain "why" tooltip, and
+  is a BUTTON: collab-switchable → openProjectByPath(switchToDiskPath) then /project
+  (switch to HD); collab/collab-no-audio → /project (open from disk); offline/no-project
+  → /download. Tone → green/amber/red (red pulse on switchable).
+- `src/lib/stores/cloudDiskPaths.ts`: reactive+persisted cloudId→diskPath map (the
+  "a local HD copy exists here" knowledge). Populated on disk-open AND by
+  `indexRecentCloudProjects()` (commit.ts) — a startup recents scan (run from
+  +layout when sidecar up, before the restore arbiter) that reads each recent
+  manifest's cloud id. So the badge can offer "switch to HD" right after launch.
+- commit.ts remember/readCloudProjectDiskPath now delegate to the store.
+
+Tests: appMode.test.ts (7 states), indexRecentCloudProjects.test.ts (2),
+cloudDiskPaths via those. Gates: check 0, unit 1018, build clean, headless boot clean.
+Still open: real-sidecar integration tests (live mode transitions).

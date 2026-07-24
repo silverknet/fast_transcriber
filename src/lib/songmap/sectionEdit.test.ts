@@ -69,14 +69,33 @@ describe('setSectionForBarRange — merge same-kind neighbors', () => {
     expect(sorted[1].barRange).toEqual({ startBarIndex: 4, endBarIndex: 7 })
   })
 
-  it('different-kind overlap still drops the existing section (regression check)', () => {
+  it('a different-kind range inside a section SPLITS it, keeping both sides', () => {
     idCounter = 0
     let map = mapWithBars(16)
     map = (setSectionForBarRange(map, 0, 7, 'chorus', id) as { map: SongMap }).map
     map = (setSectionForBarRange(map, 4, 5, 'verse', id) as { map: SongMap }).map
+    // Chorus 0-7 split by Verse 4-5 → Chorus 0-3, Verse 4-5, Chorus 6-7.
+    const sorted = [...map.sections].sort(
+      (a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex,
+    )
+    expect(sorted.map((s) => [s.kind, s.barRange.startBarIndex, s.barRange.endBarIndex])).toEqual([
+      ['chorus', 0, 3],
+      ['verse', 4, 5],
+      ['chorus', 6, 7],
+    ])
+    // The two chorus halves must have distinct ids.
+    const chorusIds = sorted.filter((s) => s.kind === 'chorus').map((s) => s.id)
+    expect(new Set(chorusIds).size).toBe(2)
+  })
+
+  it('a range that fully covers a different-kind section removes it', () => {
+    idCounter = 0
+    let map = mapWithBars(16)
+    map = (setSectionForBarRange(map, 4, 5, 'verse', id) as { map: SongMap }).map
+    map = (setSectionForBarRange(map, 0, 7, 'chorus', id) as { map: SongMap }).map
     expect(map.sections).toHaveLength(1)
-    expect(map.sections[0].kind).toBe('verse')
-    expect(map.sections[0].barRange).toEqual({ startBarIndex: 4, endBarIndex: 5 })
+    expect(map.sections[0].kind).toBe('chorus')
+    expect(map.sections[0].barRange).toEqual({ startBarIndex: 0, endBarIndex: 7 })
   })
 
   it('merging two same-kind sections with a same-kind section in the middle folds all three', () => {
@@ -149,16 +168,21 @@ describe('resizeSectionRange', () => {
     expect(map.sections[0].barRange).toEqual({ startBarIndex: 0, endBarIndex: 5 })
   })
 
-  it('drops different-kind overlap on extend', () => {
+  it('extending over a different-kind neighbour TRIMS it instead of deleting it', () => {
     idCounter = 0
     let map = mapWithBars(16)
     map = (setSectionForBarRange(map, 0, 3, 'chorus', id) as { map: SongMap }).map
     map = (setSectionForBarRange(map, 8, 11, 'verse', id) as { map: SongMap }).map
     const chorusId = map.sections.find((s) => s.kind === 'chorus')!.id
     map = (resizeSectionRange(map, chorusId, 0, 9) as { map: SongMap }).map
-    expect(map.sections).toHaveLength(1)
-    expect(map.sections[0].kind).toBe('chorus')
-    expect(map.sections[0].barRange).toEqual({ startBarIndex: 0, endBarIndex: 9 })
+    // Chorus 0-9 overlaps Verse 8-11 → Verse survives, trimmed to 10-11.
+    const sorted = [...map.sections].sort(
+      (a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex,
+    )
+    expect(sorted.map((s) => [s.kind, s.barRange.startBarIndex, s.barRange.endBarIndex])).toEqual([
+      ['chorus', 0, 9],
+      ['verse', 10, 11],
+    ])
   })
 
   it('folds in a same-kind neighbor when extending across it', () => {

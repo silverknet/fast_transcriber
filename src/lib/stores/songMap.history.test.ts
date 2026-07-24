@@ -15,6 +15,7 @@ import {
   clearSongMap,
   endPatchBatch,
   patchSongMap,
+  patchSongMapRemote,
   redoSongMap,
   setSongMap,
   songMap,
@@ -170,6 +171,54 @@ describe('songMap undo / redo', () => {
     undoSongMap()
     expect(get(songMap)!.metadata.title).toBe('Untitled')
     expect(get(canUndo)).toBe(false)
+  })
+
+  it('patchSongMapRemote installs the map WITHOUT enabling undo', () => {
+    setSongMap(fresh())
+    expect(get(canUndo)).toBe(false)
+    const remote = { ...get(songMap)!, metadata: { ...get(songMap)!.metadata, title: 'REMOTE' } }
+    const r = patchSongMapRemote(remote)
+    expect(r.ok).toBe(true)
+    expect(get(songMap)!.metadata.title).toBe('REMOTE')
+    // A collaborator's change must NOT become the local user's next Ctrl-Z.
+    expect(get(canUndo)).toBe(false)
+  })
+
+  it('patchSongMapRemote preserves the remote updatedAt (no re-stamp)', () => {
+    setSongMap(fresh())
+    const remote = {
+      ...get(songMap)!,
+      metadata: { ...get(songMap)!.metadata, title: 'R', updatedAt: '2099-12-31T00:00:00.000Z' },
+    }
+    patchSongMapRemote(remote)
+    expect(get(songMap)!.metadata.updatedAt).toBe('2099-12-31T00:00:00.000Z')
+  })
+
+  it('patchSongMapRemote leaves an existing undo/redo stack intact', () => {
+    setSongMap(fresh())
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'A' } }))
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'B' } }))
+    undoSongMap()
+    expect(get(songMap)!.metadata.title).toBe('A')
+    expect(get(canUndo)).toBe(true)
+    expect(get(canRedo)).toBe(true)
+    const remote = { ...get(songMap)!, metadata: { ...get(songMap)!.metadata, title: 'REMOTE' } }
+    patchSongMapRemote(remote)
+    expect(get(songMap)!.metadata.title).toBe('REMOTE')
+    // Neither stack was touched by the remote install.
+    expect(get(canUndo)).toBe(true)
+    expect(get(canRedo)).toBe(true)
+  })
+
+  it('patchSongMapRemote rejects an invalid map and leaves the store + history unchanged', () => {
+    setSongMap(fresh())
+    patchSongMap((m) => ({ ...m, metadata: { ...m.metadata, title: 'GOOD' } }))
+    const undoBefore = get(canUndo)
+    const { formatVersion: _drop, ...invalid } = get(songMap)!
+    const r = patchSongMapRemote(invalid as SongMap)
+    expect(r.ok).toBe(false)
+    expect(get(songMap)!.metadata.title).toBe('GOOD')
+    expect(get(canUndo)).toBe(undoBefore)
   })
 
   it('caps the history stack — oldest entries drop when full', () => {

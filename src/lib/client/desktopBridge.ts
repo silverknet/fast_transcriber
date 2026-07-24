@@ -1431,6 +1431,110 @@ export async function enqueueLyricsTranscription(
   }
 }
 
+/** One local offset probe across the song — reveals tempo/speed drift. */
+export type AlignWindow = {
+  centerSec: number
+  offsetSec: number
+  confidence: number
+}
+
+/**
+ * Result of aligning two recordings of the same performance. Sign contract:
+ * `t_ref = t_target + offsetSec` — a musical event at time `t` in the TARGET
+ * lands at `t + offsetSec` on the REF (BarBro) timeline. offset > 0 ⇒ the
+ * target starts earlier (delay/pad it); offset < 0 ⇒ it starts later (trim it).
+ */
+export type AudioAlignment = {
+  offsetSec: number
+  /** Same-recording confidence, 0..1 (coarse onset cross-correlation peak). */
+  confidence: number
+  /** Heuristic recommendation: confident match AND negligible drift. */
+  sameRecording: boolean
+  /** Spread of per-window offsets. ~0 for a constant offset; large ⇒ speed drift. */
+  driftSec: number
+  durationRefSec: number
+  durationTargetSec: number
+  sampleRate: number
+  perWindow: AlignWindow[]
+}
+
+/**
+ * Align `targetAbsPath` to `refAbsPath` (both absolute OS paths on the
+ * desktop's disk) via the sidecar's high-precision aligner. Used to (a) place
+ * an uploaded with-vocals file onto an existing song's timeline before pulling
+ * a vocal stem from it, and (b) swap in a better master without disturbing the
+ * chords/sections pinned to the old audio. A 404 means an outdated sidecar.
+ */
+export async function alignAudioFiles(
+  refAbsPath: string,
+  targetAbsPath: string,
+): Promise<{ ok: true; data: AudioAlignment } | { ok: false; error: string; code?: string }> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/align-audio`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refPath: refAbsPath, targetPath: targetAbsPath }),
+      cache: 'no-store',
+    })
+    if (res.status === 404) {
+      return { ok: false, error: 'Update BarBro Desktop to align audio.', code: 'OUTDATED_DESKTOP' }
+    }
+    const data = (await res.json().catch(() => null)) as
+      | { ok: boolean; data?: AudioAlignment; error?: string }
+      | null
+    if (!res.ok || !data?.ok || !data.data) {
+      return { ok: false, error: data?.error || `Alignment failed (HTTP ${res.status})` }
+    }
+    return { ok: true, data: data.data }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+}
+
+/**
+ * Write `srcAbsPath` shifted onto a reference timeline by `offsetSec` (from
+ * `alignAudioFiles`) to `dstAbsPath`, sample-accurate. `targetDurationSec`
+ * (optional) pads/truncates the tail so the output matches the timeline length.
+ * The destination's parent dir is created if missing.
+ */
+export async function shiftAudioFile(args: {
+  srcAbsPath: string
+  dstAbsPath: string
+  offsetSec: number
+  targetDurationSec?: number
+}): Promise<
+  | { ok: true; sampleRate: number; channels: number; durationSec: number }
+  | { ok: false; error: string; code?: string }
+> {
+  try {
+    const res = await fetch(`${BASE_URL}/native/shift-audio`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        srcPath: args.srcAbsPath,
+        dstPath: args.dstAbsPath,
+        offsetSec: args.offsetSec,
+        targetDurationSec: args.targetDurationSec ?? null,
+      }),
+      cache: 'no-store',
+    })
+    if (res.status === 404) {
+      return { ok: false, error: 'Update BarBro Desktop to align audio.', code: 'OUTDATED_DESKTOP' }
+    }
+    const data = (await res.json().catch(() => null)) as
+      | { ok: boolean; data?: { sampleRate: number; channels: number; durationSec: number }; error?: string }
+      | null
+    if (!res.ok || !data?.ok || !data.data) {
+      return { ok: false, error: data?.error || `Shift failed (HTTP ${res.status})` }
+    }
+    return { ok: true, ...data.data }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `Desktop sidecar unreachable: ${msg}` }
+  }
+}
+
 // ── Piper TTS (desktop `piper_tts/` module) ─────────────────────────────────
 
 export type PiperTtsSetupStatus = {

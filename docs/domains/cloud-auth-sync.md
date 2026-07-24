@@ -85,6 +85,23 @@ Core files:
 > writes to it, waits for the event, and deletes it. Run it after any change to
 > RLS, replica identity, or the publication.
 
+> **`cloud_push_song` / `cloud_patch_manifest` MUST stay `SECURITY DEFINER`, and
+> the failure was silent, total data loss for non-owners.** These RPCs bump
+> `cloud_projects.revision` with a plain UPDATE, but the update policy on
+> `cloud_projects` (`cloud_projects_owner_update`, `008_rls.sql`) is **owner-only**.
+> While they ran `SECURITY INVOKER` (the caller's RLS), a non-owner editor's
+> revision UPDATE matched **zero rows** → `new_rev` NULL → the `cloud_songs`
+> INSERT violated `revision NOT NULL` (23502) → HTTP 500, which
+> `cloudRepo.rpcPushSong` classifies as `conflict: false` and the client's push
+> `.catch()` swallows. Net: **collaborators' chord/draft edits never persisted,
+> no error shown** (owners passed the RLS check, so own-project testing looked
+> fine). Fixed by [`017_cloud_push_member_write.sql`](../../db/migrations/017_cloud_push_member_write.sql):
+> both RPCs are now `SECURITY DEFINER` with an explicit `is_project_member`
+> gate (+ a cross-project song-id guard, since DEFINER also bypasses
+> `cloud_songs` RLS). **Do not revert them to `SECURITY INVOKER`.** There is no
+> unit coverage for this (RLS needs a live DB with auth roles) — verify by
+> pushing as a non-owner member.
+
 Audio bytes are not the primary cloud payload. Cloud sync centers on project
 metadata, song JSON, members, and revisions. Missing audio is handled by local
 reconcile and hydration packages.

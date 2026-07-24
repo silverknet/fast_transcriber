@@ -19,6 +19,7 @@
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
+  import MidiSettingsDialog from '$lib/components/MidiSettingsDialog.svelte'
   import CloudSyncPill from '$lib/components/CloudSyncPill.svelte'
   import {
     downloadBlob,
@@ -32,7 +33,7 @@
   import { renderLeadSheetPdf } from '$lib/export/pdfLeadSheet'
   import { hydrateRestorableSong } from '$lib/stores/restorableSong'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
-  import { MODE_LABEL, MODE_TAGLINE } from '$lib/stores/appMode'
+  import { audioMode } from '$lib/stores/appMode'
   import { songMap } from '$lib/stores/songMap'
   import {
     project as projectStore,
@@ -41,6 +42,7 @@
   } from '$lib/stores/project'
   import {
     clearLastProjectPath,
+    clearLastCloudProjectId,
     createProjectOnDisk,
     dropRecentProjectPath,
     openProjectByPath,
@@ -85,6 +87,7 @@
   let importInput = $state<HTMLInputElement | undefined>()
   let debugOpen = $state(false)
   let newProjectDialogOpen = $state(false)
+  let midiDialogOpen = $state(false)
 
   function openNewProjectDialog() {
     if (!$desktopCompanionStatus.reachable) {
@@ -105,12 +108,42 @@
     }
     return `Desktop app: not running${$desktopCompanionStatus.lastError ? ` (${$desktopCompanionStatus.lastError})` : ''}${ping}`
   })
-  // Explicit MODE badge: which mode am I in, and which audio am I hearing? The
-  // desktop symbol is promoted from a plain status dot into a labelled badge.
-  let modeLabel = $derived(desktopConnected ? MODE_LABEL.studio : MODE_LABEL.collab)
-  let modeTooltip = $derived(
-    `${desktopConnected ? MODE_TAGLINE.studio : MODE_TAGLINE.collab} · ${desktopStatusTitle}`,
+  // Explicit MODE badge — the canonical audio-mode state (which audio am I
+  // ACTUALLY hearing + why), not just whether the sidecar is up. Clicking it
+  // performs the RIGHT action for the state (switch to HD, open from disk, …).
+  let audio = $derived($audioMode)
+  let modeLabel = $derived(audio.label)
+  let modeTooltip = $derived(`${audio.detail} · ${desktopStatusTitle}`)
+  // Tone → the existing badge colour classes (green / amber / red).
+  let modeToneClass = $derived(
+    audio.tone === 'ok' ? 'is-connected' : audio.tone === 'error' ? 'is-mismatch' : 'is-browser',
   )
+
+  async function onModeBadgeClick() {
+    menuError = ''
+    const m = $audioMode
+    if (m.kind === 'collab-switchable' && m.switchToDiskPath) {
+      // Switch to Studio: open the local disk copy → local HD + stems. Land on
+      // the project hub so the user re-enters the song in disk mode.
+      try {
+        await openProjectByPath(m.switchToDiskPath)
+        await goto('/project')
+      } catch (e) {
+        menuError = `Couldn't switch to the local copy: ${e instanceof Error ? e.message : String(e)}`
+      }
+      return
+    }
+    if (m.kind === 'collab' || m.kind === 'collab-no-audio') {
+      // No known local copy — send the user to the hub where they can open this
+      // project from disk (Studio) if they have it here.
+      await goto('/project')
+      return
+    }
+    // Disk / offline / no-project → the desktop-app info page (start/install it).
+    if (m.kind === 'offline-disk' || m.kind === 'no-project') {
+      await goto('/download')
+    }
+  }
 
   const debugJsonText = $derived.by(() => {
     const sm = $songMap
@@ -303,6 +336,7 @@
     // into the project they just exited. The Recent Projects list survives
     // — re-entering is one click away.
     clearLastProjectPath()
+    clearLastCloudProjectId()
     // Land on the project hub (open/create/recent), NOT the legacy single-song
     // import page — "closing a project" should mean "back to my projects".
     await goto('/project', { replaceState: true })
@@ -429,6 +463,9 @@
             {/each}
           {/if}
         {/if}
+        <DropdownMenuItem class="cursor-pointer" onclick={() => (midiDialogOpen = true)}>
+          MIDI controller…
+        </DropdownMenuItem>
         <DropdownMenuItem class="cursor-pointer" onclick={() => goto('/download')}>
           Download desktop app…
         </DropdownMenuItem>
@@ -438,15 +475,16 @@
 
   <div class="app-menu-actions">
     <CloudSyncPill />
-    <a
-      href="/download"
-      class="chrome-icon chrome-mode {desktopConnected ? 'is-connected' : 'is-browser'}"
+    <button
+      type="button"
+      onclick={onModeBadgeClick}
+      class="chrome-icon chrome-mode {modeToneClass}{audio.kind === 'collab-switchable' ? ' is-mismatch' : ''}"
       title={modeTooltip}
       aria-label={modeTooltip}
     >
       <Monitor class="size-4" aria-hidden="true" />
       <span class="mode-label">{modeLabel}</span>
-    </a>
+    </button>
     <button
       type="button"
       class="chrome-icon"
@@ -594,6 +632,7 @@
 </Dialog>
 
 <NewProjectDialog bind:open={newProjectDialogOpen} onCreated={() => refreshRecents()} />
+<MidiSettingsDialog bind:open={midiDialogOpen} />
 
 <style>
   /*
@@ -733,6 +772,23 @@
     border-color: color-mix(in oklch, #b45309 60%, var(--foreground));
     background: color-mix(in oklch, #fcd34d 20%, var(--card));
     color: var(--foreground);
+  }
+  /* MISMATCH: on cloud audio while the sidecar is up (a local HD copy may exist).
+     Loud red so it can't be mistaken for the intended desktop/HD state. */
+  .chrome-icon.is-mismatch {
+    border-color: color-mix(in oklch, #b91c1c 70%, var(--foreground));
+    background: color-mix(in oklch, #fca5a5 30%, var(--card));
+    color: var(--foreground);
+    animation: mode-mismatch-pulse 2s ease-in-out infinite;
+  }
+  @keyframes mode-mismatch-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklch, #b91c1c 45%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 0 3px color-mix(in oklch, #b91c1c 0%, transparent);
+    }
   }
 
   @media (max-width: 920px) {

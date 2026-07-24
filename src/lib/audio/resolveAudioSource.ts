@@ -17,8 +17,17 @@
 export type AudioSource = 'local' | 'cloud' | 'missing'
 
 export interface AudioSourceInput {
-  /** Sidecar reachable == "desktop mode" == the local HD master is accessible. */
+  /** Sidecar reachable == desktop client running. */
   sidecarReachable: boolean
+  /**
+   * This song belongs to a LOCAL DISK project (`project.osPath !== null`) — i.e.
+   * a local HD master exists or should be relinked. FALSE for a browser-cloud
+   * song, which has no local folder at all. The failsafe (never play the lossy
+   * cloud copy) only applies when this is true; a browser-cloud song has no local
+   * master to protect, so the cloud copy is its legitimate source even while the
+   * sidecar happens to be running.
+   */
+  localProjectPresent: boolean
   /** A local HD master resolves (originalPath on disk, or a sha reconcile match). */
   localAudioAvailable: boolean
   /** A compressed cloud audio object exists for this song. */
@@ -37,10 +46,14 @@ export interface AudioResolution {
  * re-implement "which audio" anywhere else.
  */
 export function resolveAudioSource(input: AudioSourceInput): AudioResolution {
-  if (input.sidecarReachable) {
-    // Desktop mode: the local HD master is the ONLY acceptable source. The
-    // compressed cloud copy is intentionally unreachable here — a relink is the
-    // correct response to a missing local file, not a silent downgrade.
+  // The failsafe applies ONLY to a local disk project — the one case where an HD
+  // master exists (or should be relinked). A browser-cloud song has no local
+  // folder, so "sidecar reachable" does NOT imply a local master is available;
+  // its cloud copy is the correct source even while the desktop client runs.
+  if (input.sidecarReachable && input.localProjectPresent) {
+    // Desktop disk project: the local HD master is the ONLY acceptable source.
+    // The compressed cloud copy is intentionally unreachable here — a relink is
+    // the correct response to a missing local file, not a silent downgrade.
     return input.localAudioAvailable
       ? { source: 'local', mode: 'desktop', reason: 'desktop connected — using local HD master' }
       : {
@@ -50,7 +63,8 @@ export function resolveAudioSource(input: AudioSourceInput): AudioResolution {
             'desktop connected but the local file did not resolve — relink it (the compressed cloud copy is deliberately not used on desktop)',
         }
   }
-  // Browser mode: no sidecar, so the compressed cloud copy is the source.
+  // Browser-cloud song (no local folder), or a disk project with the sidecar
+  // down: the compressed cloud copy is the source.
   return input.cloudAudioAvailable
     ? { source: 'cloud', mode: 'browser', reason: 'browser mode — streaming compressed cloud audio' }
     : {
@@ -65,11 +79,17 @@ export function resolveAudioSource(input: AudioSourceInput): AudioResolution {
  * it impossible to obtain the lossy cloud copy while the HD master is available.
  * Call at the TOP of every cloud-audio fetch/decode entry point.
  */
-export function assertCloudAudioAccessAllowed(sidecarReachable: boolean): void {
-  if (sidecarReachable) {
+export function assertCloudAudioAccessAllowed(
+  sidecarReachable: boolean,
+  localProjectPresent: boolean,
+): void {
+  // Only refuse when there is a local master to prefer — i.e. a disk project on a
+  // running desktop client. A browser-cloud song (no local folder) has no HD
+  // master, so its cloud copy must be fetchable even while the sidecar runs.
+  if (sidecarReachable && localProjectPresent) {
     throw new Error(
-      'BarBro refuses to load the compressed cloud audio while the desktop client is connected — ' +
-        'the local HD master must be used. (resolveAudioSource failsafe)',
+      'BarBro refuses to load the compressed cloud audio while the desktop client is connected ' +
+        'to a local project — the local HD master must be used. (resolveAudioSource failsafe)',
     )
   }
 }

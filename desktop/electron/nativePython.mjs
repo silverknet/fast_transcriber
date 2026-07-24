@@ -79,6 +79,24 @@ export function chordChromaScriptPath() {
   return path.join(getNativePythonRoot(), 'sections', 'chord_chroma.py')
 }
 
+/**
+ * High-precision audio aligner (`desktop/native/python/align/align_audio.py`).
+ * Reuses the sections venv (numpy + scipy + librosa). Given two audio paths it
+ * returns the constant time offset + a same-recording confidence + drift.
+ */
+export function alignAudioScriptPath() {
+  return path.join(getNativePythonRoot(), 'align', 'align_audio.py')
+}
+
+/**
+ * Sample-accurate audio shifter (`desktop/native/python/align/shift_audio.py`).
+ * Places a file onto another's timeline by a constant offset (from the aligner).
+ * Reuses the sections venv (numpy + soundfile).
+ */
+export function shiftAudioScriptPath() {
+  return path.join(getNativePythonRoot(), 'align', 'shift_audio.py')
+}
+
 export function transcribeDrumsScriptPath() {
   return path.join(getNativePythonRoot(), 'sections', 'transcribe_drums.py')
 }

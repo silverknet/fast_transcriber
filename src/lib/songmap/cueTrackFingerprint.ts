@@ -61,7 +61,7 @@ export function cueTrackFingerprintPayload(sm: SongMap, track: CueTrack | undefi
   }))
 
   return {
-    v: 6,
+    v: 7, // bumped: count-in speech now onset-aligned (trimLeadingSilence)
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),

@@ -78,6 +78,14 @@
     onViewportWheel,
     /** Chords mode: after selecting a beat, report pointer position for anchoring a popover. */
     onChordBeatInteract,
+    /** Chords mode: single-click SELECTS an off-grid (divided-bar) chord slot. */
+    onChordFractionSelect,
+    /** Chords mode: double-click an off-grid slot → open the chord picker. */
+    onChordFractionInteract,
+    /** barId → its off-grid fraction chord slots (label + fraction), rendered in the chord strip. */
+    chordFractionByBar = {} as Record<string, { fraction: number; label: string }[]>,
+    /** Key (`barId:fraction`) of the currently-selected off-grid slot, for highlight. */
+    selectedFractionKey = null as string | null,
     /** Chords mode: right-click command menu request. */
     onChordContextMenu,
     /** Chords mode: drag a selected chord to move the whole selection by N beats. */
@@ -140,6 +148,15 @@
     onSectionsSeekCommit?: (timeSec: number) => void
     onViewportWheel?: (e: WheelEvent) => boolean
     onChordBeatInteract?: (detail: { clientX: number; clientY: number }) => void
+    onChordFractionSelect?: (detail: { barId: string; fraction: number }) => void
+    onChordFractionInteract?: (detail: {
+      barId: string
+      fraction: number
+      clientX: number
+      clientY: number
+    }) => void
+    chordFractionByBar?: Record<string, { fraction: number; label: string }[]>
+    selectedFractionKey?: string | null
     onChordContextMenu?: (detail: { clientX: number; clientY: number }) => void
     onChordsMove?: (detail: { delta: number }) => void
     selectedBeatId?: string | null
@@ -264,12 +281,7 @@
    * user can place chords with section context in view. (Interactive edge
    * handles below stay sections-only — chords mode is read-only for sections.) */
   let sectionFillSpans = $derived.by(() => {
-    if (
-      (stripMode !== 'sections' && stripMode !== 'chords') ||
-      !(widthPx > 0) ||
-      viewEnd <= viewStart ||
-      effectiveSections.length === 0
-    ) {
+    if (!(widthPx > 0) || viewEnd <= viewStart || effectiveSections.length === 0) {
       return [] as SectionSpan[]
     }
     const byIndex = new Map(bars.map((b) => [b.index, b]))
@@ -389,12 +401,7 @@
   })
 
   let sectionLabelSpans = $derived.by(() => {
-    if (
-      (stripMode !== 'sections' && stripMode !== 'chords') ||
-      !(widthPx > 0) ||
-      viewEnd <= viewStart ||
-      effectiveSections.length === 0
-    ) {
+    if (!(widthPx > 0) || viewEnd <= viewStart || effectiveSections.length === 0) {
       return [] as SectionLabelSpan[]
     }
     const byIndex = new Map(bars.map((b) => [b.index, b]))
@@ -609,6 +616,35 @@
     return undefined
   }
 
+  /** Bars whose chords are OFF-GRID (divided) — their beat cells are hidden and
+   *  replaced by fraction slots. */
+  let dividedBarIds = $derived(new Set(Object.keys(chordFractionByBar)))
+
+  /** Off-grid chord slot cells, positioned across each divided bar. */
+  let chordFractionCellsPx = $derived.by(() => {
+    type Cell = { key: string; barId: string; fraction: number; x0: number; x1: number; label: string }
+    if (stripMode !== 'chords' || !(widthPx > 0) || viewEnd <= viewStart) return [] as Cell[]
+    const byId = new Map(bars.map((b) => [b.id, b]))
+    const out: Cell[] = []
+    for (const [barId, slots] of Object.entries(chordFractionByBar)) {
+      const bar = byId.get(barId)
+      if (!bar || slots.length === 0) continue
+      const dur = bar.endSec - bar.startSec
+      for (let i = 0; i < slots.length; i++) {
+        const s0 = bar.startSec + slots[i]!.fraction * dur
+        const s1 = i + 1 < slots.length ? bar.startSec + slots[i + 1]!.fraction * dur : bar.endSec
+        const visT0 = Math.max(s0, viewStart)
+        const visT1 = Math.min(s1, viewEnd)
+        if (!(visT1 > visT0)) continue
+        const x0 = timeToPxInView(visT0, viewStart, viewEnd, widthPx)
+        const x1 = timeToPxInView(visT1, viewStart, viewEnd, widthPx)
+        if (x1 - x0 < 0.5) continue
+        out.push({ key: `${barId}:${i}`, barId, fraction: slots[i]!.fraction, x0, x1, label: slots[i]!.label })
+      }
+    }
+    return out
+  })
+
   let chordBeatSegments = $derived.by(() => {
     if (stripMode !== 'chords' || !(widthPx > 0) || viewEnd <= viewStart) {
       return [] as { beat: Beat; x0: number; x1: number }[]
@@ -617,6 +653,7 @@
     const out: { beat: Beat; x0: number; x1: number }[] = []
     for (let i = 0; i < sorted.length; i++) {
       const b = sorted[i]!
+      if (dividedBarIds.has(b.barId)) continue
       const next = sorted[i + 1]
       const t1 = Math.min(
         next ? next.timeSec : Number.POSITIVE_INFINITY,
@@ -640,7 +677,7 @@
     const sorted = [...beats].sort((a, b) => a.timeSec - b.timeSec || a.id.localeCompare(b.id))
     const labeled = sorted
       .map((beat) => ({ beat, label: chordLabelByBeatId[beat.id] ?? '' }))
-      .filter((entry) => entry.label)
+      .filter((entry) => entry.label && !dividedBarIds.has(entry.beat.barId))
     if (labeled.length === 0) return []
     const timelineEnd = Math.max(
       timelineMaxSec,
@@ -1006,6 +1043,9 @@
     chordsDragCleanup?.()
     chordsDragCleanup = null
 
+    // Divided bars are handled by their own click targets (off-grid slot
+    // buttons rendered above the strip), so beat selection below is skipped
+    // for them automatically — the buttons sit on top and catch the click.
     const hit = beatAtTime(timeFromClientX(e.clientX))
     if (!hit) {
       chordsSelectionBeatIds = []
@@ -1198,9 +1238,7 @@
 <div
   bind:this={gridEl}
   class="relative w-full min-w-0 shrink-0 overflow-hidden overscroll-x-contain border-b border-foreground/10 bg-muted/15 {editing
-    ? stripMode === 'sections' || stripMode === 'chords'
-      ? 'h-[4.5rem] pointer-events-auto'
-      : 'h-[3.25rem] pointer-events-auto'
+    ? 'h-[4.5rem] pointer-events-auto'
     : 'h-11 pointer-events-none'}"
   aria-hidden={!editing}
   role={editing ? 'region' : undefined}
@@ -1242,9 +1280,9 @@
     {/each}
   {/if}
 
-  <!-- Section titles: above bar fills. Visible in sections + chords modes
-       so users have section context while placing chords. -->
-  {#if editing && (stripMode === 'sections' || stripMode === 'chords')}
+  <!-- Section titles: above bar fills. Visible in sections + chords + grid
+       modes so users always have section context. -->
+  {#if editing && (stripMode === 'sections' || stripMode === 'chords' || stripMode === 'grid')}
     {#each sectionLabelSpans as span (span.key)}
       <div
         class="pointer-events-none absolute top-0 z-[25] flex h-5 items-center justify-center overflow-hidden px-1 text-center text-[10px] font-semibold leading-none tracking-tight {SECTION_LABEL_TEXT[
@@ -1252,7 +1290,7 @@
         ] ?? 'text-zinc-200'}"
         style:left="{span.x0}px"
         style:width="{span.w}px"
-        style:opacity={stripMode === 'chords' ? 0.65 : 1}
+        style:opacity={stripMode === 'sections' ? 1 : 0.65}
         title={span.label}
       >
         <span class="min-w-0 truncate drop-shadow-sm">{span.label}</span>
@@ -1260,16 +1298,16 @@
     {/each}
   {/if}
 
-  <!-- Section tint fills: visible in sections + chords modes. Dimmed in
-       chords mode so the chord strip stays the visual focus. -->
-  {#if editing && (stripMode === 'sections' || stripMode === 'chords')}
+  <!-- Section tint fills: visible in all modes. Dimmed outside sections mode
+       so the beat/chord strip stays the visual focus. -->
+  {#if editing && (stripMode === 'sections' || stripMode === 'chords' || stripMode === 'grid')}
     {#each sectionFillSpans as span (span.key)}
       <div
         class="pointer-events-none absolute inset-y-0"
         style:left="{span.x0}px"
         style:width="{span.w}px"
         style="{SECTION_FILL_CSS[span.kind] ?? ''}; {SECTION_LEFT_BORDER_CSS[span.kind] ?? ''}"
-        style:opacity={stripMode === 'chords' ? 0.4 : 1}
+        style:opacity={stripMode === 'sections' ? 1 : 0.4}
         aria-hidden="true"
       ></div>
     {/each}
@@ -1481,6 +1519,46 @@
             {span.label}
           </div>
         {/if}
+      {/each}
+
+      <!-- OFF-GRID (divided-bar) chord slots: a dashed cell + label, plus a real
+           click target ABOVE the strip overlay so clicking opens the picker. -->
+      {#each chordFractionCellsPx as cell (cell.key)}
+        <div
+          class="pointer-events-none absolute inset-y-0 z-[7] border-l border-dashed border-foreground/45 bg-foreground/[0.04]"
+          style:left="{cell.x0}px"
+          style:width="{cell.x1 - cell.x0}px"
+          aria-hidden="true"
+        ></div>
+        {#if chordLabelFits(cell.x1 - cell.x0, cell.label || '—')}
+          <div
+            class="pointer-events-none absolute bottom-1 z-[10] overflow-hidden whitespace-nowrap px-1 text-left font-mono text-[11px] font-black tabular-nums text-foreground"
+            style:left="{cell.x0}px"
+            style:width="{cell.x1 - cell.x0}px"
+            title={cell.label}
+          >
+            {cell.label || '—'}
+          </div>
+        {/if}
+        <button
+          type="button"
+          class="pointer-events-auto absolute inset-y-0 z-[12] cursor-pointer {selectedFractionKey ===
+          `${cell.barId}:${cell.fraction.toFixed(4)}`
+            ? 'bg-foreground/15 ring-foreground/70 ring-1 ring-inset'
+            : 'hover:bg-foreground/10'}"
+          style:left="{cell.x0}px"
+          style:width="{cell.x1 - cell.x0}px"
+          aria-label={`Chord slot (${cell.label || 'empty'})`}
+          title="Click to select · double-click to set the chord"
+          onclick={() => onChordFractionSelect?.({ barId: cell.barId, fraction: cell.fraction })}
+          ondblclick={(e) =>
+            onChordFractionInteract?.({
+              barId: cell.barId,
+              fraction: cell.fraction,
+              clientX: e.clientX,
+              clientY: e.clientY,
+            })}
+        ></button>
       {/each}
     {/if}
   </div>

@@ -96,6 +96,21 @@ export class MixerEngine {
   private rafId: number | null = null
   /** Current master-bus processing chain (see setMasterChain). */
   private masterChain: MixerInsert | null = null
+  /**
+   * Transiently silenced tracks (gain forced to 0) WITHOUT changing their
+   * stored mute/volume. Used to duck the baked cue lane during a loop/replay so
+   * it doesn't collide with the live dynamic cue, then restore cleanly.
+   */
+  private suppressedKeys = new Set<TrackKey>()
+
+  // ── Bar-quantized jump (crisp section launch, Ableton-style) ──────────────
+  /** A jump waiting for its boundary to enter the lookahead window. */
+  private pendingJump: { targetCtxTime: number; toPositionSec: number } | null = null
+  /** A jump whose audio is already scheduled sample-accurately at the boundary. */
+  private committedJump: { targetCtxTime: number; toPositionSec: number; newSources: ActiveSource[] } | null = null
+  private autoStopTimer: number | null = null
+  /** How far ahead of the boundary we commit the scheduled sources (seconds). */
+  private static readonly JUMP_LOOKAHEAD = 0.08
 
   constructor() {
     this.ac = new AudioContext()
@@ -191,12 +206,23 @@ export class MixerEngine {
     this.applyGains()
   }
 
+  /** Transiently force a track to silence (or restore it) without touching its
+   *  stored mute/volume. See `suppressedKeys`. */
+  setTrackSuppressed(key: TrackKey, suppressed: boolean): void {
+    const had = this.suppressedKeys.has(key)
+    if (suppressed === had) return
+    if (suppressed) this.suppressedKeys.add(key)
+    else this.suppressedKeys.delete(key)
+    this.applyGains()
+  }
+
   /**
    * Effective per-track gain accounting for mute + solo:
    *   - any track is soloed → only soloed tracks play
    *   - else → muted tracks are silent
    */
   private effectiveGainFor(track: MixerTrack): number {
+    if (this.suppressedKeys.has(track.key)) return 0
     const anySolo = Array.from(this.tracks.values()).some((t) => t.soloed)
     if (anySolo && !track.soloed) return 0
     if (track.muted) return 0
@@ -236,12 +262,13 @@ export class MixerEngine {
     }
   }
 
-  async play(fromSec?: number): Promise<void> {
+  async play(fromSec?: number, opts?: { startDelaySec?: number }): Promise<void> {
     if (this.ac.state === 'suspended') await this.ac.resume().catch(() => {})
     if (this.state === 'playing') this.stopSourcesOnly()
 
     const startAt = Math.max(0, fromSec ?? this.playStartPositionSec)
-    const ctxStartTime = this.ac.currentTime + 0.04 // small lookahead
+    // Optional lead delay (e.g. to let a song announcement finish first).
+    const ctxStartTime = this.ac.currentTime + 0.04 + Math.max(0, opts?.startDelaySec ?? 0)
 
     this.active = []
     for (const t of this.tracks.values()) {
@@ -263,15 +290,100 @@ export class MixerEngine {
     this.state = 'playing'
     this.startTick()
     this.emitUpdate()
+    this.scheduleAutoStop()
+  }
 
-    // Auto-stop when all tracks finish.
-    const remaining = this.durationSec() - startAt
-    if (remaining > 0) {
-      window.setTimeout(() => {
-        if (this.state === 'playing' && this.positionSec() >= this.durationSec() - 0.01) {
-          this.stop()
+  /** (Re)arm the "all tracks finished → stop" timer for the current position. */
+  private scheduleAutoStop(): void {
+    if (this.autoStopTimer != null) {
+      clearTimeout(this.autoStopTimer)
+      this.autoStopTimer = null
+    }
+    if (this.state !== 'playing') return
+    const remaining = this.durationSec() - this.positionSec()
+    if (remaining <= 0) return
+    this.autoStopTimer = window.setTimeout(() => {
+      if (this.state === 'playing' && this.positionSec() >= this.durationSec() - 0.05) this.stop()
+    }, Math.ceil(remaining * 1000) + 80)
+  }
+
+  /** Current AudioContext time — the one true clock. */
+  currentCtxTime(): number {
+    return this.ac.currentTime
+  }
+
+  /**
+   * Arm a SAMPLE-ACCURATE jump: when the playhead reaches `boundaryPositionSec`
+   * (a bar line), swap to playing from `toPositionSec`. The switch is scheduled
+   * on the audio clock (not polled), so it lands exactly on the beat — no slip.
+   * Replaces any un-committed pending jump; no-op unless playing.
+   */
+  armJumpAtPosition(boundaryPositionSec: number, toPositionSec: number): void {
+    if (this.state !== 'playing') return
+    if (this.committedJump) return // too close to the boundary — let it fire
+    const targetCtxTime = this.playStartCtxTime + (boundaryPositionSec - this.playStartPositionSec)
+    if (targetCtxTime <= this.ac.currentTime) return // boundary already gone
+    this.pendingJump = {
+      targetCtxTime,
+      toPositionSec: Math.max(0, Math.min(this.durationSec(), toPositionSec)),
+    }
+  }
+
+  cancelJump(): void {
+    this.pendingJump = null
+  }
+
+  /** True while a bar-quantized jump is queued or scheduled (for LED/UI). */
+  jumpPending(): boolean {
+    return this.pendingJump != null || this.committedJump != null
+  }
+
+  /**
+   * Called every tick: commit a pending jump once its boundary is within the
+   * lookahead window (scheduling stop/start on the audio clock), then promote a
+   * committed jump once its boundary has passed.
+   */
+  private serviceJumps(): void {
+    const now = this.ac.currentTime
+
+    if (this.pendingJump && !this.committedJump) {
+      const { targetCtxTime, toPositionSec } = this.pendingJump
+      if (targetCtxTime - now <= MixerEngine.JUMP_LOOKAHEAD) {
+        const at = Math.max(targetCtxTime, now + 0.005)
+        // Stop the currently-playing sources exactly at the boundary…
+        for (const a of this.active) {
+          try {
+            a.source.stop(at)
+          } catch {
+            /* already stopped */
+          }
         }
-      }, Math.ceil(remaining * 1000) + 80)
+        // …and start fresh sources at the boundary from the section offset.
+        const newSources: ActiveSource[] = []
+        for (const t of this.tracks.values()) {
+          const gain = this.trackGains.get(t.key)
+          if (!gain) continue
+          if (toPositionSec < t.buffer.duration) {
+            const src = this.ac.createBufferSource()
+            src.buffer = t.buffer
+            src.connect(t.insert ? t.insert.input : gain)
+            src.start(at, toPositionSec)
+            newSources.push({ source: src, gain, trackKey: t.key })
+          }
+        }
+        this.committedJump = { targetCtxTime: at, toPositionSec, newSources }
+        this.pendingJump = null
+      }
+    }
+
+    if (this.committedJump && now >= this.committedJump.targetCtxTime) {
+      const c = this.committedJump
+      // The old sources already stopped at the boundary; adopt the new ones.
+      this.active = c.newSources
+      this.playStartCtxTime = c.targetCtxTime
+      this.playStartPositionSec = c.toPositionSec
+      this.committedJump = null
+      this.scheduleAutoStop()
     }
   }
 
@@ -304,6 +416,22 @@ export class MixerEngine {
   }
 
   private stopSourcesOnly(): void {
+    // Any armed/scheduled jump is void once we tear down the transport.
+    this.pendingJump = null
+    if (this.committedJump) {
+      for (const a of this.committedJump.newSources) {
+        try {
+          a.source.stop()
+        } catch {
+          /* not yet started / already stopped */
+        }
+      }
+      this.committedJump = null
+    }
+    if (this.autoStopTimer != null) {
+      clearTimeout(this.autoStopTimer)
+      this.autoStopTimer = null
+    }
     for (const a of this.active) {
       try {
         a.source.stop()
@@ -322,6 +450,7 @@ export class MixerEngine {
   private startTick(): void {
     if (this.rafId != null) return
     const tick = () => {
+      this.serviceJumps()
       this.emitUpdate()
       if (this.state === 'playing') {
         this.rafId = requestAnimationFrame(tick)

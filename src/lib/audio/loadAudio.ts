@@ -23,6 +23,12 @@ export type LoadedAudio =
 /** What the boundary needs to know — no hidden globals; the caller supplies it. */
 export interface AudioSourceInputs {
   sidecarReachable: boolean
+  /**
+   * This song belongs to a LOCAL DISK project (`project.osPath !== null`). FALSE
+   * for a browser-cloud song — which has no local master, so the fidelity
+   * failsafe must not block its cloud copy just because the sidecar is running.
+   */
+  localProjectPresent: boolean
   songId: string | null
   /** A local HD master resolves right now (desktop + file present). */
   localAudioAvailable: boolean
@@ -40,13 +46,19 @@ export interface AudioLoaders {
 async function finish(
   plan: { resolution: { source: AudioSource; reason: string }; cloud?: { path: string; cacheKey: string } },
   sidecarReachable: boolean,
+  localProjectPresent: boolean,
   loaders: AudioLoaders,
 ): Promise<LoadedAudio> {
   const { source, reason } = plan.resolution
   if (source === 'local') return { source, blob: await loaders.loadLocal(), reason }
   if (source === 'cloud' && plan.cloud) {
     const fetchCloud = loaders.fetchCloud ?? fetchCloudAudioBlob
-    const blob = await fetchCloud({ sidecarReachable, path: plan.cloud.path, cacheKey: plan.cloud.cacheKey })
+    const blob = await fetchCloud({
+      sidecarReachable,
+      localProjectPresent,
+      path: plan.cloud.path,
+      cacheKey: plan.cloud.cacheKey,
+    })
     return { source, blob, reason }
   }
   return { source: 'missing', blob: null, reason }
@@ -54,7 +66,7 @@ async function finish(
 
 /** Load a song's MIX audio from wherever it should come from. */
 export async function loadMixAudio(inputs: AudioSourceInputs, loaders: AudioLoaders): Promise<LoadedAudio> {
-  return finish(planAudioLoad(inputs), inputs.sidecarReachable, loaders)
+  return finish(planAudioLoad(inputs), inputs.sidecarReachable, inputs.localProjectPresent, loaders)
 }
 
 /** Load one STEM's audio (mixer), same boundary + failsafe as the mix. */
@@ -65,10 +77,11 @@ export async function loadStemAudio(
 ): Promise<LoadedAudio> {
   const plan = planStemLoad({
     sidecarReachable: inputs.sidecarReachable,
+    localProjectPresent: inputs.localProjectPresent,
     localStemAvailable: inputs.localStemAvailable,
     songId: inputs.songId,
     stemName,
     cloudAudio: inputs.cloudAudio,
   })
-  return finish(plan, inputs.sidecarReachable, loaders)
+  return finish(plan, inputs.sidecarReachable, inputs.localProjectPresent, loaders)
 }

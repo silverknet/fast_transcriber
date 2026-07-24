@@ -168,7 +168,7 @@ function parseHarmony(raw: unknown, path: string): HarmonyEvent {
           ),
         }
       : undefined
-  return {
+  const out: HarmonyEvent = {
     id: reqString(o.id, `${path}.id`),
     barId: reqString(o.barId, `${path}.barId`),
     beatId: optString(o.beatId),
@@ -177,6 +177,16 @@ function parseHarmony(raw: unknown, path: string): HarmonyEvent {
     chord: parseChord(o.chord, `${path}.chord`),
     beatAnchor,
   }
+  // Off-grid chords are anchored by bar + fraction (no beat) — preserve it.
+  if (typeof o.barFraction === 'number' && Number.isFinite(o.barFraction)) {
+    out.barFraction = o.barFraction
+  }
+  return out
+}
+
+function parseHarmonyArray(raw: unknown, path: string): HarmonyEvent[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((h, i) => parseHarmony(h, `${path}[${i}]`))
 }
 
 const SONG_KEY_MODES = new Set(['major', 'minor'])
@@ -236,9 +246,7 @@ function parseChordLayer(raw: unknown, path: string): ChordLayer {
   const layer: ChordLayer = {
     id: reqString(o.id, `${path}.id`),
     name: reqString(o.name, `${path}.name`),
-    harmony: Array.isArray(o.harmony)
-      ? o.harmony.map((h, i) => parseHarmony(h, `${path}.harmony[${i}]`))
-      : [],
+    harmony: parseHarmonyArray(o.harmony, `${path}.harmony`),
   }
   const source = optString(o.source)
   if (source === 'manual' || source === 'sheet-import' || source === 'suggestions') {
@@ -295,9 +303,7 @@ function parseDraft(raw: unknown, path: string): SongDraft {
     sections: Array.isArray(o.sections)
       ? o.sections.map((sec, i) => parseSection(sec, `${path}.sections[${i}]`))
       : [],
-    harmony: Array.isArray(o.harmony)
-      ? o.harmony.map((h, i) => parseHarmony(h, `${path}.harmony[${i}]`))
-      : [],
+    harmony: parseHarmonyArray(o.harmony, `${path}.harmony`),
     lyrics: parseLyrics(o.lyrics, `${path}.lyrics`),
   })
 }
@@ -792,9 +798,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const sections = Array.isArray(raw.sections)
     ? raw.sections.map((s, i) => parseSection(s, `sections[${i}]`))
     : []
-  const harmony = Array.isArray(raw.harmony)
-    ? raw.harmony.map((h, i) => parseHarmony(h, `harmony[${i}]`))
-    : []
+  const harmony = parseHarmonyArray(raw.harmony, 'harmony')
   const lyrics = parseLyrics(raw.lyrics, 'lyrics')
 
   // v6 drafts. Anything older (v1–v5) is folded up from the v5 layer stacks —

@@ -139,6 +139,56 @@ export function endPatchBatch(): void {
  * While a `beginPatchBatch()` is active, the per-patch history push is
  * suppressed — `endPatchBatch()` pushes ONE entry for the whole batch.
  */
+/**
+ * The shared body of `patchSongMap` / `patchSongMapRemote`: run the updater,
+ * merge the live audio-session reference, invalidate render caches whose inputs
+ * changed, and validate. Pure w.r.t. the store (does not set `songMap` or touch
+ * history) — it only computes the next map. Does NOT stamp `metadata.updatedAt`;
+ * that is the caller's decision (a local edit stamps it, a remote install keeps
+ * the synced value).
+ */
+function computeNextMap(
+  sm: SongMap,
+  updater: (map: SongMap) => SongMap,
+): { ok: true; next: SongMap } | { ok: false; errors: string[] } {
+  let next = updater(sm)
+  const sess = get(audioSession)
+  if (sess.file) {
+    next = mergeAudioReferenceFromSession(next, sess)
+  }
+  if (next.cueTracks.some((track) => track.renderExport) || next.clickExport) {
+    const cueTracks = next.cueTracks.map((track) => {
+      if (!track.renderExport) return track
+      const fp = fingerprintCueTrackInputs(next, track)
+      return fp === track.renderExport.fingerprint ? track : { ...track, renderExport: undefined }
+    })
+    const primaryTrack = getPrimaryCueTrack({ ...next, cueTracks })
+    const clickFp = fingerprintCueTrackInputs(next, primaryTrack)
+    next = {
+      ...next,
+      cueTracks,
+      clickExport: next.clickExport && clickFp !== next.clickExport.fingerprint ? undefined : next.clickExport,
+    }
+  }
+  if (next.drumMidi?.renderExport) {
+    // Saved drum render goes stale when its inputs (events/kit/quantize/
+    // grid/trim) change — drop only the render ref, never the events.
+    const fp = fingerprintDrumTrackInputs(next)
+    if (fp !== next.drumMidi.renderExport.fingerprint) {
+      next = { ...next, drumMidi: { ...next.drumMidi, renderExport: undefined } }
+    }
+  }
+  if (next.bassMidi?.renderExport) {
+    const fp = fingerprintBassTrackInputs(next)
+    if (fp !== next.bassMidi.renderExport.fingerprint) {
+      next = { ...next, bassMidi: { ...next.bassMidi, renderExport: undefined } }
+    }
+  }
+  const v = validateSongMap(next)
+  if (!v.ok) return { ok: false, errors: v.errors }
+  return { ok: true, next }
+}
+
 export function patchSongMap(
   updater: (map: SongMap) => SongMap,
 ): { ok: true } | { ok: false; errors: string[] } {
@@ -146,50 +196,17 @@ export function patchSongMap(
   let prev: SongMap | null = null
   songMap.update((sm) => {
     if (!sm) return sm
-    let next = updater(sm)
-    const sess = get(audioSession)
-    if (sess.file) {
-      next = mergeAudioReferenceFromSession(next, sess)
-    }
-    if (next.cueTracks.some((track) => track.renderExport) || next.clickExport) {
-      const cueTracks = next.cueTracks.map((track) => {
-        if (!track.renderExport) return track
-        const fp = fingerprintCueTrackInputs(next, track)
-        return fp === track.renderExport.fingerprint ? track : { ...track, renderExport: undefined }
-      })
-      const primaryTrack = getPrimaryCueTrack({ ...next, cueTracks })
-      const clickFp = fingerprintCueTrackInputs(next, primaryTrack)
-      next = {
-        ...next,
-        cueTracks,
-        clickExport: next.clickExport && clickFp !== next.clickExport.fingerprint ? undefined : next.clickExport,
-      }
-    }
-    if (next.drumMidi?.renderExport) {
-      // Saved drum render goes stale when its inputs (events/kit/quantize/
-      // grid/trim) change — drop only the render ref, never the events.
-      const fp = fingerprintDrumTrackInputs(next)
-      if (fp !== next.drumMidi.renderExport.fingerprint) {
-        next = { ...next, drumMidi: { ...next.drumMidi, renderExport: undefined } }
-      }
-    }
-    if (next.bassMidi?.renderExport) {
-      const fp = fingerprintBassTrackInputs(next)
-      if (fp !== next.bassMidi.renderExport.fingerprint) {
-        next = { ...next, bassMidi: { ...next.bassMidi, renderExport: undefined } }
-      }
-    }
-    const v = validateSongMap(next)
-    if (!v.ok) {
-      result = { ok: false, errors: v.errors }
+    const computed = computeNextMap(sm, updater)
+    if (!computed.ok) {
+      result = { ok: false, errors: computed.errors }
       return sm
     }
     result = { ok: true }
     prev = sm
     const now = new Date().toISOString()
     return {
-      ...next,
-      metadata: { ...next.metadata, updatedAt: now },
+      ...computed.next,
+      metadata: { ...computed.next.metadata, updatedAt: now },
     }
   })
   if (prev !== null) {
@@ -205,5 +222,35 @@ export function patchSongMap(
       })
     }
   }
+  return result
+}
+
+/**
+ * Install a REMOTE-originated map (the merge result of a live cloud pull). Runs
+ * the SAME validation + audio-session merge + render-cache invalidation as
+ * `patchSongMap`, but deliberately:
+ *  - does NOT push onto the undo stack — a collaborator's change must never
+ *    become the local user's next Ctrl-Z, and
+ *  - does NOT re-stamp `metadata.updatedAt` — it preserves the synced value so
+ *    the applied map doesn't look like a fresh local edit (which would trip the
+ *    autosave dirty-check into a spurious re-push).
+ *
+ * On validation failure the store is left unchanged and errors are returned, so
+ * the caller can decline to persist a map the editor rejected.
+ */
+export function patchSongMapRemote(
+  next: SongMap,
+): { ok: true } | { ok: false; errors: string[] } {
+  let result: { ok: true } | { ok: false; errors: string[] } = { ok: false, errors: ['No song map loaded'] }
+  songMap.update((sm) => {
+    if (!sm) return sm
+    const computed = computeNextMap(sm, () => next)
+    if (!computed.ok) {
+      result = { ok: false, errors: computed.errors }
+      return sm
+    }
+    result = { ok: true }
+    return computed.next
+  })
   return result
 }

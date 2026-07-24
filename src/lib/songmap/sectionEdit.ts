@@ -54,8 +54,11 @@ function rangesOverlapOrAdjacent(a0: number, a1: number, b0: number, b1: number)
  *     into one larger section spanning the union of all touched ranges. Tagging
  *     bars 4-7 as Chorus next to an existing Chorus 0-3 produces a single
  *     Chorus 0-7, not two 4-bar choruses.
- *   - **Different-kind sections** that overlap the (merged) range are dropped —
- *     the new tag wins, same as before.
+ *   - **Different-kind sections** that overlap the (merged) range are TRIMMED
+ *     back to their non-overlapping bars (or split when the new range lands
+ *     inside one). The new tag wins only for its own bars; a neighbour is
+ *     removed only when the new range fully covers it — it never silently
+ *     vanishes just because the edges touch.
  *
  * `labelOverride` (when non-empty) replaces the default label. Otherwise, if a
  * same-kind neighbor is being merged in and had a non-default label
@@ -88,13 +91,34 @@ export function setSectionForBarRange(
   const unionStart = Math.min(a, ...sameKindNeighbors.map((s) => s.barRange.startBarIndex))
   const unionEnd = Math.max(b, ...sameKindNeighbors.map((s) => s.barRange.endBarIndex))
 
-  // 3. Drop the same-kind neighbors we're folding in AND any *different-kind*
-  //    section that overlaps the merged span.
+  // 3. Fold in the same-kind neighbors. For any *different-kind* section that
+  //    overlaps the merged span, TRIM it back to its non-overlapping bars (or
+  //    SPLIT it when the new range lands inside it) — never drop the whole
+  //    neighbour. A section is removed ONLY when the new range fully covers it.
   const neighborIds = new Set(sameKindNeighbors.map((s) => s.id))
-  const filtered = map.sections.filter((s) => {
-    if (neighborIds.has(s.id)) return false
-    return !rangesOverlap(s.barRange.startBarIndex, s.barRange.endBarIndex, unionStart, unionEnd)
-  })
+  const filtered: Section[] = []
+  for (const s of map.sections) {
+    if (neighborIds.has(s.id)) continue // folded into the new section below
+    const sStart = s.barRange.startBarIndex
+    const sEnd = s.barRange.endBarIndex
+    if (!rangesOverlap(sStart, sEnd, unionStart, unionEnd)) {
+      filtered.push(s) // untouched
+      continue
+    }
+    const hasLeft = sStart < unionStart // a piece survives before the new range
+    const hasRight = sEnd > unionEnd // a piece survives after it
+    if (hasLeft) {
+      filtered.push({ ...s, barRange: { ...s.barRange, endBarIndex: unionStart - 1 } })
+    }
+    if (hasRight) {
+      filtered.push({
+        ...s,
+        id: hasLeft ? idFactory() : s.id, // a true split needs a fresh id for the right piece
+        barRange: { ...s.barRange, startBarIndex: unionEnd + 1 },
+      })
+    }
+    // neither piece survives → the new section fully covers it → dropped
+  }
 
   // 4. Resolve the label. Explicit override wins; otherwise inherit a custom
   //    label from one of the merged neighbors; otherwise default for the kind.
@@ -135,6 +159,7 @@ export function resizeSectionRange(
   sectionId: string,
   newStartBarIndex: number,
   newEndBarIndex: number,
+  idFactory: IdFactory = () => crypto.randomUUID(),
 ): SectionEditResult {
   const existing = map.sections.find((s) => s.id === sectionId)
   if (!existing) return fail('Section not found')
@@ -157,11 +182,29 @@ export function resizeSectionRange(
   const unionStart = Math.min(a, ...sameKindNeighbors.map((s) => s.barRange.startBarIndex))
   const unionEnd = Math.max(b, ...sameKindNeighbors.map((s) => s.barRange.endBarIndex))
 
+  // Trim (or split) different-kind neighbours instead of deleting them — same
+  // rule as setSectionForBarRange: a neighbour vanishes only when fully covered.
   const neighborIds = new Set(sameKindNeighbors.map((s) => s.id))
-  const filtered = others.filter((s) => {
-    if (neighborIds.has(s.id)) return false
-    return !rangesOverlap(s.barRange.startBarIndex, s.barRange.endBarIndex, unionStart, unionEnd)
-  })
+  const filtered: Section[] = []
+  for (const s of others) {
+    if (neighborIds.has(s.id)) continue
+    const sStart = s.barRange.startBarIndex
+    const sEnd = s.barRange.endBarIndex
+    if (!rangesOverlap(sStart, sEnd, unionStart, unionEnd)) {
+      filtered.push(s)
+      continue
+    }
+    const hasLeft = sStart < unionStart
+    const hasRight = sEnd > unionEnd
+    if (hasLeft) filtered.push({ ...s, barRange: { ...s.barRange, endBarIndex: unionStart - 1 } })
+    if (hasRight) {
+      filtered.push({
+        ...s,
+        id: hasLeft ? idFactory() : s.id,
+        barRange: { ...s.barRange, startBarIndex: unionEnd + 1 },
+      })
+    }
+  }
 
   const updated: Section = {
     ...existing,

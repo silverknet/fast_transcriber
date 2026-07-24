@@ -20,14 +20,15 @@
  */
 import { get } from 'svelte/store'
 import { collabContentFingerprint, mergeLocalIntoCollab } from '$lib/songmap/collab'
-import { autoResolvedMerge, mergeForConflict } from '$lib/songmap/collabMerge'
+import { autoResolvedMerge, mergeForConflict, type MergeReport } from '$lib/songmap/collabMerge'
 import { project } from '$lib/stores/project'
-import { patchSongMap, songMap } from '$lib/stores/songMap'
+import { patchSongMapRemote, songMap } from '$lib/stores/songMap'
 import type { ExpectedAudio, SongMap } from '$lib/songmap/types'
 
 /** Identity of the song the editor currently has loaded, if any. */
 export type ActiveSongRef = {
-  osPath: string
+  /** Null in browser/collab mode — the song has no local folder. */
+  osPath: string | null
   folder: string
   songId: string
 }
@@ -39,7 +40,11 @@ export type ActiveSongRef = {
  */
 export function activeSongRef(): ActiveSongRef | null {
   const snap = get(project)
-  if (!snap.osPath || !snap.activeSongFolder || !snap.activeSongId) return null
+  // No `osPath` requirement: in browser/collab mode there is no local folder,
+  // but the editor still has a song open (identity = folder + id + mode). The
+  // sole caller (`isActiveSong`, used by `applyRemoteSongMap`) only reads
+  // `songId`, so a live pull can now install into the open browser song too.
+  if (!snap.activeSongFolder || !snap.activeSongId) return null
   if (snap.editingMode !== 'project-song') return null
   return { osPath: snap.osPath, folder: snap.activeSongFolder, songId: snap.activeSongId }
 }
@@ -65,6 +70,15 @@ export type RemoteApplicationPlan = {
    * change was merged item-by-item instead of overwriting them.
    */
   localState: 'clean' | 'dirty'
+  /**
+   * True when a DANGEROUS remote change (whole-timeline swap, wholesale chord
+   * replace, `analyzed` flip, audio-identity change) landed on a DIRTY editor.
+   * The caller must NOT install/persist `merged` (it is left as `local`);
+   * instead it surfaces `report` via the conflict dialog for the user to decide.
+   */
+  needsUserResolution?: boolean
+  /** The conflict report to hand the dialog when `needsUserResolution`. */
+  report?: MergeReport
 }
 
 /**
@@ -151,9 +165,35 @@ export function planRemoteApplication(args: {
   // `mergeForConflict` assembles from the CLOUD copy, which has local-only
   // fields stripped, so its result is run back through `mergeLocalIntoCollab`
   // to re-attach them.
-  const shared = dirty
-    ? keepLocalOnly(local, autoResolvedMerge(mergeForConflict(local, args.incoming)))
-    : args.incoming
+  // Compute the conflict report ONCE when dirty — used both for the
+  // dangerous-change check and for the auto-resolved merge below.
+  let report: MergeReport | undefined
+  if (dirty) {
+    report = mergeForConflict(local, args.incoming)
+    // A structural remote change that CANNOT be auto-merged losslessly must not
+    // be silently resolved for a mid-edit user — surface it via the dialog (the
+    // same asymmetry the push path guards). We deliberately EXCLUDE the
+    // wholesale-`harmony` category: `keepLocalOnly` below already unions the
+    // freshly-typed local chords back in, and a genuine chord-track REPLACE is a
+    // draft divergence (kept as a separate draft, no loss) — so that one stays
+    // dialog-free. What's left — a bar-count change, an `analyzed` flip, or an
+    // audio-master swap — genuinely changes what the song IS and needs a choice.
+    const needsResolution = report.conflicts.some(
+      (c) => c.severity === 'dangerous' && c.path !== 'harmony',
+    )
+    if (needsResolution) {
+      return {
+        merged: local,
+        localSource: args.memory ? 'memory' : 'disk',
+        appliedToMemory: false,
+        localState: 'dirty',
+        needsUserResolution: true,
+        report,
+      }
+    }
+  }
+
+  const shared = dirty ? keepLocalOnly(local, autoResolvedMerge(report!)) : args.incoming
   const merged = mergeLocalIntoCollab(local, shared)
 
   // Fold the audio claim in HERE rather than mutating the map after it has been
@@ -198,8 +238,10 @@ export function applyRemoteSongMap(args: {
   if (!plan.appliedToMemory) return plan
 
   // Replace wholesale rather than patching fields: `merged` already folded the
-  // local-only fields back in via `mergeLocalIntoCollab`.
-  const res = patchSongMap(() => plan.merged)
+  // local-only fields back in via `mergeLocalIntoCollab`. Use the REMOTE variant
+  // so a collaborator's change never lands on the local user's undo stack and
+  // doesn't re-stamp `updatedAt` (which would look like a fresh local edit).
+  const res = patchSongMapRemote(plan.merged)
   if (res.ok) return plan
 
   // Validation rejected the merged map. Report that memory was NOT updated so

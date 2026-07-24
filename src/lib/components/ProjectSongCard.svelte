@@ -113,7 +113,9 @@
   let stemPresence = $derived(
     STEM_TRACKS.map((t) => ({ name: t.name, present: !!metadata?.stemRefs?.[t.name] })),
   )
-  let hasCueTrack = $derived(!!metadata?.hasCueTrack)
+  // Green iff there are actually cues to speak in live mode — not merely that a
+  // (possibly stale/click-only) cue WAV exists on disk.
+  let hasCueContent = $derived(!!metadata?.hasCueContent)
   let hasAudio = $derived(!!metadata?.hasAudio)
 
   /** Active stem job for this song (queued / running / paused) — drives the row pill. */
@@ -300,11 +302,11 @@
     <!-- Cue dot -->
     <span
       class="flex min-w-0 justify-center"
-      title={hasCueTrack ? 'Cue track: ready' : 'Cue track: not generated'}
+      title={hasCueContent ? 'Cues: present' : 'Cues: none'}
     >
       <span
-        class="studio-light {hasCueTrack ? 'bg-emerald-500' : 'bg-foreground/20'}"
-        aria-label={`cue: ${hasCueTrack ? 'ready' : 'not generated'}`}
+        class="studio-light {hasCueContent ? 'bg-emerald-500' : 'bg-foreground/20'}"
+        aria-label={`cue: ${hasCueContent ? 'present' : 'none'}`}
       ></span>
     </span>
 

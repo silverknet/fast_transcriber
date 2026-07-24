@@ -41,6 +41,8 @@ import {
   runPythonCapture,
   sectionsScriptPath,
   chordChromaScriptPath,
+  alignAudioScriptPath,
+  shiftAudioScriptPath,
   transcribeBassScriptPath,
   transcribeDrumsScriptPath,
   getSectionsVenvDir,
@@ -3681,6 +3683,148 @@ async function handleAnalyzeChordChroma(req, res, cors) {
 }
 
 /**
+ * `POST /native/align-audio` — body `{ refPath, targetPath }` (absolute OS
+ * paths). Computes the constant time offset that maps `targetPath` onto
+ * `refPath`'s timeline, plus a same-recording confidence and a drift measure.
+ *
+ * Sign contract (mirrors align_audio.py): `t_ref = t_target + offsetSec`.
+ * offset > 0 ⇒ the target starts earlier (delay/pad it to align); offset < 0 ⇒
+ * the target starts later (trim it). No audio crosses HTTP — both files are on
+ * the desktop's own disk. Reuses the sections venv (numpy + scipy + librosa).
+ */
+async function handleAlignAudio(req, res, cors) {
+  const t0 = Date.now()
+  try {
+    const body = await readRequestJson(req)
+    const refPath = typeof body?.refPath === 'string' ? body.refPath.trim() : ''
+    const targetPath = typeof body?.targetPath === 'string' ? body.targetPath.trim() : ''
+    try {
+      ensureAbsolutePath(refPath, 'refPath')
+      ensureAbsolutePath(targetPath, 'targetPath')
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+      return
+    }
+    if (!existsSync(refPath)) {
+      sendJson(res, 404, { ok: false, error: `ref audio not found: ${refPath}` }, cors)
+      return
+    }
+    if (!existsSync(targetPath)) {
+      sendJson(res, 404, { ok: false, error: `target audio not found: ${targetPath}` }, cors)
+      return
+    }
+    const script = alignAudioScriptPath()
+    if (!existsSync(script)) {
+      logError(`align-audio: missing script ${script}`)
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      [refPath, targetPath],
+      300_000,
+    )
+    if (code !== 0) {
+      const sigPart = signal ? ` (signal ${signal})` : ''
+      logWarn(`align-audio: python exit ${code}${sigPart}: ${stderr?.slice(0, 2000) ?? ''}`)
+      const errMsg = stderr || (signal ? `Python killed by ${signal}.` : `Python exited ${code}.`)
+      sendJson(res, 503, { ok: false, error: errMsg }, cors)
+      return
+    }
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      logError('align-audio: invalid JSON from aligner')
+      sendJson(res, 500, { ok: false, error: 'Invalid JSON from aligner' }, cors)
+      return
+    }
+    if (!data?.ok) {
+      sendJson(res, 422, { ok: false, error: data?.error || 'alignment failed' }, cors)
+      return
+    }
+    logInfo(
+      `align-audio: offset=${data.offsetSec}s conf=${data.confidence} drift=${data.driftSec}s same=${data.sameRecording} ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+    )
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`align-audio: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
+ * `POST /native/shift-audio` — body `{ srcPath, dstPath, offsetSec,
+ * targetDurationSec? }` (absolute OS paths). Writes `srcPath` shifted onto a
+ * reference timeline by `offsetSec` (same sign contract as align-audio) to
+ * `dstPath`, sample-accurate. Used to drop an aligned upload / vocal stem onto
+ * an existing song's grid. `dstPath`'s parent dir must exist.
+ */
+async function handleShiftAudio(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const srcPath = typeof body?.srcPath === 'string' ? body.srcPath.trim() : ''
+    const dstPath = typeof body?.dstPath === 'string' ? body.dstPath.trim() : ''
+    const offsetSec = Number(body?.offsetSec)
+    const targetDurationSec = body?.targetDurationSec == null ? null : Number(body.targetDurationSec)
+    try {
+      ensureAbsolutePath(srcPath, 'srcPath')
+      ensureAbsolutePath(dstPath, 'dstPath')
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
+      return
+    }
+    if (!Number.isFinite(offsetSec)) {
+      sendJson(res, 400, { ok: false, error: 'offsetSec must be a finite number' }, cors)
+      return
+    }
+    if (!existsSync(srcPath)) {
+      sendJson(res, 404, { ok: false, error: `src audio not found: ${srcPath}` }, cors)
+      return
+    }
+    const script = shiftAudioScriptPath()
+    if (!existsSync(script)) {
+      sendJson(res, 500, { ok: false, error: `Missing script: ${script}` }, cors)
+      return
+    }
+    await mkdir(path.dirname(dstPath), { recursive: true })
+    const args = [srcPath, dstPath, String(offsetSec)]
+    if (targetDurationSec != null && Number.isFinite(targetDurationSec)) args.push(String(targetDurationSec))
+    const { code, signal, stdout, stderr } = await runPythonCapture(
+      pythonSectionsExe(),
+      script,
+      args,
+      180_000,
+    )
+    if (code !== 0) {
+      const errMsg = stderr || (signal ? `Python killed by ${signal}.` : `Python exited ${code}.`)
+      logWarn(`shift-audio: python exit ${code}: ${stderr?.slice(0, 1000) ?? ''}`)
+      sendJson(res, 503, { ok: false, error: errMsg }, cors)
+      return
+    }
+    let data
+    try {
+      data = JSON.parse(stdout)
+    } catch {
+      sendJson(res, 500, { ok: false, error: 'Invalid JSON from shifter' }, cors)
+      return
+    }
+    if (!data?.ok) {
+      sendJson(res, 422, { ok: false, error: data?.error || 'shift failed' }, cors)
+      return
+    }
+    sendJson(res, 200, { ok: true, data }, cors)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logError(`shift-audio: ${msg}`)
+    sendJson(res, 500, { ok: false, error: msg }, cors)
+  }
+}
+
+/**
  * Run a queued stems job. Updates state, spawns Python with
  * `--stream-progress`, drains its stdout to the per-job event buffer, and
  * settles the job on close. Concurrency is enforced by the worker loop —
@@ -6390,6 +6534,16 @@ function startBeaconServer() {
 
     if (req.method === 'POST' && req.url === '/native/analyze-chord-chroma') {
       void handleAnalyzeChordChroma(req, res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/align-audio') {
+      void handleAlignAudio(req, res, cors)
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/native/shift-audio') {
+      void handleShiftAudio(req, res, cors)
       return
     }
 

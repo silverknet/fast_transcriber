@@ -50,8 +50,14 @@ export interface ProjectSongMetadataLite {
    */
   stemsByPreset?: Record<string, string[]>
   hasAls?: boolean
-  /** True iff a rendered cue track exists on disk. */
+  /** True iff a rendered cue track WAV exists on disk (may be stale/click-only). */
   hasCueTrack?: boolean
+  /**
+   * True iff the `.smap`'s cue track actually has something to SAY (spoken cues
+   * or count-in) — the honest "cues present in live mode" signal, independent of
+   * whether a (possibly stale) WAV lingers on disk. Drives the green cue dot.
+   */
+  hasCueContent?: boolean
   /** True iff `<song>/cue/click-track.wav` exists on disk. */
   hasClickTrack?: boolean
   /**
