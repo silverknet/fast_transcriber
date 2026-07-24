@@ -19,6 +19,9 @@
   import { get } from 'svelte/store'
   import ApcKey25Control from '$lib/components/ApcKey25Control.svelte'
   import LiveMidiController from '$lib/components/LiveMidiController.svelte'
+  import LiveStageMobile from '$lib/components/LiveStageMobile.svelte'
+  import { isNarrow } from '$lib/stores/viewport'
+  import { upcomingChordRow } from '$lib/audio/upcomingChords'
   import type { LiveCommand, LiveLedState } from '$lib/hardware/liveMidiMap'
   import { Button } from '$lib/components/ui/button'
   import LiveHardwareStrip from '$lib/components/LiveHardwareStrip.svelte'
@@ -450,6 +453,9 @@
     if (!seg) return fmtTime(0)
     return fmtTime(Math.max(0, seg.endSec - snapshot.positionSec))
   })
+  // Phone live "chord row": current chord + next 3. Next-3 (not 1) so a fast run
+  // of chords is readable; harmless when it's one chord per bar.
+  const mobileChordRow = $derived(upcomingChordRow(chordTimelineSegments, snapshot.positionSec, 3))
   // Stable rows from ABSOLUTE chord times so chords don't jump vertically when
   // the front one is consumed. Recomputed only when the chord data changes.
   const chordRowById = $derived.by(() => {
@@ -2042,6 +2048,24 @@
 
   {#if playbackMode}
     <LiveMidiController enabled={playbackMode} onCommand={handleLiveMidiCommand} led={liveLedState} />
+    {#if liveMode && $isNarrow}
+      <!-- Read-only PHONE live stage: balanced, non-scrolling, reusing the same
+           chord/lyric/waveform derivations. Desktop stage below is untouched. -->
+      <LiveStageMobile
+        chordRow={mobileChordRow}
+        {lyricLines}
+        {currentLyricIdx}
+        {lyricsSongTime}
+        waveBuffer={stageWaveformLane?.buffer ?? null}
+        positionSec={snapshot.positionSec}
+        durationSec={snapshot.durationSec}
+        {sectionBands}
+        {onSeekFraction}
+        isPlaying={snapshot.state === 'playing'}
+        {onPlayPause}
+        {onStop}
+      />
+    {:else}
     <section class="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden" aria-label="Playback mode">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex min-w-0 items-center gap-3">
@@ -2310,6 +2334,7 @@
         onSeekFraction={onSeekFraction}
       />
     </section>
+    {/if}
   {:else if lanes.length > 0}
     <div class="flex flex-col gap-1.5">
       {#each lanes as lane, i (lane.key)}
