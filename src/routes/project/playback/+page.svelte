@@ -10,8 +10,9 @@
   import { loadCloudSongIntoEditor } from '$lib/client/browserCloudProject'
   import { project as projectStore, isBrowserCloudProject } from '$lib/stores/project'
   import { songMap } from '$lib/stores/songMap'
-  import { ArrowLeft, HelpCircle, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
+  import { ArrowLeft, HelpCircle, ListMusic, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
   import ApcKey25Guide from '$lib/components/ApcKey25Guide.svelte'
+  import { isNarrow } from '$lib/stores/viewport'
 
   type SetlistItem = {
     id: string
@@ -27,6 +28,8 @@
   let showGuide = $state(false)
   let refreshing = $state(false)
   let fullscreen = $state(false)
+  /** Phone-only setlist sheet (the "corner menu" to switch songs). */
+  let songMenuOpen = $state(false)
   let attemptedAutoLoadKey = ''
 
   const projectName = $derived($projectStore.data?.name?.trim() || 'Project')
@@ -171,7 +174,7 @@
 </svelte:head>
 
 <main class="live-playback-page min-h-dvh bg-background text-foreground">
-  <div class="flex min-h-dvh flex-col gap-3 px-3 py-3 lg:px-4">
+  <div class="flex flex-col gap-3 px-3 py-3 lg:px-4 {$isNarrow ? 'h-dvh overflow-hidden' : 'min-h-dvh'}">
     <header class="flex shrink-0 flex-wrap items-center gap-2">
       <Button
         variant={exitArmed ? 'default' : 'outline'}
@@ -187,26 +190,28 @@
         <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">Live playback</p>
         <h1 class="truncate text-2xl font-black leading-none sm:text-3xl">{projectName}</h1>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        class="h-9 gap-1.5"
-        onclick={() => void refreshProject()}
-        disabled={refreshing}
-      >
-        <RefreshCw class="size-4 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
-        Refresh
-      </Button>
-      <Button
-        variant={showGuide ? 'default' : 'outline'}
-        size="sm"
-        class="h-9 gap-1.5"
-        onclick={() => (showGuide = !showGuide)}
-        title="How to drive live mode with keys + the APC Key 25"
-      >
-        <HelpCircle class="size-4" aria-hidden="true" />
-        Controls
-      </Button>
+      {#if !$isNarrow}
+        <Button
+          variant="outline"
+          size="sm"
+          class="h-9 gap-1.5"
+          onclick={() => void refreshProject()}
+          disabled={refreshing}
+        >
+          <RefreshCw class="size-4 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
+          Refresh
+        </Button>
+        <Button
+          variant={showGuide ? 'default' : 'outline'}
+          size="sm"
+          class="h-9 gap-1.5"
+          onclick={() => (showGuide = !showGuide)}
+          title="How to drive live mode with keys + the APC Key 25"
+        >
+          <HelpCircle class="size-4" aria-hidden="true" />
+          Controls
+        </Button>
+      {/if}
       <Button variant="outline" size="sm" class="h-9 gap-1.5" onclick={() => void toggleFullscreen()}>
         {#if fullscreen}
           <Minimize2 class="size-4" aria-hidden="true" />
@@ -260,6 +265,7 @@
       </section>
     {:else}
       <div class="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)]">
+        {#if !$isNarrow}
         <aside class="min-h-0 overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-card">
           <div class="border-b-2 border-foreground px-3 py-2">
             <div class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
@@ -292,29 +298,52 @@
             {/each}
           </ol>
         </aside>
+        {/if}
 
-        <section class="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-background p-3">
-          <div class="mb-3 flex shrink-0 flex-wrap items-center gap-2">
-            <div class="min-w-0 flex-1">
-              <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
-                Now
-              </p>
-              <h2 class="truncate text-3xl font-black leading-none sm:text-4xl">
-                {activeItem?.title ?? 'Loading song'}
-              </h2>
+        <section class="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-background {$isNarrow ? 'p-0' : 'p-3'}">
+          {#if $isNarrow}
+            <!-- Corner song-menu: the only chrome on the phone stage. -->
+            <div class="flex shrink-0 items-center gap-2 px-2 py-1.5">
+              <button
+                type="button"
+                class="border-foreground bg-card flex min-w-0 flex-1 items-center gap-2 rounded-full border-2 px-3 py-1.5 text-left"
+                onclick={() => (songMenuOpen = !songMenuOpen)}
+                aria-expanded={songMenuOpen}
+                aria-label="Switch song"
+              >
+                <ListMusic class="size-4 shrink-0" aria-hidden="true" />
+                <span class="font-mono text-xs font-black tabular-nums shrink-0">
+                  {activeIndex >= 0 ? activeIndex + 1 : 0}/{setlistItems.length}
+                </span>
+                <span class="min-w-0 flex-1 truncate text-sm font-black">
+                  {activeItem?.title ?? 'Select a song'}
+                </span>
+                {#if loadingSongId}<span class="shrink-0 text-xs">…</span>{/if}
+              </button>
             </div>
-            {#if upcomingItem}
-              <div class="rounded-[var(--radius)] bg-muted/60 px-3 py-2 text-right">
-                <div class="text-muted-foreground text-[10px] font-black uppercase">Next</div>
-                <div class="max-w-52 truncate text-sm font-black">{upcomingItem.title}</div>
+          {:else}
+            <div class="mb-3 flex shrink-0 flex-wrap items-center gap-2">
+              <div class="min-w-0 flex-1">
+                <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
+                  Now
+                </p>
+                <h2 class="truncate text-3xl font-black leading-none sm:text-4xl">
+                  {activeItem?.title ?? 'Loading song'}
+                </h2>
               </div>
-            {/if}
-            {#if loadingSongId}
-              <div class="rounded-full bg-muted px-3 py-1 font-mono text-xs font-bold">
-                Loading…
-              </div>
-            {/if}
-          </div>
+              {#if upcomingItem}
+                <div class="rounded-[var(--radius)] bg-muted/60 px-3 py-2 text-right">
+                  <div class="text-muted-foreground text-[10px] font-black uppercase">Next</div>
+                  <div class="max-w-52 truncate text-sm font-black">{upcomingItem.title}</div>
+                </div>
+              {/if}
+              {#if loadingSongId}
+                <div class="rounded-full bg-muted px-3 py-1 font-mono text-xs font-bold">
+                  Loading…
+                </div>
+              {/if}
+            </div>
+          {/if}
 
           {#if hasLoadedSong}
             <MixerView initialPlaybackMode lockPlaybackMode liveMode />
@@ -324,6 +353,51 @@
             </div>
           {/if}
         </section>
+
+        {#if $isNarrow && songMenuOpen}
+          <!-- Collapsible song list (closed by default) — tap a song to switch + close. -->
+          <div class="fixed inset-0 z-[200]">
+            <!-- Backdrop is an interactive button (tap outside to close) sitting
+                 BEHIND the panel, so panel taps never reach it — no stopPropagation. -->
+            <button
+              type="button"
+              class="absolute inset-0 bg-black/50"
+              aria-label="Close song menu"
+              onclick={() => (songMenuOpen = false)}
+            ></button>
+            <div
+              class="border-foreground bg-card absolute inset-x-2 top-2 max-h-[75dvh] overflow-hidden rounded-[var(--radius)] border-2"
+            >
+              <div class="border-foreground/20 bg-card flex items-center justify-between border-b-2 px-3 py-2">
+                <span class="text-xs font-black uppercase tracking-wide">Songs</span>
+                <button type="button" class="text-muted-foreground px-2 text-sm font-black" onclick={() => (songMenuOpen = false)} aria-label="Close">✕</button>
+              </div>
+              <ol class="max-h-[calc(75dvh-2.5rem)] overflow-y-auto">
+                {#each setlistItems as item, index (item.id)}
+                  <li>
+                    <button
+                      type="button"
+                      class="grid w-full grid-cols-[2rem_minmax(0,1fr)] items-center gap-2 border-b border-foreground/10 px-3 py-3 text-left {item.id === activeSongId ? 'bg-primary text-primary-foreground' : 'active:bg-muted/60'}"
+                      onclick={() => {
+                        songMenuOpen = false
+                        void openSong(item.id)
+                      }}
+                      disabled={loadingSongId === item.id}
+                    >
+                      <span class="font-mono text-xs font-black tabular-nums">{index + 1}</span>
+                      <span class="min-w-0">
+                        <span class="block truncate text-sm font-black">{item.title}</span>
+                        <span class="block truncate font-mono text-[11px] opacity-75">
+                          {item.keyLabel} · {item.bpmLabel} BPM{item.artist ? ` · ${item.artist}` : ''}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ol>
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
   </div>

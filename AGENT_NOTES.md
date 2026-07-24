@@ -457,3 +457,33 @@ Each carries {label, tone, detail}. Replaces the old sidecar-only "Studio/Collab
 Tests: appMode.test.ts (7 states), indexRecentCloudProjects.test.ts (2),
 cloudDiskPaths via those. Gates: check 0, unit 1018, build clean, headless boot clean.
 Still open: real-sidecar integration tests (live mode transitions).
+
+---
+
+## Read-only mobile "Live" mode
+
+Phone-friendly, read-only performance view. Reused `/project/playback` (already
+chromeless + wake-lock + cloud-aware `openSong`) + MixerView's chord/lyric/waveform
+derivations — no new route, no new engine.
+
+- `src/lib/stores/viewport.ts` — `isNarrow` (matchMedia max-width 640, SSR-safe),
+  the app's first mobile signal.
+- `src/lib/audio/upcomingChords.ts` (+7 unit tests) — `upcomingChordRow(segments,
+  positionSec, count)`: current chord + next N (we use 3, so fast runs are readable;
+  fine when it's one-per-bar). Pure.
+- `src/lib/components/LiveStageMobile.svelte` (+4 browser tests) — balanced,
+  NON-scrolling stage: slim waveform (MixerStageWaveform) · current+next-3 chord row
+  (current big + time-to-next bar) · karaoke lyrics (prev/cur/next, active word) ·
+  play/pause + stop. Pure presentational, fed derived props.
+- `MixerView.svelte` — `{#if liveMode && $isNarrow}` renders `<LiveStageMobile>` from
+  the EXISTING derivations (mobileChordRow, lyricLines, currentLyricIdx, lyricsSongTime,
+  stageWaveformLane.buffer, snapshot, onPlayPause/onStop). Desktop stage untouched.
+- `/project/playback/+page.svelte` — on `$isNarrow`: container is `h-dvh
+  overflow-hidden` (no scroll); the setlist sidebar is replaced by a COLLAPSIBLE
+  corner song-menu (a top pill, CLOSED by default → opens a full-screen sheet listing
+  songs via `openSong`, closes on pick/backdrop); Refresh/Controls hidden; the
+  desktop Now/Next header hidden.
+
+Editing / `/edit` stays desktop-only (mobile is read-only). Gates: check 0 errors,
+unit 1025 green, browser LiveStageMobile 4 green, build clean, boots clean at 390×844.
+Not yet tried on a real phone (the real gate).
