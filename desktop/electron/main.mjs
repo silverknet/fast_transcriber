@@ -90,6 +90,15 @@ import {
   transposeCacheSubpath,
 } from './transposeCache.mjs'
 import { createXAirClient } from './xairOsc.mjs'
+import { serveFileFromDisk } from './serveFile.mjs'
+import {
+  atomicWriteFile,
+  ensureAbsolutePath,
+  slugifyName,
+  validateAssetSubpath,
+  validateRelSongFolder,
+} from './projectPaths.mjs'
+import { createProjectAssetRoutes } from './projectAssetRoutes.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -701,55 +710,9 @@ async function extractAudioFromSmap(smapPath, destPath) {
 
 /** Project manifest filename, must match `src/lib/project/types.ts` PROJECT_FILENAME. */
 const PROJECT_FILENAME = 'barbro.project.json'
-const PROJECT_SONGS_DIR = 'songs'
 const PROJECT_FILE_VERSION = 1
 const SONG_SMAP_FILENAME = 'song.smap'
 const SONG_ALS_FILENAME = 'song.als'
-
-/** Mirrors `safeExportBasename()` in src/lib/songmap/persist.ts. */
-function slugifyName(s) {
-  const t = String(s).trim() || 'project'
-  const out = t.replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').slice(0, 80)
-  return out || 'project'
-}
-
-/**
- * Validate `songs/<leaf>` style relative path. Throws on violation.
- * Mirrors `validateProjectFolderPath` in src/lib/project/types.ts.
- */
-function validateRelSongFolder(p, label = 'songFolder') {
-  if (typeof p !== 'string' || p.length === 0) {
-    throw new Error(`Invalid ${label}: must be a non-empty string`)
-  }
-  if (p.startsWith('/')) throw new Error(`Invalid ${label}: must not start with "/"`)
-  if (p.includes('\\')) throw new Error(`Invalid ${label}: must use forward slashes`)
-  if (p.endsWith('/')) throw new Error(`Invalid ${label}: must not end with "/"`)
-  if (p.includes('//')) throw new Error(`Invalid ${label}: must not contain "//"`)
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.' || seg === '..') {
-      throw new Error(`Invalid ${label}: must not contain "." or ".." segments`)
-    }
-  }
-  if (!p.startsWith(`${PROJECT_SONGS_DIR}/`)) {
-    throw new Error(`Invalid ${label}: must start with "${PROJECT_SONGS_DIR}/"`)
-  }
-  return p
-}
-
-/** Atomic file write: write a sibling temp file then rename over the target. */
-async function atomicWriteFile(targetPath, bytes) {
-  const dir = path.dirname(targetPath)
-  await mkdir(dir, { recursive: true })
-  const tmp = path.join(dir, `.${path.basename(targetPath)}.${randomUUID().slice(0, 8)}.tmp`)
-  await writeFile(tmp, bytes)
-  try {
-    const { rename } = await import('node:fs/promises')
-    await rename(tmp, targetPath)
-  } catch (e) {
-    await rm(tmp, { force: true }).catch(() => {})
-    throw e
-  }
-}
 
 /** Recursively sort object keys (mirrors web-side `sortKeysDeep`). */
 function sortKeysDeep(x) {
@@ -1207,15 +1170,6 @@ function nowIso() {
   return new Date().toISOString()
 }
 
-function ensureAbsolutePath(p, label) {
-  if (typeof p !== 'string' || !p.trim()) {
-    throw new Error(`${label} is required`)
-  }
-  if (!path.isAbsolute(p)) {
-    throw new Error(`${label} must be an absolute path`)
-  }
-}
-
 /**
  * `POST /native/project/create` — body `{ parentPath, name }`. Creates a
  * project folder under `parentPath` with a slugified name, writes an empty
@@ -1387,26 +1341,8 @@ function handleProjectSongRead(req, res, cors, url) {
       sendJson(res, 404, { ok: false, error: `${SONG_SMAP_FILENAME} not found` }, cors)
       return
     }
-    let size = 0
-    try {
-      size = statSync(smapPath).size
-    } catch {
-      /* ignore */
-    }
-    res.writeHead(200, {
-      ...cors,
-      'Content-Type': 'application/octet-stream',
-      ...(size > 0 ? { 'Content-Length': String(size) } : {}),
-    })
-    const stream = createReadStream(smapPath)
-    stream.on('error', () => {
-      try {
-        res.end()
-      } catch {
-        /* ignore */
-      }
-    })
-    stream.pipe(res)
+    // Range-aware, fails cleanly on a mid-stream read error (see serveFile.mjs).
+    serveFileFromDisk(req, res, smapPath, { contentType: 'application/octet-stream', cors })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     sendJson(res, 400, { ok: false, error: msg }, cors)
@@ -1442,29 +1378,6 @@ async function handleProjectSongWrite(req, res, cors) {
     const msg = e instanceof Error ? e.message : String(e)
     sendJson(res, 400, { ok: false, error: msg }, cors)
   }
-}
-
-/**
- * `POST /native/project/song/asset/write` — body
- * `{ projectPath, songFolder, subpath, contentBase64 }`. Writes a single
- * file under the song folder (e.g. `cue/tracks/main/cue-track.wav`). `subpath` is
- * validated like `songFolder` — no `..`, no leading `/`, no `\\`.
- * Intermediate directories are created on demand.
- */
-function validateAssetSubpath(p, label = 'subpath') {
-  if (typeof p !== 'string' || p.length === 0) {
-    throw new Error(`Invalid ${label}: must be a non-empty string`)
-  }
-  if (p.startsWith('/')) throw new Error(`Invalid ${label}: must not start with "/"`)
-  if (p.includes('\\')) throw new Error(`Invalid ${label}: must use forward slashes`)
-  if (p.endsWith('/')) throw new Error(`Invalid ${label}: must not end with "/"`)
-  if (p.includes('//')) throw new Error(`Invalid ${label}: must not contain "//"`)
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.' || seg === '..') {
-      throw new Error(`Invalid ${label}: must not contain "." or ".." segments`)
-    }
-  }
-  return p
 }
 
 function safeYoutubeTitleFragment(title) {
@@ -1549,103 +1462,10 @@ function normalizeYoutubeVideoUrl(rawUrl) {
   return { ok: true, url: `https://www.youtube.com/watch?v=${videoId}`, videoId }
 }
 
-/**
- * `GET /native/project/song/asset/read?projectPath=...&songFolder=...&subpath=...`
- * — stream a single file from under the song folder. Path traversal blocked
- * via the same validator as the write endpoint.
- */
-function handleProjectSongAssetRead(req, res, cors, url) {
-  try {
-    const projectPath = url.searchParams.get('projectPath') ?? ''
-    const songFolder = url.searchParams.get('songFolder') ?? ''
-    const subpath = url.searchParams.get('subpath') ?? ''
-    ensureAbsolutePath(projectPath, 'projectPath')
-    validateRelSongFolder(songFolder)
-    validateAssetSubpath(subpath)
-    const filePath = path.join(projectPath, songFolder, subpath)
-    if (!existsSync(filePath)) {
-      sendJson(res, 404, { ok: false, error: 'File not found' }, cors)
-      return
-    }
-    let size = 0
-    try {
-      size = statSync(filePath).size
-    } catch {
-      /* ignore */
-    }
-    const isWav = subpath.toLowerCase().endsWith('.wav')
-    res.writeHead(200, {
-      ...cors,
-      'Content-Type': isWav ? 'audio/wav' : 'application/octet-stream',
-      ...(size > 0 ? { 'Content-Length': String(size) } : {}),
-    })
-    const stream = createReadStream(filePath)
-    stream.on('error', () => {
-      try {
-        res.end()
-      } catch {
-        /* ignore */
-      }
-    })
-    stream.pipe(res)
-  } catch (e) {
-    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
-  }
-}
-
-async function handleProjectSongAssetWrite(req, res, cors) {
-  try {
-    const body = await readRequestJson(req)
-    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
-    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
-    ensureAbsolutePath(projectPath, 'projectPath')
-    if (!existsSync(projectPath)) {
-      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
-    }
-    const songFolder = validateRelSongFolder(body.songFolder)
-    const subpath = validateAssetSubpath(body.subpath)
-    if (typeof body.contentBase64 !== 'string') {
-      return sendJson(res, 400, { ok: false, error: 'contentBase64 is required' }, cors)
-    }
-    const targetAbs = path.join(projectPath, songFolder, subpath)
-    const bytes = Buffer.from(body.contentBase64, 'base64')
-    await atomicWriteFile(targetAbs, bytes)
-    sendJson(res, 200, { ok: true }, cors)
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendJson(res, 400, { ok: false, error: msg }, cors)
-  }
-}
-
-/**
- * `POST /native/project/song/asset/remove` — body
- *   `{ projectPath, songFolder, subpath }`.
- *
- * Delete a file OR directory under a song folder (recursive, force). Used by
- * "Replace audio" to wipe stale derived artifacts (`stems/`, `cue/`, the old
- * audio file) so they don't get re-discovered for the new audio. No-op if the
- * target doesn't exist. Same `subpath` validation as asset-write — confined
- * to the song folder, no `..` traversal.
- */
-async function handleProjectSongAssetRemove(req, res, cors) {
-  try {
-    const body = await readRequestJson(req)
-    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
-    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
-    ensureAbsolutePath(projectPath, 'projectPath')
-    if (!existsSync(projectPath)) {
-      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
-    }
-    const songFolder = validateRelSongFolder(body.songFolder)
-    const subpath = validateAssetSubpath(body.subpath)
-    const targetAbs = path.join(projectPath, songFolder, subpath)
-    await rm(targetAbs, { recursive: true, force: true })
-    sendJson(res, 200, { ok: true }, cors)
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendJson(res, 400, { ok: false, error: msg }, cors)
-  }
-}
+// The asset read/write/remove endpoints live in projectAssetRoutes.mjs so they
+// can be booted over a real HTTP server in tests (projectAssetRoutes.test.mjs).
+// HTTP plumbing is injected; path safety + atomic write come from projectPaths.
+const projectAssetRoutes = createProjectAssetRoutes({ sendJson, readRequestJson })
 
 /**
  * `POST /native/project/song/audio/relink` — open an OS file picker, copy
@@ -5553,7 +5373,18 @@ async function runQueuedLyricsJob(job) {
   })
   job.child = child
   try {
-    child.stdin.write(JSON.stringify({ modelDir: getLyricsModelDir(), model: 'small' }))
+    child.stdin.write(
+      JSON.stringify({
+        modelDir: getLyricsModelDir(),
+        // Larger model by default — recognition (not matching) is the fit
+        // bottleneck; measured 54%→65% word-anchor over the library. Downloads
+        // on first use (transcribe.py streams progress). Callers may override.
+        model: job.options?.model || 'mobiuslabsgmbh/faster-whisper-large-v3-turbo',
+        // Language hint derived from the imported lyrics — avoids Whisper
+        // mis-detecting sung audio (e.g. Swedish → Norwegian). Omitted when unset.
+        language: job.options?.language,
+      }),
+    )
     child.stdin.end()
   } catch {
     /* child gone already — close handler settles the job */
@@ -5715,7 +5546,7 @@ async function handleTranscribeLyrics(req, res, cors) {
       inputPath: audioAbsPath,
       outDir: tempRoot,
       files: [],
-      options: { audioAbsPath },
+      options: { audioAbsPath, model: body.model, language: body.language },
       artifact: null,
       createdAt: Date.now(),
       startedAt: null,
@@ -6744,16 +6575,16 @@ function startBeaconServer() {
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/asset/write') {
-      void handleProjectSongAssetWrite(req, res, cors)
+      void projectAssetRoutes.write(req, res, cors)
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/asset/remove') {
-      void handleProjectSongAssetRemove(req, res, cors)
+      void projectAssetRoutes.remove(req, res, cors)
       return
     }
     if (req.method === 'GET' && req.url?.startsWith('/native/project/song/asset/read')) {
       const u = new URL(req.url, `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
-      handleProjectSongAssetRead(req, res, cors, u)
+      projectAssetRoutes.read(req, res, cors, u)
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/audio/relink') {

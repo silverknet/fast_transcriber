@@ -749,7 +749,21 @@ function parseTimeline(raw: unknown, path: string): SongMapTimeline {
   const beatsRaw = o.beats
   const bars = Array.isArray(barsRaw) ? barsRaw.map((b, i) => parseBar(b, `${path}.bars[${i}]`)) : []
   const beats = Array.isArray(beatsRaw) ? beatsRaw.map((b, i) => parseBeat(b, `${path}.beats[${i}]`)) : []
-  return { bars, beats }
+  const timeline: SongMapTimeline = { bars, beats }
+  // The "Reset grid" baseline snapshot persists in the `.smap` (types.ts) — it
+  // MUST round-trip, or every save→load silently drops it (and the collab
+  // fingerprint then sees a phantom change and pushes the stripped map).
+  if (o.original !== undefined && o.original !== null) {
+    const orig = expectObject(o.original, `${path}.original`)
+    const origBars = Array.isArray(orig.bars)
+      ? orig.bars.map((b, i) => parseBar(b, `${path}.original.bars[${i}]`))
+      : []
+    const origBeats = Array.isArray(orig.beats)
+      ? orig.beats.map((b, i) => parseBeat(b, `${path}.original.beats[${i}]`))
+      : []
+    timeline.original = { bars: origBars, beats: origBeats }
+  }
+  return timeline
 }
 
 function extractSongMap(raw: Record<string, unknown>): SongMap {

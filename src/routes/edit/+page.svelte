@@ -122,6 +122,7 @@
   import { applySheetImport, prepareSheetImport } from '$lib/chords/sheet/importAsDraft'
   import { shouldReseedLyricsDraft, pruneSelections } from '$lib/editor/liveEditGuards'
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
+  import { detectLyricsLanguage } from '$lib/lyrics/detectLyricsLanguage'
   import { ensureAudioFingerprint } from '$lib/audio/importedAudio'
   import { selectBestStemSet, refreshProjectInfo } from '$lib/project/commit'
   import {
@@ -3592,9 +3593,13 @@
         }
       }
 
-      // 2. Transcribe (the model downloads on the very first run).
+      // 2. Transcribe (the model downloads on the very first run). Hand the
+      // recognizer a language hint read off the imported lyrics — far more
+      // reliable than letting it guess from sung audio (which mis-detected
+      // Swedish as Norwegian and halved the recognized words).
       lyricsFitMsg = src.usedStem ? 'Listening to the vocal track…' : 'Listening to the song…'
-      const enq = await enqueueLyricsTranscription(src.abs)
+      const lyricsLang = detectLyricsLanguage(sourceText)
+      const enq = await enqueueLyricsTranscription(src.abs, lyricsLang ? { language: lyricsLang } : {})
       if (!enq.ok) {
         lyricsFitErr = enq.error
         return
@@ -3651,7 +3656,7 @@
           words: timed,
           sourceText,
           alignedAt: new Date().toISOString(),
-          transcriberVersion: 2,
+          transcriberVersion: 4,
         },
       }))
       if (!p.ok) {

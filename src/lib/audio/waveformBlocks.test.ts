@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   computeStableVisualBlockPeaksFromChannels,
   computeVisualBlockPeaksFromChannels,
+  normalizeBlockPeaks,
   waveformBlockBucketCount,
 } from './waveformBlocks'
 
@@ -52,6 +53,43 @@ describe('computeVisualBlockPeaksFromChannels', () => {
     const heights = [peaks[1], peaks[3], peaks[5], peaks[7]]
 
     expect(Math.max(...heights) - Math.min(...heights)).toBeGreaterThan(0.08)
+  })
+})
+
+describe('normalizeBlockPeaks (read-only/live auto-gain)', () => {
+  // build a quiet song: peaks well below full scale, with real dynamics
+  function quietLane() {
+    const ch0 = new Float32Array(4096)
+    for (let i = 0; i < ch0.length; i++) {
+      const loud = i > 2048 // second half louder
+      ch0[i] = Math.sin(i / 9) * (loud ? 0.22 : 0.06)
+    }
+    return computeVisualBlockPeaksFromChannels(ch0, null, 0, ch0.length, 64)
+  }
+
+  it('scales a quiet master up so the loudest bar fills the height', () => {
+    const raw = quietLane()
+    const rawMax = Math.max(...raw)
+    expect(rawMax).toBeLessThan(0.4) // absolute lane is short
+
+    const norm = normalizeBlockPeaks(raw)
+    const normMax = Math.max(...norm)
+    expect(normMax).toBeGreaterThan(0.9) // now fills the height
+  })
+
+  it('preserves loud-vs-quiet ordering (still represents the sound)', () => {
+    const norm = normalizeBlockPeaks(quietLane())
+    const buckets = norm.length / 2
+    const firstHalf = norm[Math.floor(buckets * 0.25) * 2 + 1] ?? 0
+    const secondHalf = norm[Math.floor(buckets * 0.75) * 2 + 1] ?? 0
+    expect(secondHalf).toBeGreaterThan(firstHalf + 0.15)
+  })
+
+  it('leaves a silent lane alone instead of amplifying noise to full height', () => {
+    const silent = new Float32Array(2048)
+    const raw = computeVisualBlockPeaksFromChannels(silent, null, 0, silent.length, 32)
+    const norm = normalizeBlockPeaks(raw)
+    expect(Math.max(...norm)).toBeLessThan(0.05)
   })
 })
 

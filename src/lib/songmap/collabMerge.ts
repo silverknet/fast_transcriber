@@ -476,6 +476,13 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const activeId = cloud.activeDraftId ?? local.activeDraftId
   mergedDrafts = mergedDrafts.filter((d) => d.id !== activeId)
 
+  // `timeline.original` is the analyzed baseline snapshot ("Reset grid").
+  // It's captured once at analysis and never hand-edited, so it's the same on
+  // both sides — but it must survive the merge (rebuilding `timeline` as just
+  // `{ bars, beats }` silently dropped it, losing the reset affordance after
+  // any collab/cloud conflict resolve).
+  const mergedOriginal = cloud.timeline?.original ?? local.timeline?.original
+
   const merged: SongMap = {
     ...cloud,
     harmony: harmony.merged,
@@ -485,6 +492,7 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     timeline: {
       bars: bars.merged,
       beats: beats.merged,
+      ...(mergedOriginal ? { original: mergedOriginal } : {}),
     },
   }
 

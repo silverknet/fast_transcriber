@@ -20,6 +20,9 @@
   import ApcKey25Control from '$lib/components/ApcKey25Control.svelte'
   import LiveMidiController from '$lib/components/LiveMidiController.svelte'
   import LiveStageMobile from '$lib/components/LiveStageMobile.svelte'
+  import LyricConfidenceLine from '$lib/components/LyricConfidenceLine.svelte'
+  import LyricBreak from '$lib/components/LyricBreak.svelte'
+  import { lyricBreakState } from '$lib/audio/lyricBreak'
   import { isNarrow } from '$lib/stores/viewport'
   import { upcomingChordRow } from '$lib/audio/upcomingChords'
   import type { LiveCommand, LiveLedState } from '$lib/hardware/liveMidiMap'
@@ -679,15 +682,8 @@
     return idx
   })
 
-  /** Sticky active word: the last word of the current line that has started. */
-  function activeWordIndex(line: LyricLineView, t: number): number {
-    let idx = -1
-    for (let i = 0; i < line.words.length; i++) {
-      if (line.words[i]!.startSec <= t) idx = i
-      else break
-    }
-    return idx
-  }
+  /** A long instrumental gap → the live view shows a countdown, not a stale line. */
+  const lyricBreak = $derived(lyricBreakState(lyricLines, lyricsSongTime))
 
   /**
    * Song sections mapped onto the mixer timeline as fractions [0..1]. Uses the
@@ -1811,7 +1807,7 @@
       ? 'fixed bottom-0 left-0 right-0 z-[100] flex flex-col gap-3 overflow-hidden px-4 py-4 sm:px-8'
       : 'border-foreground bg-background space-y-3 border-2 px-3 py-3'}
   style={liveMode
-    ? 'background-color: var(--background); background-image: repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px, transparent 1px 42px), repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 42px);'
+    ? undefined
     : playbackMode
       ? `top: ${chromeInsetPx}px; background-color: var(--background); background-image: repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 4%, transparent) 0 1px, transparent 1px 42px), repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 42px); background-position: 0 ${-(chromeInsetPx % 42)}px;`
       : undefined}
@@ -2071,7 +2067,7 @@
         <div class="flex min-w-0 items-center gap-3">
           <button
             type="button"
-            class="border-foreground bg-foreground text-background inline-flex size-12 shrink-0 items-center justify-center rounded-full border-2 shadow-md transition-transform hover:scale-105 disabled:opacity-40"
+            class="border-foreground bg-foreground text-background inline-flex size-12 shrink-0 items-center justify-center rounded-full border-2 shadow-md transition hover:brightness-110 disabled:opacity-40"
             onclick={onPlayPause}
             disabled={!mixerCanPlay}
             aria-label={snapshot.state === 'playing' ? 'Pause' : 'Play'}
@@ -2294,27 +2290,24 @@
         {@const prev = currentLyricIdx > 0 ? lyricLines[currentLyricIdx - 1] : null}
         {@const cur = currentLyricIdx >= 0 ? lyricLines[currentLyricIdx] : null}
         {@const next = lyricLines[currentLyricIdx + 1] ?? null}
-        {@const activeIdx = cur ? activeWordIndex(cur, lyricsSongTime) : -1}
         <div
-          class="flex shrink-0 flex-col items-center gap-1 px-4 py-2 text-center"
+          class="flex min-h-[6.5rem] shrink-0 flex-col items-center justify-center gap-1 px-4 text-center"
           aria-label="Lyrics"
           aria-live="polite"
         >
+          {#if lyricBreak.active}
+            <LyricBreak
+              untilSec={lyricBreak.untilSec}
+              progress={lyricBreak.progress}
+              nextText={lyricBreak.nextLine ? lyricBreak.nextLine.words.map((w) => w.text).join(' ') : ''}
+            />
+          {:else}
           <div class="text-muted-foreground/70 min-h-5 truncate text-sm">
             {prev ? prev.words.map((w) => w.text).join(' ') : ' '}
           </div>
           <div class="min-h-10 text-2xl font-black leading-snug sm:text-3xl">
             {#if cur}
-              {#each cur.words as w, wi (wi)}<span
-                  class={wi === activeIdx
-                    ? 'bg-primary text-primary-foreground rounded px-1'
-                    : wi < activeIdx
-                      ? 'text-foreground/60'
-                      : activeIdx === -1
-                        ? 'text-foreground/70'
-                        : 'text-foreground'}
-                >{w.text}</span
-                >{#if wi < cur.words.length - 1}{' '}{/if}{/each}
+              <LyricConfidenceLine words={cur.words} songTime={lyricsSongTime} />
             {:else if next}
               <span class="text-muted-foreground">{next.words.map((w) => w.text).join(' ')}</span>
             {/if}
@@ -2322,12 +2315,13 @@
           <div class="text-muted-foreground min-h-5 truncate text-sm">
             {cur && next ? next.words.map((w) => w.text).join(' ') : ' '}
           </div>
+          {/if}
         </div>
       {/if}
 
       <MixerStageWaveform
         buffer={stageWaveformLane?.buffer ?? null}
-        color={stageWaveformLane?.color ?? '#f97316'}
+        color="var(--foreground)"
         positionSec={snapshot.positionSec}
         durationSec={snapshot.durationSec}
         {sectionBands}

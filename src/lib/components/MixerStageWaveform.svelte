@@ -3,7 +3,7 @@
 
   let {
     buffer,
-    color = '#f97316',
+    color = 'var(--foreground)',
     positionSec,
     durationSec,
     sectionBands = [],

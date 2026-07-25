@@ -24,6 +24,7 @@
   } from '$lib/audio/timeGeometry'
   import type { BlockWaveformData } from '$lib/audio/waveformBlocks'
   import { drawPeaksToCanvas } from '$lib/audio/waveformDraw'
+  import { themeTick } from '$lib/stores/theme'
   import {
     hitTestSelectionTarget,
     hitTestViewportTarget,
@@ -521,6 +522,7 @@
     peaks
     waveWidth
     canvas
+    void $themeTick // redraw on light/dark flip (canvas colour is baked in)
     redrawCanvas()
   })
 
@@ -1289,6 +1291,7 @@
     objectUrl
     minimapEl
     overviewCanvas
+    void $themeTick // repaint the overview when light/dark flips too
     if (!minimapEl || !decodedAudioBuffer || !objectUrl) return
 
     const buf = decodedAudioBuffer

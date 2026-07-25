@@ -1,6 +1,7 @@
 <script lang="ts">
   import { computePeaks, drawPeaksToCanvas } from '$lib/audio/peaks'
   import { waveformBlockBucketCount } from '$lib/audio/waveformBlocks'
+  import { themeTick } from '$lib/stores/theme'
 
   type SectionBand = { startFrac: number; endFrac: number; label: string; index: number; color?: string }
 
@@ -53,10 +54,14 @@
   })
 
   $effect(() => {
+    void $themeTick // redraw when light/dark flips — canvas holds concrete pixels
     if (!canvas || !buffer || waveWidth <= 0) return
     const peaks = computePeaks(buffer, 0, buffer.duration, waveformBlockBucketCount(waveWidth))
     const ctx = canvas.getContext('2d')
-    if (ctx) ctx.strokeStyle = color
+    // Resolve the stroke from the canvas's own computed `color` (set to `color`
+    // below) so a CSS token like `var(--foreground)` becomes a concrete,
+    // theme-correct rgb the canvas can paint.
+    if (ctx) ctx.strokeStyle = getComputedStyle(canvas).color
     drawPeaksToCanvas(canvas, peaks, waveWidth, height)
   })
 
@@ -91,16 +96,16 @@
   {#each sectionBands as band (band.index)}
     <div
       class="pointer-events-none absolute top-0 bottom-0"
-      style="left: {band.startFrac * 100}%; width: {(band.endFrac - band.startFrac) * 100}%; border-left: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent); background: {band.color
-        ? `color-mix(in oklch, ${band.color} 26%, transparent)`
+      style="left: {band.startFrac * 100}%; width: {(band.endFrac - band.startFrac) * 100}%; background: {band.color
+        ? `color-mix(in oklch, ${band.color} 13%, transparent)`
         : band.index % 2 === 0
-          ? 'color-mix(in oklch, var(--foreground) 7%, transparent)'
+          ? 'color-mix(in oklch, var(--foreground) 4%, transparent)'
           : 'transparent'};"
     ></div>
   {/each}
 
   {#if buffer}
-    <canvas bind:this={canvas} class="absolute inset-0 z-[1]"></canvas>
+    <canvas bind:this={canvas} class="absolute inset-0 z-[1]" style="color: {color}"></canvas>
     {#if safeBufferEndFraction !== null && safeBufferEndFraction < 1}
       <div
         class="bg-foreground/30 pointer-events-none absolute top-0 bottom-0 z-[2] w-px"
@@ -117,8 +122,9 @@
   {#if showSectionLabels}
     {#each sectionBands as band (band.index)}
       <span
-        class="text-foreground/65 pointer-events-none absolute top-1 truncate pl-1 text-[9px] font-black uppercase leading-none tracking-wide"
-        style="left: {band.startFrac * 100}%; max-width: {(band.endFrac - band.startFrac) * 100}%"
+        class="text-foreground/90 bg-background/75 pointer-events-none absolute top-1 z-[3] truncate rounded-sm px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide backdrop-blur-[2px]"
+        style="left: {band.startFrac * 100}%; max-width: {(band.endFrac - band.startFrac) *
+          100}%; text-shadow: 0 0 3px var(--background), 0 0 4px var(--background);"
       >{band.label}</span>
     {/each}
   {/if}

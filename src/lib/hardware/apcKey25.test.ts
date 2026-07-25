@@ -12,6 +12,8 @@ import {
   apcSceneLaunchLedMessage,
   apcSingleLedMessage,
   apcTrackButtonLedMessage,
+  isApcKey25ControlPortName,
+  isApcKey25KeysPortName,
   isLikelyApcKey25Mk2Name,
   midiBytesHex,
   parseApcKey25Message,
@@ -151,8 +153,27 @@ describe('createApcKnobEngine', () => {
     const down = eng.next(0, 127, 1.0)
     expect(down).toBeCloseTo(0.975, 5)
     expect(eng.mode).toBe('unknown')
-    // A huge relative-looking burst is bounded to ±3 ticks.
-    expect(eng.next(0, 60, 1.0)).toBeNull // never: 60 is mid-range → absolute
+    // raw 60 is unambiguously mid-range → this LOCKS absolute mode. Soft pickup
+    // is not engaged (the knob's ~0.71 target is far from the lane at 1.0, and
+    // there's no prior absolute raw to have crossed), so the message is
+    // swallowed rather than yanking the fader. (Was a dead `.toBeNull` with no
+    // call — it asserted nothing.)
+    expect(eng.next(0, 60, 1.0)).toBeNull()
+    expect(eng.mode).toBe('absolute')
+  })
+
+  it('engages pickup by CROSSING the lane value even when never within tolerance', () => {
+    // Isolate the `crossed` branch from the `near` branch: both raw values sit
+    // well outside the ±0.08 window, so the only way pickup can engage is by
+    // the knob sweeping ACROSS the lane's current value between two messages.
+    const eng = createApcKnobEngine()
+    // Lane at 0.5 → currentRaw ≈ 42. raw 20 (≈0.24) is below and not near →
+    // swallowed, but records the position.
+    expect(eng.next(0, 20, 0.5)).toBeNull()
+    expect(eng.mode).toBe('absolute')
+    // raw 70 (≈0.83) is above and still not near (|0.83−0.5| ≫ 0.08), but it
+    // crossed 42 coming from 20 → pickup engages and the lane jumps to target.
+    expect(eng.next(0, 70, 0.5)).toBeCloseTo((70 / 127) * 1.5, 5)
   })
 
   it('dropPickup forces a fresh pickup after bank switches', () => {
@@ -161,5 +182,27 @@ describe('createApcKnobEngine', () => {
     eng.dropPickup()
     // Different lane now under the knob, far away → swallowed again.
     expect(eng.next(0, 60, 0.1)).toBeNull()
+  })
+})
+
+describe('isApcKey25ControlPortName', () => {
+  it('accepts the CONTROL port but rejects the piano keybed and other devices', () => {
+    expect(isApcKey25ControlPortName('APC Key 25 mk2 Control')).toBe(true)
+    expect(isApcKey25ControlPortName('APC Key 25 mk2 Keys')).toBe(false)
+    // Single-port setups (no "Keys"/"Control" split) still count as control.
+    expect(isApcKey25ControlPortName('APC Key 25')).toBe(true)
+    expect(isApcKey25ControlPortName('Akai MPK mini')).toBe(false)
+    expect(isApcKey25ControlPortName('Some Piano Keys')).toBe(false)
+    expect(isApcKey25ControlPortName(null)).toBe(false)
+  })
+})
+
+describe('isApcKey25KeysPortName', () => {
+  it('matches only the APC keybed port', () => {
+    expect(isApcKey25KeysPortName('APC Key 25 mk2 Keys')).toBe(true)
+    expect(isApcKey25KeysPortName('APC Key 25 mk2 Control')).toBe(false)
+    expect(isApcKey25KeysPortName('APC Key 25')).toBe(false)
+    expect(isApcKey25KeysPortName('Akai MPK mini')).toBe(false)
+    expect(isApcKey25KeysPortName(null)).toBe(false)
   })
 })

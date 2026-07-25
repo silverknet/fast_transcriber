@@ -1,9 +1,13 @@
 <script lang="ts">
   import { browser } from '$app/environment'
   import { goto } from '$app/navigation'
-  import { onMount } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import { get } from 'svelte/store'
   import MixerView from '$lib/components/MixerView.svelte'
+  import KeysSynthController from '$lib/components/KeysSynthController.svelte'
+  import { KeysSynth, BUILTIN_PRESETS, type SynthPatch } from '$lib/audio/keysSynth'
+  import { loadUserPresets } from '$lib/audio/synthPresets'
+  import { ensureMidi, autoConnectMidiIfGranted, midiStatus } from '$lib/hardware/midiService'
   import { Button } from '$lib/components/ui/button'
   import { formatSongKeyLabel } from '$lib/chords'
   import { loadProjectSongIntoEditor, refreshProjectInfo } from '$lib/project/commit'
@@ -31,6 +35,8 @@
   /** Phone-only setlist sheet (the "corner menu" to switch songs). */
   let songMenuOpen = $state(false)
   let attemptedAutoLoadKey = ''
+  /** The scrollable setlist <ol>, so the active song can be scrolled into view. */
+  let setlistEl = $state<HTMLOListElement | undefined>(undefined)
 
   const projectName = $derived($projectStore.data?.name?.trim() || 'Project')
   const setlistItems = $derived.by<SetlistItem[]>(() => {
@@ -100,6 +106,71 @@
     }
   }
 
+  // ── Play the APC Key 25 keyboard as a synth, alongside the backing track.
+  // The keybed is a separate MIDI port from the control pads, so it never
+  // touches the transport.
+  const synth = new KeysSynth()
+  let synthOn = $state(false)
+  let synthUserOff = $state(false) // user explicitly turned it off → don't auto-enable
+  let synthPresetName = $state('Lush Pad')
+  let synthVolume = $state(0.8)
+  let userPresets = $state<SynthPatch[]>(loadUserPresets())
+  const allPresets = $derived([...BUILTIN_PRESETS, ...userPresets])
+  const currentPatch = () => allPresets.find((p) => p.name === synthPresetName) ?? BUILTIN_PRESETS[0]!
+
+  $effect(() => {
+    if (synthOn) synth.setVolume(synthVolume)
+  })
+
+  /** Browsers require a user gesture to start audio. If `resume()` is blocked
+   *  now (e.g. auto-enabled before any interaction), unlock on the next tap/key. */
+  function armAudioUnlock() {
+    if (!browser) return
+    const unlock = () => {
+      void synth.resume()
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+    window.addEventListener('pointerdown', unlock)
+    window.addEventListener('keydown', unlock)
+  }
+
+  async function enableSynth() {
+    try {
+      await ensureMidi().catch(() => {})
+      synth.setPatch(currentPatch())
+      synth.setVolume(synthVolume)
+      await synth.resume().catch(() => armAudioUnlock()) // start now, or on first interaction
+      synthOn = true
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : 'Could not start the synth.'
+    }
+  }
+
+  function toggleSynth() {
+    if (synthOn) {
+      synthUserOff = true
+      synthOn = false
+    } else {
+      synthUserOff = false
+      void enableSynth()
+    }
+  }
+  function pickSynthPreset(name: string) {
+    synthPresetName = name
+    synth.setPatch(currentPatch())
+  }
+
+  // Turn the keyboard synth ON automatically when the APC is plugged in (unless
+  // the user has explicitly switched it off). Unplugging it turns it back off.
+  $effect(() => {
+    const apcPresent = $midiStatus.apc
+    if (apcPresent && !synthOn && !synthUserOff) void enableSynth()
+    else if (!apcPresent && synthOn) synthOn = false
+  })
+
+  onDestroy(() => void synth.close())
+
   // Guarded exit: live performers must not drop out of the set on an accidental
   // tap. First press arms ("Tap again to exit"); a second within 3s leaves.
   let exitArmed = $state(false)
@@ -129,6 +200,15 @@
     void openSong(targetId)
   })
 
+  // Keep the current song in view when it changes — e.g. skipped via the APC/
+  // keyboard, which can move the selection below the fold of the setlist.
+  $effect(() => {
+    const id = activeSongId
+    if (!setlistEl || !id) return
+    const el = setlistEl.querySelector<HTMLElement>('[data-active="true"]')
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+
   onMount(() => {
     if (!browser) return
     const onFullscreenChange = () => {
@@ -138,6 +218,10 @@
     fullscreen = !!document.fullscreenElement
     const project = get(projectStore).data
     if (project) void refreshProject()
+
+    // Populate MIDI-device presence (no permission prompt) so the keyboard synth
+    // can auto-enable when the APC is already plugged in + granted.
+    void autoConnectMidiIfGranted()
 
     // Live stage view: keep the screen awake for the whole set. The OS drops
     // wake locks when the tab is hidden — re-acquire on return.
@@ -173,8 +257,15 @@
   <title>{projectName} · Live Playback · BarBro</title>
 </svelte:head>
 
-<main class="live-playback-page min-h-dvh bg-background text-foreground">
-  <div class="flex flex-col gap-3 px-3 py-3 lg:px-4 {$isNarrow ? 'h-dvh overflow-hidden' : 'min-h-dvh'}">
+<main
+  class="live-playback-page bg-background text-foreground min-h-dvh"
+  style="background-image:
+    repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 21px),
+    repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 21px),
+    repeating-linear-gradient(90deg, color-mix(in oklch, var(--foreground) 6.5%, transparent) 0 1px, transparent 1px 42px),
+    repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 6.5%, transparent) 0 1px, transparent 1px 42px);"
+>
+  <div class="flex h-dvh flex-col gap-3 overflow-hidden px-3 py-3 lg:px-4">
     <header class="flex shrink-0 flex-wrap items-center gap-2">
       <Button
         variant={exitArmed ? 'default' : 'outline'}
@@ -187,8 +278,8 @@
         {exitArmed ? 'Tap again to exit' : 'Project'}
       </Button>
       <div class="min-w-0 flex-1">
-        <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">Live playback</p>
-        <h1 class="truncate text-2xl font-black leading-none sm:text-3xl">{projectName}</h1>
+        <p class="text-muted-foreground truncate text-[10px] font-black uppercase tracking-wide">Live playback</p>
+        <h1 class="truncate pb-0.5 text-2xl font-black leading-tight sm:text-3xl">{projectName}</h1>
       </div>
       {#if !$isNarrow}
         <Button
@@ -211,6 +302,44 @@
           <HelpCircle class="size-4" aria-hidden="true" />
           Controls
         </Button>
+        <div class="flex items-center gap-1.5">
+          <Button
+            variant={synthOn ? 'default' : 'outline'}
+            size="sm"
+            class="h-9 gap-1.5"
+            onclick={() => void toggleSynth()}
+            title="Play a synth with the APC Key 25 keyboard — the pads still control playback"
+          >
+            <Music4 class="size-4" aria-hidden="true" />
+            Keys
+          </Button>
+          {#if synthOn}
+            <select
+              value={synthPresetName}
+              onchange={(e) => pickSynthPreset((e.currentTarget as HTMLSelectElement).value)}
+              class="border-foreground/20 bg-card h-9 max-w-40 rounded-md border px-2 text-sm"
+              title="Synth sound"
+            >
+              <optgroup label="Built-in">
+                {#each BUILTIN_PRESETS as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
+              </optgroup>
+              {#if userPresets.length}
+                <optgroup label="Your presets">
+                  {#each userPresets as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
+                </optgroup>
+              {/if}
+            </select>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              bind:value={synthVolume}
+              class="w-20 accent-[var(--studio-orange)]"
+              title="Synth volume"
+            />
+          {/if}
+        </div>
       {/if}
       <Button variant="outline" size="sm" class="h-9 gap-1.5" onclick={() => void toggleFullscreen()}>
         {#if fullscreen}
@@ -222,6 +351,8 @@
         {/if}
       </Button>
     </header>
+
+    <KeysSynthController enabled={synthOn} {synth} />
 
     {#if showGuide}
       <section class="border-foreground bg-card flex flex-col gap-4 border-2 p-4 sm:flex-row" aria-label="Live controls guide">
@@ -266,8 +397,8 @@
     {:else}
       <div class="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)]">
         {#if !$isNarrow}
-        <aside class="min-h-0 overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-card">
-          <div class="border-b-2 border-foreground px-3 py-2">
+        <aside class="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-card">
+          <div class="shrink-0 border-b-2 border-foreground px-3 py-2">
             <div class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
               Setlist
             </div>
@@ -275,11 +406,12 @@
               {activeIndex >= 0 ? activeIndex + 1 : 0} / {setlistItems.length}
             </div>
           </div>
-          <ol class="max-h-[calc(100dvh-8rem)] overflow-y-auto">
+          <ol bind:this={setlistEl} class="min-h-0 flex-1 overflow-y-auto">
             {#each setlistItems as item, index (item.id)}
               <li>
                 <button
                   type="button"
+                  data-active={item.id === activeSongId}
                   class="grid w-full grid-cols-[2rem_minmax(0,1fr)] items-center gap-2 border-b border-foreground/10 px-3 py-2 text-left transition-colors {item.id === activeSongId
                     ? 'bg-primary text-primary-foreground'
                     : 'hover:bg-muted/60'}"
@@ -300,7 +432,7 @@
         </aside>
         {/if}
 
-        <section class="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-background {$isNarrow ? 'p-0' : 'p-3'}">
+        <section class="flex min-h-0 flex-col overflow-hidden {$isNarrow ? 'p-0' : 'p-3'}">
           {#if $isNarrow}
             <!-- Corner song-menu: the only chrome on the phone stage. -->
             <div class="flex shrink-0 items-center gap-2 px-2 py-1.5">
@@ -327,9 +459,14 @@
                 <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
                   Now
                 </p>
-                <h2 class="truncate text-3xl font-black leading-none sm:text-4xl">
+                <h2 class="truncate pb-0.5 text-3xl font-black leading-tight sm:text-4xl">
                   {activeItem?.title ?? 'Loading song'}
                 </h2>
+                {#if activeItem?.artist}
+                  <p class="text-muted-foreground truncate text-sm font-bold leading-tight">
+                    {activeItem.artist}
+                  </p>
+                {/if}
               </div>
               {#if upcomingItem}
                 <div class="rounded-[var(--radius)] bg-muted/60 px-3 py-2 text-right">

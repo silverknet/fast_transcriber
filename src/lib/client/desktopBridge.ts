@@ -1403,12 +1403,17 @@ export type LyricsTranscriptionEvent =
  */
 export async function enqueueLyricsTranscription(
   audioAbsPath: string,
+  opts: { language?: string; model?: string } = {},
 ): Promise<{ ok: true; jobId: string } | { ok: false; error: string; code?: string }> {
   try {
     const res = await fetch(`${BASE_URL}/native/transcribe-lyrics`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audioAbsPath }),
+      body: JSON.stringify({
+        audioAbsPath,
+        ...(opts.language ? { language: opts.language } : {}),
+        ...(opts.model ? { model: opts.model } : {}),
+      }),
       cache: 'no-store',
     })
     if (res.status === 404) {

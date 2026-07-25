@@ -38,14 +38,20 @@
     type Performer,
     type PreCountInCueMode,
   } from '$lib/project/types'
-  import { Music4, Plus, Trash2, User } from '@lucide/svelte'
+  import { Mic, Music4, Plus, Trash2, User } from '@lucide/svelte'
 
   let {
     open = $bindable(false),
     onOpenSetlistExport,
+    onReanalyseLyrics,
+    reanalyseBusy = false,
+    reanalyseMsg = '',
   } = $props<{
     open?: boolean
     onOpenSetlistExport?: () => void
+    onReanalyseLyrics?: () => void
+    reanalyseBusy?: boolean
+    reanalyseMsg?: string
   }>()
 
   /** Friendly labels — never expose model names / internals here. */
@@ -565,6 +571,35 @@
           >
             <Music4 class="size-3.5" aria-hidden="true" />
             Export .als
+          </Button>
+        </div>
+      </section>
+
+      <section class="border-foreground/10 flex flex-col gap-2 border-t pt-4">
+        <h3 class="text-muted-foreground text-[11px] font-bold uppercase tracking-wider">Lyrics</h3>
+        <div class="flex items-center gap-3">
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-semibold">Reanalyse all lyrics</p>
+            <p class="text-muted-foreground text-xs">
+              Re-fit every song’s imported lyrics to its audio with the current voice model. Only the
+              timing is recomputed — your words stay exactly as you pasted them.{reanalyseMsg ? ` · ${reanalyseMsg}` : ''}
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            class="shrink-0 gap-1"
+            disabled={!reanalyseBusy && (!$desktopCompanionStatus.reachable || !$projectStore.osPath)}
+            onclick={() => onReanalyseLyrics?.()}
+            title={!$projectStore.osPath
+              ? 'Open this project from disk (Studio) to reanalyse lyrics.'
+              : !$desktopCompanionStatus.reachable
+                ? 'Reanalysing lyrics needs the BarBro desktop client running.'
+                : 'Re-fit every song’s imported lyrics.'}
+          >
+            <Mic class="size-3.5 {reanalyseBusy ? 'animate-pulse' : ''}" aria-hidden="true" />
+            {reanalyseBusy ? 'Stop' : 'Reanalyse'}
           </Button>
         </div>
       </section>

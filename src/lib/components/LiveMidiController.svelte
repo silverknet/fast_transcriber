@@ -13,6 +13,7 @@
     apcSingleLedMessage,
     apcTrackButtonLedMessage,
     apcSceneLaunchLedMessage,
+    isApcKey25ControlPortName,
     type ApcSingleLedState,
     APC_PLAY_NOTE,
     APC_RECORD_NOTE,
@@ -49,6 +50,14 @@
   function handle(ev: MIDIMessageEvent) {
     const data = ev.data
     if (!data) return
+    // ONLY the APC Key 25's CONTROL port drives live commands. The MIDI service
+    // fans out messages from EVERY connected input, and the mk2 exposes its
+    // 25-key piano keybed as a SEPARATE port ("APC Key 25 mk2 Keys") — playing it
+    // was being read as pad/scene presses and jumping songs. Ignore the keybed
+    // port and any other device. (Unknown/nameless port → allow, so the control
+    // surface is never accidentally muted.)
+    const portName = (ev.target as { name?: string | null } | null)?.name ?? null
+    if (portName != null && !isApcKey25ControlPortName(portName)) return
     const action = parseApcKey25Message(data)
     if (!action) return
     const cmd = resolveLiveCommand(action, get(liveMapping))

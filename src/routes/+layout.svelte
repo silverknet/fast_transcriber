@@ -35,6 +35,7 @@
     hasBrowserCloudSong,
   } from '$lib/client/browserCloudProject'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { continueWithoutDesktop } from '$lib/stores/desktopGate'
   import { autoConnectMidiIfGranted } from '$lib/hardware/midiService'
   import { classifySidecarVersion } from '$lib/desktop/minSidecarVersion'
   import { songMap } from '$lib/stores/songMap'
@@ -366,6 +367,9 @@
     // (browser-only) — the user opens cloud projects and plays/edits on cloud
     // audio. Studio-only actions are gated individually, and /download stays
     // reachable via the navbar badge for anyone who wants the desktop app.
+    // The user explicitly chose to keep going in Collab (browser) mode despite
+    // the sidecar needing attention — don't yank them back to /download.
+    if ($continueWithoutDesktop) return
     if (
       status.versionStatus === 'outdated' ||
       status.pythonHealth === 'broken' ||

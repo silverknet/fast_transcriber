@@ -1,6 +1,7 @@
 import {
   computeVisualBlockPeaksFromChannels,
   drawBlockPeaksToCanvas,
+  normalizeBlockPeaks,
 } from '$lib/audio/waveformBlocks'
 
 /**
@@ -24,7 +25,9 @@ export function computePeaks(
   const sr = buffer.sampleRate
   const i0 = Math.max(0, Math.floor(startSec * sr))
   const i1 = Math.min(buffer.length, Math.max(i0 + 1, Math.ceil(endSec * sr)))
-  return computeVisualBlockPeaksFromChannels(ch0, ch1, i0, i1, bucketCount)
+  // Read-only lane always shows the whole clip → auto-normalise to this song's
+  // own dynamic range so it fills the height and reads well (visual only).
+  return normalizeBlockPeaks(computeVisualBlockPeaksFromChannels(ch0, ch1, i0, i1, bucketCount))
 }
 
 /**

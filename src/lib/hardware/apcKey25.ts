@@ -40,6 +40,29 @@ export function isLikelyApcKey25Mk2Name(name: string | null | undefined): boolea
   return APC_KEY_25_MK2_NAME_RE.test(name ?? '')
 }
 
+/**
+ * True ONLY for the APC Key 25's CONTROL port (pads / scene / transport / knobs).
+ *
+ * The mk2 exposes its 25-key piano keybed as a SEPARATE input port named
+ * "APC Key 25 mk2 Keys" — playing it must not drive live commands. Returns false
+ * for that keybed port and for any non-APC device; a bare "APC Key 25" (a
+ * single-port setup) still counts as control.
+ */
+export function isApcKey25ControlPortName(name: string | null | undefined): boolean {
+  const n = name ?? ''
+  return isLikelyApcKey25Mk2Name(n) && !/\bkeys\b/i.test(n)
+}
+
+/**
+ * True for the APC Key 25's piano-KEYBED port ("APC Key 25 mk2 Keys"). The
+ * inverse concern of {@link isApcKey25ControlPortName}: the in-app synth listens
+ * to THIS port (note on/off + velocity), never the control surface.
+ */
+export function isApcKey25KeysPortName(name: string | null | undefined): boolean {
+  const n = name ?? ''
+  return isLikelyApcKey25Mk2Name(n) && /\bkeys\b/i.test(n)
+}
+
 export function parseApcKey25Message(dataLike: ArrayLike<number>): ApcKey25Action | null {
   if (dataLike.length < 3) return null
   const status = dataLike[0]! & 0xff

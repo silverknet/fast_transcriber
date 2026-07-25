@@ -17,21 +17,19 @@ const lyricLines = [{ words: [{ text: 'hello', startSec: 0 }, { text: 'world', s
 
 function mount(over: Record<string, unknown> = {}) {
   return render(LiveStageMobile, {
-    props: {
-      chordRow,
-      lyricLines,
-      currentLyricIdx: 0,
-      lyricsSongTime: 0.5, // "hello" has started, "world" hasn't → active = hello
-      waveBuffer: null,
-      positionSec: 3,
-      durationSec: 100,
-      sectionBands: [],
-      onSeekFraction: vi.fn(),
-      isPlaying: false,
-      onPlayPause: vi.fn(),
-      onStop: vi.fn(),
-      ...over,
-    },
+    chordRow,
+    lyricLines,
+    currentLyricIdx: 0,
+    lyricsSongTime: 0.5, // "hello" has started, "world" hasn't → active = hello
+    waveBuffer: null,
+    positionSec: 3,
+    durationSec: 100,
+    sectionBands: [],
+    onSeekFraction: vi.fn(),
+    isPlaying: false,
+    onPlayPause: vi.fn(),
+    onStop: vi.fn(),
+    ...over,
   })
 }
 

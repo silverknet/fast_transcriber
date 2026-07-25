@@ -337,3 +337,25 @@ test('reports a blocked reason when audio is missing', async () => {
   assert.equal(st.phase, 'blocked')
   assert.match(st.reason, /audio/i)
 })
+
+test('REGRESSION: clearBudgets is path-boundary-scoped, not a bare prefix', () => {
+  // Two sibling projects whose paths share a prefix. Clearing one must NOT
+  // wipe the other's abandoned budgets / statuses (bare startsWith would).
+  const { daemon } = makeDaemon([
+    { path: '/m/Album', autoStems: CFG, songs: [] },
+    { path: '/m/Album2', autoStems: CFG, songs: [] },
+  ])
+  daemon._attempts.set('/m/Album/songs/a', 3)
+  daemon._statuses.set('/m/Album/songs/a', { state: 'abandoned' })
+  daemon._attempts.set('/m/Album2/songs/b', 3)
+  daemon._statuses.set('/m/Album2/songs/b', { state: 'abandoned' })
+
+  daemon.resetAttempts('/m/Album') // → clearBudgets('/m/Album')
+
+  assert.equal(daemon._attempts.has('/m/Album/songs/a'), false, 'target project cleared')
+  assert.equal(daemon._statuses.has('/m/Album/songs/a'), false, 'target status cleared')
+  assert.ok(daemon._attempts.has('/m/Album2/songs/b'), 'sibling /m/Album2 budget must survive')
+  assert.ok(daemon._statuses.has('/m/Album2/songs/b'), 'sibling /m/Album2 status must survive')
+
+  daemon.stop()
+})

@@ -720,7 +720,7 @@ function xmlAudioClip(clip: StemClip, bpm: number): string {
 							<HiddenLoopStart Value="${ps}" />
 							<HiddenLoopEnd Value="${pe}" />
 						</Loop>
-						<Name Value="${clip.fileName}" />
+						<Name Value="${escapeXmlAttr(clip.fileName)}" />
 						<Annotation Value="" />
 						<Color Value="-1" />
 						<LaunchMode Value="0" />
@@ -857,8 +857,8 @@ function xmlAudioTrack(id: number, name: string, color: number, nextId: () => nu
 				<IsValueSampleBased Value="false" />
 			</TrackDelay>
 			<Name>
-				<EffectiveName Value="${name}" />
-				<UserName Value="${name}" />
+				<EffectiveName Value="${escapeXmlAttr(name)}" />
+				<UserName Value="${escapeXmlAttr(name)}" />
 				<Annotation Value="" />
 				<MemorizedFirstClipName Value="" />
 			</Name>
@@ -1036,8 +1036,8 @@ function xmlAudioTrackMulti(
 				<IsValueSampleBased Value="false" />
 			</TrackDelay>
 			<Name>
-				<EffectiveName Value="${name}" />
-				<UserName Value="${name}" />
+				<EffectiveName Value="${escapeXmlAttr(name)}" />
+				<UserName Value="${escapeXmlAttr(name)}" />
 				<Annotation Value="" />
 				<MemorizedFirstClipName Value="" />
 			</Name>

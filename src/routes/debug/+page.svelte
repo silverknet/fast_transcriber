@@ -1,6 +1,18 @@
 <script lang="ts">
   const pages = [
     {
+      href: '/debug/lyrics',
+      title: 'Lyric Confidence',
+      kicker: 'Live lyrics',
+      body: 'Highlight styles that reflect timing confidence — heard vs guessed words. Halo / running line / block.',
+    },
+    {
+      href: '/debug/synth',
+      title: 'Keys Synth',
+      kicker: 'Instrument',
+      body: 'Play a low-latency in-app synth with the APC Key 25 keybed or the on-screen keyboard.',
+    },
+    {
       href: '/debug/project-style',
       title: 'Project Style Lab',
       kicker: 'Color identity',

@@ -210,7 +210,10 @@ function validateCueTrack(track: CueTrack, path: string, errors: string[]) {
   if (typeof track.enabled !== 'boolean') errors.push(`${path}.enabled must be boolean`)
   if (track.voiceId !== undefined && typeof track.voiceId !== 'string') errors.push(`${path}.voiceId invalid`)
   if (!Array.isArray(track.events)) errors.push(`${path}.events must be array`)
-  else track.events.forEach((event, i) => validateCueEvent(event, `${path}.events[${i}]`, errors))
+  else {
+    track.events.forEach((event, i) => validateCueEvent(event, `${path}.events[${i}]`, errors))
+    pushDuplicateIdErrors(track.events, `${path}.events`, errors)
+  }
   if (!Array.isArray(track.suppressedGeneratedKeys)) {
     errors.push(`${path}.suppressedGeneratedKeys must be array`)
   } else {
@@ -218,6 +221,23 @@ function validateCueTrack(track: CueTrack, path: string, errors: string[]) {
       if (typeof key !== 'string') errors.push(`${path}.suppressedGeneratedKeys[${i}] invalid`)
     })
   }
+}
+
+/**
+ * Flags repeated `.id` values in an id-keyed list. These lists are merged by id
+ * (`mergeByIdList` in collabMerge), so a duplicate id silently collapses two
+ * distinct items into one on the next sync — real data loss. Bars, beats and
+ * drafts have their own bespoke checks; this covers harmony, sections,
+ * cueTracks and cue events.
+ */
+function pushDuplicateIdErrors(items: readonly { id?: unknown }[], label: string, errors: string[]) {
+  const seen = new Set<string>()
+  items.forEach((it, i) => {
+    const id = it?.id
+    if (typeof id !== 'string') return
+    if (seen.has(id)) errors.push(`${label}[${i}]: duplicate id ${id}`)
+    seen.add(id)
+  })
 }
 
 export function validateSongMap(map: SongMap): ValidationResult {
@@ -306,7 +326,10 @@ export function validateSongMap(map: SongMap): ValidationResult {
   }
 
   if (!Array.isArray(map.cueTracks)) errors.push('cueTracks must be array')
-  else map.cueTracks.forEach((track, i) => validateCueTrack(track, `cueTracks[${i}]`, errors))
+  else {
+    map.cueTracks.forEach((track, i) => validateCueTrack(track, `cueTracks[${i}]`, errors))
+    pushDuplicateIdErrors(map.cueTracks, 'cueTracks', errors)
+  }
 
   if (map.countInBeats !== undefined) {
     if (!Number.isInteger(map.countInBeats) || map.countInBeats < 0) {
@@ -353,7 +376,10 @@ export function validateSongMap(map: SongMap): ValidationResult {
   if (map.clickExport !== undefined) validateRenderedExport(map.clickExport, 'clickExport')
 
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
-  else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
+  else {
+    map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
+    pushDuplicateIdErrors(map.sections, 'sections', errors)
+  }
 
   if (map.drumMidi !== undefined) {
     const dm = map.drumMidi
@@ -435,6 +461,7 @@ export function validateSongMap(map: SongMap): ValidationResult {
   if (!Array.isArray(map.harmony)) errors.push('harmony must be array')
   else {
     map.harmony.forEach((h, i) => validateHarmony(h, `harmony[${i}]`, errors))
+    pushDuplicateIdErrors(map.harmony, 'harmony', errors)
     if (Array.isArray(beats) && Array.isArray(bars)) {
       const beatById = new Map(beats.map((b) => [b.id, b]))
       const seenBeat = new Set<string>()
