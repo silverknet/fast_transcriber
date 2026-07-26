@@ -15,6 +15,7 @@
     ZoomOut,
   } from '@lucide/svelte'
   import { PlaybackController } from '$lib/audio/playbackController.svelte'
+  import type { PlaybackControllerLike } from '$lib/audio/transport.svelte'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
   import {
@@ -182,7 +183,7 @@
      * is passed (the trim variant on the home page), we instantiate a
      * local fallback so the binding still has a target.
      */
-    controller: passedController = null as PlaybackController | null,
+    controller: passedController = null as PlaybackControllerLike | null,
     /**
      * Optional playback-only buffer override. `undefined` means use the decoded
      * source buffer; `null` means playback is intentionally unavailable
@@ -220,8 +221,18 @@
    * behavior matches the pre-controller days for that surface.
    */
   const fallbackController = new PlaybackController()
-  const controller = $derived(passedController ?? fallbackController)
+  const controller: PlaybackControllerLike = $derived(passedController ?? fallbackController)
   onDestroy(() => fallbackController.destroy())
+
+  /**
+   * When the controller owns the ONE decode (the Song Edit `UnifiedTransport`),
+   * reuse its `audioBuffer` for peaks/timeline instead of decoding the file a
+   * second time — the whole editor shares a single decode. The real
+   * `PlaybackController` (home trim variant) has no `ownsDecode`, so that surface
+   * keeps decoding locally, exactly as before.
+   */
+  let usesExternalDecode = $derived(controller.ownsDecode === true)
+  let externalBuffer = $derived(usesExternalDecode ? (controller.audioBuffer ?? null) : null)
 
   let isEditorVariant = $derived(variant === 'editor')
   let beatGridEditing = $derived(
@@ -1124,10 +1135,9 @@
     commitMediaTiming()
   }
 
-  async function loadFile() {
-    if (!file) return
-    const gen = ++loadGeneration
-    loading = true
+  /** Clear the visual/timeline state ahead of a (re)load. Shared by the local
+   *  decode path and the shared-decode path. */
+  function resetForLoad() {
     ready = false
     mediaReady = false
     error = ''
@@ -1149,6 +1159,72 @@
       audioEl.pause()
       controller.seek(0)
     }
+  }
+
+  /**
+   * Publish a decoded `AudioBuffer` as the timeline: duration-guard, commit
+   * `timelineSec` / selection / view, then compute peaks after paint. Shared by
+   * the local decode (home trim) and the transport's shared decode (editor), so
+   * the two paths differ ONLY in where the buffer comes from.
+   */
+  async function applyLoadedBuffer(buf: AudioBuffer, gen: number) {
+    if (gen !== loadGeneration) return
+
+    if (buf.duration > MAX_AUDIO_DURATION_SEC) {
+      const m = Math.floor(MAX_AUDIO_DURATION_SEC / 60)
+      error = `Audio must be ${m} minutes or shorter (this file is ${formatTime(buf.duration)}).`
+      loading = false
+      return
+    }
+
+    decodedDuration = buf.duration
+    timelineSec = buf.duration
+    decodedAudioBuffer = buf
+    viewStart = 0
+
+    // Hand the decoded PCM to the host (see `onAudioDecoded`) — the editor
+    // uses it to backfill the recording fingerprint for songs imported
+    // before v6, or via the sidecar path that skips decoding.
+    onAudioDecoded?.(buf)
+    viewEnd = buf.duration
+
+    // The <audio> element is no longer on the play path (buffer-based), but the
+    // bar-only preview tool still uses it, so keep a blob URL alive.
+    if (file && !objectUrl) objectUrl = URL.createObjectURL(file)
+
+    // If rangeStart/rangeEnd are already set to a valid sub-range (e.g. seeded from saved trim),
+    // keep them. Otherwise default to full file.
+    const hasValidRange =
+      rangeStart >= 0 &&
+      rangeEnd > rangeStart &&
+      rangeEnd <= buf.duration + 0.1
+    const initStart = hasValidRange ? rangeStart : 0
+    const initEnd = hasValidRange ? Math.min(rangeEnd, buf.duration) : buf.duration
+    const full = clampSelectionToTimeline(buf.duration, initStart, initEnd, MIN_SELECTION_SPAN_SEC)
+    setSelection(full.start, full.end)
+
+    loading = false
+
+    await tick()
+    await tick()
+    if (gen !== loadGeneration) return
+    markMediaReadyAfterDecode()
+    /** `loading` just became false — layout may not have `detailEl`/canvas yet; refresh peaks after paint. */
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve())
+      })
+    })
+    if (gen !== loadGeneration) return
+    flushMainPeaksUpdate()
+  }
+
+  /** Local decode path (home trim variant, no shared transport). */
+  async function loadFile() {
+    if (!file) return
+    const gen = ++loadGeneration
+    loading = true
+    resetForLoad()
 
     const ac = new AudioContext()
     try {
@@ -1158,51 +1234,7 @@
       const buf = await ac.decodeAudioData(ab.slice(0))
       if (gen !== loadGeneration) return
 
-      if (buf.duration > MAX_AUDIO_DURATION_SEC) {
-        const m = Math.floor(MAX_AUDIO_DURATION_SEC / 60)
-        error = `Audio must be ${m} minutes or shorter (this file is ${formatTime(buf.duration)}).`
-        loading = false
-        return
-      }
-
-      decodedDuration = buf.duration
-      timelineSec = buf.duration
-      decodedAudioBuffer = buf
-      viewStart = 0
-
-      // Hand the decoded PCM to the host (see `onAudioDecoded`) — the editor
-      // uses it to backfill the recording fingerprint for songs imported
-      // before v6, or via the sidecar path that skips decoding.
-      onAudioDecoded?.(buf)
-      viewEnd = buf.duration
-
-      objectUrl = URL.createObjectURL(file)
-
-      // If rangeStart/rangeEnd are already set to a valid sub-range (e.g. seeded from saved trim),
-      // keep them. Otherwise default to full file.
-      const hasValidRange =
-        rangeStart >= 0 &&
-        rangeEnd > rangeStart &&
-        rangeEnd <= buf.duration + 0.1
-      const initStart = hasValidRange ? rangeStart : 0
-      const initEnd = hasValidRange ? Math.min(rangeEnd, buf.duration) : buf.duration
-      const full = clampSelectionToTimeline(buf.duration, initStart, initEnd, MIN_SELECTION_SPAN_SEC)
-      setSelection(full.start, full.end)
-
-      loading = false
-
-      await tick()
-      await tick()
-      if (gen !== loadGeneration) return
-      markMediaReadyAfterDecode()
-      /** `loading` just became false — layout may not have `detailEl`/canvas yet; refresh peaks after paint. */
-      await new Promise<void>((resolve) => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => resolve())
-        })
-      })
-      if (gen !== loadGeneration) return
-      flushMainPeaksUpdate()
+      await applyLoadedBuffer(buf, gen)
     } catch {
       if (gen !== loadGeneration) return
       error = 'Could not decode this audio file.'
@@ -1211,6 +1243,34 @@
       await ac.close().catch(() => {})
     }
   }
+
+  /**
+   * Shared-decode path. When the controller owns the decode, this single effect
+   * both resets on a file change AND adopts the transport's buffer the moment
+   * it's ready (or immediately, if it already is) — so the editor decodes the
+   * uploaded file exactly once, shared with live playback and the mixer.
+   */
+  let externalLoadedFile: File | null = null
+  let adoptedBuffer: AudioBuffer | null = null
+  $effect(() => {
+    if (!usesExternalDecode) return
+    const f = file
+    const buf = externalBuffer
+    untrack(() => {
+      // New file → clear the old view and wait for its buffer.
+      if (f !== externalLoadedFile) {
+        externalLoadedFile = f
+        adoptedBuffer = null
+        resetForLoad()
+        loading = !!f
+      }
+      if (!f || !buf || adoptedBuffer === buf) return
+      adoptedBuffer = buf
+      loading = true
+      const gen = ++loadGeneration
+      void applyLoadedBuffer(buf, gen)
+    })
+  })
 
   $effect(() => {
     if (!file) {
@@ -1237,6 +1297,9 @@
       }
       return
     }
+    // Shared-decode path (editor): the `usesExternalDecode` $effect owns
+    // reset + buffer adoption; don't also decode locally here.
+    if (usesExternalDecode) return
     if (file === lastScheduledFileRef) return
     lastScheduledFileRef = file
     /** Defer past this effect flush — sync `loadFile()` re-enters the runtime and can hit `effect_update_depth_exceeded`. */

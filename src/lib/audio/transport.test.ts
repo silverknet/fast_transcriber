@@ -486,3 +486,65 @@ describe('UnifiedTransport volume knobs', () => {
     t.dispose()
   })
 })
+
+// The `playbackAdapter` is the `PlaybackControllerLike` view `WaveformPlayer`
+// drives. Its job is the song-time ↔ buffer-time conversion at the edge; these
+// pin those conversions (the timing engine itself is covered above).
+describe('UnifiedTransport.playbackAdapter (PlaybackControllerLike view)', () => {
+  it('reports currentTime in BUFFER-time and seek() takes BUFFER-time', async () => {
+    const t = await freshTransport()
+    // trimStart 1.5 → buffer position 1.5 is song-time 0.
+    await loadSong(t, makeSong({ barCount: 4, trimStartSec: 1.5, trimEndSec: 8 }), 8)
+    const a = t.playbackAdapter
+    expect(a.mediaTimeOffsetSec).toBeCloseTo(1.5, 6)
+    expect(a.mediaReady).toBe(true)
+    expect(a.audioBuffer).toBe(t.audioBuffer)
+    // Seek in BUFFER-time 4.0 → song-time 2.5.
+    a.seek(4.0)
+    expect(t.songTimeSec).toBeCloseTo(2.5, 6)
+    // currentTime is BUFFER-time = songTime + mediaOffset = 4.0.
+    expect(a.currentTime).toBeCloseTo(4.0, 6)
+    t.dispose()
+  })
+
+  it('rangeStart/rangeEnd are BUFFER-time and clamp play() to that window', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4, trimStartSec: 1.5, trimEndSec: 8 }), 8)
+    const a = t.playbackAdapter
+    // Host sets the two edges independently, in BUFFER-time.
+    a.rangeStart = 3
+    a.rangeEnd = 7
+    expect(a.rangeStart).toBeCloseTo(3, 6)
+    expect(a.rangeEnd).toBeCloseTo(7, 6)
+    // Head at song start (buffer 1.5) is outside [3, 7) → the source starts at
+    // BUFFER position 3 (proving the buffer-time range reached the engine).
+    a.play()
+    expect(lastCtx!.bufferSources[0]!.starts[0]![1]).toBeCloseTo(3, 6)
+    t.dispose()
+  })
+
+  it('proxies the UI knobs, no-ops setAudioBuffer/setAudioElement, and is stable', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 2 }), 4)
+    const a = t.playbackAdapter
+    a.playWithClick = true
+    a.clickVolume = 1.9
+    a.songVolume = 0.4
+    a.clickOffsetSec = 0.01
+    a.debugClickTiming = true
+    expect(t.playWithClick).toBe(true)
+    expect(t.clickVolume).toBeCloseTo(1.9, 6)
+    expect(t.songVolume).toBeCloseTo(0.4, 6)
+    expect(t.clickOffsetSec).toBeCloseTo(0.01, 6)
+    expect(t.debugClickTiming).toBe(true)
+    // Transport owns the decode — these must not disturb the buffer.
+    const buf = t.audioBuffer
+    a.setAudioBuffer(null)
+    a.setAudioElement(null)
+    expect(t.audioBuffer).toBe(buf)
+    expect(a.ownsDecode).toBe(true)
+    // Same object every read (stable identity for the host's controller prop).
+    expect(t.playbackAdapter).toBe(a)
+    t.dispose()
+  })
+})

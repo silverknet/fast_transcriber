@@ -44,7 +44,8 @@
     transposeChordForStorage,
     transposeSongKey,
   } from '$lib/songmap/transposition'
-  import { PlaybackController } from '$lib/audio/playbackController.svelte'
+  import { transport } from '$lib/audio/transport.svelte'
+  import { formatTime } from '$lib/audio/formatTime'
   import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
   import {
@@ -155,7 +156,7 @@
     songMap,
     undoSongMap,
   } from '$lib/stores/songMap'
-  import { ArrowLeft, Layers, Pause, Pencil, Play, RefreshCw, Trash2 } from '@lucide/svelte'
+  import { ArrowLeft, Layers, Pause, Pencil, Play, RefreshCw, Square, Trash2 } from '@lucide/svelte'
   import {
     Dialog,
     DialogContent,
@@ -1996,16 +1997,16 @@
   let rafId = 0
 
   /**
-   * Centralised playback engine for the grid editor — single owner of
-   * the `<audio>` element, click loop, count-in pre-roll, transport,
-   * range-end auto-stop, AND the click/volume UI state. The toolbar
-   * inside `WaveformPlayer` binds directly to `playbackController.playWithClick`
-   * / `.clickVolume` / `.songVolume` — no intermediate parent state,
-   * no $effect bridge. WaveformPlayer reads `currentTime` / `isPlaying`
-   * via `$derived` from the controller and dispatches `play() / pause()
-   * / stop() / seek()`.
+   * Live playback now runs through the module-singleton `UnifiedTransport` — ONE
+   * decode, ONE clock, shared across every editing mode so a single play button
+   * keeps the song playing continuously as the user switches tabs. `WaveformPlayer`
+   * still drives a `PlaybackController`-shaped surface; `transport.playbackAdapter`
+   * is that surface (click loop, count-in, range auto-stop, volumes, click/song
+   * knobs) mapped onto the transport in BUFFER-time. The persistent transport bar
+   * below the tabs drives the same singleton. Grid/sections/chords behave exactly
+   * as before, but audio + position now persist into cue/lyrics/leadsheet.
    */
-  const playbackController = new PlaybackController()
+  const playbackController = transport.playbackAdapter
   // Audio pitch-shift is DISABLED for now: the client-side shift
   // (signalsmith-stretch) doesn't sound good enough to ship. Transpose stays a
   // chords-&-key-only feature; playback keeps the original audio. Flip back to
@@ -2054,22 +2055,31 @@
     }
   })
 
+  // Feed the transport reactively. It derives the ONE media-time offset
+  // (`plan.trimStartSec`) from the SongMap itself, so — unlike the old
+  // controller — there's no separate `mediaTimeOffsetSec` wiring to keep in sync.
   $effect(() => {
-    playbackController.setSongMap($songMap ?? null)
+    transport.configure($songMap ?? null)
   })
 
+  // ONE decode of the full uploaded reference file, shared by the waveform peaks,
+  // the click/count-in engine and (next step) the mixer + live route.
   $effect(() => {
-    const sm = $songMap
-    // Grid editor's audio src = full uploaded file → currentTime is
-    // original-time → offset = `plan.trimStartSec`.
-    playbackController.mediaTimeOffsetSec = sm
-      ? songPlaybackPlan(sm)?.trimStartSec ?? 0
-      : 0
+    void transport.loadFile($audioSession.file)
   })
 
+  // Trim selection is BUFFER-time; the adapter converts to the transport's
+  // song-time range so `play()` clamps to the same window.
   $effect(() => {
     playbackController.rangeStart = rangeStart
     playbackController.rangeEnd = rangeEnd
+  })
+
+  // Overview owns playback via `MixerView`'s own engine this step, so keep the
+  // shared transport paused there to avoid two engines sounding at once.
+  // TODO(M1b-next): fold mixer+live onto the shared transport.
+  $effect(() => {
+    if (editMode === 'overview') transport.pause()
   })
 
   async function decodePlaybackBlob(blob: Blob): Promise<AudioBuffer> {
@@ -2190,8 +2200,11 @@
     })
   })
 
+  // The transport is a module singleton that must survive mount/unmount and the
+  // /edit ↔ /project/playback route change, so we do NOT dispose it here. Just
+  // stop any audio when leaving the editor.
   onDestroy(() => {
-    playbackController.destroy()
+    transport.pause()
   })
 
   /**
@@ -4174,6 +4187,69 @@
         </Button>
       </div>
     </div>
+
+    <!-- Persistent transport — rendered ONCE, above every editing panel, so a
+         single play button keeps the song playing continuously as the user
+         switches tabs (grid → sections → chords → cue → lyrics → lead sheet).
+         Exception: on Overview, `MixerView` owns playback via its own engine, so
+         these controls are disabled to avoid two engines sounding at once.
+         TODO(M1b-next): fold mixer+live onto the shared transport. -->
+    {#if $audioSession.file}
+      <div
+        class="border-foreground bg-background flex flex-wrap items-center gap-3 border-2 px-3 py-2 font-mono"
+        role="group"
+        aria-label="Transport"
+      >
+        <button
+          type="button"
+          class="border-foreground inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40 {transport.isPlaying
+            ? 'bg-[var(--studio-orange)] text-background'
+            : 'hover:bg-foreground hover:text-background'}"
+          onclick={() => transport.togglePlay()}
+          disabled={editMode === 'overview' || !transport.ready}
+          aria-label={transport.isPlaying ? 'Pause' : 'Play'}
+          title={transport.isPlaying ? 'Pause' : 'Play'}
+        >
+          {#if transport.isPlaying}
+            <Pause class="size-4" aria-hidden="true" />
+          {:else}
+            <Play class="size-4" aria-hidden="true" />
+          {/if}
+        </button>
+        <button
+          type="button"
+          class="border-foreground hover:bg-foreground hover:text-background inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40"
+          onclick={() => transport.stop()}
+          disabled={editMode === 'overview' || !transport.ready}
+          aria-label="Stop"
+          title="Stop and go to selection start"
+        >
+          <Square class="size-4" aria-hidden="true" />
+        </button>
+        <span class="text-sm font-bold tabular-nums">
+          <span class="text-[var(--studio-orange)]">{formatTime(transport.songTimeSec)}</span>
+          <span class="text-muted-foreground">/ {formatTime(transport.durationSec)}</span>
+        </span>
+        <label
+          class="border-foreground/40 hover:bg-foreground/5 ml-auto inline-flex cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs {editMode ===
+          'overview'
+            ? 'pointer-events-none opacity-40'
+            : ''}"
+          title="Play clicks alongside the audio (and count-in if configured)"
+        >
+          <input
+            type="checkbox"
+            bind:checked={transport.playWithClick}
+            disabled={editMode === 'overview'}
+            class="accent-foreground size-3.5"
+          />
+          <span class="font-bold uppercase tracking-wider">Click</span>
+        </label>
+        {#if editMode === 'overview'}
+          <span class="text-muted-foreground w-full text-[11px] sm:w-auto">Mixer controls playback here</span>
+        {/if}
+      </div>
+    {/if}
 
 
     {#if editMode === 'cue'}

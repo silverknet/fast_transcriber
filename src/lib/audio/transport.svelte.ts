@@ -49,6 +49,41 @@ const END_EPS = 0.028
 /** The single track key the song is registered under (no stems this step). */
 const SONG_TRACK_KEY = 'original'
 
+/**
+ * The minimal `PlaybackController`-shaped surface `WaveformPlayer` consumes.
+ * Both the real `PlaybackController` (home trim variant) and the transport's
+ * `playbackAdapter` (Song Edit) satisfy it structurally, so `WaveformPlayer`
+ * can drive either engine without knowing which one backs it. Everything the
+ * controller historically expressed in BUFFER-time (`currentTime`, `seek`,
+ * `rangeStart/End`) stays BUFFER-time here; the adapter converts at its edge.
+ *
+ * `ownsDecode` is the one member the real controller lacks: when true the host
+ * (`WaveformPlayer`) reuses `audioBuffer` instead of decoding the file itself,
+ * so the whole editor shares ONE decode.
+ */
+export interface PlaybackControllerLike {
+  readonly currentTime: number
+  readonly isPlaying: boolean
+  readonly audioBuffer: AudioBuffer | null
+  readonly mediaTimeOffsetSec: number
+  readonly mediaReady?: boolean
+  readonly ownsDecode?: boolean
+  rangeStart: number
+  rangeEnd: number
+  playWithClick: boolean
+  clickVolume: number
+  songVolume: number
+  clickOffsetSec: number
+  debugClickTiming: boolean
+  setAudioBuffer(buf: AudioBuffer | null): void
+  setAudioElement(el: HTMLAudioElement | null): void
+  setSongMap(sm: SongMap | null): void
+  seek(sec: number): void
+  play(): void
+  pause(): void
+  stop(): void
+}
+
 class UnifiedTransport {
   /**
    * Shared, page-owned viewport in SONG-TIME seconds. The spine binds these; a
@@ -68,6 +103,12 @@ class UnifiedTransport {
   clickVolume = $state(1.5)
   songVolume = $state(1)
   clickOffsetSec = $state(0)
+  /**
+   * Per-device "log click scheduling to the console" toggle. The transport does
+   * not consume it (its click loop is already test-pinned); it exists only so
+   * the `playbackAdapter` can back `WaveformPlayer`'s `bind:debugClickTiming`.
+   */
+  debugClickTiming = $state(false)
 
   // ── Reactive runtime bus (song timing source of truth) ─────────────
   #songMap = $state<SongMap | null>(null)
@@ -101,6 +142,9 @@ class UnifiedTransport {
   #nextClickIdx = 0
   /** Cleanup for the `$effect.root` that owns the facade's sync effects. */
   #effectCleanup: (() => void) | null = null
+
+  /** Lazily-built, stable `PlaybackControllerLike` view (see `playbackAdapter`). */
+  #adapter: PlaybackControllerLike | null = null
 
   constructor() {
     this.#effectCleanup = $effect.root(() => {
@@ -142,7 +186,10 @@ class UnifiedTransport {
   }
   /** Total song-time duration (0 until a buffer is loaded). */
   get durationSec(): number {
-    const d = this.#engine ? this.#engine.durationSec() : (this.audioBuffer?.duration ?? 0)
+    // Read `audioBuffer` ($state) unconditionally so this stays reactive once the
+    // shared decode lands, even though the engine is the authoritative length.
+    const buf = this.audioBuffer
+    const d = this.#engine ? this.#engine.durationSec() : (buf?.duration ?? 0)
     return d > 0 ? d - this.mediaOffsetSec : 0
   }
   /** Song-time offset of the decoded buffer's t=0 (= `plan.trimStartSec`). */
@@ -331,6 +378,116 @@ class UnifiedTransport {
     if (wasPlaying) this.play()
   }
 
+  /**
+   * A stable `PlaybackControllerLike` view of this transport, so the existing
+   * `WaveformPlayer` (grid / sections / chords) can drive the shared engine with
+   * NO changes to how it talks to a controller. Everything the host expects in
+   * BUFFER-time is converted here:
+   *   • `currentTime` / `seek` translate buffer-time ↔ song-time via
+   *     `mediaOffsetSec` (= `plan.trimStartSec`).
+   *   • `rangeStart/End` are stored/read in buffer-time but routed through
+   *     `setRangeSongTime` (song-time) so `play()` clamps to the same window.
+   *   • `setAudioBuffer` / `setAudioElement` are no-ops — the transport owns the
+   *     one decode and plays buffer-based, so there is no element or second
+   *     buffer to hand it. `ownsDecode: true` tells the host to reuse
+   *     `audioBuffer` instead of decoding the file again.
+   * The getters read this instance's `$state`, so a consumer's `$derived(
+   * adapter.currentTime)` stays reactive.
+   */
+  get playbackAdapter(): PlaybackControllerLike {
+    if (this.#adapter) return this.#adapter
+    const t = this
+    this.#adapter = {
+      ownsDecode: true,
+      get currentTime() {
+        return t.songTimeSec + t.mediaOffsetSec
+      },
+      get isPlaying() {
+        return t.isPlaying
+      },
+      get audioBuffer() {
+        return t.audioBuffer
+      },
+      get mediaTimeOffsetSec() {
+        return t.mediaOffsetSec
+      },
+      get mediaReady() {
+        return t.ready
+      },
+      get playWithClick() {
+        return t.playWithClick
+      },
+      set playWithClick(v: boolean) {
+        t.playWithClick = v
+      },
+      get clickVolume() {
+        return t.clickVolume
+      },
+      set clickVolume(v: number) {
+        t.clickVolume = v
+      },
+      get songVolume() {
+        return t.songVolume
+      },
+      set songVolume(v: number) {
+        t.songVolume = v
+      },
+      get clickOffsetSec() {
+        return t.clickOffsetSec
+      },
+      set clickOffsetSec(v: number) {
+        t.clickOffsetSec = v
+      },
+      get debugClickTiming() {
+        return t.debugClickTiming
+      },
+      set debugClickTiming(v: boolean) {
+        t.debugClickTiming = v
+      },
+      // Range in BUFFER-time. Read straight off the stored buffer range; on
+      // write, convert to song-time and preserve the other edge so setting the
+      // two independently (as the host does) still lands the right window.
+      get rangeStart() {
+        return t.#rangeStart
+      },
+      set rangeStart(v: number) {
+        const off = t.mediaOffsetSec
+        const endBuf = t.#rangeEnd
+        t.setRangeSongTime(v - off, endBuf > v ? endBuf - off : v - off)
+      },
+      get rangeEnd() {
+        return t.#rangeEnd
+      },
+      set rangeEnd(v: number) {
+        const off = t.mediaOffsetSec
+        const startBuf = t.#rangeStart
+        t.setRangeSongTime(startBuf - off, v > startBuf ? v - off : startBuf - off)
+      },
+      setAudioBuffer(_buf: AudioBuffer | null) {
+        /* transport owns the one decode — nothing to adopt */
+      },
+      setAudioElement(_el: HTMLAudioElement | null) {
+        /* buffer-based playback — the <audio> element is not on the play path */
+      },
+      setSongMap(sm: SongMap | null) {
+        t.configure(sm)
+      },
+      seek(bufferPos: number) {
+        t.seek(bufferPos - t.mediaOffsetSec)
+      },
+      play() {
+        t.play()
+      },
+      pause() {
+        t.pause()
+      },
+      stop() {
+        t.stop()
+      },
+    }
+    return this.#adapter
+  }
+
   dispose(): void {
     this.#stopClickLoop()
     this.#stopTransport()
@@ -348,6 +505,7 @@ class UnifiedTransport {
     this.#engine = null
     this.#effectCleanup?.()
     this.#effectCleanup = null
+    this.#adapter = null
     this.audioBuffer = null
     this.#loadedFile = null
     this.#playing = false
