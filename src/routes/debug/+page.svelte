@@ -1,6 +1,18 @@
 <script lang="ts">
   const pages = [
     {
+      href: '/debug/edit-style',
+      title: 'Edit Style Lab',
+      kicker: 'Editor · styles',
+      body: 'Five edit-mode looks rendered directly under the real navbar — base, brutalist, editorial, pro-tool, soft. Floating switcher to compare.',
+    },
+    {
+      href: '/debug/edit-layout',
+      title: 'Edit Layout',
+      kicker: 'Editor · early',
+      body: 'A calmer, more uniform /edit: one hero shadow, inline help, fills over borders. Toggle old vs new headers.',
+    },
+    {
       href: '/debug/lyrics',
       title: 'Lyric Confidence',
       kicker: 'Live lyrics',
