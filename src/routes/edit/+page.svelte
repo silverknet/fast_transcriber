@@ -9,6 +9,8 @@
   import LyricsEditor from '$lib/components/editor/LyricsEditor.svelte'
   import MixerPanel from '$lib/components/editor/MixerPanel.svelte'
   import CueEditor from '$lib/components/editor/CueEditor.svelte'
+  import EditInspector from '$lib/components/editor/EditInspector.svelte'
+  import DebugSharedWaveform from '$lib/components/DebugSharedWaveform.svelte'
   import { cueRender } from '$lib/audio/cueRender.svelte'
   import RelinkAudioBanner from '$lib/components/RelinkAudioBanner.svelte'
   import RecordingMismatchBanner from '$lib/components/RecordingMismatchBanner.svelte'
@@ -50,7 +52,21 @@
   import { clearFullAppSongState } from '$lib/stores/restorableSong'
   import { audioSession } from '$lib/stores/audioSession'
   import { patchSongMap, redoSongMap, songMap, undoSongMap } from '$lib/stores/songMap'
-  import { ArrowLeft, Layers, Pause, Pencil, Play, RefreshCw } from '@lucide/svelte'
+  import {
+    ArrowLeft,
+    FileText,
+    Layers,
+    LayoutGrid,
+    Mic,
+    Music4,
+    Pause,
+    Pencil,
+    Play,
+    RefreshCw,
+    Rows3,
+    SlidersHorizontal,
+    Type,
+  } from '@lucide/svelte'
 
   /** Half-open bar interval [start, end) — match `audioTransport` end clamp */
   const END_EPS = 0.028
@@ -409,6 +425,17 @@
     ],
   ]
 
+  /** Per-mode glyph for the segmented switch (matches the DAW prototypes). */
+  const MODE_ICON: Record<EditMode, typeof Play> = {
+    overview: SlidersHorizontal,
+    grid: LayoutGrid,
+    sections: Rows3,
+    chords: Music4,
+    cue: Mic,
+    lyrics: Type,
+    leadsheet: FileText,
+  }
+
   let keyDraft = $state<SongKey>({ root: 'C', mode: 'major' })
 
   $effect(() => {
@@ -485,6 +512,46 @@
    * as before, but audio + position now persist into cue/lyrics/leadsheet.
    */
   const playbackController = transport.playbackAdapter
+
+  // ── Persistent waveform SPINE (shell-owned navigation overview) ──────────
+  // ONE shared waveform sits under the command bar. It shows on the
+  // non-timeline modes (Overview / Cue / Lyrics / Lead sheet); on Grid /
+  // Sections / Chords the `TimelineWorkspace` renders its OWN editing
+  // waveform, so the shell spine is hidden there — exactly one waveform per
+  // tab. Its zoom/scroll window lives in shell state, so it survives every
+  // mode switch (zoom into a section, switch tabs, same view when you return).
+  //
+  // The spine is a navigational overview: it assumes uniform bars and file-time
+  // (= song-time when trim is 0, the common case). Frame-accurate editing lives
+  // in the TimelineWorkspace waveform, which reads the real per-bar geometry.
+  let spineViewStart = $state(0)
+  let spineViewEnd = $state(0)
+  const TIMELINE_MODES = new Set<EditMode>(['grid', 'sections', 'chords'])
+  const showSpine = $derived(!TIMELINE_MODES.has(editMode))
+  const spineBarCount = $derived($songMap?.timeline.bars.length ?? 0)
+  const spineDurationSec = $derived(
+    $songMap?.audio?.durationSec ?? Math.max(1, $audioSession.endSec - $audioSession.startSec),
+  )
+  const spineSections = $derived(
+    ($songMap?.sections ?? []).map((s) => ({
+      kind: s.kind,
+      label: s.label || s.kind,
+      from: s.barRange.startBarIndex + 1,
+      to: s.barRange.endBarIndex + 1,
+    })),
+  )
+  // Live playhead in file/buffer time; the adapter getter reads the transport's
+  // reactive position so this updates every frame during playback.
+  const spinePlayheadSec = $derived(playbackController.currentTime)
+  // Seed the window to the whole song once its duration is known; user zoom
+  // (which leaves viewEnd > viewStart) is never clobbered afterwards.
+  $effect(() => {
+    const d = spineDurationSec
+    if (d > 0 && spineViewEnd <= spineViewStart) {
+      spineViewStart = 0
+      spineViewEnd = d
+    }
+  })
   // Audio pitch-shift is DISABLED for now: the client-side shift
   // (signalsmith-stretch) doesn't sound good enough to ship. Transpose stays a
   // chords-&-key-only feature; playback keeps the original audio. Flip back to
@@ -924,7 +991,7 @@
   page instead of scrolling.
 -->
 <main
-  class="edit-page relative z-10 flex h-full min-h-0 w-full max-w-none flex-col px-2 pt-3 sm:px-4 md:px-6 lg:px-8"
+  class="edit-page relative z-10 flex h-full min-h-0 w-full max-w-none flex-col px-2 pt-3 sm:px-3"
 >
   {#if !browser}
     <div class="min-h-[50vh]" aria-hidden="true"></div>
@@ -1151,16 +1218,18 @@
         {#each MODE_GROUPS as group, gi (gi)}
           <div class="border-foreground bg-card inline-flex overflow-hidden border-2">
             {#each group as m (m.id)}
+              {@const Icon = MODE_ICON[m.id]}
               <button
                 type="button"
                 role="tab"
                 aria-selected={editMode === m.id}
-                class="border-foreground inline-flex h-7 items-center border-r-2 px-3 text-[11px] font-bold uppercase tracking-wide whitespace-nowrap transition-colors last:border-r-0 {editMode ===
+                class="border-foreground inline-flex h-7 items-center gap-1.5 border-r-2 px-2.5 text-[11px] font-bold uppercase tracking-wide whitespace-nowrap transition-colors last:border-r-0 {editMode ===
                 m.id
                   ? 'bg-foreground text-background'
                   : 'text-foreground hover:bg-foreground/10 active:bg-foreground/20'}"
                 onclick={() => (editMode = m.id)}
               >
+                <Icon class="size-3.5" aria-hidden="true" />
                 {m.label}
               </button>
             {/each}
@@ -1170,17 +1239,39 @@
     </div>
 
 
-    <!-- ── Content region. The active editor panel plus the shell's own
-         always-on tail (Timeline details, Back to import) share ONE bounded,
-         internally-scrolling container. `flex-1 min-h-0` claims the leftover
-         height under the pinned command bar; `overflow-y-auto` then scrolls
-         the panel WITHIN the shell — so the mixer with many track lanes, a
-         long lyric sheet, etc. scroll here rather than growing the page.
-         `overflow-x-hidden` guarantees no horizontal body scroll; the small
-         `px`/`pb` leave room for the panels' hard brutalist shadows. ── -->
-    <div
-      class="edit-content mt-4 flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overflow-x-hidden px-1.5 pt-1 pb-8"
-    >
+    <!-- ── Persistent waveform SPINE. ONE shared waveform, directly under the
+         command bar, on the non-timeline modes (Overview / Cue / Lyrics / Lead
+         sheet). On Grid / Sections / Chords the `TimelineWorkspace` renders its
+         OWN editing waveform, so the shell spine is hidden there — one waveform
+         per tab. Its zoom/scroll window is shell state, so it persists across
+         tab switches. `shrink-0` keeps it pinned under the command bar. ── -->
+    {#if showSpine}
+      <div class="edit-spine mt-3 shrink-0 px-1.5 pb-1">
+        <DebugSharedWaveform
+          bind:viewStart={spineViewStart}
+          bind:viewEnd={spineViewEnd}
+          sections={spineSections}
+          bars={spineBarCount}
+          durationSec={spineDurationSec}
+          playheadSec={spinePlayheadSec}
+        />
+      </div>
+    {/if}
+
+    <!-- ── Main row: centre WORKSPACE (the active editor panel + the shell's
+         always-on tail) beside a RIGHT contextual inspector rail. `flex-1
+         min-h-0` claims the height left under the command bar + spine; each
+         column carries `min-h-0` + its own `overflow-y-auto`, so a tall panel
+         or a long inspector scrolls WITHIN its column instead of growing the
+         page. The inspector is shell-owned chrome and hides on narrow widths. ── -->
+    <div class="edit-main flex min-h-0 flex-1 gap-3 pt-3">
+      <!-- Centre workspace. The active editor panel plus the shell's own tail
+           (Timeline details, Back to import) share ONE bounded, internally-
+           scrolling container. `overflow-x-hidden` guarantees no horizontal body
+           scroll; the small `px`/`pb` leave room for the panels' hard shadows. -->
+      <div
+        class="edit-content flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overflow-x-hidden px-1.5 pt-1 pb-8"
+      >
       {#if editMode === 'cue'}
         <CueEditor />
       {/if}
@@ -1305,6 +1396,25 @@
         <ArrowLeft class="size-4" aria-hidden="true" />
         Back to import
       </Button>
+      </div>
+
+      <!-- ── RIGHT contextual inspector rail. Shell-owned chrome: read-only,
+           per-mode facts derived from `$songMap` + shell state, with the deep
+           editing controls left to the mode's editor component. Its own
+           `overflow-y-auto`; hidden below `xl` so narrow widths hand the
+           workspace the full width. ── -->
+      <aside
+        class="edit-inspector-rail border-foreground bg-card brutalist-shadow-sm mt-1 mb-8 hidden w-[320px] shrink-0 flex-col overflow-hidden border-2 xl:flex"
+        aria-label="Inspector"
+      >
+        <EditInspector
+          {editMode}
+          {keyLabel}
+          {transposeSemitones}
+          {activeDraftLabel}
+          {chordChromaStatus}
+        />
+      </aside>
     </div>
 
     <!-- Song-level dialogs, at page level on purpose. They must NOT sit
@@ -1343,5 +1453,13 @@
 
   .edit-page :global(fieldset.border-foreground) {
     background: color-mix(in oklch, var(--card) 84%, var(--muted));
+  }
+
+  /* The persistent spine reuses the interactive debug waveform. Its baked-in
+     placeholder transport buttons (▶ ■) are non-functional here — the real
+     transport lives in the command bar — so hide them to avoid a second, dead
+     play control. The functional zoom + minimap navigation stay. */
+  .edit-page :global(.edit-spine .swf-transport) {
+    display: none;
   }
 </style>
