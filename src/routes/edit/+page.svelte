@@ -913,8 +913,18 @@
   })
 </script>
 
+<!--
+  Fixed-height, non-scrolling editor shell. `.app-scroll` (the layout's bounded
+  scroll region) hands us a definite height; `h-full min-h-0` makes this shell
+  exactly fill it and never overflow, so `.app-scroll` itself stays put. The
+  command bar is `shrink-0` (always pinned); the content region below is
+  `flex-1 min-h-0 overflow-y-auto`, so the ACTIVE editor panel scrolls WITHIN
+  the shell instead of growing the page. Every flex ancestor down to that
+  scroll container carries `min-h-0` — drop one and a tall panel pushes the
+  page instead of scrolling.
+-->
 <main
-  class="edit-page relative z-10 flex min-h-dvh w-full max-w-none flex-col gap-6 px-2 py-8 sm:px-4 md:px-6 md:py-12 lg:px-8"
+  class="edit-page relative z-10 flex h-full min-h-0 w-full max-w-none flex-col px-2 pt-3 sm:px-4 md:px-6 lg:px-8"
 >
   {#if !browser}
     <div class="min-h-[50vh]" aria-hidden="true"></div>
@@ -925,7 +935,7 @@
          user can keep editing chord chart / sections / metadata. -->
     <RelinkAudioBanner />
     <div
-      class="brutalist-shadow border-foreground bg-background mx-auto w-full max-w-md border-2 p-8 text-center"
+      class="brutalist-shadow border-foreground bg-background mx-auto my-auto w-full max-w-md border-2 p-8 text-center"
     >
       <p class="text-muted-foreground text-sm">
         Locate the audio file for <span class="text-foreground font-semibold">{$songMap.metadata.title}</span>
@@ -941,7 +951,7 @@
          cloud audio couldn't be obtained. NOT a dead-end — the chart is editable;
          the fix for audio is Studio mode (open the project from disk). -->
     <div
-      class="brutalist-shadow border-foreground bg-background mx-auto w-full max-w-md border-2 p-8 text-center"
+      class="brutalist-shadow border-foreground bg-background mx-auto my-auto w-full max-w-md border-2 p-8 text-center"
     >
       <p class="text-foreground text-sm font-semibold">Audio isn't available here</p>
       <p class="text-muted-foreground mt-2 text-sm">
@@ -956,7 +966,7 @@
     </div>
   {:else if !$audioSession.file || !$songMap}
     <div
-      class="brutalist-shadow border-foreground bg-background mx-auto w-full max-w-md border-2 p-8 text-center"
+      class="brutalist-shadow border-foreground bg-background mx-auto my-auto w-full max-w-md border-2 p-8 text-center"
     >
       <p class="text-muted-foreground text-sm">No analyzed clip in session.</p>
       <Button type="button" variant="secondary" class="mt-6 gap-2" onclick={() => goto('/')}>
@@ -976,7 +986,7 @@
          (a <div>, not a <header>, so it never picks up removed studio-box rules).
          The composed editor panels below keep their own framing; the shell no
          longer boxes them a second time. ── -->
-    <div class="command-bar border-foreground bg-card brutalist-shadow-sm w-full border-2">
+    <div class="command-bar border-foreground bg-card brutalist-shadow-sm w-full shrink-0 border-2">
       <!-- Row A: identity · live metadata · transport (reads as one cluster) -->
       <div class="border-foreground/15 flex flex-wrap items-center gap-x-3 gap-y-2 border-b-2 px-3 py-2">
         <!-- Song identity: title (click-to-edit) + rename + draft switcher, artist beneath. -->
@@ -1160,130 +1170,142 @@
     </div>
 
 
-    {#if editMode === 'cue'}
-      <CueEditor />
-    {/if}
+    <!-- ── Content region. The active editor panel plus the shell's own
+         always-on tail (Timeline details, Back to import) share ONE bounded,
+         internally-scrolling container. `flex-1 min-h-0` claims the leftover
+         height under the pinned command bar; `overflow-y-auto` then scrolls
+         the panel WITHIN the shell — so the mixer with many track lanes, a
+         long lyric sheet, etc. scroll here rather than growing the page.
+         `overflow-x-hidden` guarantees no horizontal body scroll; the small
+         `px`/`pb` leave room for the panels' hard brutalist shadows. ── -->
+    <div
+      class="edit-content mt-4 flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overflow-x-hidden px-1.5 pt-1 pb-8"
+    >
+      {#if editMode === 'cue'}
+        <CueEditor />
+      {/if}
 
-    {#if editMode === 'overview'}
-      <MixerPanel {keyLabel} />
-    {/if}
+      {#if editMode === 'overview'}
+        <MixerPanel {keyLabel} />
+      {/if}
 
-    {#if editMode === 'lyrics'}
-      <LyricsEditor {activeDraftLabel} />
-    {/if}
+      {#if editMode === 'lyrics'}
+        <LyricsEditor {activeDraftLabel} />
+      {/if}
 
-    {#if editMode === 'leadsheet'}
-      <LeadSheetPanel />
-    {/if}
+      {#if editMode === 'leadsheet'}
+        <LeadSheetPanel />
+      {/if}
 
-    {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
-      <TimelineWorkspace
-        {editMode}
-        {playbackController}
-        {transposeSemitones}
-        {displayedSongKey}
-        {activeDraftLabel}
-        {keyDraft}
-        {chordChromaStatus}
-        {chordChromaError}
-        {draftMsg}
-        playbackAudioBufferOverride={transposeAudioEnabled && transposeSemitones !== 0
-          ? transposePlaybackBuffer
-          : undefined}
-        {applyKeyPatch}
-        onRetryChroma={() => void runChordChromaAnalysis(true)}
-        bind:beatEditError
-        bind:audioElement={audioEl}
-      />
-    {/if}
+      {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
+        <TimelineWorkspace
+          {editMode}
+          {playbackController}
+          {transposeSemitones}
+          {displayedSongKey}
+          {activeDraftLabel}
+          {keyDraft}
+          {chordChromaStatus}
+          {chordChromaError}
+          {draftMsg}
+          playbackAudioBufferOverride={transposeAudioEnabled && transposeSemitones !== 0
+            ? transposePlaybackBuffer
+            : undefined}
+          {applyKeyPatch}
+          onRetryChroma={() => void runChordChromaAnalysis(true)}
+          bind:beatEditError
+          bind:audioElement={audioEl}
+        />
+      {/if}
 
-    <details class="group border-foreground bg-background border-2">
-      <summary
-        class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-4 py-3 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
-      >
-        <span class="underline-offset-2 group-open:underline">Timeline details</span>
-        <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview and bar playback</span>
-      </summary>
-      <div class="border-foreground space-y-6 border-t-2 px-4 py-4">
-        <dl class="text-foreground/90 space-y-2 text-sm">
-          <div class="flex justify-between gap-4">
-            <dt class="text-muted-foreground">Bars</dt>
-            <dd>{sm.timeline.bars.length}</dd>
-          </div>
-          <div class="flex justify-between gap-4">
-            <dt class="text-muted-foreground">Beats</dt>
-            <dd>{sm.timeline.beats.length}</dd>
-          </div>
-          <div class="flex justify-between gap-4">
-            <dt class="text-muted-foreground">Duration</dt>
-            <dd class="tabular-nums">
-              {(sm.audio?.durationSec ?? Math.max(0, $audioSession.endSec - $audioSession.startSec)).toFixed(2)}s
-            </dd>
-          </div>
-        </dl>
+      <details class="group border-foreground bg-background border-2">
+        <summary
+          class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-4 py-3 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
+        >
+          <span class="underline-offset-2 group-open:underline">Timeline details</span>
+          <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview and bar playback</span>
+        </summary>
+        <div class="border-foreground space-y-6 border-t-2 px-4 py-4">
+          <dl class="text-foreground/90 space-y-2 text-sm">
+            <div class="flex justify-between gap-4">
+              <dt class="text-muted-foreground">Bars</dt>
+              <dd>{sm.timeline.bars.length}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="text-muted-foreground">Beats</dt>
+              <dd>{sm.timeline.beats.length}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="text-muted-foreground">Duration</dt>
+              <dd class="tabular-nums">
+                {(sm.audio?.durationSec ?? Math.max(0, $audioSession.endSec - $audioSession.startSec)).toFixed(2)}s
+              </dd>
+            </div>
+          </dl>
 
-        {#if sm.timeline.bars.length > 0}
-          <div>
-            <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars</p>
-            <ul class="space-y-3 text-xs">
-              {#each sm.timeline.bars.slice(0, previewBars) as bar (bar.id)}
-                <li class="border-foreground border-b-2 pb-3 font-mono last:border-0 last:pb-0">
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0 flex-1">
-                      <div>
-                        Bar {bar.index} · {bar.startSec.toFixed(3)}–{bar.endSec.toFixed(3)}s · meter{' '}
-                        {bar.meter.numerator}/{bar.meter.denominator}
+          {#if sm.timeline.bars.length > 0}
+            <div>
+              <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars</p>
+              <ul class="space-y-3 text-xs">
+                {#each sm.timeline.bars.slice(0, previewBars) as bar (bar.id)}
+                  <li class="border-foreground border-b-2 pb-3 font-mono last:border-0 last:pb-0">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0 flex-1">
+                        <div>
+                          Bar {bar.index} · {bar.startSec.toFixed(3)}–{bar.endSec.toFixed(3)}s · meter{' '}
+                          {bar.meter.numerator}/{bar.meter.denominator}
+                        </div>
+                        <ul class="text-muted-foreground mt-1 pl-2">
+                          {#each beatsForBar(bar.id) as bt (bt.id)}
+                            <li>beat {bt.indexInBar} @ {bt.timeSec.toFixed(3)}s</li>
+                          {/each}
+                        </ul>
                       </div>
-                      <ul class="text-muted-foreground mt-1 pl-2">
-                        {#each beatsForBar(bar.id) as bt (bt.id)}
-                          <li>beat {bt.indexInBar} @ {bt.timeSec.toFixed(3)}s</li>
-                        {/each}
-                      </ul>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        class="shrink-0"
+                        disabled={!$audioSession.file || !objectUrl}
+                        title={playingBarId === bar.id ? 'Pause' : 'Play this bar only'}
+                        aria-label={playingBarId === bar.id
+                          ? `Pause bar ${bar.index}`
+                          : `Play bar ${bar.index} only (${bar.startSec.toFixed(2)}–${bar.endSec.toFixed(2)}s)`}
+                        onclick={() => playBarOnly(bar)}
+                      >
+                        {#if playingBarId === bar.id}
+                          <Pause class="size-4" aria-hidden="true" />
+                        {:else}
+                          <Play class="size-4" aria-hidden="true" />
+                        {/if}
+                      </Button>
                     </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      class="shrink-0"
-                      disabled={!$audioSession.file || !objectUrl}
-                      title={playingBarId === bar.id ? 'Pause' : 'Play this bar only'}
-                      aria-label={playingBarId === bar.id
-                        ? `Pause bar ${bar.index}`
-                        : `Play bar ${bar.index} only (${bar.startSec.toFixed(2)}–${bar.endSec.toFixed(2)}s)`}
-                      onclick={() => playBarOnly(bar)}
-                    >
-                      {#if playingBarId === bar.id}
-                        <Pause class="size-4" aria-hidden="true" />
-                      {:else}
-                        <Play class="size-4" aria-hidden="true" />
-                      {/if}
-                    </Button>
-                  </div>
-                </li>
-              {/each}
-            </ul>
-          </div>
-        {/if}
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
 
-        <p class="text-foreground/90 font-mono text-xs tabular-nums">
-          {$audioSession.name}<br />
-          <span class="text-muted-foreground">
-            {$audioSession.startSec.toFixed(2)}s to {$audioSession.endSec.toFixed(2)}s
-          </span>
-        </p>
+          <p class="text-foreground/90 font-mono text-xs tabular-nums">
+            {$audioSession.name}<br />
+            <span class="text-muted-foreground">
+              {$audioSession.startSec.toFixed(2)}s to {$audioSession.endSec.toFixed(2)}s
+            </span>
+          </p>
 
-        <!-- The previously-rendered orphan <audio> here was the bug:
-             two audio elements, two event sources, two volume targets.
-             Removed. `audioEl` now binds to the WaveformPlayer's real
-             <audio> via bind:audioElement above. -->
+          <!-- The previously-rendered orphan <audio> here was the bug:
+               two audio elements, two event sources, two volume targets.
+               Removed. `audioEl` now binds to the WaveformPlayer's real
+               <audio> via bind:audioElement above. -->
 
-      </div>
-    </details>
+        </div>
+      </details>
 
-    <Button type="button" variant="outline" class="gap-2 self-start" onclick={confirmBackToImport}>
-      <ArrowLeft class="size-4" aria-hidden="true" />
-      Back to import
-    </Button>
+      <Button type="button" variant="outline" class="gap-2 self-start" onclick={confirmBackToImport}>
+        <ArrowLeft class="size-4" aria-hidden="true" />
+        Back to import
+      </Button>
+    </div>
 
     <!-- Song-level dialogs, at page level on purpose. They must NOT sit
          inside the header column: that column is `sm:items-end` against the
