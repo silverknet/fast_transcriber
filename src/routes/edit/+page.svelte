@@ -386,9 +386,28 @@
   }
 
   /** Main workspace mode. */
-  let editMode = $state<'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'>(
-    'overview',
-  )
+  type EditMode = 'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'
+  let editMode = $state<EditMode>('overview')
+
+  /**
+   * Command-bar mode switch. Grouped so each segment wraps as a unit on narrow
+   * widths — mix · the timeline family · the performance docs. A single
+   * `role="tablist"` still wraps all seven `role="tab"` buttons (the group
+   * `<div>`s are presentational), so the a11y contract is unchanged.
+   */
+  const MODE_GROUPS: { id: EditMode; label: string }[][] = [
+    [{ id: 'overview', label: 'Overview' }],
+    [
+      { id: 'grid', label: 'Grid' },
+      { id: 'sections', label: 'Sections' },
+      { id: 'chords', label: 'Chords' },
+    ],
+    [
+      { id: 'cue', label: 'Cue' },
+      { id: 'lyrics', label: 'Lyrics' },
+      { id: 'leadsheet', label: 'Lead sheet' },
+    ],
+  ]
 
   let keyDraft = $state<SongKey>({ root: 'C', mode: 'major' })
 
@@ -952,88 +971,87 @@
          of the same master never triggers it. -->
     <RecordingMismatchBanner />
 
-    <!-- Song-first header, raw over the background (a <div>, NOT a <header>, so
-         it escapes the `.edit-page > header` studio-box rule). -->
-    <div
-      class="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"
-    >
-      <div class="min-w-0">
-        {#if editingTitle}
-          <input
-            class="border-foreground bg-background text-foreground w-full min-w-0 max-w-md border-b-2 px-0.5 text-3xl font-bold tracking-tight outline-none"
-            bind:value={titleDraft}
-            onblur={commitTitleEdit}
-            onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
-            use:focusOnMount
-          />
-        {:else}
-          <h1 class="flex items-center gap-2 text-3xl font-bold tracking-tight">
-            <!-- `min-w-0` is what makes `truncate` actually work on a flex
-                 item: without it the title refuses to shrink below its
-                 content width, overflows the row, and wraps the controls
-                 after it onto a second line. -->
-            <span class="min-w-0 truncate">{sm.metadata.title || 'Untitled song'}</span>
+    <!-- ── Compact DAW command bar. Song identity, live metadata, transport and
+         the mode switch, condensed into ONE framed cluster over the background
+         (a <div>, not a <header>, so it never picks up removed studio-box rules).
+         The composed editor panels below keep their own framing; the shell no
+         longer boxes them a second time. ── -->
+    <div class="command-bar border-foreground bg-card brutalist-shadow-sm w-full border-2">
+      <!-- Row A: identity · live metadata · transport (reads as one cluster) -->
+      <div class="border-foreground/15 flex flex-wrap items-center gap-x-3 gap-y-2 border-b-2 px-3 py-2">
+        <!-- Song identity: title (click-to-edit) + rename + draft switcher, artist beneath. -->
+        <div class="flex min-w-0 flex-col gap-0.5">
+          {#if editingTitle}
+            <input
+              class="border-foreground bg-background text-foreground w-full min-w-0 max-w-xs border-b-2 px-0.5 text-lg font-bold leading-tight tracking-tight outline-none"
+              bind:value={titleDraft}
+              onblur={commitTitleEdit}
+              onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingTitle = false } }}
+              use:focusOnMount
+            />
+          {:else}
+            <h1 class="flex min-w-0 items-center gap-1.5 text-lg font-bold leading-tight tracking-tight">
+              <!-- `min-w-0` lets `truncate` shrink the title below its content
+                   width so it never pushes the controls after it onto a new row. -->
+              <span class="min-w-0 truncate">{sm.metadata.title || 'Untitled song'}</span>
+              <button
+                type="button"
+                class="text-muted-foreground/50 hover:text-foreground shrink-0 transition-colors"
+                onclick={startTitleEdit}
+                aria-label="Rename song"
+              >
+                <Pencil class="size-3.5" />
+              </button>
+
+              <!-- ── Draft switcher. Song-level on purpose: a draft is the song's
+                   sections + chords + lyrics together, so it can't sit inside one
+                   editor tab. The selected draft is what the grid edits, what live
+                   mode plays, and what the .als exports. ── -->
+              <Button
+                variant="outline"
+                size="icon-xs"
+                class="shrink-0 border-2"
+                onclick={() => (draftMenuOpen = true)}
+                aria-label={`Draft: ${activeDraftLabel}. Switch drafts`}
+                title={`Draft: ${activeDraftLabel} — switch between this song's drafts`}
+              >
+                <Layers aria-hidden="true" />
+              </Button>
+            </h1>
+          {/if}
+
+          <!-- Artist — a grey subtitle right under the title, click-to-edit like
+               the title. Part of `metadata`, so it syncs across collaborators. -->
+          {#if editingArtist}
+            <input
+              class="text-muted-foreground/70 bg-background border-muted-foreground/40 w-full min-w-0 max-w-xs border-b px-0 text-xs leading-tight outline-none"
+              bind:value={artistDraft}
+              onblur={commitArtistEdit}
+              onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingArtist = false } }}
+              use:focusOnMount
+              placeholder="Artist"
+              aria-label="Artist"
+            />
+          {:else}
             <button
               type="button"
-              class="text-muted-foreground/50 hover:text-foreground shrink-0 transition-colors"
-              onclick={startTitleEdit}
-              aria-label="Rename song"
+              class="block max-w-full truncate px-0 text-left text-xs leading-tight transition-colors hover:text-foreground {sm
+                .metadata.artist
+                ? 'text-muted-foreground/70'
+                : 'text-muted-foreground/40 italic'}"
+              onclick={startArtistEdit}
+              title="Edit artist"
             >
-              <Pencil class="size-4" />
+              {sm.metadata.artist || 'Add artist'}
             </button>
+          {/if}
+        </div>
 
-            <!-- ── Draft switcher. Song-level on purpose: a draft is the
-                 song's sections + chords + lyrics together, so it can't sit
-                 inside one editor tab. The selected draft is what the grid
-                 edits, what live mode plays, and what the .als exports. ── -->
-            <!-- `icon-xs` (a fixed 24×24 from the button variants) rather than
-                 hand-tuned padding: the button base is `whitespace-nowrap
-                 shrink-0`, so any text label sets a hard minimum width that
-                 squeezes the title. The draft name is in the tooltip, and the
-                 Sections/Chords toolbars show it in full. -->
-            <Button
-              variant="outline"
-              size="icon-xs"
-              class="shrink-0 border-2"
-              onclick={() => (draftMenuOpen = true)}
-              aria-label={`Draft: ${activeDraftLabel}. Switch drafts`}
-              title={`Draft: ${activeDraftLabel} — switch between this song's drafts`}
-            >
-              <Layers aria-hidden="true" />
-            </Button>
-          </h1>
-        {/if}
+        <span class="bg-foreground/15 hidden h-8 w-px shrink-0 sm:block" aria-hidden="true"></span>
 
-        <!-- Artist — a grey subtitle right under the title, click-to-edit like
-             the title. Part of `metadata`, so it syncs across collaborators.
-             View and edit share the same left edge and line-height so clicking
-             to edit doesn't nudge the text. -->
-        {#if editingArtist}
-          <input
-            class="text-muted-foreground/70 bg-background border-muted-foreground/40 mt-0.5 w-full min-w-0 max-w-xs border-b px-0 text-base leading-tight outline-none"
-            bind:value={artistDraft}
-            onblur={commitArtistEdit}
-            onkeydown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } else if (e.key === 'Escape') { editingArtist = false } }}
-            use:focusOnMount
-            placeholder="Artist"
-            aria-label="Artist"
-          />
-        {:else}
-          <button
-            type="button"
-            class="mt-0.5 block max-w-full truncate px-0 text-left text-base leading-tight transition-colors hover:text-foreground {sm
-              .metadata.artist
-              ? 'text-muted-foreground/70'
-              : 'text-muted-foreground/40 italic'}"
-            onclick={startArtistEdit}
-            title="Edit artist"
-          >
-            {sm.metadata.artist || 'Add artist'}
-          </button>
-        {/if}
-
+        <!-- Live metadata: BPM · key (+ re-detect) · personal transpose. -->
         <div
-          class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums"
+          class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs tabular-nums"
         >
           <span>{sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}</span>
           <span class="text-muted-foreground/40" aria-hidden="true">·</span>
@@ -1048,9 +1066,7 @@
               aria-label="Re-detect key"
             >
               <RefreshCw
-                class="size-3 {redetectingKey || chordChromaStatus === 'analyzing'
-                  ? 'animate-spin'
-                  : ''}"
+                class="size-3 {redetectingKey || chordChromaStatus === 'analyzing' ? 'animate-spin' : ''}"
               />
             </button>
           </span>
@@ -1110,108 +1126,38 @@
             </span>
           {/if}
         </div>
+
+        <!-- Transport docks at the right of the command-bar cluster. It's its own
+             component (own click loop / count-in / auto-stop) — the shell only
+             positions it here; it wraps below on narrow widths. -->
+        <div class="ml-auto min-w-0">
+          <TransportBar {editMode} />
+        </div>
       </div>
 
-      <div
-        class="border-foreground bg-muted inline-grid grid-cols-7 gap-0 self-start overflow-hidden border-2 sm:self-auto"
-        role="tablist"
-        aria-label="Edit mode"
-      >
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'overview'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'overview'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'overview')}
-        >
-          Overview
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'grid'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'grid'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'grid')}
-        >
-          Grid
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'sections'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'sections'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'sections')}
-        >
-          Sections
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'chords'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'chords'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'chords')}
-        >
-          Chords
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'cue'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'cue'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'cue')}
-        >
-          Cue
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'lyrics'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'lyrics'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'lyrics')}
-        >
-          Lyrics
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={editMode === 'leadsheet'}
-          variant="ghost"
-          size="sm"
-          class="h-8 border-0 px-3 text-xs font-bold shadow-none transition-colors {editMode === 'leadsheet'
-            ? 'bg-foreground text-background hover:bg-foreground hover:text-background'
-            : 'bg-transparent text-foreground hover:bg-foreground/15 active:bg-foreground/25'}"
-          onclick={() => (editMode = 'leadsheet')}
-        >
-          Lead sheet
-        </Button>
+      <!-- Row B: compact segmented mode switch. ONE `role="tablist"` over three
+           presentational groups; active = filled `bg-foreground text-background`. -->
+      <div class="flex flex-wrap items-center gap-2 px-3 py-2" role="tablist" aria-label="Edit mode">
+        {#each MODE_GROUPS as group, gi (gi)}
+          <div class="border-foreground bg-card inline-flex overflow-hidden border-2">
+            {#each group as m (m.id)}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={editMode === m.id}
+                class="border-foreground inline-flex h-7 items-center border-r-2 px-3 text-[11px] font-bold uppercase tracking-wide whitespace-nowrap transition-colors last:border-r-0 {editMode ===
+                m.id
+                  ? 'bg-foreground text-background'
+                  : 'text-foreground hover:bg-foreground/10 active:bg-foreground/20'}"
+                onclick={() => (editMode = m.id)}
+              >
+                {m.label}
+              </button>
+            {/each}
+          </div>
+        {/each}
       </div>
     </div>
-
-    <TransportBar {editMode} />
 
 
     {#if editMode === 'cue'}
@@ -1363,22 +1309,14 @@
 </main>
 
 <style>
-  /* (The old `.edit-page > header` studio box was removed — the header is now a
-     raw <div> over the background.) */
+  /* The header + tab box + transport are now one self-styled command bar
+     (`bg-card` applied directly), so the old studio-box overrides for the
+     `grid-cols-7` tab box and the removed `.edit-page > header` are gone.
+     What remains only re-tints the composed editor panels + shell boxes so
+     their `bg-background` reads as a lifted card. */
   .edit-page :global(.brutalist-shadow.border-foreground.bg-background),
-  .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-background),
   .edit-page :global(details.border-foreground.bg-background) {
     background: var(--card);
-  }
-
-  .edit-page :global(.brutalist-shadow-sm.border-foreground.bg-muted) {
-    background: var(--studio-orange);
-    color: var(--foreground);
-  }
-
-  .edit-page :global(.inline-grid.grid-cols-7.border-foreground.bg-muted) {
-    background: var(--card);
-    box-shadow: 4px 4px 0 var(--ink);
   }
 
   .edit-page :global(fieldset.border-foreground) {
