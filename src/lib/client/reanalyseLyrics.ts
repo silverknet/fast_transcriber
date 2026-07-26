@@ -29,6 +29,7 @@ import {
 } from '$lib/client/desktopBridge'
 import { pushCloudSong } from '$lib/client/cloudSync'
 import { detectLyricsLanguage } from '$lib/lyrics/detectLyricsLanguage'
+import { validateSongMap } from '$lib/songmap/validate'
 import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
 import { metadataLiteFromSongMap, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
 import { collabContentFingerprint } from '$lib/songmap/collab'
@@ -214,6 +215,19 @@ export async function reanalyseAllLyrics(
             alignedAt: new Date().toISOString(),
             transcriberVersion: 4,
           },
+        }
+
+        // Never persist an invalid map. Every other SongMap-write path (edit
+        // `patchSongMap`, collaborator pull, disk load) validates first; this
+        // one writes both the disk source-of-truth AND the shared cloud row, so
+        // a malformed alignment (e.g. a non-finite recognizer timestamp) must
+        // fail this ONE song, not corrupt a `.smap` that then won't reopen and
+        // breaks collaborators' validated pulls.
+        const invalid = validateSongMap(nextMap)
+        if (!invalid.ok) {
+          results.push({ title, folder: entry.folder, status: 'failed', detail: 'produced an invalid fit — left unchanged' })
+          emit('running', i + 1, total, title)
+          continue
         }
 
         // Persist to disk (Studio source of truth).

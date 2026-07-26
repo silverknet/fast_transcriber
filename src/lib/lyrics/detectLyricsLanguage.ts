@@ -24,7 +24,7 @@ export type DetectedLyricsLanguage = 'sv' | 'en' | 'no' | 'da' | 'de'
  * running lyric text.
  */
 const STOPWORDS: Record<DetectedLyricsLanguage, readonly string[]> = {
-  sv: ['och', 'att', 'jag', 'är', 'det', 'som', 'på', 'för', 'inte', 'med', 'har', 'vi', 'så', 'men', 'när', 'här', 'där', 'från', 'mig', 'dig', 'än', ' över', 'också', 'aldrig'],
+  sv: ['och', 'att', 'jag', 'är', 'det', 'som', 'på', 'för', 'inte', 'med', 'har', 'vi', 'så', 'men', 'när', 'här', 'där', 'från', 'mig', 'dig', 'än', 'över', 'också', 'aldrig'],
   en: ['the', 'and', 'you', 'are', 'that', 'with', 'this', 'for', 'was', 'have', 'your', 'not', 'but', 'all', 'when', 'where', 'they', 'she', 'out', 'know', 'never', 'because', 'about', 'would'],
   no: ['og', 'jeg', 'ikke', 'det', 'som', 'på', 'har', 'meg', 'deg', 'ikkje', 'eg', 'kva', 'noko', 'berre', 'ei'],
   da: ['og', 'jeg', 'ikke', 'det', 'som', 'på', 'har', 'mig', 'dig', 'men', 'hvad', 'ikke', 'kun', 'nogen'],

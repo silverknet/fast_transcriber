@@ -112,6 +112,12 @@
   const synth = new KeysSynth()
   let synthOn = $state(false)
   let synthUserOff = $state(false) // user explicitly turned it off → don't auto-enable
+  // Synchronous re-entrancy guard (plain, non-reactive on purpose). `enableSynth`
+  // is fired from the auto-enable $effect below AND writes `midiStatus` (through
+  // ensureMidi → refresh) before its async loop-breaker `synthOn = true` can run;
+  // without this guard the effect re-invalidates itself in a tight loop on mount
+  // whenever the APC is already plugged in + granted.
+  let synthStarting = false
   let synthPresetName = $state('Lush Pad')
   let synthVolume = $state(0.8)
   let userPresets = $state<SynthPatch[]>(loadUserPresets())
@@ -136,6 +142,8 @@
   }
 
   async function enableSynth() {
+    if (synthStarting) return // in-flight; don't let the auto-enable effect re-enter
+    synthStarting = true
     try {
       await ensureMidi().catch(() => {})
       synth.setPatch(currentPatch())
@@ -144,6 +152,8 @@
       synthOn = true
     } catch (e) {
       loadError = e instanceof Error ? e.message : 'Could not start the synth.'
+    } finally {
+      synthStarting = false
     }
   }
 

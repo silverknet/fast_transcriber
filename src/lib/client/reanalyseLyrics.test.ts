@@ -58,11 +58,18 @@ const SOURCE = 'you are the one that i know\nand you have all that we need'
 
 function makeSongMap(title: string, opts: { sourceText?: string | null; originalPath?: string | null } = {}): SongMap {
   const sourceText = opts.sourceText === undefined ? SOURCE : opts.sourceText
+  // A valid decoded map: in production `sm` comes from decodeSmapFile →
+  // parseSongMap, which validates, so the batch's own validate guard only ever
+  // rejects a map the NEW lyrics made invalid — never the fixture itself.
   return {
-    metadata: { title },
+    formatVersion: 6,
+    metadata: { title, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z' },
     ...(sourceText ? { lyrics: { words: [], sourceText } } : {}),
     ...(opts.originalPath === null ? {} : { audio: { originalPath: opts.originalPath ?? 'audio/mix.wav' } }),
     timeline: { bars: [], beats: [] },
+    sections: [],
+    harmony: [],
+    cueTracks: [],
   } as unknown as SongMap
 }
 
@@ -268,6 +275,29 @@ describe('reanalyseAllLyrics — per-song skips & failures', () => {
     const r = await reanalyseAllLyrics(noop)
     expect(r.results[0]!.status).toBe('failed')
     expect(r.results[0]!.detail).toMatch(/could not read/i)
+  })
+
+  it('marks a song failed (and never persists) when the fit is invalid', async () => {
+    // A recognizer that returns a non-finite word time flows through alignment
+    // into a word with a non-finite endSec. Validation must catch it BEFORE any
+    // disk OR cloud write, so one bad transcription can't corrupt a `.smap`
+    // (which would then fail to reopen and break collaborators' pulls).
+    setProjectStore({ cloud: { projectId: 'cp', lastSyncedRevision: 3 } })
+    vi.mocked(subscribeToJobEvents).mockImplementationOnce((_id: string, onEvent: (e: never) => void) => {
+      const words = asrFromText(SOURCE).map((w) =>
+        w.text === 'know' ? { ...w, endSec: Number.POSITIVE_INFINITY } : w,
+      )
+      onEvent({ type: 'done', words } as never)
+      return () => {}
+    })
+    const r = await reanalyseAllLyrics(noop)
+    expect(r.results[0]!.status).toBe('failed')
+    expect(r.results[0]!.detail).toMatch(/invalid/i)
+    // The bad song is never written to disk or pushed to the cloud; the clean
+    // second song is still processed normally.
+    expect(writeProjectSong).toHaveBeenCalledTimes(1)
+    expect(pushCloudSong).toHaveBeenCalledTimes(1)
+    expect(r.results[1]!.status).toBe('ok')
   })
 
   it('marks a song failed when the disk write fails', async () => {
