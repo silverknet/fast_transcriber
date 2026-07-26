@@ -254,6 +254,39 @@ export class MixerEngine {
     return Math.max(0, this.playStartPositionSec + elapsed)
   }
 
+  /**
+   * Transport anchor exposure for an EXTERNAL click/count-in loop that
+   * schedules against this engine's clock (e.g. `UnifiedTransport`).
+   *
+   * `playStartCtx` is the exact `ac.currentTime` the current sources were
+   * scheduled to start at (already includes the `0.04` lookahead + any
+   * `startDelaySec` pre-roll). `playStartPos` is the mix-timeline offset
+   * they were started from. Together they let the caller pre-schedule
+   * count-in clicks at `playStartCtx + clickPoint.timeSec`, sample-aligned
+   * with the song's first sample. Read-only — they do not mutate state.
+   */
+  get playStartCtx(): number {
+    return this.playStartCtxTime
+  }
+
+  get playStartPos(): number {
+    return this.playStartPositionSec
+  }
+
+  /**
+   * SIGNED playhead on the scheduling timeline — same derivation as
+   * `positionSec()` but WITHOUT the `Math.max(0, …)` floor, so it can go
+   * below `playStartPositionSec` during a `startDelaySec` pre-roll (the
+   * shortfall is "how long until the first sample plays", negated). An
+   * external click loop needs this signed value so a downbeat at
+   * plan-time 0 stays correctly AHEAD during the count-in instead of
+   * being dumped into "now". Returns `playStartPositionSec` when stopped.
+   */
+  schedulingPositionSec(): number {
+    if (this.state !== 'playing') return this.playStartPositionSec
+    return this.playStartPositionSec + (this.ac.currentTime - this.playStartCtxTime)
+  }
+
   snapshot(): MixerSnapshot {
     return {
       state: this.state,

@@ -13,28 +13,43 @@
  * at 0, count-in negative). Each surface converts at its own edge; this facade
  * never double-shifts.
  *
- * Internals CURRENTLY back onto `PlaybackController` (single decoded buffer +
- * the invariant-protected click/count-in scheduler). A later step swaps the
- * audio graph to `MixerEngine` (the no-stems song is the degenerate 1-track
- * case) reusing that SAME click scheduler on the mixer's context — without
- * changing this facade, so consumers wired against it don't move.
+ * **Internals: one `MixerEngine` (the song is the degenerate 1-track case) with
+ * clicks + count-in scheduled on that SAME `AudioContext`.** The song plays as a
+ * single `MixerEngine` track (`AudioBufferSourceNode.start(ctxStart, offset)`)
+ * and the metronome rings through a `clickMaster` gain on `engine.ac` — one
+ * clock (`engine.ac.currentTime`), one output latency, so song and clicks
+ * cannot disagree. The scheduling DECISIONS (which click fires and when) reuse
+ * the pure, test-pinned `clickScheduling` module — the exact same functions the
+ * `PlaybackController` uses — so both engines stay bit-for-bit in step.
+ *
+ * `play()` is transcribed from `PlaybackController.play()`: same start-position
+ * clamp, same count-in decision (`songStartBufferPos` / `atSongStart` /
+ * `wantsCountIn` / `preroll = plan.prependSec`), then `engine.play(startPos,
+ * { startDelaySec: preroll })` (which anchors `ctxStart = ac.currentTime + 0.04
+ * + preroll`, identical to the controller). The count-in clicks are pre-
+ * scheduled against the engine's exact `playStartCtx`; the song-beat clicks are
+ * scheduled from a rAF loop off the engine's signed scheduling position.
  *
  * Runtime-only: nothing here is ever written into the `.smap`, so autosave and
  * the cloud dirty-check are untouched.
  */
-import { PlaybackController } from './playbackController.svelte'
-import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
+import {
+  countInClickTimes,
+  dueClicks,
+  initialClickIndex,
+} from '$lib/audio/clickScheduling'
+import { playMetronomeClick } from '$lib/audio/debugClickTrack'
+import { MixerEngine, type MixerSnapshot } from '$lib/audio/mixerEngine'
+import { songPlaybackPlan, type PlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
 
-class UnifiedTransport {
-  /**
-   * The current audio graph + click/count-in scheduler. Exposed so that
-   * `WaveformPlayer` — which already accepts an injected `controller` — can bind
-   * to it during the migration. Treat as an implementation detail elsewhere;
-   * prefer the song-time methods below.
-   */
-  readonly controller = new PlaybackController()
+/** Auto-stop epsilon at clip / range ends. Mirrors the controller. */
+const END_EPS = 0.028
 
+/** The single track key the song is registered under (no stems this step). */
+const SONG_TRACK_KEY = 'original'
+
+class UnifiedTransport {
   /**
    * Shared, page-owned viewport in SONG-TIME seconds. The spine binds these; a
    * mode never rebuilds them, so zoom/scroll persists across mode switches.
@@ -48,139 +63,448 @@ class UnifiedTransport {
   decoding = $state(false)
   decodeError = $state<string | null>(null)
 
-  /** Song-time offset of the decoded buffer's t=0 (= `plan.trimStartSec`). */
-  #mediaOffsetSec = 0
-  /** A dedicated decode context, reused across songs; separate from playback. */
-  #decodeCtx: AudioContext | null = null
+  // ── UI knobs (bind targets from host components) ───────────────────
+  playWithClick = $state(false)
+  clickVolume = $state(1.5)
+  songVolume = $state(1)
+  clickOffsetSec = $state(0)
+
+  // ── Reactive runtime bus (song timing source of truth) ─────────────
+  #songMap = $state<SongMap | null>(null)
+  #plan = $derived<PlaybackPlan | null>(
+    this.#songMap ? songPlaybackPlan(this.#songMap) : null,
+  )
+
+  // ── Reactive transport mirror (MixerEngine is NOT Svelte-reactive) ─
+  /** Mirror of engine transport state; the facade's `isPlaying`. */
+  #playing = $state(false)
+  /** UI playhead in BUFFER-time, floored at song start (see `#computeUiPosition`). */
+  #positionSec = $state(0)
+
+  // ── Audio graph (created lazily so module import stays SSR-safe) ────
+  #engine: MixerEngine | null = null
+  #clickMaster: GainNode | null = null
+  #unsubEngine: (() => void) | null = null
+
+  /** Playback selection in BUFFER-time (auto-stop when position ≥ rangeEnd). */
+  #rangeStart = 0
+  #rangeEnd = 0
+
   /** The file whose decode is current, to skip redundant re-decodes. */
-  #decodedFile: File | null = null
+  #loadedFile: File | null = null
+
+  /** rAF for the position mirror + range auto-stop guard. */
+  #transportRaf = 0
+  /** rAF for the click loop. */
+  #clickRaf = 0
+  /** Index into `plan.clickPoints` for the next song click to schedule. */
+  #nextClickIdx = 0
+  /** Cleanup for the `$effect.root` that owns the facade's sync effects. */
+  #effectCleanup: (() => void) | null = null
+
+  constructor() {
+    this.#effectCleanup = $effect.root(() => {
+      // 1. Sync click master gain from `clickVolume` (no upper cap).
+      $effect(() => {
+        const v = Math.max(0, this.clickVolume)
+        if (this.#clickMaster) this.#clickMaster.gain.value = v
+      })
+
+      // 2. Sync the song track gain from `songVolume` (clamped [0, 1]).
+      $effect(() => {
+        const v = Math.max(0, Math.min(1, this.songVolume))
+        if (this.#engine && this.audioBuffer) this.#engine.setVolume(SONG_TRACK_KEY, v)
+      })
+
+      // 3. Start / stop the click rAF loop when:
+      //      isPlaying × playWithClick × plan.clickPoints.length > 0
+      $effect(() => {
+        const should =
+          this.#playing &&
+          this.playWithClick &&
+          (this.#plan?.clickPoints.length ?? 0) > 0
+        if (should) this.#startClickLoop()
+        else this.#stopClickLoop()
+      })
+    })
+  }
 
   // ── Transport observables (song-time) ──────────────────────────────
   get isPlaying(): boolean {
-    return this.controller.isPlaying
+    return this.#playing
   }
   /** Playhead in song-time seconds (song-start = 0). */
   get songTimeSec(): number {
-    return this.controller.currentTime - this.#mediaOffsetSec
+    return this.#positionSec - this.mediaOffsetSec
   }
   get ready(): boolean {
-    return this.controller.mediaReady
+    return this.audioBuffer !== null && this.audioBuffer.duration > 0
   }
   /** Total song-time duration (0 until a buffer is loaded). */
   get durationSec(): number {
-    const d = this.audioBuffer?.duration ?? 0
-    return d > 0 ? d - this.#mediaOffsetSec : 0
+    const d = this.#engine ? this.#engine.durationSec() : (this.audioBuffer?.duration ?? 0)
+    return d > 0 ? d - this.mediaOffsetSec : 0
   }
-
-  // ── UI knobs (proxied to the controller's bind targets) ────────────
-  get playWithClick(): boolean {
-    return this.controller.playWithClick
-  }
-  set playWithClick(v: boolean) {
-    this.controller.playWithClick = v
-  }
-  get clickVolume(): number {
-    return this.controller.clickVolume
-  }
-  set clickVolume(v: number) {
-    this.controller.clickVolume = v
-  }
-  get songVolume(): number {
-    return this.controller.songVolume
-  }
-  set songVolume(v: number) {
-    this.controller.songVolume = v
-  }
-  get clickOffsetSec(): number {
-    return this.controller.clickOffsetSec
-  }
-  set clickOffsetSec(v: number) {
-    this.controller.clickOffsetSec = v
+  /** Song-time offset of the decoded buffer's t=0 (= `plan.trimStartSec`). */
+  get mediaOffsetSec(): number {
+    return this.#plan?.trimStartSec ?? 0
   }
 
   // ── Configuration ──────────────────────────────────────────────────
   /**
-   * Point the transport at a song. Sets the click/timing plan source and the
-   * one canonical media-time offset (`plan.trimStartSec`), so every consumer's
-   * song-time conversion agrees. Cheap + idempotent — safe to call reactively.
+   * Point the transport at a song. Sets the click/timing plan source and (via
+   * the derived plan) the one canonical media-time offset (`plan.trimStartSec`),
+   * so every consumer's song-time conversion agrees. Cheap + idempotent — safe
+   * to call reactively.
    */
   configure(sm: SongMap | null): void {
-    this.controller.setSongMap(sm)
-    const plan = sm ? songPlaybackPlan(sm) : null
-    this.#mediaOffsetSec = plan?.trimStartSec ?? 0
+    this.#songMap = sm
   }
 
   /**
-   * Decode `file` once and hand the buffer to the engine. No-op if the same
-   * file is already decoded. Loading a null file clears the buffer.
+   * Decode `file` once (on the playback context) and register it as the single
+   * song track. No-op if the same file is already decoded. Loading a null file
+   * clears the track.
    */
   async loadFile(file: File | null): Promise<void> {
-    if (file === this.#decodedFile) return
-    this.#decodedFile = file
+    if (file === this.#loadedFile) return
+    this.#loadedFile = file
     this.decodeError = null
     if (!file) {
       this.audioBuffer = null
-      this.controller.setAudioBuffer(null)
+      this.#engine?.removeTrack(SONG_TRACK_KEY)
       return
     }
     this.decoding = true
     try {
-      if (!this.#decodeCtx) this.#decodeCtx = new AudioContext()
-      const ctx = this.#decodeCtx
+      const engine = this.#ensureEngine()
       const bytes = await file.arrayBuffer()
-      const buf = await ctx.decodeAudioData(bytes)
+      const buf = await engine.ac.decodeAudioData(bytes)
       // A newer file may have superseded us while decoding.
-      if (this.#decodedFile !== file) return
+      if (this.#loadedFile !== file) return
       this.audioBuffer = buf
-      this.controller.setAudioBuffer(buf)
+      this.#registerTrack(buf)
     } catch (e) {
-      if (this.#decodedFile === file) {
+      if (this.#loadedFile === file) {
         this.decodeError = e instanceof Error ? e.message : 'Could not decode audio.'
         this.audioBuffer = null
-        this.controller.setAudioBuffer(null)
+        this.#engine?.removeTrack(SONG_TRACK_KEY)
       }
     } finally {
-      if (this.#decodedFile === file) this.decoding = false
+      if (this.#loadedFile === file) this.decoding = false
     }
   }
 
   // ── Song-time selection / playback range ───────────────────────────
   /** Set the loop/selection range in SONG-TIME (empty range = whole song). */
   setRangeSongTime(startSec: number, endSec: number): void {
-    this.controller.rangeStart = startSec + this.#mediaOffsetSec
-    this.controller.rangeEnd = endSec > startSec ? endSec + this.#mediaOffsetSec : 0
+    this.#rangeStart = startSec + this.mediaOffsetSec
+    this.#rangeEnd = endSec > startSec ? endSec + this.mediaOffsetSec : 0
   }
 
   // ── Transport (song-time) ──────────────────────────────────────────
   play(): void {
-    this.controller.play()
-  }
-  pause(): void {
-    this.controller.pause()
-  }
-  stop(): void {
-    this.controller.stop()
-  }
-  togglePlay(): void {
-    if (this.controller.isPlaying) this.controller.pause()
-    else this.controller.play()
-  }
-  /** Seek to a SONG-TIME position. */
-  seek(songTimeSec: number): void {
-    this.controller.seek(songTimeSec + this.#mediaOffsetSec)
+    if (this.#playing) return
+    const buf = this.audioBuffer
+    if (!buf) return
+    const engine = this.#ensureEngine()
+    const plan = this.#plan
+
+    // Where to start from (BUFFER-time). If the playhead is outside the
+    // selection, clamp to rangeStart. Bound to the buffer so we never
+    // schedule a start past the end.
+    const dur = buf.duration
+    let startPos = engine.playStartPos
+    if (this.#rangeEnd > this.#rangeStart) {
+      if (startPos < this.#rangeStart || startPos >= this.#rangeEnd - 0.02) {
+        startPos = this.#rangeStart
+      }
+    }
+    startPos = Math.max(0, Math.min(startPos, dur))
+    const endPos =
+      this.#rangeEnd > this.#rangeStart ? Math.min(this.#rangeEnd, dur) : dur
+    if (endPos - startPos < 0.005) return // empty range
+
+    // Count-in pre-roll: only when (a) click enabled, (b) tight trim needs
+    // prepend silence, (c) playhead at/before song start. Identical decision
+    // to `PlaybackController.play()`.
+    const songStartBufferPos = plan
+      ? plan.firstDownbeatOriginalSec - this.mediaOffsetSec
+      : Number.POSITIVE_INFINITY
+    const atSongStart = startPos <= songStartBufferPos + 0.05
+    const wantsCountIn =
+      this.playWithClick &&
+      plan !== null &&
+      plan.countInBeats > 0 &&
+      plan.prependSec > 1e-6 &&
+      atSongStart
+    const preroll = wantsCountIn ? plan!.prependSec : 0
+
+    // Ensure the context is running, then launch. When already running (the
+    // normal post-gesture case, and every unit test), `engine.play()` runs
+    // fully synchronously so `engine.playStartCtx` is set before we read it.
+    if (engine.ac.state === 'suspended') {
+      void engine.ac.resume().finally(() => {
+        if (this.#loadedFile && !this.#playing) {
+          this.#launch(engine, plan, startPos, preroll, wantsCountIn)
+        }
+      })
+    } else {
+      this.#launch(engine, plan, startPos, preroll, wantsCountIn)
+    }
   }
 
-  /** Buffer-time ↔ song-time helpers for surfaces that need the raw offset. */
-  get mediaOffsetSec(): number {
-    return this.#mediaOffsetSec
+  /** Schedule the song source + count-in clicks; mirror of the controller tail. */
+  #launch(
+    engine: MixerEngine,
+    plan: PlaybackPlan | null,
+    startPos: number,
+    preroll: number,
+    wantsCountIn: boolean,
+  ): void {
+    // `engine.play` sets `ctxStartTime = ac.currentTime + 0.04 + preroll` and
+    // its `playStartCtx` / `playStartPos` anchor — IDENTICAL to the controller's
+    // `ctxStart = ctx.currentTime + PLAY_START_LOOKAHEAD_SEC + preroll`.
+    void engine.play(startPos, { startDelaySec: preroll })
+    const ctxStart = engine.playStartCtx
+
+    // Pre-schedule the count-in clicks against the exact ctxStart, so they are
+    // sample-aligned with the song's first sample. The WHAT/WHEN is the pure
+    // `countInClickTimes`; we only make the sound.
+    if (wantsCountIn && plan && this.#clickMaster) {
+      const fires = countInClickTimes(
+        plan,
+        ctxStart,
+        this.clickOffsetSec,
+        engine.ac.currentTime,
+      )
+      for (const f of fires) {
+        playMetronomeClick(engine.ac, this.#clickMaster, f.atCtxTime, f.downbeat)
+      }
+    }
+
+    this.#playing = true
+    this.#positionSec = this.#computeUiPosition()
+    this.#startTransport()
+    this.#startClickLoop()
+  }
+
+  pause(): void {
+    if (!this.#playing) return
+    this.#stopClickLoop()
+    this.#stopTransport()
+    this.#playing = false
+    this.#engine?.pause()
+    this.#positionSec = this.#computeUiPosition()
+  }
+
+  /** Pause and seek to rangeStart. */
+  stop(): void {
+    this.#stopClickLoop()
+    this.#stopTransport()
+    const engine = this.#engine
+    this.#playing = false
+    if (!engine) return
+    engine.stop()
+    if (this.#rangeStart > 0) engine.seek(this.#rangeStart)
+    this.#positionSec = this.#computeUiPosition()
+  }
+
+  togglePlay(): void {
+    if (this.#playing) this.pause()
+    else this.play()
+  }
+
+  /** Seek to a SONG-TIME position. */
+  seek(songTimeSec: number): void {
+    const engine = this.#ensureEngine()
+    const target = songTimeSec + this.mediaOffsetSec // buffer-time
+    const wasPlaying = this.#playing
+    if (wasPlaying) {
+      this.#stopClickLoop()
+      this.#stopTransport()
+      engine.pause()
+      this.#playing = false
+    }
+    engine.seek(target) // clamps to [0, durationSec], sets playStartPos when stopped
+    this.#positionSec = this.#computeUiPosition()
+    if (wasPlaying) this.play()
   }
 
   dispose(): void {
-    this.controller.destroy()
-    if (this.#decodeCtx) void this.#decodeCtx.close().catch(() => {})
-    this.#decodeCtx = null
-    this.#decodedFile = null
+    this.#stopClickLoop()
+    this.#stopTransport()
+    this.#unsubEngine?.()
+    this.#unsubEngine = null
+    if (this.#clickMaster) {
+      try {
+        this.#clickMaster.disconnect()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.#clickMaster = null
+    if (this.#engine) void this.#engine.dispose().catch(() => {})
+    this.#engine = null
+    this.#effectCleanup?.()
+    this.#effectCleanup = null
     this.audioBuffer = null
+    this.#loadedFile = null
+    this.#playing = false
+    this.#positionSec = 0
+  }
+
+  // ── Internals: engine graph ────────────────────────────────────────
+
+  #ensureEngine(): MixerEngine {
+    if (this.#engine) return this.#engine
+    const engine = new MixerEngine()
+    const click = engine.ac.createGain()
+    click.gain.value = Math.max(0, this.clickVolume)
+    click.connect(engine.ac.destination)
+    this.#clickMaster = click
+    // Mirror engine-driven transport changes (e.g. auto-stop at the buffer end)
+    // into the reactive `#playing` flag. MixerEngine has no Svelte reactivity.
+    this.#unsubEngine = engine.onUpdate((s: MixerSnapshot) => {
+      if (this.#playing && s.state !== 'playing') {
+        // Engine stopped on its own — tear down the loops.
+        this.#playing = false
+        this.#stopClickLoop()
+        this.#stopTransport()
+        this.#positionSec = this.#computeUiPosition()
+      }
+    })
+    this.#engine = engine
+    return engine
+  }
+
+  #registerTrack(buf: AudioBuffer): void {
+    const engine = this.#ensureEngine()
+    if (this.#playing) this.stop()
+    engine.setTrack({
+      key: SONG_TRACK_KEY,
+      label: 'Song',
+      buffer: buf,
+      volume: Math.max(0, Math.min(1, this.songVolume)),
+      muted: false,
+      soloed: false,
+    })
+  }
+
+  // ── Internals: position derivation ─────────────────────────────────
+
+  /**
+   * UI playhead in BUFFER-time. Same derivation as the controller's
+   * `#computeCurrentPosition()`: the engine's SIGNED scheduling position,
+   * floored at `playStartPos` so the playhead never reports below song start
+   * during the count-in pre-roll.
+   */
+  #computeUiPosition(): number {
+    const engine = this.#engine
+    if (!engine) return 0
+    return Math.max(engine.playStartPos, engine.schedulingPositionSec())
+  }
+
+  // ── Internals: transport rAF (position mirror + range auto-stop) ───
+
+  #startTransport(): void {
+    if (this.#transportRaf) return
+    this.#transportRaf = requestAnimationFrame(this.#tickTransport)
+  }
+
+  #stopTransport(): void {
+    if (this.#transportRaf) cancelAnimationFrame(this.#transportRaf)
+    this.#transportRaf = 0
+  }
+
+  #tickTransport = (): void => {
+    const engine = this.#engine
+    if (!this.#playing || !engine) {
+      this.#stopTransport()
+      return
+    }
+    // Engine reached the buffer end on its own → stop.
+    if (engine.snapshot().state !== 'playing') {
+      this.#playing = false
+      this.#stopClickLoop()
+      this.#positionSec = this.#computeUiPosition()
+      this.#stopTransport()
+      return
+    }
+    const pos = this.#computeUiPosition()
+    this.#positionSec = pos
+    // Range auto-stop: the engine plays to the buffer end (it has no range),
+    // so we stop it when the floored position reaches rangeEnd — the same rAF
+    // guard the controller uses (belt-and-suspenders there, primary here).
+    if (this.#rangeEnd > this.#rangeStart && pos >= this.#rangeEnd - END_EPS) {
+      this.#playing = false
+      this.#stopClickLoop()
+      this.#stopTransport()
+      engine.stop()
+      if (this.#rangeStart > 0) engine.seek(this.#rangeStart)
+      this.#positionSec = this.#computeUiPosition()
+      return
+    }
+    this.#transportRaf = requestAnimationFrame(this.#tickTransport)
+  }
+
+  // ── Internals: click rAF loop ──────────────────────────────────────
+
+  #startClickLoop(): void {
+    if (this.#clickRaf) return
+    if (!this.playWithClick) return
+    const engine = this.#engine
+    const plan = this.#plan
+    if (!engine || !plan || plan.clickPoints.length === 0) return
+    // Signed scheduling position: during a count-in pre-roll this is negative,
+    // so the downbeat at `timeSec === 0` is correctly still AHEAD of us.
+    const planTime = engine.schedulingPositionSec() - this.mediaOffsetSec
+    this.#nextClickIdx = initialClickIndex(plan, planTime)
+    this.#clickRaf = requestAnimationFrame(this.#runClickLoop)
+  }
+
+  #stopClickLoop(): void {
+    if (this.#clickRaf) cancelAnimationFrame(this.#clickRaf)
+    this.#clickRaf = 0
+  }
+
+  #runClickLoop = (): void => {
+    const engine = this.#engine
+    const master = this.#clickMaster
+    if (!engine || !master || !this.playWithClick || !this.#playing) {
+      this.#stopClickLoop()
+      return
+    }
+    const plan = this.#plan
+    if (!plan) {
+      this.#stopClickLoop()
+      return
+    }
+
+    // Position derives from the SAME ctx clock the song source is locked to —
+    // they cannot disagree. It is the SIGNED scheduling position, so during the
+    // count-in pre-roll plan-time is negative and clicks are scheduled at their
+    // true distance ahead instead of being dumped into "now".
+    const planTime = engine.schedulingPositionSec() - this.mediaOffsetSec
+    const ctxNow = engine.ac.currentTime
+
+    const { fires, nextIdx, done } = dueClicks(
+      plan,
+      this.#nextClickIdx,
+      planTime,
+      ctxNow,
+      this.clickOffsetSec,
+    )
+    this.#nextClickIdx = nextIdx
+    for (const f of fires) {
+      playMetronomeClick(engine.ac, master, f.atCtxTime, f.downbeat)
+    }
+
+    if (done) {
+      this.#stopClickLoop()
+      return
+    }
+    this.#clickRaf = requestAnimationFrame(this.#runClickLoop)
   }
 }
 
