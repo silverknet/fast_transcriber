@@ -36,19 +36,19 @@
  * at `ctxStart + prependSec` so bar 1 beat 1 lands exactly one beat
  * after the last count-in click.
  */
+import {
+  CLICK_SCHEDULE_LEAD_SEC,
+  PLAY_START_LOOKAHEAD_SEC,
+  countInClickTimes,
+  dueClicks,
+  initialClickIndex,
+} from '$lib/audio/clickScheduling'
 import { playMetronomeClick } from '$lib/audio/debugClickTrack'
 import { songPlaybackPlan, type PlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
 
+/** Auto-stop epsilon at clip ends. Not a click-scheduling constant. */
 const END_EPS = 0.028
-/** rAF lookahead for click scheduling. */
-const CLICK_LOOKAHEAD_SEC = 0.025
-/** Web Audio scheduling lead-time so clicks aren't audibly late. */
-const CLICK_SCHEDULE_LEAD_SEC = 0.002
-/** Grace window for "click happened just now". */
-const CLICK_PAST_GRACE_SEC = 0.018
-/** Lookahead before we schedule the BufferSource to start. Same as MixerEngine. */
-const PLAY_START_LOOKAHEAD_SEC = 0.04
 
 export class PlaybackController {
   // ── Inputs ─────────────────────────────────────────────────────────
@@ -300,17 +300,12 @@ export class PlaybackController {
     this.#playEndPositionSec = endPos
 
     // Pre-schedule count-in clicks. They live in `ctx` time too, so
-    // they're sample-aligned with the song's first sample.
+    // they're sample-aligned with the song's first sample. The WHAT/WHEN
+    // decision is the pure `countInClickTimes`; we only make the sound.
     if (wantsCountIn) {
-      const calOffset = this.clickOffsetSec
-      for (const c of plan!.clickPoints) {
-        if (!c.isCountIn) continue
-        // c.timeSec is in [−prependSec, 0). The Nth count-in click
-        // lands `prependSec + c.timeSec` seconds before song start,
-        // i.e. `ctxStart + c.timeSec` (negative shift behind ctxStart).
-        const fireAt = ctxStart + c.timeSec + calOffset
-        if (fireAt < ctx.currentTime + CLICK_SCHEDULE_LEAD_SEC) continue
-        playMetronomeClick(ctx, this.#clickMaster!, fireAt, c.downbeat)
+      const fires = countInClickTimes(plan!, ctxStart, this.clickOffsetSec, ctx.currentTime)
+      for (const f of fires) {
+        playMetronomeClick(ctx, this.#clickMaster!, f.atCtxTime, f.downbeat)
       }
     }
 
@@ -516,10 +511,7 @@ export class PlaybackController {
     // Signed position: during a count-in pre-roll this is negative, so the
     // downbeat at `timeSec === 0` is correctly still AHEAD of us.
     const planTime = this.#computeSchedulingPosition() - this.mediaTimeOffsetSec
-    let i = plan.clickPoints.findIndex((c) => !c.isCountIn || c.timeSec >= -1e-9)
-    if (i < 0) i = plan.clickPoints.length
-    while (i < plan.clickPoints.length && plan.clickPoints[i]!.timeSec < planTime - CLICK_PAST_GRACE_SEC) i++
-    this.#nextClickIdx = i
+    this.#nextClickIdx = initialClickIndex(plan, planTime)
     this.#clickRaf = requestAnimationFrame(this.#runClickLoop)
   }
 
@@ -551,43 +543,34 @@ export class PlaybackController {
     const planTime = position - this.mediaTimeOffsetSec
     const ctxNow = ctx.currentTime
 
-    // Drop clicks too far in the past.
-    while (
-      this.#nextClickIdx < plan.clickPoints.length &&
-      plan.clickPoints[this.#nextClickIdx]!.timeSec < planTime - CLICK_PAST_GRACE_SEC
-    ) {
-      this.#nextClickIdx++
-    }
-
-    while (
-      this.#nextClickIdx < plan.clickPoints.length &&
-      plan.clickPoints[this.#nextClickIdx]!.timeSec <= planTime + CLICK_LOOKAHEAD_SEC
-    ) {
-      const c = plan.clickPoints[this.#nextClickIdx]!
-      // Skip count-in clicks — those were pre-scheduled in `play()`.
-      if (c.timeSec >= -1e-9) {
-        const delta = c.timeSec - planTime
-        const offset = this.clickOffsetSec
-        const scheduleAt = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, delta + offset)
-        playMetronomeClick(ctx, master, scheduleAt, c.downbeat)
-        if (this.debugClickTiming && this.#debugLogBudget > 0) {
-          this.#debugLogBudget--
-          console.log('[click]', {
-            beat: this.#nextClickIdx,
-            downbeat: c.downbeat,
-            position: position.toFixed(4),
-            planTime: planTime.toFixed(4),
-            ctxNow: ctxNow.toFixed(4),
-            delta: delta.toFixed(4),
-            offsetApplied: offset.toFixed(4),
-            scheduleAt: scheduleAt.toFixed(4),
-          })
-        }
+    // Pure decision: which song clicks are due this tick, at what ctx
+    // times, and is the plan exhausted. We only make the sound.
+    const { fires, nextIdx, done } = dueClicks(
+      plan,
+      this.#nextClickIdx,
+      planTime,
+      ctxNow,
+      this.clickOffsetSec,
+    )
+    this.#nextClickIdx = nextIdx
+    for (const f of fires) {
+      playMetronomeClick(ctx, master, f.atCtxTime, f.downbeat)
+      if (this.debugClickTiming && this.#debugLogBudget > 0) {
+        this.#debugLogBudget--
+        console.log('[click]', {
+          beat: f.idx,
+          downbeat: f.downbeat,
+          position: position.toFixed(4),
+          planTime: planTime.toFixed(4),
+          ctxNow: ctxNow.toFixed(4),
+          delta: f.delta.toFixed(4),
+          offsetApplied: this.clickOffsetSec.toFixed(4),
+          scheduleAt: f.atCtxTime.toFixed(4),
+        })
       }
-      this.#nextClickIdx++
     }
 
-    if (this.#nextClickIdx >= plan.clickPoints.length) {
+    if (done) {
       this.#stopClickLoop()
       return
     }
