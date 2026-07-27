@@ -843,6 +843,9 @@
         active: now >= t0 && now < t1,
       })
     }
+    // Chronological (song order), so the nav strip + the "fill chords from…"
+    // menu read like a timeline rather than storage order.
+    out.sort((a, b) => a.startSec - b.startSec)
     return out
   })
 
@@ -857,8 +860,14 @@
   let sectionFillMenu = $state<{ targetId: string; x: number; y: number } | null>(null)
   const sectionFillSources = $derived.by(() => {
     if (!sectionFillMenu) return [] as typeof chordSectionNav
-    return chordSectionNav.filter((s) => s.id !== sectionFillMenu!.targetId)
+    // The full timeline in song order (chordSectionNav is sorted), INCLUDING the
+    // right-clicked section itself — shown read-only as a "you are here" anchor
+    // so choosing a source is oriented by position, not an unordered list.
+    return chordSectionNav
   })
+  const sectionFillHasSources = $derived(
+    sectionFillSources.some((s) => s.id !== sectionFillMenu?.targetId),
+  )
   function openSectionFillMenu(e: MouseEvent, sectionId: string) {
     e.preventDefault()
     e.stopPropagation()
@@ -2473,22 +2482,40 @@
             onpointerdown={(e) => e.stopPropagation()}
           >
             <div class="text-muted-foreground px-2 py-1 font-bold uppercase tracking-wide">Fill chords from…</div>
-            {#if sectionFillSources.length === 0}
-              <div class="text-muted-foreground px-2 py-1.5">No earlier section</div>
+            {#if !sectionFillHasSources}
+              <div class="text-muted-foreground px-2 py-1.5">No other section to copy from</div>
             {:else}
               {#each sectionFillSources as src (src.id)}
-                <button
-                  type="button"
-                  class="hover:bg-muted flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left"
-                  role="menuitem"
-                  onclick={() => chooseSectionFillSource(src.id)}
-                >
-                  <span
-                    class="size-2.5 shrink-0 rounded-[2px]"
-                    style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
-                  ></span>
-                  <span class="truncate">{src.label}</span>
-                </button>
+                {@const isCurrent = src.id === sectionFillMenu.targetId}
+                {#if isCurrent}
+                  <div
+                    class="flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left opacity-55"
+                    role="menuitem"
+                    aria-current="true"
+                    aria-disabled="true"
+                    title="The section you right-clicked (shown for position)"
+                  >
+                    <span
+                      class="size-2.5 shrink-0 rounded-[2px]"
+                      style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
+                    ></span>
+                    <span class="truncate">{src.label}</span>
+                    <span class="text-muted-foreground ml-auto text-[10px] font-bold uppercase tracking-wide">current</span>
+                  </div>
+                {:else}
+                  <button
+                    type="button"
+                    class="hover:bg-muted flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left"
+                    role="menuitem"
+                    onclick={() => chooseSectionFillSource(src.id)}
+                  >
+                    <span
+                      class="size-2.5 shrink-0 rounded-[2px]"
+                      style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
+                    ></span>
+                    <span class="truncate">{src.label}</span>
+                  </button>
+                {/if}
               {/each}
             {/if}
           </div>
