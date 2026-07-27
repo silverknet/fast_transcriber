@@ -254,6 +254,33 @@ describe('UnifiedTransport configuration + readiness', () => {
   })
 })
 
+describe('UnifiedTransport — song switching resets position (regression)', () => {
+  it('loading a new song resets to the top even when the singleton was left mid-song', async () => {
+    const t = await freshTransport()
+    // Song A: play, advance the shared engine clock into the second half, pause.
+    await loadSong(t, makeSong({ barCount: 8 }), 16)
+    t.play()
+    const ctx = lastCtx!
+    ctx.currentTime = 10 // ~second half of the 16s buffer
+    t.pause()
+    expect(t.songTimeSec).toBeGreaterThan(5) // paused mid-song
+
+    // Load a DIFFERENT file (new song) into the SAME persistent transport.
+    t.configure(makeSong({ barCount: 8 }))
+    await t.loadFile(makeFile('song-b.wav'))
+
+    // Must be reset to the top — not the previous song's leftover position.
+    expect(t.songTimeSec).toBeCloseTo(0, 6)
+
+    // …and playing the new song starts the source from offset 0 (the top),
+    // which is also where the click loop anchors (fixes "clicks start midway").
+    t.play()
+    const newSource = lastCtx!.bufferSources[lastCtx!.bufferSources.length - 1]!
+    expect(newSource.starts[0]![1]).toBeCloseTo(0, 6)
+    t.dispose()
+  })
+})
+
 describe('UnifiedTransport.play() — engine source scheduling', () => {
   it('no-ops (no engine/context created) when no file is loaded', async () => {
     const t = await freshTransport()

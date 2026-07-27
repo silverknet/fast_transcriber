@@ -547,6 +547,16 @@ class UnifiedTransport {
       muted: false,
       soloed: false,
     })
+    // This transport is a persistent module singleton shared across songs, so a
+    // freshly-loaded song must be reset to the top — otherwise playback AND the
+    // click loop start from wherever the PREVIOUS song's playhead / selection was
+    // left (the "click track starts in the second half after switching songs"
+    // regression). Reset the engine position, the selection range, and the mirror.
+    engine.seek(0)
+    this.#rangeStart = 0
+    this.#rangeEnd = 0
+    this.#nextClickIdx = 0
+    this.#positionSec = 0
   }
 
   // ── Internals: position derivation ─────────────────────────────────
