@@ -54,7 +54,7 @@
   } from '$lib/components/TimelineBeatGrid.svelte'
   import { triggerBeatPulse } from '$lib/stores/beatPulse'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
-  import { SECTION_KIND_OPTIONS } from '$lib/songmap/sectionEdit'
+  import SectionKindPills from '$lib/components/editor/SectionKindPills.svelte'
   import type { BarGridAction } from '$lib/songmap/timelineEdit'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
 
@@ -255,10 +255,6 @@
 
   /** Selected bar in the strip (grid mode). */
   let selectedBarId = $state<string | null>(null)
-
-  let sectionTagChoice = $state<SectionKind>('verse')
-  /** Free-text label, only consulted when sectionTagChoice === 'custom'. */
-  let customSectionLabel = $state('')
 
   $effect(() => {
     const ids = new Set(beatGrid?.bars.map((b) => b.id) ?? [])
@@ -806,6 +802,36 @@
       out.push({ key: sec.id, kind: sec.kind, x0Pct, wPct, xPx, wPx })
     }
     return out
+  })
+
+  /**
+   * The existing section that the current sections-selection exactly covers.
+   * Clicking a section band selects its whole bar range, so an exact bar-range
+   * match means "this section is selected" → the pill switcher highlights its
+   * kind and offers Rename. A fresh (non-matching) range → `null` = create mode.
+   */
+  let selectedSection = $derived.by((): Section | null => {
+    if (timelineStripMode !== 'sections' || sectionsSelectionBarIds.length === 0 || !beatGrid) {
+      return null
+    }
+    const byId = new Map(beatGrid.bars.map((b) => [b.id, b]))
+    let start = Number.POSITIVE_INFINITY
+    let end = Number.NEGATIVE_INFINITY
+    let count = 0
+    for (const id of sectionsSelectionBarIds) {
+      const b = byId.get(id)
+      if (!b) continue
+      count++
+      if (b.index < start) start = b.index
+      if (b.index > end) end = b.index
+    }
+    // Only an exact, contiguous match of an existing section counts as "selected".
+    if (count === 0 || end - start + 1 !== count) return null
+    return (
+      mapSections.find(
+        (s) => s.barRange.startBarIndex === start && s.barRange.endBarIndex === end,
+      ) ?? null
+    )
   })
 
   /** Chords mode: clickable section jump-list so you can flip between parts
@@ -2242,51 +2268,18 @@
           </div>
         {/if}
         {#if beatGridEditing && timelineStripMode === 'sections' && onApplySectionTag}
-          <div
-            class="border-foreground/10 bg-muted/20 flex flex-wrap items-center gap-2 border-b px-2 py-1.5"
-            role="toolbar"
-            aria-label="Section tags"
+          <SectionKindPills
+            selectedKind={selectedSection?.kind ?? null}
+            hasSelection={sectionsSelectionBarIds.length > 0}
+            currentLabel={selectedSection?.label ?? ''}
+            sectionName={selectedSection?.label ?? ''}
+            onPick={(kind, customLabel) => onApplySectionTag?.(kind, customLabel)}
+          />
+          <p
+            class="border-foreground/10 bg-muted/10 text-muted-foreground flex flex-wrap items-center gap-2 border-b px-2 py-1 text-[11px]"
           >
-            <label class="text-muted-foreground flex items-center gap-2 text-xs">
-              Section
-              <select
-                class="border-input bg-background ring-offset-background focus-visible:ring-ring h-8 rounded-md border px-2 text-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-                bind:value={sectionTagChoice}
-              >
-                {#each SECTION_KIND_OPTIONS as opt (opt.kind)}
-                  <option value={opt.kind}>{opt.label}</option>
-                {/each}
-              </select>
-            </label>
-            {#if sectionTagChoice === 'custom'}
-              <input
-                type="text"
-                placeholder="Label (e.g. Drop, Hook)"
-                bind:value={customSectionLabel}
-                class="border-input bg-background ring-offset-background focus-visible:ring-ring h-8 w-40 rounded-md border px-2 text-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-                aria-label="Custom section label"
-                maxlength="40"
-              />
-            {/if}
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              class="h-8 text-xs"
-              disabled={sectionsSelectionBarIds.length === 0 ||
-                (sectionTagChoice === 'custom' && customSectionLabel.trim().length === 0)}
-              onclick={() =>
-                onApplySectionTag?.(
-                  sectionTagChoice,
-                  sectionTagChoice === 'custom' ? customSectionLabel : undefined,
-                )}
-            >
-              Tag selection
-            </Button>
-            <span class="text-muted-foreground text-[11px]">
-              Drag to select · Shift+drag adds · Shift+click range · ⌘/Ctrl+click toggle · Esc clears
-            </span>
-          </div>
+            Click a section to select it · drag to select a range · Shift+click extends · ⌘/Ctrl+click toggles · Esc clears
+          </p>
           <div
             class="border-foreground/10 bg-muted/10 flex flex-wrap items-center gap-2 border-b px-2 py-1.5 text-xs"
             role="toolbar"

@@ -806,6 +806,16 @@
     barBoundaryResizeCleanup = teardown
   }
 
+  /** The existing section covering `barIndex`, if any (bar-index range). */
+  function sectionRangeAtBarIndex(barIndex: number): { start: number; end: number } | null {
+    for (const s of effectiveSections) {
+      if (barIndex >= s.barRange.startBarIndex && barIndex <= s.barRange.endBarIndex) {
+        return { start: s.barRange.startBarIndex, end: s.barRange.endBarIndex }
+      }
+    }
+    return null
+  }
+
   function applySectionsClick(hit: Bar, shift: boolean, meta: boolean) {
     const idx = hit.index
     if (shift && rangeAnchorIndex != null) {
@@ -819,7 +829,18 @@
       selectedBarIds = [...set]
       rangeAnchorIndex = idx
     } else {
-      selectedBarIds = [hit.id]
+      // Plain click: selecting an existing section is first-class — clicking any
+      // bar inside a tagged section selects the WHOLE section. Untagged bars
+      // select just the one bar so a fresh range can still be built up for a new
+      // section (drag also always selects a sub-range).
+      const sec = sectionRangeAtBarIndex(idx)
+      if (sec) {
+        selectedBarIds = sortedBars
+          .filter((bar) => bar.index >= sec.start && bar.index <= sec.end)
+          .map((bar) => bar.id)
+      } else {
+        selectedBarIds = [hit.id]
+      }
       rangeAnchorIndex = idx
     }
   }

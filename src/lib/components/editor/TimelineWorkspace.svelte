@@ -771,7 +771,7 @@
     editMode === 'grid'
       ? 'Edit bars and beats in the strip above the waveform. Add or remove bars at the ends, wheel to change beats per bar, and drag a bar edge to adjust timing.'
       : editMode === 'sections'
-        ? 'Drag on the bar strip, or use Shift+click / Cmd/Ctrl+click, to select a range. Pick a section type to tag it.'
+        ? 'Click a section to select it, or drag the bar strip to select a range. Then click a colored type to tag or re-tag it — its color updates instantly.'
         : 'Select beats on the chord strip, double-click/tap to edit, and press Space to play from the selected beat. Cmd/Ctrl+C and Cmd/Ctrl+V copy and paste chords.',
   )
 
