@@ -15,6 +15,7 @@
    * info, then a per-mode help footer.
    */
   import HelpHint from '$lib/components/HelpHint.svelte'
+  import { inspectorPortal } from '$lib/components/editor/inspectorPortal.svelte'
   import { songMap } from '$lib/stores/songMap'
   import { audioSession } from '$lib/stores/audioSession'
   import { sectionKindColor } from '$lib/songmap/sectionColors'
@@ -281,8 +282,16 @@
         </div>
       {/if}
 
-      <!-- ───── CHORDS: key/transpose + analysis status ───── -->
+      <!-- ───── CHORDS: portalled edit controls + key/transpose + analysis ───── -->
       {#if editMode === 'chords'}
+        <!-- Deep chord controls + song-key picker, DEFINED in TimelineWorkspace
+             (so they keep its state/handlers) but rendered here in the rail. -->
+        {#if inspectorPortal.extra}
+          {@const Extra = inspectorPortal.extra}
+          <div class="px-3 pt-2">
+            {@render Extra()}
+          </div>
+        {/if}
         {@render keyTranspose()}
         {@render insHead('Chords')}
         {@render row('Chords placed', String(chordCount))}

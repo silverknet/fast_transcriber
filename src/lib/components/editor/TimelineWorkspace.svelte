@@ -7,6 +7,7 @@
   import SectionSuggestionBanner from '$lib/components/SectionSuggestionBanner.svelte'
   import ChordAutoFillBanner from '$lib/components/ChordAutoFillBanner.svelte'
   import ChordRadialQuickSelect from '$lib/components/ChordRadialQuickSelect.svelte'
+  import { inspectorPortal } from '$lib/components/editor/inspectorPortal.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Layers, Wand2 } from '@lucide/svelte'
   import {
@@ -1816,8 +1817,262 @@
       chordsPlaceBusy = false
     }
   }
+
+  // ── Portal the Chords tab's controls into the shell's right inspector ──────
+  // The chord-controls toolbar + song-key picker are DEFINED here (as the
+  // `chordInspectorControls` snippet below) so they keep their closures over
+  // this component's `$state` + handlers, but they RENDER in the shell's
+  // inspector `<aside>` via `EditInspector`. No logic moves — only WHERE the
+  // markup paints. Registered while chords is active; cleared on unmount / mode
+  // change so other tabs' inspector content is untouched.
+  $effect(() => {
+    inspectorPortal.extra = editMode === 'chords' ? chordInspectorControls : null
+    return () => {
+      inspectorPortal.extra = null
+    }
+  })
 </script>
 
+
+{#snippet chordInspectorControls()}
+  <!-- ── Chords toolbar: one row instead of three stacked blocks.
+       Drafts moved up next to the song title — they cover chords,
+       sections AND lyrics, so they don't belong to one tab. ── -->
+  <EditSectionToolbar
+    title="Chord controls"
+    compact
+    helpText="Suggestions can be accepted for the selected section or hidden once the section is finished."
+  >
+    {#snippet primary()}
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-7 border-2 px-2 text-xs font-bold"
+        onclick={() => (sheetImportOpen = true)}
+        title="Paste a chord sheet — its chords and sections land as a new draft"
+      >
+        Sheet
+      </Button>
+
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-7 border-2 px-2 text-xs font-bold {chordInspectorOpen ? 'bg-foreground text-background' : ''}"
+        onclick={() => (chordInspectorOpen = !chordInspectorOpen)}
+        title="Show every stored chord with its exact bar, beat and time — for checking what you see against what's saved"
+      >
+        Inspect
+      </Button>
+
+      <!-- Auto-fill: a low-frequency helper. Show a small icon ONLY when a
+           suggestion is available; clicking expands the banner in place. -->
+      {#if activeAutoFill}
+        <Button
+          variant="outline"
+          size="icon"
+          class="size-7 border-2 {showAutoFill ? 'bg-foreground text-background' : ''}"
+          onclick={() => (showAutoFill = !showAutoFill)}
+          aria-pressed={showAutoFill}
+          title="A chord auto-fill suggestion is available — copy chords from a matching section"
+          aria-label="Chord auto-fill suggestion"
+        >
+          <Wand2 class="size-3.5" aria-hidden="true" />
+        </Button>
+      {/if}
+
+      <span class="border-foreground/30 mx-1 h-5 border-l" aria-hidden="true"></span>
+
+      <label class="inline-flex items-center gap-2 font-bold">
+        <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
+        Suggestions
+      </label>
+      <span class="text-muted-foreground">
+        {currentChordSection
+          ? sectionDisplayLabel(currentChordSection)
+          : 'Select a beat in a section'}
+      </span>
+      {#if currentChordSection && currentChordSectionDone}
+        <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase">done</span>
+      {/if}
+      <button
+        type="button"
+        class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+        onclick={handleAcceptCurrentSectionSuggestions}
+        disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
+        title="Write every visible suggestion in the selected section"
+      >
+        Use section suggestions ({currentSectionSuggestionEntries.length})
+      </button>
+      <button
+        type="button"
+        class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+        onclick={toggleCurrentChordSectionDone}
+        disabled={!currentChordSection}
+        title={currentChordSectionDone
+          ? 'Show chord suggestions in this section again'
+          : 'Hide chord suggestions in this section'}
+      >
+        {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
+      </button>
+    {/snippet}
+  </EditSectionToolbar>
+  {#if chordsPlaceErr || chordsPlaceMsg || draftMsg}
+    <p
+      class="mb-3 px-1 text-xs {chordsPlaceErr ? 'text-destructive' : 'text-muted-foreground'}"
+      role="status"
+    >
+      {chordsPlaceErr || chordsPlaceMsg || draftMsg}
+    </p>
+  {/if}
+
+  {#if chordInspectorOpen}
+    <!-- The stored truth, row by row: compare against the grid/waveform.
+         Bar and beat are 1-based here to match what a musician counts. -->
+    <div class="border-foreground/15 mb-3 border text-xs">
+      <div class="border-foreground/15 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
+        <span>Stored chords · {chordInspectorRows.length}</span>
+        <span>draft: {activeDraftLabel}</span>
+        <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
+        <button
+          type="button"
+          class="border-foreground hover:bg-foreground hover:text-background ml-auto border px-1.5 py-0.5 normal-case"
+          onclick={() => void copyChordInspector()}
+        >
+          {chordInspectorCopied ? 'Copied ✓' : 'Copy all'}
+        </button>
+      </div>
+      <div class="max-h-64 overflow-auto">
+        <table class="w-full font-mono text-[11px] tabular-nums">
+          <thead>
+            <tr class="text-muted-foreground text-left">
+              <th class="px-2 py-0.5 font-bold">#</th>
+              <th class="px-2 py-0.5 font-bold">bar.beat</th>
+              <th class="px-2 py-0.5 font-bold">time</th>
+              <th class="px-2 py-0.5 font-bold">chord</th>
+              <th class="px-2 py-0.5 font-bold">placed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each chordInspectorRows as row, ri (row.id)}
+              <tr class="odd:bg-muted/40">
+                <td class="text-muted-foreground px-2 py-0.5">{ri + 1}</td>
+                <td class="px-2 py-0.5">
+                  {row.barIndex !== null ? `${row.barIndex + 1}.${row.beatInBar}` : '—'}
+                </td>
+                <td class="px-2 py-0.5">{formatInspectorTime(row.timeSec)}</td>
+                <td class="px-2 py-0.5 font-bold">{row.symbol}</td>
+                <td class="text-muted-foreground px-2 py-0.5">{row.origin}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        {#if chordInspectorRows.length === 0}
+          <p class="text-muted-foreground px-2 py-2 italic">No chords on the active track.</p>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+
+  <!-- Collapsed by default; the Wand toggle in the toolbar expands it in
+       place. Only mounts when open AND a suggestion exists, so it takes
+       near-zero vertical space the rest of the time. -->
+  {#if showAutoFill && activeAutoFill}
+    <ChordAutoFillBanner
+      proposal={activeAutoFill}
+      index={activeAutoFillPosition}
+      total={visibleAutoFills.length}
+      dismissedCount={dismissedAutoFillSigs.length}
+      onAccept={handleAcceptAutoFill}
+      onSkip={handleSkipAutoFill}
+      onDismiss={handleDismissAutoFill}
+      onUndoDismiss={handleUndoDismissAutoFill}
+    />
+  {/if}
+  <div data-song-key-picker>
+    <EditSectionToolbar
+      title="Song key"
+      compact
+      secondaryVisible={!!((showKeyHint && detectedKey) ||
+        chordChromaStatus === 'analyzing' ||
+        chordChromaStatus === 'installing' ||
+        (chordChromaStatus === 'error' && chordChromaError))}
+      helpText="Set the source song key used for display, transposed labels, suggestions, and exports. Detection is only a helper; the saved key is what matters."
+    >
+      {#snippet primary()}
+        <select
+          class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
+          value={keyDraft.root}
+          onchange={(e) =>
+            applyKeyPatch({ ...keyDraft, root: e.currentTarget.value as NoteName })}
+        >
+          {#each NOTE_NAMES as n (n)}
+            <option value={n}>{n}</option>
+          {/each}
+        </select>
+        <select
+          class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
+          value={keyDraft.accidental ?? ''}
+          onchange={(e) => {
+            const v = e.currentTarget.value
+            const accidental: Accidental | undefined =
+              v === '' ? undefined : (v as Accidental)
+            applyKeyPatch({ ...keyDraft, accidental })
+          }}
+        >
+          <option value="">natural</option>
+          <option value="flat">♭</option>
+          <option value="sharp">♯</option>
+          <option value="natural">♮</option>
+        </select>
+        <select
+          class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
+          value={keyDraft.mode}
+          onchange={(e) =>
+            applyKeyPatch({
+              ...keyDraft,
+              mode: e.currentTarget.value as SongKey['mode'],
+            })}
+        >
+          <option value="major">major</option>
+          <option value="minor">minor</option>
+        </select>
+      {/snippet}
+      {#snippet secondary()}
+        {#if showKeyHint && detectedKey}
+          <span class="text-foreground/70 text-xs">✨</span>
+          <span class="text-foreground/80 text-xs">
+            Detected:
+            <span class="font-semibold">{detectedKeyDisplayLabel()}</span>
+            <span class="text-muted-foreground">({confidenceLabel(detectedKey.confidence)})</span>
+          </span>
+          <button
+            type="button"
+            class="border-foreground bg-background hover:bg-foreground hover:text-background ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
+            onclick={acceptDetectedKey}
+          >
+            Use
+          </button>
+        {:else if chordChromaStatus === 'analyzing' || chordChromaStatus === 'installing'}
+          <span class="text-muted-foreground text-xs italic">
+            ✨ {chordChromaStatus === 'installing'
+              ? 'Installing harmony analyzer...'
+              : 'Analyzing harmony to suggest a key...'}
+          </span>
+        {:else if chordChromaStatus === 'error' && chordChromaError}
+          <span class="text-destructive text-xs">⚠ Key detection failed: {chordChromaError}</span>
+          <button
+            type="button"
+            class="border-destructive ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
+            onclick={() => onRetryChroma()}
+          >
+            Retry
+          </button>
+        {/if}
+      {/snippet}
+    </EditSectionToolbar>
+  </div>
+{/snippet}
 
 {#if $songMap}
   {@const sm = $songMap}
@@ -1839,245 +2094,6 @@
             onDismiss={handleDismissSectionSuggestion}
             onUndoDismiss={handleUndoDismissSectionSuggestion}
           />
-        {/if}
-        {#if editMode === 'chords'}
-          <!-- ── Chords toolbar: one row instead of three stacked blocks.
-               Drafts moved up next to the song title — they cover chords,
-               sections AND lyrics, so they don't belong to one tab. ── -->
-          <EditSectionToolbar
-            title="Chord controls"
-            compact
-            helpText="Suggestions can be accepted for the selected section or hidden once the section is finished."
-          >
-            {#snippet primary()}
-              <Button
-                variant="outline"
-                size="sm"
-                class="h-7 border-2 px-2 text-xs font-bold"
-                onclick={() => (sheetImportOpen = true)}
-                title="Paste a chord sheet — its chords and sections land as a new draft"
-              >
-                Sheet
-              </Button>
-
-              <Button
-                variant="outline"
-                size="sm"
-                class="h-7 border-2 px-2 text-xs font-bold {chordInspectorOpen ? 'bg-foreground text-background' : ''}"
-                onclick={() => (chordInspectorOpen = !chordInspectorOpen)}
-                title="Show every stored chord with its exact bar, beat and time — for checking what you see against what's saved"
-              >
-                Inspect
-              </Button>
-
-              <!-- Auto-fill: a low-frequency helper. Show a small icon ONLY when a
-                   suggestion is available; clicking expands the banner in place. -->
-              {#if activeAutoFill}
-                <Button
-                  variant="outline"
-                  size="icon"
-                  class="size-7 border-2 {showAutoFill ? 'bg-foreground text-background' : ''}"
-                  onclick={() => (showAutoFill = !showAutoFill)}
-                  aria-pressed={showAutoFill}
-                  title="A chord auto-fill suggestion is available — copy chords from a matching section"
-                  aria-label="Chord auto-fill suggestion"
-                >
-                  <Wand2 class="size-3.5" aria-hidden="true" />
-                </Button>
-              {/if}
-
-              <span class="border-foreground/30 mx-1 h-5 border-l" aria-hidden="true"></span>
-
-              <label class="inline-flex items-center gap-2 font-bold">
-                <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
-                Suggestions
-              </label>
-              <span class="text-muted-foreground">
-                {currentChordSection
-                  ? sectionDisplayLabel(currentChordSection)
-                  : 'Select a beat in a section'}
-              </span>
-              {#if currentChordSection && currentChordSectionDone}
-                <span class="text-muted-foreground font-mono text-[10px] font-bold uppercase">done</span>
-              {/if}
-              <button
-                type="button"
-                class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
-                onclick={handleAcceptCurrentSectionSuggestions}
-                disabled={!currentChordSection || currentSectionSuggestionEntries.length === 0}
-                title="Write every visible suggestion in the selected section"
-              >
-                Use section suggestions ({currentSectionSuggestionEntries.length})
-              </button>
-              <button
-                type="button"
-                class="text-foreground disabled:text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
-                onclick={toggleCurrentChordSectionDone}
-                disabled={!currentChordSection}
-                title={currentChordSectionDone
-                  ? 'Show chord suggestions in this section again'
-                  : 'Hide chord suggestions in this section'}
-              >
-                {currentChordSectionDone ? 'Show section suggestions' : 'Finish section'}
-              </button>
-            {/snippet}
-          </EditSectionToolbar>
-          {#if chordsPlaceErr || chordsPlaceMsg || draftMsg}
-            <p
-              class="mb-3 px-1 text-xs {chordsPlaceErr ? 'text-destructive' : 'text-muted-foreground'}"
-              role="status"
-            >
-              {chordsPlaceErr || chordsPlaceMsg || draftMsg}
-            </p>
-          {/if}
-
-          {#if chordInspectorOpen}
-            <!-- The stored truth, row by row: compare against the grid/waveform.
-                 Bar and beat are 1-based here to match what a musician counts. -->
-            <div class="border-foreground/15 mb-3 border text-xs">
-              <div class="border-foreground/15 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
-                <span>Stored chords · {chordInspectorRows.length}</span>
-                <span>draft: {activeDraftLabel}</span>
-                <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
-                <button
-                  type="button"
-                  class="border-foreground hover:bg-foreground hover:text-background ml-auto border px-1.5 py-0.5 normal-case"
-                  onclick={() => void copyChordInspector()}
-                >
-                  {chordInspectorCopied ? 'Copied ✓' : 'Copy all'}
-                </button>
-              </div>
-              <div class="max-h-64 overflow-auto">
-                <table class="w-full font-mono text-[11px] tabular-nums">
-                  <thead>
-                    <tr class="text-muted-foreground text-left">
-                      <th class="px-2 py-0.5 font-bold">#</th>
-                      <th class="px-2 py-0.5 font-bold">bar.beat</th>
-                      <th class="px-2 py-0.5 font-bold">time</th>
-                      <th class="px-2 py-0.5 font-bold">chord</th>
-                      <th class="px-2 py-0.5 font-bold">placed</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each chordInspectorRows as row, ri (row.id)}
-                      <tr class="odd:bg-muted/40">
-                        <td class="text-muted-foreground px-2 py-0.5">{ri + 1}</td>
-                        <td class="px-2 py-0.5">
-                          {row.barIndex !== null ? `${row.barIndex + 1}.${row.beatInBar}` : '—'}
-                        </td>
-                        <td class="px-2 py-0.5">{formatInspectorTime(row.timeSec)}</td>
-                        <td class="px-2 py-0.5 font-bold">{row.symbol}</td>
-                        <td class="text-muted-foreground px-2 py-0.5">{row.origin}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-                {#if chordInspectorRows.length === 0}
-                  <p class="text-muted-foreground px-2 py-2 italic">No chords on the active track.</p>
-                {/if}
-              </div>
-            </div>
-          {/if}
-
-
-          <!-- Collapsed by default; the Wand toggle in the toolbar expands it in
-               place. Only mounts when open AND a suggestion exists, so it takes
-               near-zero vertical space the rest of the time. -->
-          {#if showAutoFill && activeAutoFill}
-            <ChordAutoFillBanner
-              proposal={activeAutoFill}
-              index={activeAutoFillPosition}
-              total={visibleAutoFills.length}
-              dismissedCount={dismissedAutoFillSigs.length}
-              onAccept={handleAcceptAutoFill}
-              onSkip={handleSkipAutoFill}
-              onDismiss={handleDismissAutoFill}
-              onUndoDismiss={handleUndoDismissAutoFill}
-            />
-          {/if}
-          <div data-song-key-picker>
-            <EditSectionToolbar
-              title="Song key"
-              compact
-              secondaryVisible={!!((showKeyHint && detectedKey) ||
-                chordChromaStatus === 'analyzing' ||
-                chordChromaStatus === 'installing' ||
-                (chordChromaStatus === 'error' && chordChromaError))}
-              helpText="Set the source song key used for display, transposed labels, suggestions, and exports. Detection is only a helper; the saved key is what matters."
-            >
-              {#snippet primary()}
-                <select
-                  class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
-                  value={keyDraft.root}
-                  onchange={(e) =>
-                    applyKeyPatch({ ...keyDraft, root: e.currentTarget.value as NoteName })}
-                >
-                  {#each NOTE_NAMES as n (n)}
-                    <option value={n}>{n}</option>
-                  {/each}
-                </select>
-                <select
-                  class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
-                  value={keyDraft.accidental ?? ''}
-                  onchange={(e) => {
-                    const v = e.currentTarget.value
-                    const accidental: Accidental | undefined =
-                      v === '' ? undefined : (v as Accidental)
-                    applyKeyPatch({ ...keyDraft, accidental })
-                  }}
-                >
-                  <option value="">natural</option>
-                  <option value="flat">♭</option>
-                  <option value="sharp">♯</option>
-                  <option value="natural">♮</option>
-                </select>
-                <select
-                  class="border-input bg-background text-foreground border-2 px-2 py-1 text-xs"
-                  value={keyDraft.mode}
-                  onchange={(e) =>
-                    applyKeyPatch({
-                      ...keyDraft,
-                      mode: e.currentTarget.value as SongKey['mode'],
-                    })}
-                >
-                  <option value="major">major</option>
-                  <option value="minor">minor</option>
-                </select>
-              {/snippet}
-              {#snippet secondary()}
-                {#if showKeyHint && detectedKey}
-                  <span class="text-foreground/70 text-xs">✨</span>
-                  <span class="text-foreground/80 text-xs">
-                    Detected:
-                    <span class="font-semibold">{detectedKeyDisplayLabel()}</span>
-                    <span class="text-muted-foreground">({confidenceLabel(detectedKey.confidence)})</span>
-                  </span>
-                  <button
-                    type="button"
-                    class="border-foreground bg-background hover:bg-foreground hover:text-background ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
-                    onclick={acceptDetectedKey}
-                  >
-                    Use
-                  </button>
-                {:else if chordChromaStatus === 'analyzing' || chordChromaStatus === 'installing'}
-                  <span class="text-muted-foreground text-xs italic">
-                    ✨ {chordChromaStatus === 'installing'
-                      ? 'Installing harmony analyzer...'
-                      : 'Analyzing harmony to suggest a key...'}
-                  </span>
-                {:else if chordChromaStatus === 'error' && chordChromaError}
-                  <span class="text-destructive text-xs">⚠ Key detection failed: {chordChromaError}</span>
-                  <button
-                    type="button"
-                    class="border-destructive ml-auto border-2 px-2 py-0.5 text-[11px] font-bold"
-                    onclick={() => onRetryChroma()}
-                  >
-                    Retry
-                  </button>
-                {/if}
-              {/snippet}
-            </EditSectionToolbar>
-          </div>
         {/if}
         <WaveformPlayer
           file={$audioSession.file}

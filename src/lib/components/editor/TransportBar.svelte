@@ -17,7 +17,7 @@
      TODO(M1b-next): fold mixer+live onto the shared transport. -->
 {#if $audioSession.file}
   <div
-    class="border-foreground bg-background flex flex-wrap items-center gap-3 border-2 px-3 py-2 font-mono"
+    class="flex flex-wrap items-center gap-3 font-mono"
     role="group"
     aria-label="Transport"
   >
