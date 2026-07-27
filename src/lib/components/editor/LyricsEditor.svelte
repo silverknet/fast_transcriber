@@ -442,7 +442,7 @@
   }
 </script>
 
-<section class="w-full" aria-label="Lyrics">
+<section class="flex min-h-0 w-full flex-1 flex-col" aria-label="Lyrics">
   <EditSectionToolbar
     title="Lyrics"
     helpText={`Lyrics belong to the CURRENT draft (“${activeDraftLabel || '—'}”) — “Save lyrics” stores the text ON THIS DRAFT (no new draft) and replaces that draft's lyrics. Timing each word to the audio is a SEPARATE, optional step — press “Fit to song” only when you want it (needs BarBro Desktop). So you can import lyrics now and fit them later. Chord-sheet lines are stripped here; import chords from the Chords tab.`}
@@ -490,8 +490,10 @@
       </button>
     {/snippet}
   </EditSectionToolbar>
-  <div class="grid gap-4 md:grid-cols-2">
-    <div class="flex flex-col gap-2">
+  <!-- The two columns fill the panel height; each column scrolls internally
+       when its content is long, so the workspace itself stays put. -->
+  <div class="grid min-h-0 flex-1 gap-4 md:grid-cols-2 md:grid-rows-1 md:overflow-hidden">
+    <div class="flex min-h-0 flex-col gap-2 md:overflow-y-auto md:pr-1">
       <label class="text-muted-foreground text-xs font-medium uppercase tracking-wide" for="lyrics-paste">
         Paste lyrics
       </label>
@@ -605,7 +607,7 @@
       {/if}
     </div>
 
-    <div class="flex min-w-0 flex-col gap-2">
+    <div class="flex min-h-0 min-w-0 flex-col gap-2 md:overflow-y-auto md:pl-1">
       <span class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
         Cleaned preview · {lyricsCleanedPreview.lines.length} line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
       </span>

@@ -352,14 +352,16 @@
   }
 </script>
 
-<section class="w-full" aria-label="Cue editor">
+<section class="flex min-h-0 w-full flex-1 flex-col" aria-label="Cue editor">
   <EditSectionToolbar
     title="Cue"
     helpText="Per section, toggle a spoken cue and/or a count-in — click a section to edit its voice line. Switch voice tracks with the pills; Auto-generate reads each section name just before it starts."
   />
-  <div class="mt-3 space-y-3">
+  <!-- Pills stay pinned; the cue timeline fills the remaining height and only
+       scrolls internally if the content genuinely overflows. -->
+  <div class="mt-3 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
     <!-- Voice / performer track pills -->
-    <div class="flex flex-wrap items-center gap-1.5">
+    <div class="flex shrink-0 flex-wrap items-center gap-1.5">
       {#if cuePerformerView}
         <span class="text-muted-foreground mr-1 text-[11px] font-bold uppercase tracking-wide">Performer</span>
         {#each cuePerformerView as pv (pv.performerId)}

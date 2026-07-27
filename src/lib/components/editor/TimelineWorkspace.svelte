@@ -8,7 +8,7 @@
   import ChordAutoFillBanner from '$lib/components/ChordAutoFillBanner.svelte'
   import ChordRadialQuickSelect from '$lib/components/ChordRadialQuickSelect.svelte'
   import { Button } from '$lib/components/ui/button'
-  import { Layers } from '@lucide/svelte'
+  import { Layers, Wand2 } from '@lucide/svelte'
   import {
     Dialog,
     DialogContent,
@@ -633,6 +633,13 @@
    */
   let dismissedAutoFillSigs = $state<string[]>([])
   let currentAutoFillIndex = $state(0)
+  /**
+   * Pure UI toggle (NOT business logic): the chord auto-fill banner is a
+   * low-frequency feature, so it stays collapsed behind a small icon in the
+   * chord toolbar and only expands in place when the user clicks it. Default
+   * collapsed; takes no vertical space until opened.
+   */
+  let showAutoFill = $state(false)
 
   function autoFillSig(proposal: ChordAutoFillProposal): string {
     return `${proposal.sourceSection.id}->${proposal.targetSection.id}`
@@ -1814,8 +1821,12 @@
 
 {#if $songMap}
   {@const sm = $songMap}
+  <!-- Height-filling column: the Edit-timeline surface grows to FILL the
+       workspace; the grid-only History + Metronome controls sit below as
+       compact, non-growing rows so nothing pushes the page into a scroll. -->
+  <div class="flex h-full min-h-0 w-full flex-1 flex-col gap-3">
     {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
-      <section class="w-full" aria-label="Edit timeline">
+      <section class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto" aria-label="Edit timeline">
         <EditSectionToolbar title={timelineToolbarTitle} helpText={timelineToolbarHelp}>
           {#snippet primary()}
             <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
@@ -1866,6 +1877,22 @@
               >
                 Inspect
               </Button>
+
+              <!-- Auto-fill: a low-frequency helper. Show a small icon ONLY when a
+                   suggestion is available; clicking expands the banner in place. -->
+              {#if activeAutoFill}
+                <Button
+                  variant="outline"
+                  size="icon"
+                  class="size-7 border-2 {showAutoFill ? 'bg-foreground text-background' : ''}"
+                  onclick={() => (showAutoFill = !showAutoFill)}
+                  aria-pressed={showAutoFill}
+                  title="A chord auto-fill suggestion is available — copy chords from a matching section"
+                  aria-label="Chord auto-fill suggestion"
+                >
+                  <Wand2 class="size-3.5" aria-hidden="true" />
+                </Button>
+              {/if}
 
               <span class="border-foreground/30 mx-1 h-5 border-l" aria-hidden="true"></span>
 
@@ -1961,16 +1988,21 @@
           {/if}
 
 
-          <ChordAutoFillBanner
-            proposal={activeAutoFill}
-            index={activeAutoFillPosition}
-            total={visibleAutoFills.length}
-            dismissedCount={dismissedAutoFillSigs.length}
-            onAccept={handleAcceptAutoFill}
-            onSkip={handleSkipAutoFill}
-            onDismiss={handleDismissAutoFill}
-            onUndoDismiss={handleUndoDismissAutoFill}
-          />
+          <!-- Collapsed by default; the Wand toggle in the toolbar expands it in
+               place. Only mounts when open AND a suggestion exists, so it takes
+               near-zero vertical space the rest of the time. -->
+          {#if showAutoFill && activeAutoFill}
+            <ChordAutoFillBanner
+              proposal={activeAutoFill}
+              index={activeAutoFillPosition}
+              total={visibleAutoFills.length}
+              dismissedCount={dismissedAutoFillSigs.length}
+              onAccept={handleAcceptAutoFill}
+              onSkip={handleSkipAutoFill}
+              onDismiss={handleDismissAutoFill}
+              onUndoDismiss={handleUndoDismissAutoFill}
+            />
+          {/if}
           <div data-song-key-picker>
             <EditSectionToolbar
               title="Song key"
@@ -2252,9 +2284,10 @@
       {/if}
     {/if}
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
-      <section class="w-full" aria-label="Edit history">
+      <section class="w-full shrink-0" aria-label="Edit history">
         <EditSectionToolbar
           title="History"
+          compact
           helpText="Cmd/Ctrl+Z undoes timeline edits. Hold Shift to redo. Reset restores the saved analyzed grid; re-analyze detects bars and beats again from the current audio."
         >
           {#snippet primary()}
@@ -2325,15 +2358,18 @@
       </section>
     {/if}
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
-      <section class="w-full space-y-4" aria-label="Metronome">
+      <section class="w-full shrink-0" aria-label="Metronome">
         <EditSectionToolbar
           title="Metronome"
+          compact
           helpText="Count-in adds clicks before playback starts. Start at beat sets the song-start anchor; moving it later lets earlier beats play under the count-in, for example a drum fill before the downbeat."
         />
 
-        <fieldset class="border-foreground/15 rounded-[var(--radius)] border px-3 py-2.5">
+        <!-- Compact two-up strip so the metronome controls don't eat height. -->
+        <div class="flex flex-col gap-2 sm:flex-row">
+        <fieldset class="border-foreground/15 min-w-0 flex-1 rounded-[var(--radius)] border px-2.5 py-1.5">
           <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Count-in beats</legend>
-          <div class="flex flex-wrap gap-3 pt-1">
+          <div class="flex flex-wrap gap-3 pt-0.5">
             {#each [0, 4, 8] as n (n)}
               <label class="flex cursor-pointer items-center gap-2 text-sm">
                 <input
@@ -2350,7 +2386,7 @@
           </div>
           <!-- Live readout — confirms the toggle actually took effect and shows
                what the resulting pre-roll will sound like. -->
-          <p class="text-muted-foreground mt-2 font-mono text-xs tabular-nums" role="status">
+          <p class="text-muted-foreground mt-1 font-mono text-xs tabular-nums" role="status">
             {#if cueCountInBeats === 0}
               No count-in — playback starts immediately.
             {:else if cueCountInResult}
@@ -2362,9 +2398,9 @@
           </p>
         </fieldset>
 
-        <fieldset class="border-foreground/15 rounded-[var(--radius)] border px-3 py-2.5">
+        <fieldset class="border-foreground/15 min-w-0 flex-1 rounded-[var(--radius)] border px-2.5 py-1.5">
           <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Start at beat</legend>
-          <div class="flex flex-wrap items-center gap-3 pt-1">
+          <div class="flex flex-wrap items-center gap-3 pt-0.5">
             <input
               type="number"
               min={1}
@@ -2394,6 +2430,7 @@
             {/if}
           </div>
         </fieldset>
+        </div>
 
         <!-- "Play with click" toggle + Click / Song volume sliders
              moved to a compact strip directly under the WaveformPlayer
@@ -2463,4 +2500,5 @@
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  </div>
 {/if}

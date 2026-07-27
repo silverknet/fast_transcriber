@@ -1215,13 +1215,16 @@
 
         <!-- ── WORKSPACE + INSPECTOR ──────────────────────────────────────── -->
         <div class="flex min-h-0 flex-1 overflow-hidden">
-          <!-- CENTRE workspace: the active editor component plus the shell's
-               always-on tail (Timeline details, Back to import) share ONE
-               internally-scrolling column. Overview is just the mixer (no
+          <!-- CENTRE workspace: a height-filling column. The active editor
+               component grows to FILL (`flex-1 min-h-0`) so panels feel static
+               and use the viewport they're given; the shell's always-on tail
+               (Timeline details) sits below as a compact `shrink-0` row.
+               `overflow-y-auto` is only a safety net — with typical content the
+               panel fits and never scrolls. Overview is just the mixer (no
                waveform); Grid / Sections / Chords render their own editing
                waveform inside `TimelineWorkspace`. -->
-          <main class="min-w-0 flex-1 overflow-y-auto">
-            <div class="flex min-w-0 flex-col gap-4 p-3 pb-6 sm:p-4">
+          <main class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+            <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-4 p-3 pb-6 sm:p-4">
               <!-- Advisory: silent unless the local audio is a different
                    recording than the one the song was shared with. -->
               <RecordingMismatchBanner />
@@ -1262,7 +1265,7 @@
         />
       {/if}
 
-      <details class="group border-foreground/15 border">
+      <details class="group border-foreground/15 shrink-0 border">
         <summary
           class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-3 py-2 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
         >
@@ -1344,11 +1347,6 @@
 
         </div>
       </details>
-
-      <Button type="button" variant="outline" class="gap-2 self-start" onclick={confirmBackToImport}>
-        <ArrowLeft class="size-4" aria-hidden="true" />
-        Back to import
-      </Button>
             </div>
           </main>
 

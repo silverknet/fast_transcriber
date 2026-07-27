@@ -61,7 +61,7 @@
 
 {#if $songMap}
   {@const sm = $songMap}
-  <section class="w-full" aria-label="Overview">
+  <section class="flex min-h-0 w-full flex-1 flex-col" aria-label="Overview">
     <EditSectionToolbar
       title="Overview"
       helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
@@ -76,7 +76,7 @@
       {/snippet}
     </EditSectionToolbar>
 
-    <div class="flex justify-end">
+    <div class="flex shrink-0 justify-end">
       <button
         type="button"
         class="text-muted-foreground hover:text-foreground rounded-[var(--radius)] px-2 py-0.5 text-xs font-bold transition-colors"
@@ -88,9 +88,15 @@
     </div>
 
     {#if showBandTools}
-      <DrumTrackPanel onChanged={() => mixerReloadSignal++} />
+      <div class="shrink-0">
+        <DrumTrackPanel onChanged={() => mixerReloadSignal++} />
+      </div>
     {/if}
 
-    <MixerView reloadSignal={mixerReloadSignal} />
+    <!-- The mixer fills the remaining height; its lane list scrolls internally
+         only when there are more lanes than fit. -->
+    <div class="min-h-0 flex-1 overflow-y-auto">
+      <MixerView reloadSignal={mixerReloadSignal} />
+    </div>
   </section>
 {/if}
