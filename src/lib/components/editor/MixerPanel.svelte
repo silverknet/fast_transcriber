@@ -61,10 +61,7 @@
 
 {#if $songMap}
   {@const sm = $songMap}
-  <section
-    class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-    aria-label="Overview"
-  >
+  <section class="w-full" aria-label="Overview">
     <EditSectionToolbar
       title="Overview"
       helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."

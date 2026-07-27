@@ -223,7 +223,7 @@
 
 <div class="edit-inspector flex h-full min-h-0 w-full flex-col">
   <!-- mode header — same corner on every mode -->
-  <div class="border-foreground bg-muted/40 flex shrink-0 items-center gap-2 border-b-2 px-3 py-2.5">
+  <div class="border-foreground/12 flex shrink-0 items-center gap-2 border-b px-3 py-2.5">
     <HeadIcon class="size-4 shrink-0" aria-hidden="true" />
     <span class="text-xs font-black uppercase tracking-widest">{MODE_LABEL[editMode]}</span>
     <span class="text-muted-foreground ml-auto font-mono text-[10px] uppercase">Inspector</span>

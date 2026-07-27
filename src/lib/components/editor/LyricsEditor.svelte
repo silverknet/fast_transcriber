@@ -442,10 +442,7 @@
   }
 </script>
 
-<section
-  class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-  aria-label="Lyrics"
->
+<section class="w-full" aria-label="Lyrics">
   <EditSectionToolbar
     title="Lyrics"
     helpText={`Lyrics belong to the CURRENT draft (“${activeDraftLabel || '—'}”) — “Save lyrics” stores the text ON THIS DRAFT (no new draft) and replaces that draft's lyrics. Timing each word to the audio is a SEPARATE, optional step — press “Fit to song” only when you want it (needs BarBro Desktop). So you can import lyrics now and fit them later. Chord-sheet lines are stripped here; import chords from the Chords tab.`}
@@ -505,7 +502,7 @@
         onblur={() => (lyricsFocused = false)}
         rows="18"
         placeholder={'Paste the full lyrics here…\n\nSection markers like [Chorus] or (Verse 2) are removed automatically.'}
-        class="border-foreground bg-background min-h-[24rem] w-full resize-y border-2 px-3 py-2 font-mono text-sm leading-relaxed focus:outline-none"
+        class="border-foreground/20 bg-background min-h-[24rem] w-full resize-y border px-3 py-2 font-mono text-sm leading-relaxed focus:outline-none"
         spellcheck="false"
       ></textarea>
       {#if lyricsFitBusy && lyricsFitMsg}
@@ -532,7 +529,7 @@
       <!-- Import a vocals source — for instrumental/backing tracks whose
            separated vocal stem is empty, so Fit has nothing to hear. -->
       {#if $desktopCompanionStatus.reachable}
-        <div class="border-foreground/40 bg-muted/30 mt-1 border-2 p-3">
+        <div class="border-foreground/15 bg-muted/20 mt-1 border p-3">
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <p class="text-xs font-black uppercase tracking-wide">
@@ -562,7 +559,7 @@
             <p class="text-destructive mt-2 text-xs">{vocalImportErr}</p>
           {/if}
           {#if vocalImportConfirm}
-            <div class="border-amber-500/60 bg-amber-500/10 mt-2 border-2 p-2">
+            <div class="border-amber-500/40 bg-amber-500/10 mt-2 border p-2">
               <p class="text-xs font-bold text-amber-700">This might not be the same recording:</p>
               <ul class="text-amber-700 mt-1 list-disc pl-4 text-xs">
                 {#each vocalImportConfirm.verdict.reasons as reason (reason)}
@@ -612,7 +609,7 @@
       <span class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
         Cleaned preview · {lyricsCleanedPreview.lines.length} line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
       </span>
-      <div class="border-foreground/30 bg-muted/40 min-h-[24rem] overflow-auto border-2 px-3 py-2">
+      <div class="border-foreground/12 bg-muted/25 min-h-[24rem] overflow-auto border px-3 py-2">
         {#if lyricsCleanedPreview.text}
           {#each lyricsCleanedPreview.text.split('\n') as line, i (i)}
             {#if line}

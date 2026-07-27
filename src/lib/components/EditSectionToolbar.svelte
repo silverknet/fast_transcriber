@@ -28,9 +28,9 @@
 </script>
 
 <div
-  class="edit-section-toolbar border-foreground/20 bg-muted/35 mb-3 rounded-[var(--radius)] border px-2.5 {compact
-    ? 'py-1.5'
-    : 'py-2.5 sm:mb-4'}"
+  class="edit-section-toolbar border-foreground/10 mb-3 border-b px-0.5 {compact
+    ? 'pb-1.5'
+    : 'pb-2 sm:mb-3'}"
 >
   <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
     <div class="flex min-w-0 items-center gap-1.5">

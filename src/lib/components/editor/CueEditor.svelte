@@ -352,10 +352,7 @@
   }
 </script>
 
-<section
-  class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-  aria-label="Cue editor"
->
+<section class="w-full" aria-label="Cue editor">
   <EditSectionToolbar
     title="Cue"
     helpText="Per section, toggle a spoken cue and/or a count-in — click a section to edit its voice line. Switch voice tracks with the pills; Auto-generate reads each section name just before it starts."

@@ -1221,7 +1221,7 @@
                waveform); Grid / Sections / Chords render their own editing
                waveform inside `TimelineWorkspace`. -->
           <main class="min-w-0 flex-1 overflow-y-auto">
-            <div class="flex min-w-0 flex-col gap-6 p-3 pb-8 sm:p-4">
+            <div class="flex min-w-0 flex-col gap-4 p-3 pb-6 sm:p-4">
               <!-- Advisory: silent unless the local audio is a different
                    recording than the one the song was shared with. -->
               <RecordingMismatchBanner />
@@ -1262,14 +1262,14 @@
         />
       {/if}
 
-      <details class="group border-foreground bg-background border-2">
+      <details class="group border-foreground/15 border">
         <summary
-          class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-4 py-3 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
+          class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-3 py-2 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
         >
           <span class="underline-offset-2 group-open:underline">Timeline details</span>
           <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview and bar playback</span>
         </summary>
-        <div class="border-foreground space-y-6 border-t-2 px-4 py-4">
+        <div class="border-foreground/15 space-y-4 border-t px-3 py-3">
           <dl class="text-foreground/90 space-y-2 text-sm">
             <div class="flex justify-between gap-4">
               <dt class="text-muted-foreground">Bars</dt>
@@ -1292,7 +1292,7 @@
               <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars</p>
               <ul class="space-y-3 text-xs">
                 {#each sm.timeline.bars.slice(0, previewBars) as bar (bar.id)}
-                  <li class="border-foreground border-b-2 pb-3 font-mono last:border-0 last:pb-0">
+                  <li class="border-foreground/12 border-b pb-3 font-mono last:border-0 last:pb-0">
                     <div class="flex items-start justify-between gap-3">
                       <div class="min-w-0 flex-1">
                         <div>

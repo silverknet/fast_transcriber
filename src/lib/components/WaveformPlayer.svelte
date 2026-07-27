@@ -76,6 +76,12 @@
     onSelectionCommit = undefined as ((start: number, end: number) => void) | undefined,
     ready = $bindable(false),
     variant = 'trim',
+    /**
+     * When true, hide the Play/Pause + Stop buttons in the transport toolbar so
+     * the shell's `TransportBar` is the single play/stop control. The Click
+     * toggle and the volume/calibration popover are NOT duplicated, so they stay.
+     */
+    hideTransportButtons = false,
     beatGrid = null as BeatGridModel | null,
     /** When set with `onBarGridAction`, the bar strip edits SongMap bars (equal spacing). */
     beatGridEditable = false,
@@ -1845,34 +1851,36 @@
 
   <div class="flex w-full min-w-0 flex-col gap-3">
     <div class="flex flex-wrap items-center justify-center gap-3">
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        class="gap-2"
-        disabled={!mediaReady}
-        onclick={togglePlay}
-      >
-        {#if isPlaying}
-          <Pause class="size-4" aria-hidden="true" />
-          Pause
-        {:else}
-          <Play class="size-4" aria-hidden="true" />
-          Play
-        {/if}
-      </Button>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        class="gap-2"
-        disabled={!mediaReady}
-        onclick={stopPlayback}
-        title="Stop and go to selection start"
-      >
-        <Square class="size-4" aria-hidden="true" />
-        Stop
-      </Button>
+      {#if !hideTransportButtons}
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          class="gap-2"
+          disabled={!mediaReady}
+          onclick={togglePlay}
+        >
+          {#if isPlaying}
+            <Pause class="size-4" aria-hidden="true" />
+            Pause
+          {:else}
+            <Play class="size-4" aria-hidden="true" />
+            Play
+          {/if}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="gap-2"
+          disabled={!mediaReady}
+          onclick={stopPlayback}
+          title="Stop and go to selection start"
+        >
+          <Square class="size-4" aria-hidden="true" />
+          Stop
+        </Button>
+      {/if}
       {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0}
         <!-- Toolbar-level click toggle + volume popover. State is
              $bindable, parent owns the click-loop logic. -->

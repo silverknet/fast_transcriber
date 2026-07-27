@@ -1815,10 +1815,7 @@
 {#if $songMap}
   {@const sm = $songMap}
     {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
-      <section
-        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Edit timeline"
-      >
+      <section class="w-full" aria-label="Edit timeline">
         <EditSectionToolbar title={timelineToolbarTitle} helpText={timelineToolbarHelp}>
           {#snippet primary()}
             <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
@@ -1918,8 +1915,8 @@
           {#if chordInspectorOpen}
             <!-- The stored truth, row by row: compare against the grid/waveform.
                  Bar and beat are 1-based here to match what a musician counts. -->
-            <div class="border-foreground bg-background mb-3 border-2 text-xs">
-              <div class="border-foreground/40 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
+            <div class="border-foreground/15 mb-3 border text-xs">
+              <div class="border-foreground/15 text-muted-foreground flex flex-wrap items-center gap-x-3 border-b px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider">
                 <span>Stored chords · {chordInspectorRows.length}</span>
                 <span>draft: {activeDraftLabel}</span>
                 <span class="normal-case">bar.beat is 1-based · time is the beat’s position in the song audio</span>
@@ -2065,6 +2062,8 @@
           onSelectionCommit={handleTrimCommit}
           bind:ready={waveformReady}
           variant="editor"
+          hideTransportButtons
+
           beatGrid={{ bars: sm.timeline.bars, beats: sm.timeline.beats }}
           beatGridEditable={true}
           timelineStripMode={editMode === 'sections'
@@ -2253,10 +2252,7 @@
       {/if}
     {/if}
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
-      <section
-        class="brutalist-shadow border-foreground bg-background w-full border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Edit history"
-      >
+      <section class="w-full" aria-label="Edit history">
         <EditSectionToolbar
           title="History"
           helpText="Cmd/Ctrl+Z undoes timeline edits. Hold Shift to redo. Reset restores the saved analyzed grid; re-analyze detects bars and beats again from the current audio."
@@ -2329,16 +2325,13 @@
       </section>
     {/if}
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
-      <section
-        class="brutalist-shadow border-foreground bg-background w-full space-y-4 border-2 p-3 sm:p-4 md:p-5"
-        aria-label="Metronome"
-      >
+      <section class="w-full space-y-4" aria-label="Metronome">
         <EditSectionToolbar
           title="Metronome"
           helpText="Count-in adds clicks before playback starts. Start at beat sets the song-start anchor; moving it later lets earlier beats play under the count-in, for example a drum fill before the downbeat."
         />
 
-        <fieldset class="border-foreground border-2 px-3 py-3">
+        <fieldset class="border-foreground/15 rounded-[var(--radius)] border px-3 py-2.5">
           <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Count-in beats</legend>
           <div class="flex flex-wrap gap-3 pt-1">
             {#each [0, 4, 8] as n (n)}
@@ -2369,7 +2362,7 @@
           </p>
         </fieldset>
 
-        <fieldset class="border-foreground border-2 px-3 py-3">
+        <fieldset class="border-foreground/15 rounded-[var(--radius)] border px-3 py-2.5">
           <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Start at beat</legend>
           <div class="flex flex-wrap items-center gap-3 pt-1">
             <input
