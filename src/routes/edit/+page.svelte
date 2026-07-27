@@ -1199,32 +1199,19 @@
           <div class="min-w-0 shrink-0">
             <TransportBar {editMode} />
           </div>
-
-          <!-- save / sync status pill (far-right corner, like version-2) -->
-          <span
-            class="border-foreground bg-background hidden shrink-0 items-center gap-1.5 rounded-[var(--radius)] border-2 px-2 py-1 text-[11px] font-bold uppercase tracking-wide 2xl:inline-flex"
-            title="Edits save locally and sync to the cloud"
-          >
-            <Check class="size-3.5 text-[color:var(--studio-orange)]" aria-hidden="true" />
-            Saved
-            <span class="text-muted-foreground/40">·</span>
-            <Cloud class="size-3.5" aria-hidden="true" />
-            Synced
-          </span>
         </div>
 
         <!-- ── WORKSPACE + INSPECTOR ──────────────────────────────────────── -->
         <div class="flex min-h-0 flex-1 overflow-hidden">
           <!-- CENTRE workspace: a height-filling column. The active editor
                component grows to FILL (`flex-1 min-h-0`) so panels feel static
-               and use the viewport they're given; the shell's always-on tail
-               (Timeline details) sits below as a compact `shrink-0` row.
+               and use the viewport they're given.
                `overflow-y-auto` is only a safety net — with typical content the
                panel fits and never scrolls. Overview is just the mixer (no
                waveform); Grid / Sections / Chords render their own editing
                waveform inside `TimelineWorkspace`. -->
           <main class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
-            <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-4 p-3 pb-6 sm:p-4">
+            <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3 p-3">
               <!-- Advisory: silent unless the local audio is a different
                    recording than the one the song was shared with. -->
               <RecordingMismatchBanner />
@@ -1265,88 +1252,6 @@
         />
       {/if}
 
-      <details class="group border-foreground/15 shrink-0 border">
-        <summary
-          class="text-muted-foreground hover:text-foreground cursor-pointer list-none px-3 py-2 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
-        >
-          <span class="underline-offset-2 group-open:underline">Timeline details</span>
-          <span class="text-muted-foreground/70 ml-2 font-normal normal-case">analysis preview and bar playback</span>
-        </summary>
-        <div class="border-foreground/15 space-y-4 border-t px-3 py-3">
-          <dl class="text-foreground/90 space-y-2 text-sm">
-            <div class="flex justify-between gap-4">
-              <dt class="text-muted-foreground">Bars</dt>
-              <dd>{sm.timeline.bars.length}</dd>
-            </div>
-            <div class="flex justify-between gap-4">
-              <dt class="text-muted-foreground">Beats</dt>
-              <dd>{sm.timeline.beats.length}</dd>
-            </div>
-            <div class="flex justify-between gap-4">
-              <dt class="text-muted-foreground">Duration</dt>
-              <dd class="tabular-nums">
-                {(sm.audio?.durationSec ?? Math.max(0, $audioSession.endSec - $audioSession.startSec)).toFixed(2)}s
-              </dd>
-            </div>
-          </dl>
-
-          {#if sm.timeline.bars.length > 0}
-            <div>
-              <p class="text-muted-foreground mb-2 text-xs font-medium uppercase tracking-wide">First bars</p>
-              <ul class="space-y-3 text-xs">
-                {#each sm.timeline.bars.slice(0, previewBars) as bar (bar.id)}
-                  <li class="border-foreground/12 border-b pb-3 font-mono last:border-0 last:pb-0">
-                    <div class="flex items-start justify-between gap-3">
-                      <div class="min-w-0 flex-1">
-                        <div>
-                          Bar {bar.index} · {bar.startSec.toFixed(3)}–{bar.endSec.toFixed(3)}s · meter{' '}
-                          {bar.meter.numerator}/{bar.meter.denominator}
-                        </div>
-                        <ul class="text-muted-foreground mt-1 pl-2">
-                          {#each beatsForBar(bar.id) as bt (bt.id)}
-                            <li>beat {bt.indexInBar} @ {bt.timeSec.toFixed(3)}s</li>
-                          {/each}
-                        </ul>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        class="shrink-0"
-                        disabled={!$audioSession.file || !objectUrl}
-                        title={playingBarId === bar.id ? 'Pause' : 'Play this bar only'}
-                        aria-label={playingBarId === bar.id
-                          ? `Pause bar ${bar.index}`
-                          : `Play bar ${bar.index} only (${bar.startSec.toFixed(2)}–${bar.endSec.toFixed(2)}s)`}
-                        onclick={() => playBarOnly(bar)}
-                      >
-                        {#if playingBarId === bar.id}
-                          <Pause class="size-4" aria-hidden="true" />
-                        {:else}
-                          <Play class="size-4" aria-hidden="true" />
-                        {/if}
-                      </Button>
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            </div>
-          {/if}
-
-          <p class="text-foreground/90 font-mono text-xs tabular-nums">
-            {$audioSession.name}<br />
-            <span class="text-muted-foreground">
-              {$audioSession.startSec.toFixed(2)}s to {$audioSession.endSec.toFixed(2)}s
-            </span>
-          </p>
-
-          <!-- The previously-rendered orphan <audio> here was the bug:
-               two audio elements, two event sources, two volume targets.
-               Removed. `audioEl` now binds to the WaveformPlayer's real
-               <audio> via bind:audioElement above. -->
-
-        </div>
-      </details>
             </div>
           </main>
 

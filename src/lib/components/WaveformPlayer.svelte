@@ -77,9 +77,12 @@
     ready = $bindable(false),
     variant = 'trim',
     /**
-     * When true, hide the Play/Pause + Stop buttons in the transport toolbar so
-     * the shell's `TransportBar` is the single play/stop control. The Click
-     * toggle and the volume/calibration popover are NOT duplicated, so they stay.
+     * When true, hide the transport chrome that the shell's `TransportBar`
+     * already provides — Play/Pause + Stop, the Click toggle, the
+     * volume/calibration popover, and the time/selection readout — so the
+     * `TransportBar` is the single source of those controls. The
+     * waveform-editing toolbars (zoom/pan, bar-add, selected-bar edit) always
+     * stay regardless.
      */
     hideTransportButtons = false,
     beatGrid = null as BeatGridModel | null,
@@ -1881,9 +1884,11 @@
           Stop
         </Button>
       {/if}
-      {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0}
-        <!-- Toolbar-level click toggle + volume popover. State is
-             $bindable, parent owns the click-loop logic. -->
+      {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0 && !hideTransportButtons}
+        <!-- Toolbar-level click toggle + volume popover. Hidden in the editor
+             (timeline) usage, where the shell's `TransportBar` already owns the
+             click toggle + volume/calibration. State is $bindable, parent owns
+             the click-loop logic. -->
         <label
           class="border-foreground/40 hover:bg-foreground/5 ml-1 flex shrink-0 cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs"
           title="Play clicks alongside the audio (and count-in if configured)"
@@ -1996,12 +2001,14 @@
           </div>
         </details>
       {/if}
-      <span class="text-muted-foreground font-mono text-xs tabular-nums">
-        {formatTime(currentTime)} / {formatTime(timelineSec)}
-      </span>
-      <span class="text-muted-foreground text-xs">
-        Selection: {formatTime(rangeStart)} – {formatTime(rangeEnd)}
-      </span>
+      {#if !hideTransportButtons}
+        <span class="text-muted-foreground font-mono text-xs tabular-nums">
+          {formatTime(currentTime)} / {formatTime(timelineSec)}
+        </span>
+        <span class="text-muted-foreground text-xs">
+          Selection: {formatTime(rangeStart)} – {formatTime(rangeEnd)}
+        </span>
+      {/if}
     </div>
 
     <div

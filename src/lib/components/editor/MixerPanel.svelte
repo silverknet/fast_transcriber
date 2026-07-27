@@ -65,16 +65,7 @@
     <EditSectionToolbar
       title="Overview"
       helpText="Original audio, stems, and cues load as separate lanes. Volume, mute, and solo settings are saved with the song, and every lane stays aligned for playback and export. Click on a waveform to seek."
-    >
-      {#snippet primary()}
-        <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
-        <span class="font-mono tabular-nums">
-          {sm.sections.length} section{sm.sections.length === 1 ? '' : 's'}
-        </span>
-        {#if sm.metadata.bpm != null}<span class="font-mono tabular-nums">{Math.round(sm.metadata.bpm)} BPM</span>{/if}
-        {#if keyLabel}<span class="font-mono tabular-nums">{keyLabel}</span>{/if}
-      {/snippet}
-    </EditSectionToolbar>
+    />
 
     <div class="flex shrink-0 justify-end">
       <button

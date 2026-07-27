@@ -1827,15 +1827,7 @@
   <div class="flex h-full min-h-0 w-full flex-1 flex-col gap-3">
     {#if editMode === 'grid' || editMode === 'sections' || editMode === 'chords'}
       <section class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto" aria-label="Edit timeline">
-        <EditSectionToolbar title={timelineToolbarTitle} helpText={timelineToolbarHelp}>
-          {#snippet primary()}
-            <span class="font-mono tabular-nums">{sm.timeline.bars.length} bars</span>
-            <span class="font-mono tabular-nums">{sm.timeline.beats.length} beats</span>
-            {#if editMode === 'sections' || editMode === 'chords'}
-              <span class="text-muted-foreground">{activeDraftLabel}</span>
-            {/if}
-          {/snippet}
-        </EditSectionToolbar>
+        <EditSectionToolbar title={timelineToolbarTitle} helpText={timelineToolbarHelp} />
         {#if editMode === 'sections'}
           <SectionSuggestionBanner
             suggestion={activeSuggestion}
@@ -2291,37 +2283,18 @@
           helpText="Cmd/Ctrl+Z undoes timeline edits. Hold Shift to redo. Reset restores the saved analyzed grid; re-analyze detects bars and beats again from the current audio."
         >
           {#snippet primary()}
-            <button
-              type="button"
-              onclick={undoSongMap}
-              disabled={!$canUndo}
-              title="Undo (Cmd/Ctrl+Z)"
-              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
-            >
-              Undo
-            </button>
-            <button
-              type="button"
-              onclick={redoSongMap}
-              disabled={!$canRedo}
-              title="Redo (Cmd/Ctrl+Shift+Z)"
-              class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm font-bold"
-            >
-              Redo
-            </button>
-            <span class="text-muted-foreground mx-1 text-xs">·</span>
             {#if resetGridConfirming}
               <button
                 type="button"
                 onclick={commitResetGrid}
-                class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-3 py-1 text-sm font-bold"
+                class="border-foreground bg-destructive text-destructive-foreground hover:bg-destructive/90 border-2 px-2.5 py-0.5 text-xs font-bold"
               >
                 Yes, reset
               </button>
               <button
                 type="button"
                 onclick={cancelResetGridConfirm}
-                class="border-foreground hover:bg-foreground hover:text-background border-2 px-3 py-1 text-sm"
+                class="border-foreground hover:bg-foreground hover:text-background border-2 px-2.5 py-0.5 text-xs"
               >
                 Cancel
               </button>
@@ -2336,7 +2309,7 @@
                 title={sm.timeline.original
                   ? 'Restore to the originally analyzed grid'
                   : 'Re-analyze the song to enable. Old projects don’t have a snapshot of the analyzed grid.'}
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-2.5 py-0.5 text-xs"
               >
                 Reset to analyzed
               </button>
@@ -2345,7 +2318,7 @@
                 onclick={reanalyzeGrid}
                 disabled={reanalyzeBusy || !$audioSession.file}
                 title="Detect bars and beats again. You’ll be warned before chords or sections are cleared."
-                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-3 py-1 text-sm"
+                class="border-foreground hover:bg-foreground hover:text-background disabled:opacity-40 disabled:hover:bg-background disabled:hover:text-foreground border-2 px-2.5 py-0.5 text-xs"
               >
                 {reanalyzeBusy ? 'Re-analyzing...' : 'Re-analyze grid'}
               </button>
@@ -2359,14 +2332,15 @@
     {/if}
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}
       <section class="w-full shrink-0" aria-label="Metronome">
-        <EditSectionToolbar
-          title="Metronome"
-          compact
-          helpText="Count-in adds clicks before playback starts. Start at beat sets the song-start anchor; moving it later lets earlier beats play under the count-in, for example a drum fill before the downbeat."
-        />
-
-        <!-- Compact two-up strip so the metronome controls don't eat height. -->
-        <div class="flex flex-col gap-2 sm:flex-row">
+        <details class="group border-foreground/15 rounded-[var(--radius)] border">
+          <summary
+            class="text-muted-foreground hover:text-foreground flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs font-medium tracking-wide uppercase select-none marker:content-none [&::-webkit-details-marker]:hidden"
+            title="Count-in adds clicks before playback starts. Start at beat sets the song-start anchor; moving it later lets earlier beats play under the count-in, for example a drum fill before the downbeat."
+          >
+            <span class="underline-offset-2 group-open:underline">Metronome / count-in</span>
+          </summary>
+          <!-- Compact two-up strip so the metronome controls don't eat height. -->
+          <div class="border-foreground/15 flex flex-col gap-2 border-t px-2.5 py-2 sm:flex-row">
         <fieldset class="border-foreground/15 min-w-0 flex-1 rounded-[var(--radius)] border px-2.5 py-1.5">
           <legend class="text-muted-foreground px-1 text-xs font-medium uppercase tracking-wide">Count-in beats</legend>
           <div class="flex flex-wrap gap-3 pt-0.5">
@@ -2430,7 +2404,8 @@
             {/if}
           </div>
         </fieldset>
-        </div>
+          </div>
+        </details>
 
         <!-- "Play with click" toggle + Click / Song volume sliders
              moved to a compact strip directly under the WaveformPlayer

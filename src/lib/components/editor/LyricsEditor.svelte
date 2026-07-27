@@ -448,19 +448,6 @@
     helpText={`Lyrics belong to the CURRENT draft (“${activeDraftLabel || '—'}”) — “Save lyrics” stores the text ON THIS DRAFT (no new draft) and replaces that draft's lyrics. Timing each word to the audio is a SEPARATE, optional step — press “Fit to song” only when you want it (needs BarBro Desktop). So you can import lyrics now and fit them later. Chord-sheet lines are stripped here; import chords from the Chords tab.`}
   >
     {#snippet primary()}
-      <span class="text-muted-foreground">
-        draft <span class="text-foreground font-bold">{activeDraftLabel || '—'}</span>
-      </span>
-      <span class="font-mono tabular-nums">
-        {lyricsCleanedPreview.lines.length} cleaned line{lyricsCleanedPreview.lines.length === 1 ? '' : 's'}
-      </span>
-      {#if lyricsSaved?.words.length}
-        <span class="font-mono tabular-nums">{lyricsSaved.words.length} timed words</span>
-      {:else if lyricsSaved}
-        <span class="text-muted-foreground">Saved, not fitted yet</span>
-      {:else}
-        <span class="text-muted-foreground">Not saved yet</span>
-      {/if}
       {#if lyricsSaveMsg && !lyricsFitBusy}
         <span class="text-muted-foreground" role="status">{lyricsSaveMsg}</span>
       {/if}
