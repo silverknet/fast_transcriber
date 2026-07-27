@@ -268,6 +268,15 @@ class UnifiedTransport {
       }
     }
     startPos = Math.max(0, Math.min(startPos, dur))
+    // The song begins at buffer position `mediaOffsetSec` (= trim.startSec).
+    // Never start in the pre-trim lead-in: the click plan is trim-shifted, so
+    // playing from before the song start delays the first click until playback
+    // reaches it — the "clicks start in the second half" bug on songs trimmed to
+    // begin partway into the uploaded file. This is the authoritative guard (the
+    // .smap trim), independent of whatever selection the editor pushed.
+    if (this.mediaOffsetSec > 0) {
+      startPos = Math.min(dur, Math.max(startPos, this.mediaOffsetSec))
+    }
     const endPos =
       this.#rangeEnd > this.#rangeStart ? Math.min(this.#rangeEnd, dur) : dur
     if (endPos - startPos < 0.005) return // empty range
@@ -552,11 +561,13 @@ class UnifiedTransport {
     // click loop start from wherever the PREVIOUS song's playhead / selection was
     // left (the "click track starts in the second half after switching songs"
     // regression). Reset the engine position, the selection range, and the mirror.
-    engine.seek(0)
-    this.#rangeStart = 0
-    this.#rangeEnd = 0
+    const songStart = this.mediaOffsetSec // buffer pos of song start (trim.startSec)
+    const trimEnd = this.#songMap?.audio?.trim?.endSec
+    engine.seek(songStart)
+    this.#rangeStart = songStart
+    this.#rangeEnd = trimEnd && trimEnd > songStart ? Math.min(trimEnd, buf.duration) : 0
     this.#nextClickIdx = 0
-    this.#positionSec = 0
+    this.#positionSec = songStart
   }
 
   // ── Internals: position derivation ─────────────────────────────────

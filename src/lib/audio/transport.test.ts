@@ -279,6 +279,21 @@ describe('UnifiedTransport — song switching resets position (regression)', () 
     expect(newSource.starts[0]![1]).toBeCloseTo(0, 6)
     t.dispose()
   })
+
+  it('starts a trimmed song at its song start (buffer trim.startSec), not the pre-trim lead-in', async () => {
+    const t = await freshTransport()
+    // Song trimmed to start at buffer position 4 of an 8s file (song = 2nd half).
+    await loadSong(t, makeSong({ barCount: 4, trimStartSec: 4, trimEndSec: 8 }), 8)
+    expect(t.mediaOffsetSec).toBeCloseTo(4, 6)
+    // Playhead sits at the song start (song-time 0), not the pre-trim lead-in.
+    expect(t.songTimeSec).toBeCloseTo(0, 6)
+    t.play()
+    const src = lastCtx!.bufferSources[lastCtx!.bufferSources.length - 1]!
+    // The source starts at buffer 4 (the song start), NOT 0 — so the trim-shifted
+    // click loop fires from beat 1 instead of only once playback crosses the trim.
+    expect(src.starts[0]![1]).toBeCloseTo(4, 6)
+    t.dispose()
+  })
 })
 
 describe('UnifiedTransport.play() — engine source scheduling', () => {
