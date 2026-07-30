@@ -6,8 +6,11 @@ import {
   createXAirClient,
   decodeOscMessage,
   encodeOscMessage,
+  parseXAirChannelState,
+  xairBusFaderPath,
   xairChannelBusSendPath,
   xairChannelFaderPath,
+  xairChannelMainAssignPath,
   xairChannelOnPath,
   xairMainFaderPath,
 } from './xairOsc.mjs'
@@ -49,6 +52,59 @@ test('XR18 path builders constrain channels and buses', () => {
   assert.throws(() => xairChannelFaderPath(19), /channel/)
   assert.throws(() => xairChannelBusSendPath(1, 0), /bus/)
   assert.throws(() => xairChannelBusSendPath(1, 7), /bus/)
+})
+
+test('FOH-safety + monitor path builders', () => {
+  assert.equal(xairChannelMainAssignPath(17), '/ch/17/mix/lr') // click off-house control
+  assert.equal(xairChannelMainAssignPath(18), '/ch/18/mix/lr')
+  assert.equal(xairBusFaderPath(3), '/bus/03/mix/fader')
+  assert.throws(() => xairChannelMainAssignPath(19), /channel/)
+  assert.throws(() => xairBusFaderPath(7), /bus/)
+})
+
+test('parseXAirChannelState decodes a desk readback (proves lr = off)', () => {
+  const raw = {
+    '/ch/17/mix/lr': [{ type: 'i', value: 0 }], // click OFF the main bus
+    '/ch/17/mix/on': [{ type: 'i', value: 1 }],
+    '/ch/09/mix/lr': [{ type: 'i', value: 1 }], // music ON the main bus
+    '/ch/09/mix/fader': [{ type: 'f', value: 0.75 }],
+    '/xinfo': [{ type: 's', value: 'XR18' }], // ignored (not a channel state)
+  }
+  const parsed = parseXAirChannelState(raw)
+  assert.equal(parsed.channels[17].lr, 0)
+  assert.equal(parsed.channels[17].on, 1)
+  assert.equal(parsed.channels[9].lr, 1)
+  assert.ok(Math.abs(parsed.channels[9].fader - 0.75) < 1e-6)
+  assert.equal(parsed.channels['xinfo'], undefined)
+})
+
+test('client sends main-assign OFF over UDP and accumulates readback state', async () => {
+  const server = dgram.createSocket('udp4')
+  const received = []
+  server.on('message', (msg, rinfo) => {
+    const decoded = decodeOscMessage(msg)
+    received.push(decoded)
+    // Emulate the desk replying to a bare /ch/17/mix/lr query with value 0.
+    if (decoded.address === '/ch/17/mix/lr' && decoded.args.length === 0) {
+      server.send(encodeOscMessage('/ch/17/mix/lr', [{ type: 'i', value: 0 }]), rinfo.port, rinfo.address)
+    }
+  })
+  await new Promise((resolve) => server.bind(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  const client = createXAirClient({ host: '127.0.0.1', port, keepaliveMs: 60_000 })
+  try {
+    await client.open()
+    await waitFor(() => received.some((m) => m.address === '/xremote'))
+
+    client.setChannelMainAssign(17, false)
+    await waitFor(() => received.some((m) => m.address === '/ch/17/mix/lr' && m.args[0]?.value === 0))
+
+    const parsed = await client.refreshChannelState({ waitMs: 120 })
+    assert.equal(parsed.channels[17].lr, 0) // read back OFF the house
+  } finally {
+    client.close()
+    server.close()
+  }
 })
 
 test('clamp01 protects live mixer writes', () => {

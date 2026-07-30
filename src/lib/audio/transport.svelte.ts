@@ -42,11 +42,16 @@ import { playMetronomeClick } from '$lib/audio/debugClickTrack'
 import { MixerEngine, type MixerSnapshot } from '$lib/audio/mixerEngine'
 import { songPlaybackPlan, type PlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
+import { resolveStemAudibility } from './stemMix'
+import { buildKickPunchChain } from './mastering'
+import { stemNameForKey } from './liveStemDefaults'
+import { clampTempoHold, varispeedPlan } from './varispeed'
+import { createLivePitchShifter, type LivePitchShifter } from './livePitchShift'
 
 /** Auto-stop epsilon at clip / range ends. Mirrors the controller. */
 const END_EPS = 0.028
 
-/** The single track key the song is registered under (no stems this step). */
+/** The full-mix song track key (the degenerate all-stems-on case plays this). */
 const SONG_TRACK_KEY = 'original'
 
 /**
@@ -121,6 +126,50 @@ class UnifiedTransport {
   #playing = $state(false)
   /** UI playhead in BUFFER-time, floored at song start (see `#computeUiPosition`). */
   #positionSec = $state(0)
+
+  // ── Stems (edit-song stems dock; `original` is the all-stems-on case) ──
+  /** Registered stem tracks (metadata; the buffers live in the engine). */
+  #stems = $state<{ key: string; label: string }[]>([])
+  /** Per-stem on/off — a stem is audible unless explicitly set to false. */
+  #stemEnabled = $state<Record<string, boolean>>({})
+  /**
+   * Kick punch on the DRUMS stem, 0…1 (0 = off). A monitor-only insert for the
+   * editor: the mixer builds the same stage as part of the full per-stem
+   * mastering chain, but this transport plays stems raw, so without this the
+   * effect is inaudible in /edit.
+   */
+  #kickPunch = $state(0)
+
+  /**
+   * NAIVE transpose (varispeed): semitone offset applied as a playback-rate
+   * change, so pitch and tempo move together like a tape machine.
+   *
+   * The audio buffer is NEVER touched — the engine plays the original decoded
+   * buffer and only sets `playbackRate`. Setting this back to 0 restores a rate
+   * of exactly 1, so `transpose(-n)` after `transpose(+n)` is bit-identical
+   * playback, not an approximation. See `varispeed.ts`.
+   *
+   * The `.smap` is not rescaled either: the playhead keeps being reported in
+   * ORIGINAL audio time, so bars, beats, sections and chords stay in sync with
+   * no changes on their side.
+   */
+  #transposeSemitones = $state(0)
+
+  /**
+   * How much of the transpose's tempo change to cancel, 0…1 (0 = pure
+   * varispeed, 1 = keep the original tempo). Costs a live stretch worklet on
+   * the master bus, and artifacts scale with it — see `varispeedPlan`.
+   */
+  #tempoHold = $state(0)
+  /** The live shifter, created on first use and kept for the context's life. */
+  #shifter: LivePitchShifter | null = null
+  #shifterPending: Promise<LivePitchShifter | null> | null = null
+  /**
+   * Delays the metronome to match the shifter's processing latency. The clicks
+   * are oscillators straight to `destination`, so they bypass the master bus —
+   * without this they run AHEAD of the song by the worklet's latency.
+   */
+  #clickDelay: DelayNode | null = null
 
   // ── Audio graph (created lazily so module import stays SSR-safe) ────
   #engine: MixerEngine | null = null
@@ -197,6 +246,15 @@ class UnifiedTransport {
     return this.#plan?.trimStartSec ?? 0
   }
 
+  // ── Stems ──────────────────────────────────────────────────────────
+  /** Reactive view for the stems dock: each stem + whether it's enabled. */
+  get stems(): { key: string; label: string; enabled: boolean }[] {
+    return this.#stems.map((s) => ({ ...s, enabled: this.#stemEnabled[s.key] !== false }))
+  }
+  get hasStems(): boolean {
+    return this.#stems.length > 0
+  }
+
   // ── Configuration ──────────────────────────────────────────────────
   /**
    * Point the transport at a song. Sets the click/timing plan source and (via
@@ -206,6 +264,246 @@ class UnifiedTransport {
    */
   configure(sm: SongMap | null): void {
     this.#songMap = sm
+  }
+
+  // ── Stems: register the song's separated stems as extra engine tracks ──
+  /**
+   * Decode + register this song's stems. They start MUTED — the all-on default
+   * plays the original full mix — and the dock toggles them live via
+   * {@link setStemEnabled}. Replaces any previously-registered stems. Buffers
+   * decode on the engine's own context so they schedule sample-aligned with the
+   * song track (stems are untrimmed, so no prepend: stem t=0 = song t=0). If
+   * called mid-playback, re-seeks in place so the new stem sources join in sync.
+   */
+  async setStems(entries: { key: string; label: string; blob: Blob }[]): Promise<void> {
+    const engine = this.#ensureEngine()
+    this.#clearStemTracks()
+    const stems: { key: string; label: string }[] = []
+    const enabled: Record<string, boolean> = {}
+    for (const e of entries) {
+      let buffer: AudioBuffer
+      try {
+        buffer = await engine.ac.decodeAudioData(await e.blob.arrayBuffer())
+      } catch {
+        continue // a single unreadable stem shouldn't sink the others
+      }
+      engine.setTrack({
+        key: e.key,
+        label: e.label,
+        buffer,
+        volume: Math.max(0, Math.min(1, this.songVolume)),
+        muted: true, // all-on default → the original plays, stems silent
+        soloed: false,
+      })
+      stems.push({ key: e.key, label: e.label })
+      enabled[e.key] = true
+    }
+    this.#stems = stems
+    this.#stemEnabled = enabled
+    this.#applyStemMutes()
+    this.#wireKickPunch() // a re-registered drums stem keeps the current setting
+    if (this.#playing && stems.length > 0) this.seek(this.songTimeSec) // fold sources in
+  }
+
+  /** Remove all stem tracks and reset toggle state (e.g. on song change). */
+  clearStems(): void {
+    this.#clearStemTracks()
+    this.#stems = []
+    this.#stemEnabled = {}
+    this.#applyStemMutes()
+  }
+
+  /** Current naive-transpose offset in semitones (0 = off). */
+  get transposeSemitones(): number {
+    return this.#transposeSemitones
+  }
+
+  /** The playback rate that offset implies (1 = untransposed). */
+  get transposeRate(): number {
+    return varispeedPlan(this.#transposeSemitones, this.#tempoHold).rate
+  }
+
+  /**
+   * The rate the ENGINE actually holds — which is what reaches the source
+   * nodes. Distinct from {@link transposeRate}, which is only this facade's
+   * intent; they disagreed once (engine created after the transpose was set)
+   * and the result was a silently untransposed playback. Test-only observer.
+   */
+  engineRateForTest(): number | null {
+    return this.#engine?.rate ?? null
+  }
+
+  /**
+   * Apply a NAIVE transpose: `semitones` up/down as a pure playback-rate
+   * change. Tempo moves with pitch by design. Takes effect immediately, mid-
+   * playback, with no render pass and no re-decode — and passing 0 restores
+   * untouched playback exactly.
+   */
+  setTransposeSemitones(semitones: number): void {
+    const n = Number.isFinite(semitones) ? Math.trunc(semitones) : 0
+    if (n === this.#transposeSemitones) return
+    this.#transposeSemitones = n
+    this.#applyVarispeed()
+  }
+
+  /** How much of the tempo change the transpose is cancelling (0…1). */
+  get tempoHold(): number {
+    return this.#tempoHold
+  }
+
+  /**
+   * Semitones the live stretcher must cover — the part of the transpose that
+   * resampling is deliberately NOT doing. 0 means "bypass the worklet". The
+   * mixer reads this to run the same stage on its own engine.
+   */
+  get residualShiftSemitones(): number {
+    return varispeedPlan(this.#transposeSemitones, this.#tempoHold).shiftSemitones
+  }
+
+  /**
+   * Hold the tempo through a transpose: 0 keeps pure varispeed (perfect audio,
+   * full tempo change), 1 keeps the original tempo (a live stretch worklet does
+   * all the work), and in between the worklet only shifts the residual.
+   */
+  setTempoHold(hold: number): void {
+    const h = clampTempoHold(hold)
+    if (h === this.#tempoHold) return
+    this.#tempoHold = h
+    this.#applyVarispeed()
+  }
+
+  /**
+   * Push the current (transpose, hold) split onto the audio graph: resampling
+   * rate on the engine, residual semitones on the live shifter. Recomputed from
+   * the SEMITONE every time, never by composing rates — that keeps the round
+   * trip exact.
+   */
+  #applyVarispeed(): void {
+    const plan = varispeedPlan(this.#transposeSemitones, this.#tempoHold)
+    this.#engine?.setPlaybackRate(plan.rate)
+    if (plan.shiftSemitones === 0) {
+      // Bypass entirely: an inert worklet still adds its latency, and at zero
+      // shift the whole point is that playback is the untouched original.
+      this.#detachShifter()
+    } else {
+      void this.#ensureShifter()
+    }
+    // The click loop's cached index was chosen under the old rate's lookahead
+    // window; re-derive it so no click is skipped or double-fired.
+    const engine = this.#engine
+    const cplan = this.#plan
+    if (this.#clickRaf && engine && cplan) {
+      this.#nextClickIdx = initialClickIndex(cplan, engine.schedulingPositionSec() - this.mediaOffsetSec)
+    }
+  }
+
+  /** Create (once) and tune the master-bus shifter, compensating the clicks. */
+  async #ensureShifter(): Promise<void> {
+    const engine = this.#engine
+    if (!engine) return
+    if (!this.#shifter) {
+      if (!this.#shifterPending) {
+        this.#shifterPending = createLivePitchShifter(engine.ac, 2)
+      }
+      const made = await this.#shifterPending
+      if (!made) return // no worklet available — stay on pure varispeed
+      this.#shifter = made
+    }
+    const shifter = this.#shifter
+    // Re-read: the offset may have changed (or zeroed) while the node was being
+    // created, and a stale value here would leave playback wrongly shifted.
+    const live = varispeedPlan(this.#transposeSemitones, this.#tempoHold)
+    if (live.shiftSemitones === 0) {
+      this.#detachShifter()
+      return
+    }
+    shifter.setSemitones(live.shiftSemitones)
+    engine.setMasterTailNode(shifter.node)
+    this.#setClickCompensation(shifter.latencySec)
+  }
+
+  /** Take the shifter back out of the graph and undo the click compensation. */
+  #detachShifter(): void {
+    this.#engine?.setMasterTailNode(null)
+    this.#setClickCompensation(0)
+  }
+
+  /** Delay the metronome by the shifter's latency so it stays with the song. */
+  #setClickCompensation(latencySec: number): void {
+    const engine = this.#engine
+    const click = this.#clickMaster
+    if (!engine || !click) return
+    if (!this.#clickDelay) {
+      if (latencySec <= 0) return // nothing to compensate, nothing to build
+      this.#clickDelay = engine.ac.createDelay(1)
+      try {
+        click.disconnect()
+      } catch {
+        /* not connected */
+      }
+      click.connect(this.#clickDelay)
+      this.#clickDelay.connect(engine.ac.destination)
+    }
+    this.#clickDelay.delayTime.value = Math.max(0, Math.min(1, latencySec))
+  }
+
+  /** Current drums-stem kick punch (0…1). */
+  get kickPunch(): number {
+    return this.#kickPunch
+  }
+
+  /**
+   * Set the kick punch on the drums stem (0…1, 0 = off). Rebuilds the insert in
+   * place and re-seeks so the change is heard immediately, mid-playback.
+   */
+  setKickPunch(amount: number): void {
+    const next = Math.max(0, Math.min(1, Number.isFinite(amount) ? amount : 0))
+    if (next === this.#kickPunch) return
+    this.#kickPunch = next
+    if (this.#wireKickPunch() && this.#playing) this.seek(this.songTimeSec)
+  }
+
+  /**
+   * Attach (or clear) the kick-punch insert on the drums stem track. Returns
+   * whether a track was actually re-wired — the caller decides about re-seeking,
+   * so stem registration doesn't seek twice.
+   */
+  #wireKickPunch(): boolean {
+    const engine = this.#engine
+    if (!engine) return false
+    const drums = this.#stems.find((s) => stemNameForKey(s.key) === 'drums')
+    if (!drums) return false
+    const track = engine.listTracks().find((t) => t.key === drums.key)
+    if (!track) return false
+    engine.setTrack({
+      ...track,
+      insert: this.#kickPunch > 0 ? buildKickPunchChain(engine.ac, this.#kickPunch) : undefined,
+    })
+    return true
+  }
+
+  /** Turn one stem on/off; re-applies the original-vs-stems mute policy live. */
+  setStemEnabled(key: string, on: boolean): void {
+    if (!(key in this.#stemEnabled)) return
+    this.#stemEnabled = { ...this.#stemEnabled, [key]: on }
+    this.#applyStemMutes()
+  }
+
+  #clearStemTracks(): void {
+    const engine = this.#engine
+    if (!engine) return
+    for (const s of this.#stems) engine.removeTrack(s.key)
+  }
+
+  /** original audible ⇔ all stems on; otherwise only the enabled stems sound. */
+  #applyStemMutes(): void {
+    const engine = this.#engine
+    if (!engine) return
+    const keys = this.#stems.map((s) => s.key)
+    const { playOriginal, audibleStemKeys } = resolveStemAudibility(keys, this.#stemEnabled)
+    const audible = new Set(audibleStemKeys)
+    engine.setMuted(SONG_TRACK_KEY, !playOriginal)
+    for (const k of keys) engine.setMuted(k, !audible.has(k))
   }
 
   /**
@@ -219,6 +517,7 @@ class UnifiedTransport {
     this.decodeError = null
     if (!file) {
       this.audioBuffer = null
+      this.clearStems()
       this.#engine?.removeTrack(SONG_TRACK_KEY)
       return
     }
@@ -320,6 +619,9 @@ class UnifiedTransport {
   ): void {
     // `engine.play` sets `ctxStartTime = ac.currentTime + 0.04 + preroll` and
     // its `playStartCtx` / `playStartPos` anchor — IDENTICAL to the controller's
+    // Belt-and-braces: the engine may have been (re)created since the transpose
+    // was set. Cheap — `setPlaybackRate` early-returns when unchanged.
+    engine.setPlaybackRate(varispeedPlan(this.#transposeSemitones, this.#tempoHold).rate)
     // `ctxStart = ctx.currentTime + PLAY_START_LOOKAHEAD_SEC + preroll`.
     void engine.play(startPos, { startDelaySec: preroll })
     const ctxStart = engine.playStartCtx
@@ -333,6 +635,7 @@ class UnifiedTransport {
         ctxStart,
         this.clickOffsetSec,
         engine.ac.currentTime,
+        varispeedPlan(this.#transposeSemitones, this.#tempoHold).rate,
       )
       for (const f of fires) {
         playMetronomeClick(engine.ac, this.#clickMaster, f.atCtxTime, f.downbeat)
@@ -519,6 +822,8 @@ class UnifiedTransport {
     this.#loadedFile = null
     this.#playing = false
     this.#positionSec = 0
+    this.#stems = []
+    this.#stemEnabled = {}
   }
 
   // ── Internals: engine graph ────────────────────────────────────────
@@ -541,6 +846,10 @@ class UnifiedTransport {
         this.#positionSec = this.#computeUiPosition()
       }
     })
+    // Carry over any transpose set BEFORE this engine existed. The editor
+    // restores the setting on mount, long before audio is decoded, so without
+    // this the rate is silently dropped and playback stays untransposed.
+    if (this.#transposeSemitones !== 0) engine.setPlaybackRate(varispeedPlan(this.#transposeSemitones, this.#tempoHold).rate)
     this.#engine = engine
     return engine
   }
@@ -548,6 +857,8 @@ class UnifiedTransport {
   #registerTrack(buf: AudioBuffer): void {
     const engine = this.#ensureEngine()
     if (this.#playing) this.stop()
+    // A new song's stems are loaded separately by the host; drop the old song's.
+    this.clearStems()
     engine.setTrack({
       key: SONG_TRACK_KEY,
       label: 'Song',
@@ -673,6 +984,7 @@ class UnifiedTransport {
       planTime,
       ctxNow,
       this.clickOffsetSec,
+      varispeedPlan(this.#transposeSemitones, this.#tempoHold).rate,
     )
     this.#nextClickIdx = nextIdx
     for (const f of fires) {

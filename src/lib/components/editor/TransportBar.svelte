@@ -6,7 +6,33 @@
 
   type EditMode = 'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'
 
-  let { editMode }: { editMode: EditMode } = $props()
+  export type MixerControls = {
+    canPlay: boolean
+    isPlaying: boolean
+    positionSec: number
+    durationSec: number
+    playPause: () => void
+    stop: () => void
+    restart: () => void
+    clickOn: boolean
+    setClick: (on: boolean) => void
+  }
+
+  let {
+    editMode,
+    mixerControls = null,
+  }: { editMode: EditMode; mixerControls?: MixerControls | null } = $props()
+
+  // On Overview the MIXER owns playback (its own engine), so these controls
+  // drive IT. Everywhere else they drive the shell transport. One button, one
+  // engine sounding — never both.
+  const onOverview = $derived(editMode === 'overview')
+  const isPlaying = $derived(onOverview ? !!mixerControls?.isPlaying : transport.isPlaying)
+  const canTransport = $derived(onOverview ? !!mixerControls?.canPlay : transport.ready)
+  const posSec = $derived(onOverview ? (mixerControls?.positionSec ?? 0) : transport.songTimeSec)
+  const durSec = $derived(onOverview ? (mixerControls?.durationSec ?? 0) : transport.durationSec)
+  const doPlayPause = () => (onOverview ? mixerControls?.playPause() : transport.togglePlay())
+  const doStop = () => (onOverview ? mixerControls?.stop() : transport.stop())
 </script>
 
 <!-- Persistent transport — rendered ONCE, above every editing panel, so a
@@ -23,15 +49,15 @@
   >
     <button
       type="button"
-      class="border-foreground inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40 {transport.isPlaying
+      class="border-foreground inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40 {isPlaying
         ? 'bg-[var(--studio-orange)] text-background'
         : 'hover:bg-foreground hover:text-background'}"
-      onclick={() => transport.togglePlay()}
-      disabled={editMode === 'overview' || !transport.ready}
-      aria-label={transport.isPlaying ? 'Pause' : 'Play'}
-      title={transport.isPlaying ? 'Pause' : 'Play'}
+      onclick={doPlayPause}
+      disabled={!canTransport}
+      aria-label={isPlaying ? 'Pause' : 'Play'}
+      title={isPlaying ? 'Pause' : 'Play'}
     >
-      {#if transport.isPlaying}
+      {#if isPlaying}
         <Pause class="size-4" aria-hidden="true" />
       {:else}
         <Play class="size-4" aria-hidden="true" />
@@ -40,28 +66,29 @@
     <button
       type="button"
       class="border-foreground hover:bg-foreground hover:text-background inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40"
-      onclick={() => transport.stop()}
-      disabled={editMode === 'overview' || !transport.ready}
+      onclick={doStop}
+      disabled={!canTransport}
       aria-label="Stop"
       title="Stop and go to selection start"
     >
       <Square class="size-4" aria-hidden="true" />
     </button>
     <span class="text-sm font-bold tabular-nums">
-      <span class="text-[var(--studio-orange)]">{formatTime(transport.songTimeSec)}</span>
-      <span class="text-muted-foreground">/ {formatTime(transport.durationSec)}</span>
+      <span class="text-[var(--studio-orange)]">{formatTime(posSec)}</span>
+      <span class="text-muted-foreground">/ {formatTime(durSec)}</span>
     </span>
     <label
-      class="border-foreground/40 hover:bg-foreground/5 ml-auto inline-flex cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs {editMode ===
-      'overview'
-        ? 'pointer-events-none opacity-40'
-        : ''}"
+      class="border-foreground/40 hover:bg-foreground/5 ml-auto inline-flex cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs"
       title="Play clicks alongside the audio (and count-in if configured)"
     >
       <input
         type="checkbox"
-        bind:checked={transport.playWithClick}
-        disabled={editMode === 'overview'}
+        checked={onOverview ? !!mixerControls?.clickOn : transport.playWithClick}
+        onchange={(e) =>
+          onOverview
+            ? mixerControls?.setClick(e.currentTarget.checked)
+            : (transport.playWithClick = e.currentTarget.checked)}
+        disabled={!canTransport}
         class="accent-foreground size-3.5"
       />
       <span class="font-bold uppercase tracking-wider">Click</span>

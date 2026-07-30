@@ -73,3 +73,40 @@ describe('parseProjectJson — autoStems', () => {
     expect(reparsed.autoStems).toEqual(project.autoStems)
   })
 })
+
+describe('parseProjectJson — mastering kickPunch', () => {
+  const withMastering = (extra: Record<string, unknown>) =>
+    parseProjectJson(manifest({ mastering: { enabled: true, ...extra } })).mastering
+
+  it('is undefined when absent (existing projects are untouched)', () => {
+    expect(withMastering({})?.kickPunch).toBeUndefined()
+  })
+
+  it('keeps a valid amount', () => {
+    expect(withMastering({ kickPunch: 0.4 })?.kickPunch).toBe(0.4)
+  })
+
+  it('clamps out-of-range amounts to 0…1', () => {
+    expect(withMastering({ kickPunch: 7 })?.kickPunch).toBe(1)
+    expect(withMastering({ kickPunch: -3 })?.kickPunch).toBe(0)
+  })
+
+  it('ignores junk rather than corrupting the config', () => {
+    expect(withMastering({ kickPunch: 'loud' })?.kickPunch).toBeUndefined()
+    expect(withMastering({ kickPunch: NaN })?.kickPunch).toBeUndefined()
+  })
+
+  it('survives a serialize → parse round-trip', () => {
+    const project: ProjectFile = {
+      formatVersion: 1,
+      id: 'proj-1',
+      name: 'My Set',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      songs: [],
+      mastering: { enabled: true, kickPunch: 0.45, stems: { drums: { intensity: 'light' } } },
+    }
+    const reparsed = parseProjectJson(serializeProject(project))
+    expect(reparsed.mastering?.kickPunch).toBe(0.45)
+  })
+})

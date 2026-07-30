@@ -26,6 +26,7 @@
  *     calling in.
  */
 import type { PlaybackPlan } from '$lib/songmap/playbackPlan'
+import { bufferSecToWallSec } from './varispeed'
 
 /** rAF lookahead for click scheduling. */
 export const CLICK_LOOKAHEAD_SEC = 0.025
@@ -87,12 +88,19 @@ export function initialClickIndex(plan: ClickPlan, planTime: number): number {
  * shift), plus the user's `clickOffsetSec`. A click whose fire time has
  * already slipped past `ctxNow + CLICK_SCHEDULE_LEAD_SEC` is dropped —
  * it's too late to schedule.
+ *
+ * `rate` is the varispeed playback rate (1 = untransposed). `c.timeSec` is
+ * PLAN-time (i.e. audio seconds), so the gap back to `ctxStart` shrinks by the
+ * rate — otherwise a transposed song counts in at the wrong tempo and the band
+ * comes in early. `clickOffsetSec` is a real-world latency calibration and
+ * stays in ctx-time, so it is NOT scaled.
  */
 export function countInClickTimes(
   plan: ClickPlan,
   ctxStart: number,
   clickOffsetSec: number,
   ctxNow: number,
+  rate = 1,
 ): ClickFire[] {
   const out: ClickFire[] = []
   for (const c of plan.clickPoints) {
@@ -100,7 +108,7 @@ export function countInClickTimes(
     // c.timeSec is in [−prependSec, 0). The Nth count-in click lands
     // `prependSec + c.timeSec` seconds before song start, i.e.
     // `ctxStart + c.timeSec` (negative shift behind ctxStart).
-    const fireAt = ctxStart + c.timeSec + clickOffsetSec
+    const fireAt = ctxStart + bufferSecToWallSec(c.timeSec, rate) + clickOffsetSec
     if (fireAt < ctxNow + CLICK_SCHEDULE_LEAD_SEC) continue
     out.push({ atCtxTime: fireAt, downbeat: c.downbeat })
   }
@@ -130,22 +138,31 @@ export function dueClicks(
   planTime: number,
   ctxNow: number,
   clickOffsetSec: number,
+  rate = 1,
 ): { fires: DueClick[]; nextIdx: number; done: boolean } {
   const pts = plan.clickPoints
   let idx = fromIdx
 
+  // The lookahead and grace windows are WALL-clock spans; at rate r they cover
+  // r× as much plan-time, so widen them before comparing against plan times.
+  const lookahead = CLICK_LOOKAHEAD_SEC * rate
+  const grace = CLICK_PAST_GRACE_SEC * rate
+
   // Drop clicks too far in the past.
-  while (idx < pts.length && pts[idx]!.timeSec < planTime - CLICK_PAST_GRACE_SEC) {
+  while (idx < pts.length && pts[idx]!.timeSec < planTime - grace) {
     idx++
   }
 
   const fires: DueClick[] = []
-  while (idx < pts.length && pts[idx]!.timeSec <= planTime + CLICK_LOOKAHEAD_SEC) {
+  while (idx < pts.length && pts[idx]!.timeSec <= planTime + lookahead) {
     const c = pts[idx]!
     // Skip count-in clicks — those were pre-scheduled in `play()`.
     if (c.timeSec >= -1e-9) {
-      const delta = c.timeSec - planTime
-      const atCtxTime = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, delta + clickOffsetSec)
+      const delta = c.timeSec - planTime // plan-time (audio seconds)
+      // → wall seconds before it should sound. The calibration offset is
+      // already in ctx-time and is added after the conversion, not scaled.
+      const waitSec = bufferSecToWallSec(delta, rate)
+      const atCtxTime = ctxNow + Math.max(CLICK_SCHEDULE_LEAD_SEC, waitSec + clickOffsetSec)
       fires.push({ atCtxTime, downbeat: c.downbeat, idx, delta })
     }
     idx++

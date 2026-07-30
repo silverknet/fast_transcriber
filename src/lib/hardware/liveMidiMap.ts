@@ -5,8 +5,10 @@
  *   1. LEARNABLE buttons — Play, Stop, Prev/Next song, Replay-once, Loop. The
  *      user assigns each to whatever control they like via MIDI-learn (press the
  *      button you want). Defaults follow Ableton conventions.
- *   2. POSITIONAL pad grid — fixed: the BOTTOM pad row (0–7) is the 8 stems
- *      (green = on, red = muted), and the TOP 4 rows are the current song's
+ *   2. FIXED pad/button grid — the BOTTOM pad row (0–7) AND the 8 round track
+ *      buttons both toggle stems, in a FIXED canonical instrument order
+ *      (`CANONICAL_LIVE_SLOTS` / `laneSlotIndex`) so a given stem is ALWAYS the
+ *      same button, every song. The TOP 4 pad rows are the current song's
  *      sections (tap to jump). No song has more than 8×4 = 32 sections.
  */
 import type { ApcKey25Action } from './apcKey25'
@@ -19,8 +21,12 @@ export type LiveLedState = {
   canReplay: boolean
   canPrev: boolean
   canNext: boolean
-  /** Bottom pad row: the live-toggleable lanes (stems + cue + click). Up to 8. */
-  lanes: { on: boolean; kind: 'stem' | 'cue' | 'click' }[]
+  /**
+   * The 8 live-toggleable lanes in FIXED canonical slots (index 0-7 = the same
+   * instrument every song; `null` = that slot has no lane in this song). Painted
+   * on BOTH the bottom pad row and the 8 track buttons.
+   */
+  lanes: ({ on: boolean; kind: 'stem' | 'cue' | 'click' } | null)[]
   /** SectionKind per section index (length = section count, capped at 32). */
   sectionKinds: string[]
   /** Index of the currently-playing section (-1 = none). */
@@ -67,6 +73,10 @@ export type LiveCommand =
   | { type: 'announce-song' }
   | { type: 'toggle-stem'; index: number }
   | { type: 'jump-section'; index: number }
+  /** Chord-jam voices as a live instrument: drop the arp in for a chorus, etc. */
+  | { type: 'toggle-jam'; voice: 'keys' | 'bass' | 'arp' }
+  /** Step the arp 1/4 → 1/8 → 1/16 → 1/4 without leaving the controller. */
+  | { type: 'cycle-arp-rate' }
 
 /** The learnable button actions (everything except the positional pad grid). */
 export type LiveAction =
@@ -77,6 +87,10 @@ export type LiveAction =
   | 'replay-once'
   | 'loop'
   | 'announce-song'
+  | 'jam-keys'
+  | 'jam-bass'
+  | 'jam-arp'
+  | 'jam-arp-rate'
 
 export const LIVE_ACTIONS: ReadonlyArray<{ id: LiveAction; label: string }> = [
   { id: 'play-pause', label: 'Play / pause' },
@@ -86,11 +100,26 @@ export const LIVE_ACTIONS: ReadonlyArray<{ id: LiveAction; label: string }> = [
   { id: 'replay-once', label: 'Replay section once' },
   { id: 'loop', label: 'Loop section' },
   { id: 'announce-song', label: 'Announce song name' },
+  { id: 'jam-keys', label: 'Chords on / off' },
+  { id: 'jam-bass', label: 'Bass on / off' },
+  { id: 'jam-arp', label: 'Arp on / off' },
+  { id: 'jam-arp-rate', label: 'Arp rate (1/4 → 1/8 → 1/16)' },
 ]
 
 /** action → the command it fires. */
 export function actionCommand(action: LiveAction): LiveCommand {
-  return { type: action } as LiveCommand
+  switch (action) {
+    case 'jam-keys':
+      return { type: 'toggle-jam', voice: 'keys' }
+    case 'jam-bass':
+      return { type: 'toggle-jam', voice: 'bass' }
+    case 'jam-arp':
+      return { type: 'toggle-jam', voice: 'arp' }
+    case 'jam-arp-rate':
+      return { type: 'cycle-arp-rate' }
+    default:
+      return { type: action } as LiveCommand
+  }
 }
 
 /** A binding map: which control id is assigned to each learnable action. */
@@ -105,6 +134,14 @@ export const DEFAULT_LIVE_MAPPING: LiveMapping = {
   'replay-once': 'record',
   loop: 'scene:2',
   'announce-song': 'scene:3',
+  // Jam voices ship UNASSIGNED on purpose. Every pad is already spoken for —
+  // the bottom row is stems and the four rows above are sections, so any default
+  // here would silently steal section pads (pads 32-39 are sections 0-7, the
+  // ones you reach for most). Learn them to whatever you can spare.
+  'jam-keys': '',
+  'jam-bass': '',
+  'jam-arp': '',
+  'jam-arp-rate': '',
 }
 
 /**
@@ -167,6 +204,41 @@ export function sectionToPad(sectionIndex: number): number | null {
 }
 
 /**
+ * FIXED live lane order — a given instrument is ALWAYS the same button (bottom
+ * pad row + track button), every song. This is what makes the stem buttons
+ * trustworthy live: pad/button 0 is Drums whether or not this song has drums.
+ */
+export const CANONICAL_LIVE_SLOTS = [
+  'drums',
+  'bass',
+  'vocals',
+  'other',
+  'guitar',
+  'fx',
+  'click',
+  'cue',
+] as const
+
+/**
+ * The fixed slot (0-7) a mixer lane key belongs to, or `null` if it isn't a
+ * live-toggleable lane. Handles both disk (`stem:drums.wav`) and cloud
+ * (`stem:Drums`) stem keys, plus the `click` / `cue` lanes.
+ */
+export function laneSlotIndex(key: string): number | null {
+  if (key === 'click') return 6
+  if (key === 'cue') return 7
+  if (!key.startsWith('stem:')) return null
+  const rest = key.slice('stem:'.length).toLowerCase()
+  if (/vocal/.test(rest)) return 2
+  if (/drum/.test(rest)) return 0
+  if (/bass/.test(rest)) return 1
+  if (/guitar/.test(rest)) return 4
+  if (/(?:^|[^a-z])fx(?:[^a-z]|$)/.test(rest)) return 5
+  if (/other/.test(rest)) return 3
+  return null
+}
+
+/**
  * Resolve a parsed APC action to a live command, given the user's button
  * mapping. Learned buttons win; otherwise the pad grid is positional (bottom
  * row = stems, top rows = sections). Fires on press only.
@@ -182,11 +254,17 @@ export function resolveLiveCommand(a: ApcKey25Action, mapping: LiveMapping): Liv
     if (mapping[action] === id) return actionCommand(action)
   }
 
-  // 2. Positional pad grid.
+  // 2. Positional pad grid: bottom row = stems (canonical slots), top = sections.
   if (a.type === 'clip-pad') {
     if (a.index < STEM_PAD_COUNT) return { type: 'toggle-stem', index: a.index }
     const section = padToSection(a.index)
     if (section !== null) return { type: 'jump-section', index: section }
+  }
+  // 3. Track buttons mirror the bottom pad row — the SAME canonical stem slots,
+  //    so a stem toggle works from either control (unless the user MIDI-learned
+  //    that track button to an action above, which wins).
+  if (a.type === 'track-button' && a.index < STEM_PAD_COUNT) {
+    return { type: 'toggle-stem', index: a.index }
   }
   return null
 }

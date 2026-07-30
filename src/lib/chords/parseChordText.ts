@@ -1,5 +1,6 @@
 import type { Accidental, ChordSymbol, NoteName } from '$lib/songmap/types'
 import { formatChordSymbol } from './formatChordSymbol'
+import { NO_CHORD_SYMBOL } from './noChord'
 
 export type ParseChordResult = { ok: true; chord: ChordSymbol } | { ok: false; error: string }
 
@@ -120,6 +121,9 @@ function parseQuality(rest: string): QualityParse {
 export function parseChordText(raw: string): ParseChordResult {
   const s0 = normalizeUnicode(raw)
   if (!s0.length) return { ok: false, error: 'Empty chord' }
+
+  // N.C. ("no chord"): `N.C.`, `NC`, `n.c.` etc. → the placed no-chord marker.
+  if (/^n\.?c\.?$/i.test(s0)) return { ok: true, chord: { ...NO_CHORD_SYMBOL } }
 
   const slashIdx = s0.indexOf('/')
   const mainPart = slashIdx >= 0 ? s0.slice(0, slashIdx) : s0

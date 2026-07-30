@@ -81,11 +81,37 @@ export function formatXAirChannelList(channels: readonly number[]): string {
   return channels.join(', ')
 }
 
+/** The XR18 channel pair a stem lane defaults to (live-rig contract: stems on 9-16). */
+function stemPairForLaneKey(laneKey: string): number[] | null {
+  if (!laneKey.startsWith('stem:')) return null
+  const rest = laneKey.slice('stem:'.length).toLowerCase()
+  if (/drum/.test(rest)) return [9, 10]
+  if (/bass/.test(rest)) return [11, 12]
+  if (/vocal/.test(rest)) return [13, 14]
+  if (/other/.test(rest)) return [15, 16]
+  return null
+}
+
+/**
+ * Default XR18 channels per BarBro lane, per the live-rig channel contract:
+ * click → ch 17, cue → ch 18 (the two MONITOR-ONLY channels that must never hit
+ * the house), stems on 9-16 stereo pairs, and the full mix as the 9/10 fallback.
+ * All configurable in the UI; these are just safe starting points.
+ */
 export function defaultXAirChannelsForLane(laneKey: string): number[] {
-  if (laneKey === 'original') return [17, 18]
-  if (laneKey === 'click') return [15]
-  if (laneKey === 'cue') return [16]
-  return []
+  if (laneKey === 'click') return [17]
+  if (laneKey === 'cue') return [18]
+  if (laneKey === 'original') return [9, 10]
+  return stemPairForLaneKey(laneKey) ?? []
+}
+
+/**
+ * A lane whose audio must be MONITOR-ONLY — heard in the performers' in-ears but
+ * NEVER in the front-of-house mix. Click ends the show if it reaches the house;
+ * spoken cues are for the band only. Everything else is musical (FOH-ok).
+ */
+export function isMonitorOnlyLane(laneKey: string): boolean {
+  return laneKey === 'click' || laneKey === 'cue'
 }
 
 export function hasAnySoloedLane(lanes: readonly XAirLiveLane[]): boolean {
@@ -175,6 +201,113 @@ export function diffXAirLaneWrites(
   for (const write of writes) {
     const key = write.kind === 'channel-fader' ? `f:${write.channel}` : `o:${write.channel}`
     const value = write.kind === 'channel-fader' ? write.value.toFixed(4) : write.on ? '1' : '0'
+    if (nextState.get(key) === value) continue
+    nextState.set(key, value)
+    changed.push(write)
+  }
+  return { changed, nextState }
+}
+
+// ── FOH safety: keep monitor-only channels (click/cue) OFF the main/LR bus ────
+
+export type XAirMainAssignWrite = { kind: 'channel-main-assign'; channel: number; on: boolean }
+
+/**
+ * The main/LR assignments that make a show house-safe: every channel carrying a
+ * MONITOR-ONLY lane (click/cue) is taken OFF the main bus (`on:false`), while
+ * every other routed channel is assigned ON. If a channel carries both (a
+ * misconfiguration), monitor-only WINS — safety over convenience. Derived from
+ * the user's routes so it always tracks their channel choices.
+ */
+export function xairFohSafetyPlan(routes: readonly XAirLaneRoute[]): XAirMainAssignWrite[] {
+  const monitorOnly = new Set<number>()
+  const musical = new Set<number>()
+  for (const route of routes) {
+    const target = isMonitorOnlyLane(route.laneKey) ? monitorOnly : musical
+    for (const channel of sanitizeXAirChannels(route.channels)) target.add(channel)
+  }
+  const writes: XAirMainAssignWrite[] = []
+  for (const channel of [...new Set([...monitorOnly, ...musical])].sort((a, b) => a - b)) {
+    writes.push({ kind: 'channel-main-assign', channel, on: !monitorOnly.has(channel) })
+  }
+  return writes
+}
+
+/**
+ * From a desk READBACK, which monitor-only channels are NOT yet house-safe: any
+ * channel carrying click/cue whose `/mix/lr` assign is not proven to be OFF.
+ * `mainAssignByChannel` maps channel → current LR assign (true = on the main bus).
+ * CRITICAL: an unread channel (missing from the map) is treated as UNSAFE — we
+ * never claim "house safe" without proof from the console.
+ */
+export function verifyFohSafe(
+  routes: readonly XAirLaneRoute[],
+  mainAssignByChannel: ReadonlyMap<number, boolean>,
+): { safe: boolean; unsafeChannels: number[] } {
+  const monitorOnly = new Set<number>()
+  for (const route of routes) {
+    if (!isMonitorOnlyLane(route.laneKey)) continue
+    for (const channel of sanitizeXAirChannels(route.channels)) monitorOnly.add(channel)
+  }
+  const unsafeChannels: number[] = []
+  for (const channel of [...monitorOnly].sort((a, b) => a - b)) {
+    if (mainAssignByChannel.get(channel) !== false) unsafeChannels.push(channel)
+  }
+  return { safe: unsafeChannels.length === 0, unsafeChannels }
+}
+
+// ── Monitor mixes: per-performer aux-bus sends (the in-ear mixes) ─────────────
+
+/** One performer's in-ear monitor mix on an XR18 aux bus (1-6). */
+export type XAirMonitorMix = {
+  performerId: string
+  bus: number
+  /** laneKey → BarBro linear send level (1.0 = unity), through the fader law. */
+  sends: Record<string, number>
+  /** Optional bus-master linear level. */
+  master?: number
+}
+
+export type XAirBusWrite =
+  | { kind: 'bus-send'; channel: number; bus: number; value: number }
+  | { kind: 'bus-fader'; bus: number; value: number }
+
+/**
+ * Aux-bus send writes for the per-performer monitor mixes: each lane's send level
+ * (through the fader law, so unity lands at 0 dB not +10) is written to every
+ * channel that lane routes to, on that mix's bus. Optional bus master.
+ */
+export function buildXAirBusSends(
+  routes: readonly XAirLaneRoute[],
+  mixes: readonly XAirMonitorMix[],
+): XAirBusWrite[] {
+  const channelsByLane = new Map(routes.map((r) => [r.laneKey, sanitizeXAirChannels(r.channels)]))
+  const writes: XAirBusWrite[] = []
+  for (const mix of mixes) {
+    if (!Number.isInteger(mix.bus) || mix.bus < 1 || mix.bus > 6) continue
+    for (const [laneKey, level] of Object.entries(mix.sends)) {
+      const channels = channelsByLane.get(laneKey)
+      if (!channels || channels.length === 0) continue
+      const value = xairFaderFromLinearGain(level)
+      for (const channel of channels) writes.push({ kind: 'bus-send', channel, bus: mix.bus, value })
+    }
+    if (mix.master != null) {
+      writes.push({ kind: 'bus-fader', bus: mix.bus, value: xairFaderFromLinearGain(mix.master) })
+    }
+  }
+  return writes
+}
+
+/** Diff bus writes against the last-sent state (same spam-guard as the lane writes). */
+export function diffXAirBusWrites(
+  writes: readonly XAirBusWrite[],
+  sentState: ReadonlyMap<string, string>,
+): { changed: XAirBusWrite[]; nextState: Map<string, string> } {
+  const nextState = new Map(sentState)
+  const changed: XAirBusWrite[] = []
+  for (const write of writes) {
+    const key = write.kind === 'bus-send' ? `b:${write.channel}:${write.bus}` : `bf:${write.bus}`
+    const value = write.value.toFixed(4)
     if (nextState.get(key) === value) continue
     nextState.set(key, value)
     changed.push(write)

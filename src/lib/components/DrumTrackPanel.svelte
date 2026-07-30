@@ -40,7 +40,14 @@
   import type { DrumClass, DrumQuantize } from '$lib/songmap/types'
   import { Drum, Guitar } from '@lucide/svelte'
 
-  let { onChanged }: { onChanged?: () => void } = $props()
+  let {
+    onChanged,
+    show = 'both',
+  }: {
+    onChanged?: () => void
+    /** Which generator to render — the mixer opens them one at a time. */
+    show?: 'both' | 'drums' | 'bass'
+  } = $props()
 
   const QUANTIZE_OPTIONS: { value: DrumQuantize; label: string }[] = [
     { value: 'off', label: 'As played' },
@@ -61,7 +68,7 @@
   const fresh = $derived($songMap ? hasFreshDrumMidi($songMap) : false)
   const renderSaved = $derived(!!dm?.renderExport?.relativePath)
   const kitId = $derived<DrumKitId>(
-    dm?.kit === 'acoustic' || dm?.kit === 'custom' ? dm.kit : 'synth',
+    DRUM_KITS.some((k) => k.id === dm?.kit) ? (dm!.kit as DrumKitId) : 'synth',
   )
 
   // "Your kit" status — loaded from the project folder when selected.
@@ -96,6 +103,7 @@
     hihat: 'hi-hat',
     tom: 'tom',
     cymbal: 'crash',
+    ride: 'ride',
   }
   const customKitLine = $derived.by(() => {
     if (kitId !== 'custom' || !customKitChecked) return ''
@@ -479,6 +487,7 @@
   class="brutalist-shadow border-foreground bg-background w-full border-2 p-3"
   aria-label="BarBro Band"
 >
+  {#if show !== 'bass'}
   <!-- ── Drums row ─────────────────────────────────────────────────────── -->
   <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
     <span class="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider">
@@ -614,6 +623,8 @@
     <p class="text-destructive mt-1 text-xs">{errorMsg}</p>
   {/if}
 
+  {/if}
+  {#if show !== 'drums'}
   <!-- ── Bass row ──────────────────────────────────────────────────────── -->
   <div class="border-foreground/20 mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-2 border-t-2 pt-2.5 text-xs">
     <span class="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider">
@@ -695,5 +706,6 @@
   {/if}
   {#if bassErrorMsg}
     <p class="text-destructive mt-1 text-xs">{bassErrorMsg}</p>
+  {/if}
   {/if}
 </section>

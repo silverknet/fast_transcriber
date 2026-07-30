@@ -46,6 +46,8 @@ class MockOscillatorNode {
 
 class MockBufferSourceNode {
   buffer: { duration: number } | null = null
+  /** Real AudioBufferSourceNodes always expose this AudioParam (varispeed). */
+  playbackRate = { value: 1 }
   connect = vi.fn()
   disconnect = vi.fn()
   /** Each `start` call records `[ctxTime, offset]`. */
@@ -587,6 +589,101 @@ describe('UnifiedTransport.playbackAdapter (PlaybackControllerLike view)', () =>
     expect(a.ownsDecode).toBe(true)
     // Same object every read (stable identity for the host's controller prop).
     expect(t.playbackAdapter).toBe(a)
+    t.dispose()
+  })
+})
+
+describe('UnifiedTransport — naive transpose (varispeed)', () => {
+  it('defaults to no transpose: rate exactly 1, sources untouched', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    expect(t.transposeSemitones).toBe(0)
+    expect(t.transposeRate).toBe(1)
+    t.play()
+    expect(lastCtx!.bufferSources[0]!.playbackRate.value).toBe(1)
+    t.dispose()
+  })
+
+  it('sets the source playback rate from the semitone offset', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    t.setTransposeSemitones(12) // an octave up = double speed
+    t.play()
+    expect(lastCtx!.bufferSources[0]!.playbackRate.value).toBeCloseTo(2, 9)
+    t.dispose()
+  })
+
+  it('down an octave halves the rate', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    t.setTransposeSemitones(-12)
+    t.play()
+    expect(lastCtx!.bufferSources[0]!.playbackRate.value).toBeCloseTo(0.5, 9)
+    t.dispose()
+  })
+
+  it('applies to sources ALREADY playing, without a re-decode', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    t.play()
+    const src = lastCtx!.bufferSources[0]!
+    const buffer = t.audioBuffer
+    t.setTransposeSemitones(5)
+    expect(src.playbackRate.value).toBeCloseTo(Math.pow(2, 5 / 12), 9)
+    // The decoded buffer is the SAME object — nothing was re-rendered.
+    expect(t.audioBuffer).toBe(buffer)
+    t.dispose()
+  })
+
+  it('returning to 0 restores a rate of EXACTLY 1 (the round-trip guarantee)', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    t.play()
+    const src = lastCtx!.bufferSources[0]!
+    const buffer = t.audioBuffer
+    for (const n of [3, 7, -5, 11, -12]) t.setTransposeSemitones(n)
+    t.setTransposeSemitones(0)
+    // Not "close to" 1 — exactly 1, or a round trip would leave it detuned.
+    expect(src.playbackRate.value).toBe(1)
+    expect(t.transposeRate).toBe(1)
+    expect(t.audioBuffer).toBe(buffer) // and the audio was never re-rendered
+    t.dispose()
+  })
+
+  it('count-in clicks speed up with the song, so the lead-in stays in tempo', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4, countInBeats: 4 }), 8)
+    t.playWithClick = true
+    t.setTransposeSemitones(12) // double speed
+    t.play()
+    const starts = lastCtx!.scheduledStarts.slice().sort((a, b) => a - b)
+    expect(starts.length).toBe(4)
+    // At 2×, the 0.5 s count-in beats must land 0.25 s apart in wall time —
+    // otherwise the count-in counts a different tempo than the song plays.
+    for (let i = 1; i < starts.length; i++) {
+      expect(starts[i]! - starts[i - 1]!).toBeCloseTo(0.25, 3)
+    }
+    t.dispose()
+  })
+
+  it('ignores junk offsets rather than producing a silent or insane rate', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    t.setTransposeSemitones(NaN)
+    expect(t.transposeRate).toBe(1)
+    t.dispose()
+  })
+})
+
+describe('UnifiedTransport — transpose set BEFORE the engine exists (regression)', () => {
+  it('applies the stored transpose to an engine created later', async () => {
+    const t = await freshTransport()
+    // The /edit page restores the setting on mount — BEFORE any audio is
+    // decoded, so no MixerEngine exists yet. The rate must not be dropped.
+    t.setTransposeSemitones(12)
+    await loadSong(t, makeSong({ barCount: 4 }), 8)
+    t.play()
+    expect(lastCtx!.bufferSources[0]!.playbackRate.value).toBeCloseTo(2, 9)
     t.dispose()
   })
 })

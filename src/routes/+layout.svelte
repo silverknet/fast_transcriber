@@ -16,7 +16,11 @@
     probeDesktopPythonHealth,
     probeDesktopSetupStatus,
   } from '$lib/client/desktopBeacon'
-  import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
+  import {
+    startProjectAutosave,
+    stopProjectAutosave,
+    flushProjectAutosave,
+  } from '$lib/client/projectAutosave'
   import { startCloudAutoPull, stopCloudAutoPull } from '$lib/client/cloudAutoPull'
   import CloudChangeToast from '$lib/components/CloudChangeToast.svelte'
   import {
@@ -305,6 +309,13 @@
   })
 
   beforeNavigate((nav) => {
+    // Persist any debounced-but-unsent edit BEFORE the route changes. SPA
+    // navigation fires no visibilitychange/pagehide, so this is the only signal
+    // that catches "edit the artist, click back to the project within 7s" —
+    // without it that edit is lost (in browser mode, permanently). Runs while
+    // $page is still /edit; the flush forces past the /edit push guard anyway.
+    flushProjectAutosave()
+
     if (!nav.to) return
     const dest = nav.to.url.pathname
     if (dest !== '/') return

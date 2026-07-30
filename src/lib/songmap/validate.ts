@@ -1,4 +1,5 @@
 import { SONGMAP_FORMAT_VERSION } from './version'
+import { isLiveSlotLink } from '$lib/hardware/liveSlotLinks'
 import type {
   Bar,
   Beat,
@@ -521,6 +522,9 @@ export function validateSongMap(map: SongMap): ValidationResult {
           else {
             if (typeof t.key !== 'string' || !t.key) errors.push(`mixState.tracks[${i}].key invalid`)
             if (!Number.isFinite(t.volume) || t.volume < 0) errors.push(`mixState.tracks[${i}].volume invalid`)
+            if (t.liveSlot !== undefined && !isLiveSlotLink(t.liveSlot)) {
+              errors.push(`mixState.tracks[${i}].liveSlot invalid`)
+            }
           }
         }
       }

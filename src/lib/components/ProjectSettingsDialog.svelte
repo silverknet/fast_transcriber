@@ -30,6 +30,7 @@
     isProjectAutoStemsWatched,
   } from '$lib/client/desktopProjectFs'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { LEGACY_LIVE_STEMS } from '$lib/audio/liveStemDefaults'
   import {
     AUTO_STEM_NAMES,
     type AutoStemName,
@@ -75,6 +76,13 @@
     other: false,
   })
   let quality = $state<AutoStemQuality>('balanced')
+  /** Which stems play by default in LIVE mode (checked = audible; rest muted). */
+  let liveSelected = $state<Record<AutoStemName, boolean>>({
+    vocals: false,
+    drums: false,
+    bass: false,
+    other: false,
+  })
   let countInBeats = $state(0)
   let cueMode = $state<PreCountInCueMode>('off')
   let performers = $state<Performer[]>([])
@@ -111,6 +119,8 @@
   let soundEnabled = $state(false)
   let soundMatchLoudness = $state(true)
   let soundMasterGlue = $state(true)
+  /** Drums only: how hard the kick in the drums stem hits (0…1, 0 = untouched). */
+  let soundKickPunch = $state(0)
   let soundStems = $state<Record<AutoStemName, StemSoundForm>>(structuredClone(DEFAULT_STEM_SOUND))
   /** THIS machine: auto-prepare stems locally (per-machine, not shared). */
   let localPrepare = $state(false)
@@ -142,6 +152,15 @@
       bass: set.has('bass'),
       other: set.has('other'),
     }
+    // Live default stems: seed from the saved config, or the legacy default
+    // (all stems except vocals) so the checkboxes show today's behavior.
+    const liveSet = new Set(snap.data?.defaults?.liveStems ?? LEGACY_LIVE_STEMS)
+    liveSelected = {
+      vocals: liveSet.has('vocals'),
+      drums: liveSet.has('drums'),
+      bass: liveSet.has('bass'),
+      other: liveSet.has('other'),
+    }
     countInBeats = snap.data?.defaults?.countInBeats ?? 0
     const pc = snap.data?.defaults?.preCountInCue
     cueMode = pc?.mode ?? 'off'
@@ -150,6 +169,7 @@
     soundEnabled = ms?.enabled ?? false
     soundMatchLoudness = ms?.matchLoudness ?? true
     soundMasterGlue = ms?.masterGlue ?? true
+    soundKickPunch = Math.max(0, Math.min(1, ms?.kickPunch ?? 0))
     const stemForm = structuredClone(DEFAULT_STEM_SOUND)
     for (const name of AUTO_STEM_NAMES) {
       const s = ms?.stems?.[name]
@@ -170,6 +190,7 @@
   })
 
   const chosenStems = $derived(AUTO_STEM_NAMES.filter((n) => selected[n]))
+  const chosenLiveStems = $derived(AUTO_STEM_NAMES.filter((n) => liveSelected[n]))
   const noStemsButEnabled = $derived(enabled && chosenStems.length === 0)
   const songCount = $derived($projectStore.data?.songs.length ?? 0)
   const canExportSetlist = $derived(
@@ -190,7 +211,11 @@
     try {
       // Shared project config (source of truth).
       await setProjectAutoStems({ enabled, stems: chosenStems, quality })
-      await setProjectDefaults({ countInBeats: countInBeats > 0 ? countInBeats : 0, preCountInCue })
+      await setProjectDefaults({
+        countInBeats: countInBeats > 0 ? countInBeats : 0,
+        preCountInCue,
+        liveStems: chosenLiveStems,
+      })
       await setProjectPerformers(
         performers
           .map((p) => ({ ...p, name: p.name.trim(), role: p.role?.trim() || undefined }))
@@ -211,6 +236,7 @@
           matchLoudness: soundMatchLoudness,
           masterGlue: soundMasterGlue,
           stems,
+          ...(soundKickPunch > 0 ? { kickPunch: soundKickPunch } : {}),
         })
       }
       // This machine (local): opt in/out of auto-preparing stems here.
@@ -339,6 +365,32 @@
           <span class="text-muted-foreground text-[11px]">
             Saving sets the default for new songs; “Apply to all” also writes it to every existing
             song. You can still override the count-in per song in the editor.
+          </span>
+        </div>
+
+        <!-- Live default stems (project-wide) -->
+        <div class="border-foreground/10 flex flex-col gap-1.5 border-t pt-3">
+          <span class="text-sm font-semibold">Live stems</span>
+          <span class="text-muted-foreground text-xs">
+            Which stems play when you start a song in live mode. Checked = you hear it; everything
+            else loads muted. Every song opens with this set, whatever its saved mix — you can still
+            change stems on the fly while performing.
+          </span>
+          <div class="mt-1 grid grid-cols-2 gap-1.5">
+            {#each AUTO_STEM_NAMES as name (name)}
+              <label class="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  bind:checked={liveSelected[name]}
+                  class="accent-foreground size-3.5"
+                />
+                {STEM_LABELS[name]}
+              </label>
+            {/each}
+          </div>
+          <span class="text-muted-foreground text-[11px]">
+            A song without the chosen stems separated falls back to its full mix, so it’s never
+            silent on stage.
           </span>
         </div>
 
@@ -501,13 +553,34 @@
                       {/each}
                     </div>
                   </div>
+                  {#if name === 'drums'}
+                    <!-- Kick punch is drums-only: it works on the sub-110 Hz
+                         band, which in a drums stem is the kick and nothing
+                         else. Snare, hats and cymbals are untouched. -->
+                    <label class="flex items-center gap-2">
+                      <span class="text-muted-foreground w-10 text-[10px] font-bold uppercase tracking-wider">Kick</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        bind:value={soundKickPunch}
+                        class="accent-foreground h-1 min-w-0 flex-1"
+                        aria-label="Kick punch"
+                      />
+                      <span class="w-14 text-right font-mono text-xs tabular-nums">
+                        {soundKickPunch === 0 ? 'Off' : `${Math.round(soundKickPunch * 100)}%`}
+                      </span>
+                    </label>
+                  {/if}
                 </div>
               {/each}
             </div>
             <span class="text-muted-foreground text-[11px]">
               Level raises or lowers just that stem in every song. “Even” smooths its dynamics so
               e.g. every bass note lands with similar weight. The named toggle shapes the tone —
-              rich low end for bass, punch and clarity for drums.
+              rich low end for bass, punch and clarity for drums. “Kick” makes the kick drum hit
+              harder without touching the snare, hats or cymbals.
             </span>
 
             <label class="flex cursor-pointer items-center gap-2 text-sm">

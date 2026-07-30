@@ -49,8 +49,37 @@ export function xairChannelBusSendPath(channel, bus) {
   return xairChannelPath(channel, `/mix/${String(busNum).padStart(2, '0')}/level`)
 }
 
+/** Main/LR bus ASSIGN — the ONE control that takes a channel off the house mix. */
+export function xairChannelMainAssignPath(channel) {
+  return xairChannelPath(channel, '/mix/lr')
+}
+
+/** Aux-bus MASTER fader (bus 1..6). */
+export function xairBusFaderPath(bus) {
+  const busNum = Number.parseInt(String(bus), 10)
+  if (!Number.isInteger(busNum) || busNum < 1 || busNum > 6) throw new Error('XR18 bus must be 1..6')
+  return `/bus/${String(busNum).padStart(2, '0')}/mix/fader`
+}
+
 export function xairMainFaderPath() {
   return '/lr/mix/fader'
+}
+
+/**
+ * Parse an accumulated `{ address: args }` readback into per-channel state
+ * (`lr`/`on`/`fader`). Used to PROVE click/cue are off the house: an int `lr` of
+ * 0 = off the main bus. Pure + testable.
+ */
+export function parseXAirChannelState(rawState) {
+  const channels = {}
+  const touch = (ch) => (channels[ch] ??= {})
+  for (const [address, args] of Object.entries(rawState || {})) {
+    const m = /^\/ch\/(\d{2})\/mix\/(lr|on|fader)$/.exec(address)
+    if (!m || !Array.isArray(args) || args.length === 0) continue
+    const ch = Number.parseInt(m[1], 10)
+    touch(ch)[m[2]] = args[0].value
+  }
+  return { channels }
 }
 
 export function normalizeOscArg(arg) {
@@ -128,6 +157,9 @@ export function createXAirClient({ host, port = XAIR_OSC_PORT, localPort = 0, ke
   let keepalive = null
   let connected = false
   let opening = null
+  // Accumulated desk readback (address → args), fed by /xremote echoes + query
+  // replies. This is what lets a "prove it" verify read the console's real state.
+  const state = new Map()
 
   const send = (address, args = []) => {
     const msg = encodeOscMessage(address, args)
@@ -136,7 +168,9 @@ export function createXAirClient({ host, port = XAIR_OSC_PORT, localPort = 0, ke
 
   socket.on('message', (msg, rinfo) => {
     try {
-      events.emit('message', { ...decodeOscMessage(msg), remote: { address: rinfo.address, port: rinfo.port } })
+      const decoded = decodeOscMessage(msg)
+      if (Array.isArray(decoded.args) && decoded.args.length > 0) state.set(decoded.address, decoded.args)
+      events.emit('message', { ...decoded, remote: { address: rinfo.address, port: rinfo.port } })
     } catch (e) {
       events.emit('error', e)
     }
@@ -200,6 +234,32 @@ export function createXAirClient({ host, port = XAIR_OSC_PORT, localPort = 0, ke
     },
     setChannelBusSend(channel, bus, value) {
       send(xairChannelBusSendPath(channel, bus), [{ type: 'f', value: clamp01(value) }])
+    },
+    setChannelMainAssign(channel, on) {
+      send(xairChannelMainAssignPath(channel), [{ type: 'i', value: on ? 1 : 0 }])
+    },
+    setBusFader(bus, value) {
+      send(xairBusFaderPath(bus), [{ type: 'f', value: clamp01(value) }])
+    },
+    /** Send a bare-address query; the desk replies with the current value. */
+    query(address) {
+      send(address)
+    },
+    /**
+     * Query every channel's `/mix/{lr,on,fader}`, wait for the UDP replies, and
+     * return the parsed per-channel state — the read-back that proves FOH safety.
+     */
+    async refreshChannelState({ waitMs = 250 } = {}) {
+      for (let ch = 1; ch <= 18; ch += 1) {
+        send(xairChannelMainAssignPath(ch))
+        send(xairChannelOnPath(ch))
+        send(xairChannelFaderPath(ch))
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitMs))
+      return parseXAirChannelState(Object.fromEntries(state))
+    },
+    getRawState() {
+      return Object.fromEntries(state)
     },
     status() {
       return { connected, host: cleanHost, port: cleanPort }

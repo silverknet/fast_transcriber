@@ -76,6 +76,7 @@ export type FormatOptions = {
  * lead-sheet view where music typography matters and the font supports it.
  */
 export function formatChordSymbol(chord: ChordSymbol, opts?: FormatOptions): string {
+  if (chord.noChord) return 'N.C.'
   const unicode = opts?.unicode ?? false
   let s = formatRoot(chord.root, chord.accidental, unicode)
   s += qualitySuffix(chord.quality, chord.extensions, chord.alterations)

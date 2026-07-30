@@ -26,6 +26,24 @@ export type SynthFx = {
   delayFeedback: number // 0..0.95
   reverbMix: number // 0..1
   reverbSize: number // seconds 0.2..6
+  // ── Mix polish (optional; transparent defaults keep every old preset identical) ──
+  /** Roll off mud below this Hz so the sound sits in the mix (≤20 = off). */
+  highpassHz?: number
+  /** Seconds of pre-delay before the reverb tail — keeps the attack clear (0 = off). */
+  reverbPredelay?: number
+  /** Low-pass on the reverb tail for a darker, smoother wash (high Hz = off). */
+  reverbDamp?: number
+  /** 0..1 soft saturation for analog warmth + glue (0 = perfectly clean). */
+  drive?: number
+  /** 0..1 bright, gently-pulsing high sparkle on top (0 = none). */
+  shimmer?: number
+  /** 0..1 analog-style humanization: subtle random per-note detune drift so the
+   *  sound isn't the same "plastic" note every time (0 = mathematically perfect). */
+  analog?: number
+  /** 0..1 phaser — sweeping allpass notches for that psychedelic whoosh (0 = off). */
+  phaser?: number
+  /** 0..1 auto-wah — an LFO-swept resonant band-pass, funky/vocal (0 = off). */
+  wah?: number
 }
 
 /** A complete, editable synth sound. */
@@ -47,6 +65,16 @@ export const DEFAULT_FX: SynthFx = {
   delayFeedback: 0.3,
   reverbMix: 0.18,
   reverbSize: 2.0,
+  // Transparent defaults: HPF near-DC, no pre-delay, tail undamped, no drive/shimmer.
+  highpassHz: 20,
+  reverbPredelay: 0,
+  reverbDamp: 14000,
+  drive: 0,
+  shimmer: 0,
+  // A touch of analog drift on everything so no sound is dead-static/plastic.
+  analog: 0.14,
+  phaser: 0,
+  wah: 0,
 }
 
 export const DEFAULT_PATCH: SynthPatch = {
@@ -157,6 +185,24 @@ export function velocityToGain(velocity: number): number {
 
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x))
 
+/**
+ * Soft-saturation transfer curve for the drive waveshaper. `null` (drive ≈ 0)
+ * means pass-through, so a clean patch is bit-identical. Otherwise a normalized
+ * `tanh` shape rounds off peaks for gentle analog warmth/glue.
+ */
+function makeDriveCurve(drive: number): Float32Array<ArrayBuffer> | null {
+  if (drive <= 0.001) return null
+  const k = 1 + drive * 6 // input gain into tanh (1..7)
+  const norm = Math.tanh(k)
+  const n = 1024
+  const curve = new Float32Array(new ArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT))
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1
+    curve[i] = Math.tanh(k * x) / norm
+  }
+  return curve
+}
+
 const MAX_VOICES = 16
 const LFO_SWING_HZ = 3500 // full-depth cutoff swing
 
@@ -169,13 +215,30 @@ type Voice = {
 }
 
 export class KeysSynth {
-  #ctx: AudioContext | null = null
+  #ctx: BaseAudioContext | null = null
+  /**
+   * Per-note randomness (analog detune). Live uses `Math.random`; an offline
+   * render swaps in a seeded source so the same song renders identically every
+   * time. Keeping it injectable is what lets ONE voice implementation serve
+   * both without the render drifting.
+   */
+  #rand: () => number = Math.random
   #voices = new Map<number, Voice>()
   #volume = 0.8
   #patch: SynthPatch = structuredClonePatch(DEFAULT_PATCH)
 
   // Graph
   #voiceBus: GainNode | null = null
+  #busHighpass: BiquadFilterNode | null = null
+  #busDrive: WaveShaperNode | null = null
+  #reverbPredelay: DelayNode | null = null
+  #reverbDamp: BiquadFilterNode | null = null
+  #shimmerLevel: GainNode | null = null
+  #shimmerLfoDepth: GainNode | null = null
+  #phaserWet: GainNode | null = null
+  #phaserDepth: GainNode | null = null
+  #wahWet: GainNode | null = null
+  #wahDepth: GainNode | null = null
   #lfo: OscillatorNode | null = null
   #lfoGain: GainNode | null = null
   #chorusWetL: GainNode | null = null
@@ -225,6 +288,21 @@ export class KeysSynth {
       this.#convolver.buffer = this.#makeReverbIR(clamp(f.reverbSize, 0.2, 6))
       this.#reverbSizeBuilt = f.reverbSize
     }
+    // Mix polish (transparent when unset).
+    if (this.#busHighpass) this.#busHighpass.frequency.value = clamp(f.highpassHz ?? 20, 20, 2000)
+    if (this.#busDrive) this.#busDrive.curve = makeDriveCurve(clamp(f.drive ?? 0, 0, 1))
+    if (this.#reverbPredelay)
+      this.#reverbPredelay.delayTime.value = clamp(f.reverbPredelay ?? 0, 0, 0.25)
+    if (this.#reverbDamp) this.#reverbDamp.frequency.value = clamp(f.reverbDamp ?? 14000, 500, 16000)
+    const shimmer = clamp(f.shimmer ?? 0, 0, 1)
+    if (this.#shimmerLevel) this.#shimmerLevel.gain.value = shimmer * 0.4
+    if (this.#shimmerLfoDepth) this.#shimmerLfoDepth.gain.value = shimmer * 0.22
+    const phaser = clamp(f.phaser ?? 0, 0, 1)
+    if (this.#phaserWet) this.#phaserWet.gain.value = phaser
+    if (this.#phaserDepth) this.#phaserDepth.gain.value = phaser * 1500 // sweep depth (Hz)
+    const wah = clamp(f.wah ?? 0, 0, 1)
+    if (this.#wahWet) this.#wahWet.gain.value = wah
+    if (this.#wahDepth) this.#wahDepth.gain.value = wah * 1700
   }
 
   async resume(): Promise<void> {
@@ -233,16 +311,75 @@ export class KeysSynth {
         (globalThis as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
           .AudioContext ??
         (globalThis as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-      this.#ctx = new Ctor({ latencyHint: 0 })
+      this.#ctx = new Ctor({ latencyHint: 0 }) as BaseAudioContext
       this.#buildGraph()
     }
-    if (this.#ctx.state !== 'running') await this.#ctx.resume()
+    const live = this.#ctx as AudioContext
+    if (live.state !== 'running') await live.resume()
     this.#warmUp()
   }
 
   #buildGraph(): void {
     const ctx = this.#ctx!
     const voiceBus = ctx.createGain()
+
+    // Bus polish: a high-pass to clear low mud (so the sound sits in the mix)
+    // feeding a soft-saturation waveshaper for warmth/glue. Both are transparent
+    // by default (HPF ~20 Hz, drive curve null), so untouched presets are
+    // bit-identical; the FX SEND + dry both read from here.
+    const busHighpass = ctx.createBiquadFilter()
+    busHighpass.type = 'highpass'
+    busHighpass.frequency.value = 20
+    const busDrive = ctx.createWaveShaper()
+    voiceBus.connect(busHighpass)
+    busHighpass.connect(busDrive)
+
+    // Phaser: a 4-stage allpass chain swept by an LFO, its wet notches mixed back
+    // with the dry — the classic psychedelic whoosh. Silent when phaser = 0.
+    const phaserOut = ctx.createGain()
+    busDrive.connect(phaserOut) // dry
+    const phaserLfo = ctx.createOscillator()
+    phaserLfo.type = 'sine'
+    phaserLfo.frequency.value = 0.4
+    const phaserDepth = ctx.createGain()
+    phaserDepth.gain.value = 0
+    phaserLfo.connect(phaserDepth)
+    phaserLfo.start()
+    let apNode: AudioNode = busDrive
+    for (let i = 0; i < 4; i++) {
+      const ap = ctx.createBiquadFilter()
+      ap.type = 'allpass'
+      ap.frequency.value = 300 + i * 420
+      ap.Q.value = 0.6
+      phaserDepth.connect(ap.frequency)
+      apNode.connect(ap)
+      apNode = ap
+    }
+    const phaserWet = ctx.createGain()
+    phaserWet.gain.value = 0
+    apNode.connect(phaserWet)
+    phaserWet.connect(phaserOut)
+
+    // Auto-wah: an LFO-swept resonant band-pass mixed with the dry — funky/vocal.
+    const wahOut = ctx.createGain()
+    phaserOut.connect(wahOut) // dry
+    const wahBP = ctx.createBiquadFilter()
+    wahBP.type = 'bandpass'
+    wahBP.frequency.value = 700
+    wahBP.Q.value = 4.5
+    const wahLfo = ctx.createOscillator()
+    wahLfo.type = 'sine'
+    wahLfo.frequency.value = 1.8
+    const wahDepth = ctx.createGain()
+    wahDepth.gain.value = 0
+    wahLfo.connect(wahDepth)
+    wahDepth.connect(wahBP.frequency)
+    wahLfo.start()
+    phaserOut.connect(wahBP)
+    const wahWet = ctx.createGain()
+    wahWet.gain.value = 0
+    wahBP.connect(wahWet)
+    wahWet.connect(wahOut)
 
     // Shared cutoff LFO (connected to each voice's filter on note-on).
     const lfo = ctx.createOscillator()
@@ -277,15 +414,15 @@ export class KeysSynth {
     panR.pan.value = 0.7
     const chorusWetL = ctx.createGain()
     const chorusWetR = ctx.createGain()
-    voiceBus.connect(chorusL)
-    voiceBus.connect(chorusR)
+    wahOut.connect(chorusL)
+    wahOut.connect(chorusR)
     chorusL.connect(chorusWetL)
     chorusR.connect(chorusWetR)
     chorusWetL.connect(panL)
     chorusWetR.connect(panR)
 
     const afterChorus = ctx.createGain()
-    voiceBus.connect(afterChorus) // dry
+    wahOut.connect(afterChorus) // dry
     panL.connect(afterChorus)
     panR.connect(afterChorus)
 
@@ -305,20 +442,65 @@ export class KeysSynth {
     afterChorus.connect(afterDelay)
     delayWet.connect(afterDelay)
 
-    // Reverb (synthesized impulse).
+    // Reverb (synthesized impulse) with PRE-DELAY (keeps the dry attack clear
+    // before the tail) and TAIL DAMPING (low-pass → dark, smooth, not fizzy).
+    const reverbPredelay = ctx.createDelay(0.25)
+    const reverbDamp = ctx.createBiquadFilter()
+    reverbDamp.type = 'lowpass'
+    reverbDamp.frequency.value = 14000
     const convolver = ctx.createConvolver()
     convolver.buffer = this.#makeReverbIR(this.#patch.fx.reverbSize)
     this.#reverbSizeBuilt = this.#patch.fx.reverbSize
     const reverbWet = ctx.createGain()
     const out = ctx.createGain()
-    afterDelay.connect(convolver)
-    convolver.connect(reverbWet)
+    afterDelay.connect(reverbPredelay)
+    reverbPredelay.connect(convolver)
+    convolver.connect(reverbDamp)
+    reverbDamp.connect(reverbWet)
     afterDelay.connect(out)
     reverbWet.connect(out)
+
+    // Twinkle / shimmer: a bright, short, gently-pulsing high echo tapped off the
+    // (driven) bus. High-passed so only the sparkle frequencies ring, with a slow
+    // tremolo LFO on its level for the "twinkle". Silent when shimmer = 0.
+    const shimmerHP = ctx.createBiquadFilter()
+    shimmerHP.type = 'highpass'
+    shimmerHP.frequency.value = 1900
+    const shimmerDelay = ctx.createDelay(0.5)
+    shimmerDelay.delayTime.value = 0.13
+    const shimmerFb = ctx.createGain()
+    shimmerFb.gain.value = 0.34
+    const shimmerLevel = ctx.createGain()
+    shimmerLevel.gain.value = 0
+    const shimmerLfo = ctx.createOscillator()
+    shimmerLfo.type = 'sine'
+    shimmerLfo.frequency.value = 5.5
+    const shimmerLfoDepth = ctx.createGain()
+    shimmerLfoDepth.gain.value = 0
+    shimmerLfo.connect(shimmerLfoDepth)
+    shimmerLfoDepth.connect(shimmerLevel.gain)
+    shimmerLfo.start()
+    busDrive.connect(shimmerHP)
+    shimmerHP.connect(shimmerDelay)
+    shimmerDelay.connect(shimmerFb)
+    shimmerFb.connect(shimmerDelay)
+    shimmerDelay.connect(shimmerLevel)
+    shimmerLevel.connect(out)
+
     out.gain.value = this.#volume
     out.connect(ctx.destination)
 
     this.#voiceBus = voiceBus
+    this.#busHighpass = busHighpass
+    this.#busDrive = busDrive
+    this.#reverbPredelay = reverbPredelay
+    this.#reverbDamp = reverbDamp
+    this.#shimmerLevel = shimmerLevel
+    this.#shimmerLfoDepth = shimmerLfoDepth
+    this.#phaserWet = phaserWet
+    this.#phaserDepth = phaserDepth
+    this.#wahWet = wahWet
+    this.#wahDepth = wahDepth
     this.#lfo = lfo
     this.#lfoGain = lfoGain
     this.#chorusWetL = chorusWetL
@@ -344,7 +526,9 @@ export class KeysSynth {
       const d = ir.getChannelData(ch)
       for (let i = 0; i < len; i++) {
         const env = Math.pow(1 - i / len, 2.6) * Math.min(1, i / (rate * 0.006))
-        d[i] = (Math.random() * 2 - 1) * env
+        // Same injectable source as the analog detune: live stays Math.random,
+        // an offline render is seeded so the same song renders identically.
+        d[i] = (this.#rand() * 2 - 1) * env
       }
     }
     return ir
@@ -364,11 +548,17 @@ export class KeysSynth {
     osc.stop(t + 0.015)
   }
 
+  /** Latency is a LIVE concept — an offline render has none. */
+  get #liveCtx(): AudioContext | null {
+    const c = this.#ctx as AudioContext | null
+    return c && typeof (c as AudioContext).baseLatency === 'number' ? c : null
+  }
+
   get baseLatencyMs(): number {
-    return (this.#ctx?.baseLatency ?? 0) * 1000
+    return (this.#liveCtx?.baseLatency ?? 0) * 1000
   }
   get outputLatencyMs(): number {
-    const ctx = this.#ctx
+    const ctx = this.#liveCtx
     if (!ctx) return 0
     const ol = (ctx as AudioContext & { outputLatency?: number }).outputLatency
     if (ol && ol > 0) return ol * 1000
@@ -383,8 +573,7 @@ export class KeysSynth {
 
   noteOn(note: number, velocity = 100): void {
     const ctx = this.#ctx
-    const bus = this.#voiceBus
-    if (!ctx || !bus) return
+    if (!ctx) return
     if (this.#voices.has(note)) this.#endVoice(note, true)
     if (this.#voices.size >= MAX_VOICES) {
       let oldestNote = -1
@@ -392,9 +581,22 @@ export class KeysSynth {
       for (const [n, v] of this.#voices) if (v.startedAt < oldestAt) ((oldestAt = v.startedAt), (oldestNote = n))
       if (oldestNote >= 0) this.#endVoice(oldestNote, true)
     }
+    const v = this.#startVoice(note, velocity, ctx.currentTime)
+    if (v) this.#voices.set(note, v)
+  }
+
+  /**
+   * Build one voice starting at `at`. Shared by live `noteOn` and offline
+   * `scheduleNote` so the two cannot sound different — the whole reason this
+   * is extracted rather than reimplemented.
+   */
+  #startVoice(note: number, velocity: number, at: number): Voice | null {
+    const ctx = this.#ctx
+    const bus = this.#voiceBus
+    if (!ctx || !bus) return null
 
     const p = this.#patch
-    const t0 = ctx.currentTime
+    const t0 = at
     const freq = midiNoteToFreq(note)
     const vel = velocityToGain(velocity)
 
@@ -412,13 +614,18 @@ export class KeysSynth {
       }
     }
 
+    // Analog humanization: a small RANDOM detune per note per oscillator so no
+    // two hits are mathematically identical — this is most of what kills the
+    // "plastic" feel. ±~8 cents at full; each osc drifts independently so they
+    // gently beat against each other.
+    const analog = clamp(p.fx.analog ?? 0.14, 0, 1)
     const oscs: OscillatorNode[] = []
     for (const spec of [p.oscA, p.oscB]) {
       if (spec.level <= 0) continue
       const osc = ctx.createOscillator()
       osc.type = spec.type
       osc.frequency.value = freq
-      osc.detune.value = spec.detune
+      osc.detune.value = spec.detune + (this.#rand() * 2 - 1) * analog * 8
       const og = ctx.createGain()
       og.gain.value = spec.level
       osc.connect(og)
@@ -434,7 +641,72 @@ export class KeysSynth {
     amp.gain.linearRampToValueAtTime(Math.max(0.0001, peak * sustain), t0 + Math.max(0.0005, attack) + decay)
     amp.connect(bus)
 
-    this.#voices.set(note, { oscs, amp, vfilter: vf, startedAt: t0, releaseSec: p.env.release })
+    return { oscs, amp, vfilter: vf, startedAt: t0, releaseSec: p.env.release }
+  }
+
+  /**
+   * OFFLINE: schedule a complete note (attack → release) at an absolute time.
+   * No voice map and no stealing — a render has no polyphony budget to protect,
+   * and every note's lifetime is known up front.
+   */
+  scheduleNote(note: number, velocity: number, atSec: number, durationSec: number): void {
+    if (!(durationSec > 0)) return
+    const p = this.#patch
+    // A note shorter than attack+decay squeezes them in rather than running
+    // past its own length.
+    const a = Math.max(0.0005, p.env.attack)
+    const d = p.env.decay
+    const scale = a + d > durationSec ? durationSec / (a + d) : 1
+    const v = this.#startVoiceScaled(note, velocity, atSec, a * scale, d * scale)
+    if (!v) return
+    const end = atSec + durationSec
+    const rel = Math.max(0.005, p.env.release)
+    try {
+      v.amp.gain.linearRampToValueAtTime(0.0001, end + rel)
+    } catch {
+      /* out of range */
+    }
+    for (const osc of v.oscs) {
+      try {
+        osc.stop(end + rel + 0.02)
+      } catch {
+        /* already stopped */
+      }
+    }
+  }
+
+  /** `#startVoice` with the envelope times overridden (short-note fitting). */
+  #startVoiceScaled(
+    note: number,
+    velocity: number,
+    at: number,
+    attack: number,
+    decay: number,
+  ): Voice | null {
+    const saved = this.#patch.env
+    this.#patch = { ...this.#patch, env: { ...saved, attack, decay } }
+    try {
+      return this.#startVoice(note, velocity, at)
+    } finally {
+      this.#patch = { ...this.#patch, env: saved }
+    }
+  }
+
+  /**
+   * Attach an OfflineAudioContext and build the graph on it. The patch, the
+   * voice and the whole FX bus are then exactly what the live instrument uses.
+   * `seed` makes the analog detune reproducible.
+   */
+  attachOfflineContext(ctx: BaseAudioContext, seed = 0x9e3779b9): void {
+    this.#ctx = ctx
+    let a = seed >>> 0
+    this.#rand = () => {
+      a = (a + 0x6d2b79f5) | 0
+      let t = Math.imul(a ^ (a >>> 15), 1 | a)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+    this.#buildGraph()
   }
 
   noteOff(note: number): void {
@@ -485,7 +757,7 @@ export class KeysSynth {
       /* ignore */
     }
     try {
-      await this.#ctx?.close()
+      await (this.#ctx as AudioContext | null)?.close?.()
     } catch {
       /* ignore */
     }

@@ -3,6 +3,8 @@ import {
   buildSynthKit,
   buildAcousticFallbackVoices,
   buildCustomKit,
+  loadDrumKit,
+  DRUM_KITS,
   DRUM_KIT_SAMPLE_RATE,
 } from './drumKits'
 import { drumVelocityGain, mixDrumEvents, normalizeDrumBuffer } from './renderDrumTrack'
@@ -54,6 +56,26 @@ describe('drum kits', () => {
     expect(hashOf(kit.voices.snare)).toBe(hashOf(fallback.snare))
     expect(hashOf(kit.voices.tom)).toBe(hashOf(fallback.tom))
     expect(hashOf(kit.voices.cymbal)).toBe(hashOf(fallback.cymbal))
+  })
+
+  it('Modern 707 is a selectable kit that degrades to the synth kit, not the acoustic one', async () => {
+    // The dropdown renders straight from DRUM_KITS, so presence here IS the
+    // option existing in the UI.
+    expect(DRUM_KITS.map((k) => k.id)).toContain('tr707')
+    expect(DRUM_KITS.find((k) => k.id === 'tr707')?.label).toBe('Modern 707')
+
+    // No static WAVs are reachable under the unit env, so every voice falls
+    // back. A drum machine must fall back to the electronic kit — the
+    // acoustic fallbacks would be wildly out of character.
+    const kit = await loadDrumKit('tr707')
+    expect(kit.id).toBe('tr707')
+    expect(kit.label).toBe('Modern 707')
+    const synth = buildSynthKit()
+    const acoustic = buildAcousticFallbackVoices()
+    for (const cls of ['kick', 'snare', 'hihat', 'tom', 'cymbal'] as DrumClass[]) {
+      expect(hashOf(kit.voices[cls])).toBe(hashOf(synth[cls]))
+      expect(hashOf(kit.voices[cls])).not.toBe(hashOf(acoustic[cls]))
+    }
   })
 })
 

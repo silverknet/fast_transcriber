@@ -43,6 +43,8 @@ class MockOscillatorNode {
 
 class MockBufferSourceNode {
   buffer: { duration: number } | null = null
+  /** Real AudioBufferSourceNodes always expose this AudioParam (varispeed). */
+  playbackRate = { value: 1 }
   connect = vi.fn()
   disconnect = vi.fn()
   /** Each `start` call records `[ctxTime, offset]`. */

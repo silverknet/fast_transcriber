@@ -1,17 +1,23 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildXAirBusSends,
   buildXAirLaneWrites,
   defaultXAirChannelsForLane,
+  diffXAirBusWrites,
   diffXAirLaneWrites,
   ensureXAirRoutesForLanes,
+  isMonitorOnlyLane,
   parseXAirChannelList,
+  verifyFohSafe,
   xairDbToFader,
   xairFaderFromLinearGain,
   xairFaderToDb,
+  xairFohSafetyPlan,
   xairLaneAudible,
   xairWriteSignature,
   type XAirLiveLane,
   type XAirLaneRoute,
+  type XAirMonitorMix,
 } from './xairRouting'
 
 const lane = (patch: Partial<XAirLiveLane> & Pick<XAirLiveLane, 'key'>): XAirLiveLane => ({
@@ -44,11 +50,11 @@ describe('ensureXAirRoutesForLanes', () => {
       [lane({ key: 'original' }), lane({ key: 'cue' }), lane({ key: 'stem:vocals.wav' })],
     )
     expect(routes.map((r) => [r.laneKey, r.channels])).toEqual([
-      ['original', [17, 18]],
-      ['cue', [16]],
-      ['stem:vocals.wav', []],
+      ['original', [9, 10]],
+      ['cue', [18]],
+      ['stem:vocals.wav', [13, 14]],
     ])
-    expect(defaultXAirChannelsForLane('click')).toEqual([15])
+    expect(defaultXAirChannelsForLane('click')).toEqual([17]) // click → its own channel, off FOH
   })
 
   it('preserves existing routes, including lanes that are temporarily absent', () => {
@@ -161,5 +167,107 @@ describe('buildXAirLaneWrites', () => {
         { kind: 'channel-on', channel: 1, on: true },
       ]),
     ).toBe('f:1:0.5000|o:1:1')
+  })
+})
+
+// ── FOH safety (the show-stopping invariant: click/cue NEVER to the house) ────
+
+const route = (laneKey: string, channels: number[]): XAirLaneRoute => ({
+  laneKey,
+  channels,
+  followVolume: true,
+  followMute: true,
+})
+
+describe('isMonitorOnlyLane', () => {
+  it('flags click + cue as monitor-only, music as FOH-ok', () => {
+    expect(isMonitorOnlyLane('click')).toBe(true)
+    expect(isMonitorOnlyLane('cue')).toBe(true)
+    expect(isMonitorOnlyLane('original')).toBe(false)
+    expect(isMonitorOnlyLane('stem:vocals.wav')).toBe(false)
+  })
+})
+
+describe('xairFohSafetyPlan', () => {
+  it('takes click/cue channels OFF the main bus and assigns music ON', () => {
+    const plan = xairFohSafetyPlan([
+      route('click', [17]),
+      route('cue', [18]),
+      route('stem:vocals.wav', [13, 14]),
+      route('original', [9, 10]),
+    ])
+    expect(plan).toEqual([
+      { kind: 'channel-main-assign', channel: 9, on: true },
+      { kind: 'channel-main-assign', channel: 10, on: true },
+      { kind: 'channel-main-assign', channel: 13, on: true },
+      { kind: 'channel-main-assign', channel: 14, on: true },
+      { kind: 'channel-main-assign', channel: 17, on: false }, // click OFF house
+      { kind: 'channel-main-assign', channel: 18, on: false }, // cue OFF house
+    ])
+  })
+
+  it('monitor-only WINS if a channel is shared (safety over convenience)', () => {
+    const plan = xairFohSafetyPlan([route('original', [17]), route('click', [17])])
+    expect(plan).toEqual([{ kind: 'channel-main-assign', channel: 17, on: false }])
+  })
+})
+
+describe('verifyFohSafe', () => {
+  const routes = [route('click', [17]), route('cue', [18]), route('original', [9, 10])]
+
+  it('is SAFE only when every click/cue channel reads back OFF the main bus', () => {
+    const readback = new Map<number, boolean>([
+      [17, false],
+      [18, false],
+      [9, true],
+      [10, true],
+    ])
+    expect(verifyFohSafe(routes, readback)).toEqual({ safe: true, unsafeChannels: [] })
+  })
+
+  it('is UNSAFE if a click/cue channel is still on the main bus', () => {
+    const readback = new Map<number, boolean>([
+      [17, true], // click still going to the house!
+      [18, false],
+    ])
+    expect(verifyFohSafe(routes, readback)).toEqual({ safe: false, unsafeChannels: [17] })
+  })
+
+  it('treats an UNREAD channel as UNSAFE — never claims safe without proof', () => {
+    expect(verifyFohSafe(routes, new Map())).toEqual({ safe: false, unsafeChannels: [17, 18] })
+  })
+})
+
+// ── Per-performer monitor mixes (aux-bus sends) ───────────────────────────────
+
+describe('buildXAirBusSends', () => {
+  const routes = [route('stem:vocals.wav', [13, 14]), route('click', [17])]
+
+  it('sends each lane level (via the fader law) to its channels on the performer bus', () => {
+    const mixes: XAirMonitorMix[] = [
+      { performerId: 'p1', bus: 3, sends: { 'stem:vocals.wav': 1.0, click: 0.5 }, master: 1.0 },
+    ]
+    const writes = buildXAirBusSends(routes, mixes)
+    expect(writes).toEqual([
+      { kind: 'bus-send', channel: 13, bus: 3, value: xairFaderFromLinearGain(1.0) },
+      { kind: 'bus-send', channel: 14, bus: 3, value: xairFaderFromLinearGain(1.0) },
+      { kind: 'bus-send', channel: 17, bus: 3, value: xairFaderFromLinearGain(0.5) },
+      { kind: 'bus-fader', bus: 3, value: xairFaderFromLinearGain(1.0) },
+    ])
+  })
+
+  it('ignores out-of-range buses and unmapped lanes', () => {
+    expect(buildXAirBusSends(routes, [{ performerId: 'x', bus: 7, sends: { click: 1 } }])).toEqual([])
+    expect(
+      buildXAirBusSends(routes, [{ performerId: 'x', bus: 2, sends: { 'stem:guitar.wav': 1 } }]),
+    ).toEqual([])
+  })
+
+  it('diffXAirBusWrites re-sends only what changed', () => {
+    const mixes: XAirMonitorMix[] = [{ performerId: 'p1', bus: 1, sends: { click: 1.0 } }]
+    const first = diffXAirBusWrites(buildXAirBusSends(routes, mixes), new Map())
+    expect(first.changed).toHaveLength(1)
+    const second = diffXAirBusWrites(buildXAirBusSends(routes, mixes), first.nextState)
+    expect(second.changed).toHaveLength(0)
   })
 })

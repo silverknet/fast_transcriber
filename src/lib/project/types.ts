@@ -103,6 +103,13 @@ export interface ProjectMastering {
   stems?: Partial<Record<AutoStemName, StemSound>>
   /** Gentle glue compression + a safety limiter on the summed master bus. */
   masterGlue?: boolean
+  /**
+   * How hard the KICK inside the drums stem hits, 0…1 (absent/0 = untouched).
+   * Drums-only: it works by compressing the sub-110 Hz band — which in a drums
+   * stem is the kick and nothing else — in parallel with the dry lane. Playback
+   * processing only; the stem file is never rewritten.
+   */
+  kickPunch?: number
 }
 
 /**
@@ -120,6 +127,12 @@ export interface Performer {
   role?: string
   /** Optional link to a signed-in user's account id. Not compulsory. */
   userId?: string
+  /**
+   * XR18 aux bus (1-6) driving this performer's in-ear monitor mix. Which
+   * performer is on which bus is band setup, so it's shared/synced; the exact
+   * send levels live in the per-device live-rig config.
+   */
+  monitorBus?: number
 }
 
 export interface ProjectDefaults {
@@ -127,6 +140,15 @@ export interface ProjectDefaults {
   countInBeats?: number
   /** Default pre-count-in spoken cue (Phase B). */
   preCountInCue?: PreCountInCueConfig
+  /**
+   * Which Demucs stems are AUDIBLE by default in live/playback mode. Applied to
+   * every song on load, overriding each song's saved mute/solo — so the whole
+   * set starts from one backing-track configuration (e.g. a gig with no live
+   * drummer/bassist → `['drums', 'bass']`). `undefined` = the legacy default
+   * (every stem audible except vocals). A song lacking the selected stems falls
+   * back to its full original mix so it is never silent on stage.
+   */
+  liveStems?: AutoStemName[]
 }
 
 /**

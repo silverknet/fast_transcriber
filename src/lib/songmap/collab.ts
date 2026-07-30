@@ -99,6 +99,18 @@ export function toCollabSongMap(sm: SongMap): SongMap {
   if (sm.bassMidi) {
     out.bassMidi = { ...sm.bassMidi, renderExport: stripExport(sm.bassMidi.renderExport) }
   }
+  if (sm.drumMachine) {
+    out.drumMachine = {
+      ...sm.drumMachine,
+      renderExport: stripExport(sm.drumMachine.renderExport),
+    }
+  }
+  if (sm.bassMachine) {
+    out.bassMachine = {
+      ...sm.bassMachine,
+      renderExport: stripExport(sm.bassMachine.renderExport),
+    }
+  }
 
   return out
 }
@@ -177,6 +189,14 @@ export function collabContentFingerprint(sm: SongMap): string {
   if (normalized.drumMidi && typeof normalized.drumMidi === 'object') {
     const { renderExport: _re, ...dmRest } = normalized.drumMidi as Record<string, unknown>
     normalized.drumMidi = dmRest
+  }
+  if (normalized.drumMachine && typeof normalized.drumMachine === 'object') {
+    const { renderExport: _re, ...machRest } = normalized.drumMachine as Record<string, unknown>
+    normalized.drumMachine = machRest
+  }
+  if (normalized.bassMachine && typeof normalized.bassMachine === 'object') {
+    const { renderExport: _re, ...bMachRest } = normalized.bassMachine as Record<string, unknown>
+    normalized.bassMachine = bMachRest
   }
   if (normalized.bassMidi && typeof normalized.bassMidi === 'object') {
     const { renderExport: _re, ...bmRest } = normalized.bassMidi as Record<string, unknown>

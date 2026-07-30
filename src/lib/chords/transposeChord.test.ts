@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { NO_CHORD_SYMBOL } from './noChord'
 import { parseChordText } from './parseChordText'
 import { transposeChord } from './transposeChord'
 import type { ChordSymbol } from '$lib/songmap/types'
@@ -102,6 +103,16 @@ describe('transposeChord — preserves quality / extensions', () => {
     const t = transposeChord(chord('Cmaj7'), 2)
     expect(t.displayRaw).toBeTruthy()
     expect(t.displayRaw.startsWith('D')).toBe(true)
+  })
+})
+
+describe('transposeChord — N.C. (no chord)', () => {
+  it('returns a no-chord symbol unchanged for any shift', () => {
+    for (const semis of [5, -3, 12, 1]) {
+      const t = transposeChord(NO_CHORD_SYMBOL, semis)
+      expect(t.noChord).toBe(true)
+      expect(t.displayRaw).toBe('N.C.')
+    }
   })
 })
 

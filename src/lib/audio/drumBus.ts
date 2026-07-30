@@ -20,6 +20,8 @@ const VOICE_PAN: Record<DrumClass, number> = {
   hihat: 0.28,
   tom: -0.3,
   cymbal: -0.18,
+  // Opposite the crash, so a ride-driven groove opens up the stereo field.
+  ride: 0.2,
 }
 
 export function voicePanGains(cls: DrumClass): { l: number; r: number } {

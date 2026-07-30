@@ -24,6 +24,16 @@ function noteAlter(accidental?: Accidental): number {
 }
 
 function chordToHarmonyXml(chord: ChordSymbol): string {
+  // N.C. ("no chord"): emit the MusicXML no-chord harmony (kind "none") so it
+  // shows as N.C. rather than a spurious placeholder-root chord.
+  if (chord.noChord) {
+    return [
+      '<harmony placement="above" print-frame="no">',
+      '<root><root-step>C</root-step></root>',
+      '<kind text="N.C.">none</kind>',
+      '</harmony>',
+    ].join('')
+  }
   const kind = chordQualityToMusicXmlKind(chord.quality)
   const kindText = kind.text ? ` text="${xmlEscape(kind.text)}"` : ''
   const pieces = [

@@ -5,6 +5,7 @@ import {
 } from '$lib/chords'
 import { diatonicTriadsInKey, songKeyPreferFlats } from '$lib/chords/diatonic'
 import { formatChordSymbol } from '$lib/chords/formatChordSymbol'
+import { NO_CHORD_SYMBOL } from '$lib/chords/noChord'
 import type { ChordSymbol, SongKey } from '$lib/songmap/types'
 
 export type RadialMenuNodeAction = 'commit' | 'branch' | 'search' | 'clear'
@@ -218,11 +219,22 @@ export function buildChordMarkingTree(songKey: SongKey): RadialMenuNode {
       weight: 40,
     },
     {
-      id: 'root-clear',
+      // N.C. is a PLACED chord: committing it stops the previous chord's
+      // stretch and renders "N.C." — distinct from Clear below.
+      id: 'root-nochord',
       label: 'No chord',
       shortLabel: 'N.C.',
-      action: 'clear' as const,
+      action: 'commit' as const,
+      chord: NO_CHORD_SYMBOL,
       weight: 35,
+    },
+    {
+      // Clear REMOVES the event so the previous chord stretches over the spot.
+      id: 'root-clear',
+      label: 'Clear',
+      shortLabel: 'Clear',
+      action: 'clear' as const,
+      weight: 30,
     },
   ].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
 
@@ -246,18 +258,22 @@ export type RadialHomeRingParts = {
   /** Tonic, Dominant, … — hover or click to show their children. */
   categories: RadialMenuNode[]
   search: RadialMenuNode | undefined
+  /** N.C. — a PLACED "no chord" commit (its own slot, separate from `clear`). */
+  noChord: RadialMenuNode | undefined
+  /** Clear — REMOVES the event (separate action from placing N.C.). */
   clear: RadialMenuNode | undefined
 }
 
 /**
- * Split the tree root into quick chords vs category branches vs Search/Clear.
- * Home ring = quickPicks + categories + utilities.
+ * Split the tree root into quick chords vs category branches vs
+ * Search / N.C. / Clear. Home ring = quickPicks + categories + utilities.
  */
 export function buildRadialHomeRingParts(root: RadialMenuNode, preferFlats: boolean): RadialHomeRingParts {
   const children = root.children ?? []
   const commits: RadialMenuNode[] = []
   const categories: RadialMenuNode[] = []
   let search: RadialMenuNode | undefined
+  let noChord: RadialMenuNode | undefined
   let clear: RadialMenuNode | undefined
 
   for (const c of children) {
@@ -267,6 +283,11 @@ export function buildRadialHomeRingParts(root: RadialMenuNode, preferFlats: bool
     }
     if (c.action === 'clear') {
       clear = c
+      continue
+    }
+    // Top-level N.C. commit: its own home-ring slot, never a quick pick.
+    if (c.action === 'commit' && c.chord?.noChord) {
+      noChord = c
       continue
     }
     if (c.action === 'branch' && c.children?.length) {
@@ -285,10 +306,10 @@ export function buildRadialHomeRingParts(root: RadialMenuNode, preferFlats: bool
 
   categories.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
 
-  return { quickPicks, categories, search, clear }
+  return { quickPicks, categories, search, noChord, clear }
 }
 
-/** Nodes drawn on the ring: home (quick + categories + search/clear) or a drilled category’s children. */
+/** Nodes drawn on the ring: home (quick + categories + search/N.C./clear) or a drilled category’s children. */
 export function radialRingNodes(
   root: RadialMenuNode,
   preferFlats: boolean,
@@ -298,9 +319,10 @@ export function radialRingNodes(
     return drilledCategory.children
   }
 
-  const { quickPicks, categories, search, clear } = buildRadialHomeRingParts(root, preferFlats)
+  const { quickPicks, categories, search, noChord, clear } = buildRadialHomeRingParts(root, preferFlats)
   const tail: RadialMenuNode[] = []
   if (search) tail.push(search)
+  if (noChord) tail.push(noChord)
   if (clear) tail.push(clear)
   return [...quickPicks, ...categories, ...tail]
 }

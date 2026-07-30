@@ -204,6 +204,12 @@ describe('harmony', () => {
     expect(hasErr(m, /duplicate beatId/)).toBe(true)
     expect(hasErr(m, /barId does not match/)).toBe(true)
   })
+  it('accepts a placed N.C. (no-chord) harmony event', () => {
+    const m = valid()
+    const ncChord = { root: 'C', noChord: true, displayRaw: 'N.C.' }
+    m.harmony = [{ id: 'h1', barId: 'bar1', beatId: 'b0', startSec: 0, endSec: 1, chord: ncChord } as never]
+    expect(validateSongMap(m).ok).toBe(true)
+  })
 })
 
 describe('drafts', () => {
@@ -281,6 +287,20 @@ describe('startBeatId + mixState + stemRefs', () => {
     ;(m as { stemRefs: unknown }).stemRefs = { Drums: 42 }
     expect(hasErr(m, /mixState\.tracks\[0\]\.volume invalid/)).toBe(true)
     expect(hasErr(m, /stemRefs\.Drums must be a string/)).toBe(true)
+  })
+  it('accepts a live-button link, and rejects an unknown slot name', () => {
+    const ok = valid()
+    ok.mixState = {
+      tracks: [
+        { key: 'stem:percussion.wav', volume: 1, liveSlot: 'drums' },
+        { key: 'stem:drums.wav', volume: 1, liveSlot: 'none' },
+      ],
+    }
+    expect(validateSongMap(ok).ok).toBe(true)
+
+    const bad = valid()
+    bad.mixState = { tracks: [{ key: 'stem:x.wav', volume: 1, liveSlot: 'trumpet' }] }
+    expect(hasErr(bad, /mixState\.tracks\[0\]\.liveSlot invalid/)).toBe(true)
   })
 })
 

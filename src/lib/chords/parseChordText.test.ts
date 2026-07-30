@@ -12,6 +12,17 @@ describe('parseChordText', () => {
     if (em.ok) expect(em.chord.quality).toBe('minor')
   })
 
+  it('parses N.C. / NC / n.c. as the no-chord marker', () => {
+    for (const text of ['N.C.', 'NC', 'n.c.', 'nc', 'N.C']) {
+      const r = parseChordText(text)
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.chord.noChord).toBe(true)
+        expect(r.chord.displayRaw).toBe('N.C.')
+      }
+    }
+  })
+
   it('parses slash chords', () => {
     const r = parseChordText('C/E')
     expect(r.ok).toBe(true)

@@ -17,6 +17,9 @@ import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { quantizeTimesToGrid } from '$lib/songmap/quantizeToGrid'
+import { generateBassGroove } from '$lib/songmap/generateBassGroove'
+import { normalizeBassTone, type BassTone } from './bassTone'
+import { renderBassVoice } from './renderBassVoice'
 import { inferBassGroove } from '$lib/songmap/bassGroove'
 import { DRUM_KIT_SAMPLE_RATE } from './drumKits'
 import { applyBusCompression, applySaturation } from './drumBus'
@@ -198,6 +201,111 @@ export type RenderBassTrackResult = {
   sampleRate: number
 }
 
+/**
+ * Render a finished note list to a WAV blob. Shared by the DETECTED bass track
+ * and the programmed bass machine — everything above differs (where the notes
+ * come from), everything below is identical, and the two must not drift.
+ */
+async function renderBassEventsToWav(
+  sm: SongMap,
+  events: BassMidiEvent[],
+  tone?: BassTone,
+  soundId?: string,
+): Promise<RenderBassTrackResult> {
+  const trim = sm.audio?.trim
+  if (!trim || !(trim.endSec > trim.startSec)) {
+    throw new Error('Bass track needs audio.trim with end > start')
+  }
+  const plan = songPlaybackPlan(sm)
+  if (!plan) throw new Error('Bass track needs audio.trim with end > start')
+
+  const preludeSec = titleCuePreludeSec(sm)
+  const prependSec = plan.prependSec
+  const totalSec = preludeSec + prependSec + plan.songDurationSec
+  if (!(totalSec > 0)) throw new Error('Bass track duration is zero')
+
+  const sampleRate = DRUM_KIT_SAMPLE_RATE
+  const frames = Math.max(1, Math.ceil(totalSec * sampleRate))
+  let dataL: Float32Array<ArrayBuffer>
+  if (tone) {
+    // The MACHINE plays the chords-view patch through real Web Audio nodes,
+    // and gets ONLY that patch's own bus (highpass + drive). The compression
+    // and saturation below were tuned for the DETECTED bass; stacking them on
+    // top saturated the line twice and squashed it flat.
+    const shift = preludeSec + prependSec
+    dataL = await renderBassVoice(
+      events
+        .filter((e) => e.timeSec >= trim.startSec && e.timeSec < trim.endSec)
+        .map((e) => ({
+          atSec: shift + (e.timeSec - trim.startSec),
+          durationSec: e.durationSec,
+          midi: e.midi,
+          velocity: e.velocity,
+        })),
+      tone,
+      frames,
+      sampleRate,
+      soundId,
+    )
+    const dataRr = new Float32Array(new ArrayBuffer(frames * Float32Array.BYTES_PER_ELEMENT))
+    dataRr.set(dataL)
+    normalizeDrumBuffer([dataL, dataRr], BASS_TRACK_TARGET_RMS_DB)
+    const buf = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
+    buf.copyToChannel(dataL, 0)
+    buf.copyToChannel(dataRr, 1)
+    return {
+      blob: audioBufferToWavBlob(buf),
+      preludeOffsetSec: preludeSec + prependSec,
+      durationSec: totalSec,
+      sampleRate,
+    }
+  }
+  dataL = new Float32Array(frames)
+  {
+    mixBassEvents(dataL, sampleRate, events, trim.startSec, trim.endSec, preludeSec + prependSec)
+  }
+  const dataR = new Float32Array(dataL)
+  applyBusCompression(dataL, dataR, sampleRate)
+  applySaturation(dataL, BASS_SATURATION_DRIVE)
+  applySaturation(dataR, BASS_SATURATION_DRIVE)
+  normalizeDrumBuffer([dataL, dataR], BASS_TRACK_TARGET_RMS_DB)
+
+  const buffer = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
+  buffer.copyToChannel(dataL, 0)
+  buffer.copyToChannel(dataR, 1)
+  return {
+    blob: audioBufferToWavBlob(buffer),
+    preludeOffsetSec: preludeSec + prependSec,
+    durationSec: totalSec,
+    sampleRate,
+  }
+}
+
+/**
+ * The PROGRAMMED bass track — played from `sm.bassMachine` plus the chords,
+ * timeline and sections. Needs no bass stem, and coexists with the detected
+ * track rather than replacing it.
+ */
+export async function renderBassMachineWavBlob(
+  sm: SongMap,
+  opts: { transposeSemitones?: number } = {},
+): Promise<RenderBassTrackResult> {
+  const machine = sm.bassMachine
+  if (!machine || !machine.enabled) throw new Error('No bass machine track on this song.')
+  let events = generateBassGroove(sm, machine)
+  if (events.length === 0) throw new Error('Bass machine produced no notes — are there chords?')
+  const semis = Math.round(opts.transposeSemitones ?? 0)
+  if (semis !== 0) {
+    events = events.map((e) => ({ ...e, midi: Math.max(0, Math.min(127, e.midi + semis)) }))
+  }
+  return renderBassEventsToWav(
+    sm,
+    trimBassOverlaps(events),
+    normalizeBassTone(machine.tone),
+    machine.sound,
+  )
+}
+
 export async function renderBassTrackWavBlob(
   sm: SongMap,
   opts: { quantize?: DrumQuantize; transposeSemitones?: number } = {},
@@ -236,25 +344,5 @@ export async function renderBassTrackWavBlob(
     const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
     events = quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
   }
-  events = trimBassOverlaps(events)
-
-  const sampleRate = DRUM_KIT_SAMPLE_RATE
-  const frames = Math.max(1, Math.ceil(totalSec * sampleRate))
-  const dataL = new Float32Array(frames)
-  mixBassEvents(dataL, sampleRate, events, trim.startSec, trim.endSec, preludeSec + prependSec)
-  const dataR = new Float32Array(dataL)
-  applyBusCompression(dataL, dataR, sampleRate)
-  applySaturation(dataL, BASS_SATURATION_DRIVE)
-  applySaturation(dataR, BASS_SATURATION_DRIVE)
-  normalizeDrumBuffer([dataL, dataR], BASS_TRACK_TARGET_RMS_DB)
-
-  const buffer = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
-  buffer.copyToChannel(dataL, 0)
-  buffer.copyToChannel(dataR, 1)
-  return {
-    blob: audioBufferToWavBlob(buffer),
-    preludeOffsetSec: preludeSec + prependSec,
-    durationSec: totalSec,
-    sampleRate,
-  }
+  return renderBassEventsToWav(sm, trimBassOverlaps(events))
 }

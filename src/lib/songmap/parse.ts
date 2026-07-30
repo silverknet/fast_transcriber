@@ -6,6 +6,8 @@ import {
   SONGMAP_LYRICS_FORMAT_VERSION,
   SONGMAP_TRANSPOSE_FORMAT_VERSION,
 } from './version'
+import { isLiveSlotLink } from '$lib/hardware/liveSlotLinks'
+import { clampChannelEq } from '$lib/audio/channelEq'
 import type {
   AudioReference,
   Bar,
@@ -41,6 +43,8 @@ import {
   type AudioFingerprint,
 } from '$lib/audio/audioFingerprint'
 import { validateSongMap } from './validate'
+import { normalizeBassTone } from '$lib/audio/bassTone'
+import { normalizeEffectBusses } from './effectBusses'
 
 export class SongMapParseError extends Error {
   constructor(
@@ -405,6 +409,13 @@ function parseMixState(raw: unknown, path: string): import('./types').MixState |
     const entry: import('./types').MixTrackState = { key, volume }
     if (typeof t.muted === 'boolean' && t.muted) entry.muted = true
     if (typeof t.soloed === 'boolean' && t.soloed) entry.soloed = true
+    // Unknown slot names are dropped rather than rejected: a song written by a
+    // newer build must still open here, falling back to the name-based guess.
+    if (isLiveSlotLink(t.liveSlot)) entry.liveSlot = t.liveSlot
+    // Coerced, never thrown on: a malformed band flattens instead of taking
+    // the whole song down.
+    const eq = clampChannelEq(t.eq)
+    if (eq) entry.eq = eq
     tracks.push(entry)
   }
   const out: import('./types').MixState = { tracks }
@@ -555,7 +566,7 @@ function migrateLegacyCueTracks(opts: {
   ]
 }
 
-const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal'])
+const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal', 'ride'])
 const DRUM_QUANTIZE = new Set(['off', '1/8', '1/16', '1/16T'])
 
 /**
@@ -563,6 +574,145 @@ const DRUM_QUANTIZE = new Set(['off', '1/8', '1/16', '1/16T'])
  * failing the whole song; velocity clamps to [0,1]; unknown kit ids pass
  * through (forward compat with future kits).
  */
+const DRUM_STYLE_IDS = new Set(['rock', 'pop', 'funk', 'disco', 'ballad', 'halfTime'])
+
+/** 0..1 knob, or undefined when absent/garbage (caller falls back). */
+function optUnit(v: unknown): number | undefined {
+  const n = optNum(v)
+  return n === undefined ? undefined : Math.max(0, Math.min(1, n))
+}
+
+const DRUM_PULSE_VOICES = new Set(['hihat', 'ride', 'none'])
+
+/** Kit-piece switches. Only `false` is meaningful — absent means "plays". */
+function parseVoiceToggles(raw: unknown): import('./types').DrumVoiceToggles | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: import('./types').DrumVoiceToggles = {}
+  for (const [cls, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (DRUM_CLASSES.has(cls) && typeof v === 'boolean') {
+      out[cls as import('./types').DrumClass] = v
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseDrumMachineSection(raw: unknown): import('./types').DrumMachineSection | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: import('./types').DrumMachineSection = {}
+  if (typeof o.style === 'string' && DRUM_STYLE_IDS.has(o.style)) {
+    out.style = o.style as import('./types').DrumStyleId
+  }
+  if (typeof o.pulse === 'string' && DRUM_PULSE_VOICES.has(o.pulse)) {
+    out.pulse = o.pulse as import('./types').DrumPulseVoice
+  }
+  const secVoices = parseVoiceToggles(o.voices)
+  if (secVoices) out.voices = secVoices
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const fills = optUnit(o.fills)
+  if (fills !== undefined) out.fills = fills
+  if (typeof o.muted === 'boolean') out.muted = o.muted
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * The programmed drum track. Events are DERIVED, never stored, so this only
+ * carries settings — an unreadable style falls back to 'rock' rather than
+ * dropping the whole track and losing the user's arrangement.
+ */
+function parseDrumMachine(raw: unknown): import('./types').DrumMachine | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const style =
+    typeof o.style === 'string' && DRUM_STYLE_IDS.has(o.style)
+      ? (o.style as import('./types').DrumStyleId)
+      : 'rock'
+  const out: import('./types').DrumMachine = {
+    enabled: o.enabled !== false,
+    style,
+  }
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const fills = optUnit(o.fills)
+  if (fills !== undefined) out.fills = fills
+  if (typeof o.crashOnSectionStart === 'boolean') out.crashOnSectionStart = o.crashOnSectionStart
+  if (typeof o.pulse === 'string' && DRUM_PULSE_VOICES.has(o.pulse)) {
+    out.pulse = o.pulse as import('./types').DrumPulseVoice
+  }
+  const voices = parseVoiceToggles(o.voices)
+  if (voices) out.voices = voices
+  const kit = optString(o.kit)
+  if (kit !== undefined) out.kit = kit
+  if (o.perSection && typeof o.perSection === 'object' && !Array.isArray(o.perSection)) {
+    const perSection: Record<string, import('./types').DrumMachineSection> = {}
+    for (const [id, v] of Object.entries(o.perSection as Record<string, unknown>)) {
+      const parsed = parseDrumMachineSection(v)
+      if (parsed) perSection[id] = parsed
+    }
+    if (Object.keys(perSection).length > 0) out.perSection = perSection
+  }
+  return out
+}
+
+const BASS_STYLE_IDS = new Set(['roots', 'rootFifth', 'octaves', 'eighths', 'walking', 'pedal'])
+
+function parseBassMachineSection(raw: unknown): import('./types').BassMachineSection | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: import('./types').BassMachineSection = {}
+  if (typeof o.style === 'string' && BASS_STYLE_IDS.has(o.style)) {
+    out.style = o.style as import('./types').BassStyleId
+  }
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const octave = optNum(o.octave)
+  if (octave !== undefined) out.octave = Math.max(-2, Math.min(2, Math.round(octave)))
+  if (typeof o.muted === 'boolean') out.muted = o.muted
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** The programmed bass track — settings only; notes are derived from chords. */
+function parseBassMachine(raw: unknown): import('./types').BassMachine | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const style =
+    typeof o.style === 'string' && BASS_STYLE_IDS.has(o.style)
+      ? (o.style as import('./types').BassStyleId)
+      : 'roots'
+  const out: import('./types').BassMachine = { enabled: o.enabled !== false, style }
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const octave = optNum(o.octave)
+  if (octave !== undefined) out.octave = Math.max(-2, Math.min(2, Math.round(octave)))
+  // The voice. Normalized on read, so a partial or hand-edited tone still
+  // renders instead of failing.
+  const sound = optString(o.sound)
+  if (sound !== undefined) out.sound = sound
+  if (o.tone && typeof o.tone === 'object' && !Array.isArray(o.tone)) {
+    out.tone = normalizeBassTone(o.tone as Partial<import('$lib/audio/bassTone').BassTone>)
+  }
+  if (o.perSection && typeof o.perSection === 'object' && !Array.isArray(o.perSection)) {
+    const perSection: Record<string, import('./types').BassMachineSection> = {}
+    for (const [id, v] of Object.entries(o.perSection as Record<string, unknown>)) {
+      const parsed = parseBassMachineSection(v)
+      if (parsed) perSection[id] = parsed
+    }
+    if (Object.keys(perSection).length > 0) out.perSection = perSection
+  }
+  return out
+}
+
 function parseDrumMidi(raw: unknown, path: string): import('./types').DrumMidi | undefined {
   if (raw === undefined || raw === null) return undefined
   if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
@@ -871,6 +1021,9 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
         ? parseChordHints(raw.chordHints, 'chordHints')
         : undefined,
     drumMidi: parseDrumMidi(raw.drumMidi, 'drumMidi'),
+    drumMachine: parseDrumMachine(raw.drumMachine),
+    bassMachine: parseBassMachine(raw.bassMachine),
+    effectBusses: normalizeEffectBusses(raw.effectBusses),
     bassMidi: parseBassMidi(raw.bassMidi, 'bassMidi'),
   }
 }
@@ -932,4 +1085,7 @@ const KNOWN_TOP_KEYS = new Set([
   'chordHints',
   'drumMidi',
   'bassMidi',
+  'drumMachine',
+  'bassMachine',
+  'effectBusses',
 ])

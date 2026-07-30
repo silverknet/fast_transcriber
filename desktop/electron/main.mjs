@@ -557,6 +557,32 @@ function sendHardwareError(res, cors, e, status = 400) {
   )
 }
 
+/**
+ * The hardware-control routes drive a LIVE console over the network, so — unlike
+ * the rest of the loopback sidecar (`Access-Control-Allow-Origin: *`) — they must
+ * NOT be reachable from any random page the user has open. Server-side origin
+ * gate (independent of CORS, which only governs response readability): allow
+ * same-origin/non-browser (no Origin), localhost dev, BarBro's Netlify prod, and
+ * anything in `BARBRO_HARDWARE_ORIGINS`. Everything else is refused BEFORE it can
+ * touch a fader. Deliberately permissive enough to never break the real rig.
+ */
+function isHardwareOriginAllowed(origin) {
+  if (!origin || typeof origin !== 'string') return true // curl / Electron / same-origin
+  try {
+    const u = new URL(origin)
+    const host = u.hostname
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
+    if (u.protocol === 'https:' && host.endsWith('.netlify.app')) return true // BarBro prod
+    const extra = String(process.env.BARBRO_HARDWARE_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    return extra.includes(origin)
+  } catch {
+    return false
+  }
+}
+
 /** `GET /native/hardware/status` — current sidecar hardware bridge state. */
 function handleHardwareStatus(res, cors) {
   sendJson(
@@ -671,6 +697,50 @@ async function handleXAirBusSend(req, res, cors) {
     client.setChannelBusSend(body.channel, body.bus, body.value)
     logInfo(`xair write: channel ${body.channel} bus ${body.bus} send ${body.value}`)
     sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/channel-main-assign` — body `{ channel, on }`. The
+ *  FOH-safety control: `on:false` takes a channel OFF the main/LR (house) bus. */
+async function handleXAirChannelMainAssign(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object' || typeof body.on !== 'boolean') {
+      throw new Error('Expected JSON body `{ channel, on }`')
+    }
+    client.setChannelMainAssign(body.channel, body.on)
+    logInfo(`xair write: channel ${body.channel} main-assign ${body.on ? 'ON' : 'OFF (house-safe)'}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/bus-fader` — body `{ bus, value }`, clamped 0..1. */
+async function handleXAirBusFader(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object') throw new Error('Expected JSON body `{ bus, value }`')
+    client.setBusFader(body.bus, body.value)
+    logInfo(`xair write: bus ${body.bus} master ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/refresh` — query the desk + return per-channel
+ *  state (lr/on/fader). Powers the "prove it" FOH-safety read-back. */
+async function handleXAirRefresh(req, res, cors) {
+  try {
+    await readRequestJson(req).catch(() => null)
+    const client = requireXAirClient()
+    const state = await client.refreshChannelState()
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus(), channels: state.channels }, cors)
   } catch (e) {
     sendHardwareError(res, cors, e)
   }
@@ -6493,6 +6563,14 @@ function startBeaconServer() {
       return
     }
 
+    // Live-console control is origin-gated (see isHardwareOriginAllowed) — a
+    // random page must never be able to move the desk's faders.
+    if (req.url?.startsWith('/native/hardware/') && !isHardwareOriginAllowed(req.headers.origin)) {
+      logWarn(`xair: refused hardware request from origin ${req.headers.origin}`)
+      sendJson(res, 403, { ok: false, error: 'Origin not allowed for hardware control' }, cors)
+      return
+    }
+
     if (req.method === 'GET' && req.url === '/native/hardware/status') {
       handleHardwareStatus(res, cors)
       return
@@ -6519,6 +6597,18 @@ function startBeaconServer() {
     }
     if (req.method === 'POST' && req.url === '/native/hardware/xair/bus-send') {
       void handleXAirBusSend(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/channel-main-assign') {
+      void handleXAirChannelMainAssign(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/bus-fader') {
+      void handleXAirBusFader(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/refresh') {
+      void handleXAirRefresh(req, res, cors)
       return
     }
 
@@ -7034,6 +7124,9 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/hardware/xair/channel-fader`)
   logInfo(`  POST   /native/hardware/xair/channel-on`)
   logInfo(`  POST   /native/hardware/xair/bus-send`)
+  logInfo(`  POST   /native/hardware/xair/channel-main-assign (FOH-safety: off the house bus)`)
+  logInfo(`  POST   /native/hardware/xair/bus-fader`)
+  logInfo(`  POST   /native/hardware/xair/refresh   (read desk state back — proves FOH safety)`)
   logInfo(`  GET    /native/setup/youtube-import/status`)
   logInfo(`  POST   /native/setup/youtube-import (prepare YouTube audio import)`)
   logInfo(`  POST   /native/import/youtube       (queued YouTube audio import)`)

@@ -19,18 +19,54 @@
   import { get } from 'svelte/store'
   import ApcKey25Control from '$lib/components/ApcKey25Control.svelte'
   import LiveMidiController from '$lib/components/LiveMidiController.svelte'
+  import XAirSettingsPanel from '$lib/components/XAirSettingsPanel.svelte'
+  import { Dialog, DialogContent, DialogHeader, DialogTitle } from '$lib/components/ui/dialog'
   import LiveStageMobile from '$lib/components/LiveStageMobile.svelte'
   import LyricConfidenceLine from '$lib/components/LyricConfidenceLine.svelte'
   import LyricBreak from '$lib/components/LyricBreak.svelte'
   import { lyricBreakState } from '$lib/audio/lyricBreak'
   import { isNarrow } from '$lib/stores/viewport'
   import { upcomingChordRow } from '$lib/audio/upcomingChords'
+  import {
+    CANONICAL_LIVE_SLOTS,
+    effectiveSlotLink,
+    isGroupOn,
+    isLiveSlotLink,
+    LIVE_SLOT_LABELS,
+    nextGroupMuted,
+    resolveLiveSlotLanes,
+    slotNameByIndex,
+    type LiveSlotLink,
+  } from '$lib/hardware/liveSlotLinks'
+  import { isLaneReorderable, moveKey, sortBySavedOrder } from '$lib/audio/laneOrder'
+  import {
+    createChannelEqNodes,
+    isEqActive,
+    isEqWorthStoring,
+    type ChannelEq,
+    type ChannelEqNodes,
+  } from '$lib/audio/channelEq'
   import type { LiveCommand, LiveLedState } from '$lib/hardware/liveMidiMap'
   import { Button } from '$lib/components/ui/button'
   import LiveHardwareStrip from '$lib/components/LiveHardwareStrip.svelte'
   import MixerTrackLane from '$lib/components/MixerTrackLane.svelte'
+  import DrumMachinePanel from '$lib/components/DrumMachinePanel.svelte'
+  import BassMachinePanel from '$lib/components/BassMachinePanel.svelte'
+  import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+  } from '$lib/components/ui/dropdown-menu'
+  import { Plus } from '@lucide/svelte'
+  import {
+    machineTrackLaneKey,
+    withMachineTrack,
+    type MachineTrackKind,
+  } from '$lib/songmap/machineTracks'
   import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
-  import { Pause, Play, Repeat, Repeat1, RotateCcw, SkipBack, SkipForward, Square, X } from '@lucide/svelte'
+  import { Cable, Pause, Play, Repeat, Repeat1, RotateCcw, SkipBack, SkipForward, Square, Trash2, X } from '@lucide/svelte'
   import {
     formatChordSymbol,
     formatSongKeyLabel,
@@ -38,6 +74,23 @@
     songKeyPreferFlats,
   } from '$lib/chords'
   import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
+  import { laneHasPrebakedPreamble } from '$lib/audio/laneAlignment'
+  import { createRefreshQueue } from '$lib/audio/refreshQueue'
+  import { createReverbInsert, normalizeReverb, REVERB_PRESETS } from '$lib/audio/reverbBus'
+  import { createDelayInsert, normalizeDelay, DELAY_PRESETS } from '$lib/audio/delayBus'
+  import { createWidenerInsert, normalizeWidener, WIDENER_PRESETS } from '$lib/audio/widenerBus'
+  import {
+    EFFECT_BUS_KINDS,
+    createEffectBus,
+    isHookedUp,
+    setHookedUp,
+    setSendAmount,
+    renameBus,
+    type EffectBus,
+    type EffectBusKind,
+  } from '$lib/songmap/effectBusses'
+  // One definition of the shape, owned by the bar that consumes it.
+  import type { MixerControls } from '$lib/components/editor/TransportBar.svelte'
   import { computeCountIn } from '$lib/audio/computeCountIn'
   import { effectiveCountInBeats } from '$lib/songmap/countIn'
   import {
@@ -47,6 +100,9 @@
     type MixerSnapshot,
     type MixerTrack,
   } from '$lib/audio/mixerEngine'
+  import { transport } from '$lib/audio/transport.svelte'
+  import { createLivePitchShifter, type LivePitchShifter } from '$lib/audio/livePitchShift'
+  import { chordJam } from '$lib/audio/chordJam.svelte'
   import {
     bufferRmsDb,
     buildMasterChain,
@@ -65,12 +121,26 @@
   import { fetchTtsWavCached } from '$lib/client/ttsCache'
   import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
-  import { renderBassTrackWavBlob } from '$lib/audio/renderBassTrack'
-  import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
+  import { renderBassTrackWavBlob, renderBassMachineWavBlob } from '$lib/audio/renderBassTrack'
+  import { renderDrumTrackWavBlob, renderDrumMachineWavBlob } from '$lib/audio/renderDrumTrack'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
-  import { project as projectStore } from '$lib/stores/project'
+  import { isStemLaneAudible, hasAudibleStemLane } from '$lib/audio/liveStemDefaults'
+  import type { AutoStemName, ProjectMastering } from '$lib/project/types'
+  import { project as projectStore, isBrowserCloudProject } from '$lib/stores/project'
+  import { loadCloudSongIntoEditor } from '$lib/client/browserCloudProject'
+  import { loadSongStemBlobsFor } from '$lib/audio/loadSongStems'
+  import { prefetchPlan } from '$lib/audio/livePrefetch'
+  import {
+    getPreloadedStems,
+    putPreloadedStems,
+    evictPreloaded,
+    markFetched,
+    decodedSongIds,
+    clearLiveAudioCache,
+    liveFetchedSongs,
+  } from '$lib/audio/liveAudioCache'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
   import {
     effectiveTransposeSemitones,
@@ -81,6 +151,13 @@
   import { RefreshCw } from '@lucide/svelte'
 
   /** Lane palette — distinct hues so tracks are easy to tell apart. */
+  /**
+   * The original full mix, deliberately OFF the rotation palette: a warm amber
+   * against a set of cool stem colours, so the reference lane is identifiable
+   * at a glance on a dark stage.
+   */
+  const ORIGINAL_LANE_COLOR = '#f59e0b'
+
   const LANE_COLORS = [
     '#0ea5e9', // sky (original)
     '#f43f5e', // rose (vocals)
@@ -105,12 +182,36 @@
     initialPlaybackMode = false,
     lockPlaybackMode = false,
     liveMode = false,
+    playbackMode = $bindable(false),
+    generatorPanel = $bindable(null),
+    controls = $bindable(null),
   } = $props<{
     reloadSignal?: number
     initialPlaybackMode?: boolean
     lockPlaybackMode?: boolean
     liveMode?: boolean
+    /** Bindable so the editor's left rail can own the Playback tab. */
+    playbackMode?: boolean
+    /** Which stem GENERATOR panel is open — a different feature from the
+     *  machines, so it gets its own "Add track" entries. */
+    generatorPanel?: 'drums' | 'bass' | null
+    /**
+     * Playback handles published UP so the editor's single top transport can
+     * drive THIS engine on Overview. The mixer owns its own engine (two
+     * engines must never sound at once), so the shell can't just use its own.
+     */
+    controls?: MixerControls | null
   }>()
+
+  /** The click plays unless switched off; it has no lane, so it needs its own
+   *  bit of state rather than reading a lane's mute. */
+  let clickMuted = $state(false)
+  function setClickOn(on: boolean): void {
+    clickMuted = !on
+    engine?.setMuted('click', !on)
+    syncLanesFromEngine()
+  }
+
 
   /** What we hand to MixerTrackLane for rendering. */
   interface LaneView {
@@ -165,7 +266,6 @@
   let loading = $state(true)
   let loadingMsg = $state('Loading tracks…')
   let loadError = $state<string | null>(null)
-  let playbackMode = $state(false)
   let initialPlaybackModeSeeded = false
   // The playback stage is a fixed overlay, but the app navbar/context bar sit in
   // their own stacking context above the editor — so the stage fills the area
@@ -181,6 +281,10 @@
   let engine: MixerEngine | null = null
   let snapshot = $state<MixerSnapshot>({ state: 'stopped', positionSec: 0, durationSec: 0 })
   let mixerDurationSec = $state(0)
+  // DISCRETE transport state — updated only on transition, NOT every frame like
+  // `snapshot`. Deriveds that only care about play/pause (lane LEDs, headings)
+  // read THIS so they stay off the per-frame reactive cascade (live-lag fix).
+  let transportState = $state<MixerSnapshot['state']>('stopped')
   let lanes = $state<LaneView[]>([])
   const mixerCanPlay = $derived(!loading && !loadError && lanes.length > 0)
 
@@ -200,13 +304,115 @@
       /* private mode — remembering is best-effort */
     }
   }
-  let showBand = $state(lsBool('barbro::mixer::band'))
+  // The Band toggle was removed from the transport bar; generated lanes are
+  // explicit tracks now (you add them), so they always show.
+  const showBand = true
   let showRig = $state(lsBool('barbro::mixer::rig'))
-  function toggleBand(): void {
-    showBand = !showBand
-    setLsBool('barbro::mixer::band', showBand)
-    void reload() // add/remove the generated lanes
+  /** The XR18 "Live Rig" settings dialog (connect / route / monitor mixes / FOH-safety). */
+  let xairPanelOpen = $state(false)
+
+  // ── Machine-lane refresh ───────────────────────────────────────────────────
+  // Editing a knob changes ONE lane. A full `reload()` re-fetches and re-decodes
+  // every stem, which makes the editors unusable — so re-render just the lane
+  // that changed, and coalesce the burst of events a slider drag produces.
+
+  const MACHINE_REFRESH_DEBOUNCE_MS = 220
+
+  /** Re-render one machine lane in place, keeping its fader/mute/solo state. */
+  async function refreshMachineLane(key: string): Promise<void> {
+    const eng = engine
+    const sm = get(songMap)
+    if (!eng || !sm) return
+    const isDrum = key === 'drum-machine'
+    const machine = isDrum ? sm.drumMachine : sm.bassMachine
+    const prev = eng.listTracks().find((t) => t.key === key)
+
+    // Deleted or switched off → drop the lane rather than leave a stale one.
+    // Deleting also clears the selection (there's nothing left to edit);
+    // switching OFF keeps it, so the editor stays open to switch back on.
+    if (!machine?.enabled) {
+      if (prev) {
+        eng.removeTrack(key)
+        syncLanesFromEngine()
+      }
+      if (!machine && selectedLaneKey === key) selectedLaneKey = null
+      return
+    }
+    // Newly added: no lane yet, so the plan has to build it.
+    if (!prev) {
+      await reload()
+      return
+    }
+
+    try {
+      const semis = transposeAudioEnabled ? transposeSemitones : 0
+      let blob: Blob
+      if (isDrum) {
+        const custom =
+          sm.drumMachine?.kit === 'custom' && $projectStore.osPath
+            ? await loadProjectDrumKit($projectStore.osPath)
+            : null
+        blob = (await renderDrumMachineWavBlob(sm, custom ? { customKit: custom.kit } : {})).blob
+      } else {
+        blob = (await renderBassMachineWavBlob(sm, { transposeSemitones: semis })).blob
+      }
+      let buf = await decodeBlob(eng, blob)
+      const pre = computePrepend(key)
+      if (pre > 0) buf = bufferWithPrepend(eng.ac, buf, pre)
+      eng.setTrack({ ...prev, buffer: buf })
+      syncLanesFromEngine()
+      // Sources already started keep playing the OLD buffer, so re-seek to the
+      // playhead to make the edit audible without stopping the transport.
+      if (eng.snapshot().state === 'playing') eng.seek(eng.positionSec())
+    } catch (e) {
+      // Keep the previous buffer — a half-written setting shouldn't blank the
+      // lane mid-edit.
+      console.warn('Failed to refresh', key, e)
+    }
   }
+
+  const machineRefreshQueue = createRefreshQueue(
+    refreshMachineLane,
+    MACHINE_REFRESH_DEBOUNCE_MS,
+  )
+
+  /** Any machine edit re-renders only that lane, debounced and coalesced. */
+  function onMachineChanged(): void {
+    if (!selectedLaneKey) return
+    machineRefreshQueue.schedule(selectedLaneKey)
+  }
+
+  /**
+   * The selected lane — Logic shows the editor for the selected track, so an
+   * editor only appears once you click its lane. Null = nothing selected.
+   */
+  let selectedLaneKey = $state<string | null>(null)
+  /** Lanes with an editor behind them; everything else is just a fader. */
+  const EDITABLE_LANE_KEYS = new Set(['drum-machine', 'bass-machine'])
+
+  /** "+ Add track" → create it, reveal the Band group, and select it. */
+  function addMachineTrack(kind: MachineTrackKind): void {
+    patchSongMap((sm) => withMachineTrack(sm, kind))
+    selectLane(machineTrackLaneKey(kind))
+    void reload()
+  }
+
+  /** Which stem GENERATOR panel is open, if any. Bound by the mixer panel —
+   *  generators are a different feature from the machines (they detect what
+   *  the recording played), so they get their own menu entries. */
+  const canAddDrumMachine = $derived(!$songMap?.drumMachine)
+  const canAddBassMachine = $derived(!$songMap?.bassMachine)
+
+  /** Which machine editor is open, if any — drives the bottom dock. */
+  const openEditor = $derived<'drum' | 'bass' | null>(
+    playbackMode
+      ? null
+      : selectedLaneKey === 'drum-machine' && $songMap?.drumMachine
+        ? 'drum'
+        : selectedLaneKey === 'bass-machine' && $songMap?.bassMachine
+          ? 'bass'
+          : null,
+  )
   function toggleRig(): void {
     showRig = !showRig
     setLsBool('barbro::mixer::rig', showRig)
@@ -217,28 +423,68 @@
     return $songMap?.mixState?.tracks.find((t) => t.key === key)
   }
 
+  // ── Live-button links ────────────────────────────────────────────────────
+  /**
+   * Which live BUTTON each track is on, when the user has said so explicitly.
+   * A track with no entry falls back to the name-based guess, so songs nobody
+   * has configured behave exactly as before. Several tracks may share a slot —
+   * that is the point: one button, a whole group (drums + percussion).
+   *
+   * Kept beside the engine rather than inside it: this is configuration, not
+   * audio state. Seeded from `mixState` on load and saved back with it.
+   */
+  let liveSlotByKey = $state<Record<string, LiveSlotLink>>({})
+
+  /** Picker options: every live button, plus "off the buttons". */
+  const LIVE_SLOT_OPTIONS = [
+    { value: 'none', label: '— none' },
+    ...CANONICAL_LIVE_SLOTS.map((name, i) => ({
+      value: name,
+      label: `${i + 1} ${LIVE_SLOT_LABELS[name]}`,
+    })),
+  ]
+
+  /** The 8 fixed slots, each holding every lane linked to it. */
+  const liveSlotLanes = $derived(
+    resolveLiveSlotLanes(lanes.map((l) => ({ key: l.key, liveSlot: liveSlotByKey[l.key] }))),
+  )
+
+  /** What a lane's picker shows — explicit setting, else the guess. */
+  function slotLinkFor(key: string): LiveSlotLink {
+    return effectiveSlotLink(key, liveSlotByKey[key])
+  }
+
+  /** Re-link a track to a live button (or off the buttons entirely). */
+  function onChangeLiveSlot(key: string, link: LiveSlotLink) {
+    liveSlotByKey = { ...liveSlotByKey, [key]: link }
+    schedulePersist()
+  }
+
   /** True when this mixer is showing a live/performance surface (the playback
    *  page, or the editor's playback-mode toggle) rather than the arranging mixer. */
   function inPlaybackContext(): boolean {
     return initialPlaybackMode || lockPlaybackMode || playbackMode
   }
 
-  /** Vocal stem detection across both naming schemes: disk keys `stem:vocals.wav`
-   *  and Collab cloud keys `stem:Vocals`. */
-  function isVocalStemKey(key: string): boolean {
-    return key.startsWith('stem:') && /vocal/i.test(key)
-  }
-
   /** Initial mute for a lane. Live/playback mode ignores the saved arranging
-   *  mix and starts from a fixed backing-track default — every stem audible
-   *  EXCEPT vocals, and the original mix off — so playing along is consistent
-   *  regardless of editing-time solos/mutes. Non-stem lanes (click / cue /
-   *  generated band) keep their saved default. */
-  function initialMutedFor(key: string, saved: MixTrackState | undefined): boolean {
+   *  mix and starts from the PROJECT-WIDE standard-stem default
+   *  (`defaults.liveStems`, e.g. `['drums','bass']` for a gig with no live
+   *  rhythm section) — the chosen stems audible, the rest muted — so the whole
+   *  set opens from one backing-track config regardless of editing-time
+   *  solos/mutes. `liveStems` unset = legacy behavior (all stems except vocals).
+   *  The `original` full mix stays muted while audible stems cover the song, but
+   *  falls back to audible when the song lacks the selected stems so it is never
+   *  silent on stage. Non-stem lanes (click / cue / generated band) keep their
+   *  saved default. */
+  function initialMutedFor(
+    key: string,
+    saved: MixTrackState | undefined,
+    liveStems: AutoStemName[] | undefined,
+    hasAudibleStem: boolean,
+  ): boolean {
     if (inPlaybackContext()) {
-      if (key === 'original') return true
-      if (isVocalStemKey(key)) return true
-      if (key.startsWith('stem:')) return false
+      if (key.startsWith('stem:')) return !isStemLaneAudible(key, liveStems)
+      if (key === 'original') return hasAudibleStem
       if (key === 'cue') return false // spoken cues are ON by default live
     }
     return !!saved?.muted
@@ -248,17 +494,187 @@
     return LANE_COLORS[lanes.length % LANE_COLORS.length]!
   }
 
+  /**
+   * Tracks that PLAY but are not shown as mixer rows. A click isn't a musical
+   * part you balance against the band — it's a metronome. It stays in the
+   * engine so it sounds and stays sample-aligned; the transport's Click
+   * checkbox turns it on and off.
+   */
+  const HIDDEN_LANE_KEYS = new Set(['click'])
+
+  // ── Effect busses ─────────────────────────────────────────────────────────
+  // The `.smap` DECLARES busses and their routing; this keeps the audio graph
+  // matching that declaration. Inserts are cached per bus id so tweaking a
+  // parameter updates the live node instead of rebuilding the graph (which
+  // clicks), and so a lane reload doesn't cost a new reverb tail.
+
+  type LiveInsert = MixerInsert & { update: (s: never) => void }
+  const busInserts = new Map<string, { kind: EffectBusKind; insert: LiveInsert }>()
+
+  const effectBusses = $derived<EffectBus[]>($songMap?.effectBusses ?? [])
+
+  function buildInsert(bus: EffectBus): LiveInsert | null {
+    const eng = engine
+    if (!eng) return null
+    if (bus.kind === 'delay') {
+      return createDelayInsert(eng.ac, normalizeDelay(bus.delay)) as unknown as LiveInsert
+    }
+    if (bus.kind === 'widener') {
+      return createWidenerInsert(eng.ac, normalizeWidener(bus.widener)) as unknown as LiveInsert
+    }
+    return createReverbInsert(eng.ac, normalizeReverb(bus.reverb)) as unknown as LiveInsert
+  }
+
+  /** The settings object for a bus, whatever kind it is. */
+  function busSettings(bus: EffectBus): unknown {
+    if (bus.kind === 'delay') return normalizeDelay(bus.delay)
+    if (bus.kind === 'widener') return normalizeWidener(bus.widener)
+    return normalizeReverb(bus.reverb)
+  }
+
+  /** Make the audio graph match the declared busses. Safe to run repeatedly. */
+  function syncEffectBusses(): void {
+    const eng = engine
+    if (!eng) return
+    const declared = new Set(effectBusses.map((b) => b.id))
+
+    for (const [id] of busInserts) {
+      if (declared.has(id)) continue
+      eng.removeBus(id)
+      busInserts.delete(id)
+    }
+
+    for (const bus of effectBusses) {
+      let entry = busInserts.get(bus.id)
+      // A kind change means a different effect entirely — rebuild that one.
+      if (entry && entry.kind !== bus.kind) {
+        eng.removeBus(bus.id)
+        busInserts.delete(bus.id)
+        entry = undefined
+      }
+      if (!entry) {
+        const insert = buildInsert(bus)
+        if (!insert) continue
+        entry = { kind: bus.kind, insert }
+        busInserts.set(bus.id, entry)
+      } else {
+        entry.insert.update(busSettings(bus) as never)
+      }
+      eng.setBus({
+        key: bus.id,
+        label: bus.label,
+        chain: entry.insert,
+        level: bus.level,
+        muted: bus.muted,
+      })
+      // Routing: every declared send on, everything else off.
+      const laneKeys = new Set(eng.listTracks().map((t) => t.key))
+      for (const key of laneKeys) {
+        eng.setSend(key, bus.id, bus.sends[key] ?? 0)
+      }
+    }
+  }
+
+  $effect(() => {
+    // Re-run when the declaration OR the lane set changes.
+    void effectBusses
+    void lanes
+    syncEffectBusses()
+  })
+
+  function updateBus(id: string, fn: (b: EffectBus) => EffectBus): void {
+    patchSongMap((sm) => ({
+      ...sm,
+      effectBusses: (sm.effectBusses ?? []).map((b) => (b.id === id ? fn(b) : b)),
+    }))
+  }
+
+  function addEffectBus(kind: EffectBusKind): void {
+    patchSongMap((sm) => {
+      const existing = sm.effectBusses ?? []
+      return { ...sm, effectBusses: [...existing, createEffectBus(existing, kind)] }
+    })
+  }
+
+  function removeEffectBus(id: string): void {
+    patchSongMap((sm) => {
+      const next = (sm.effectBusses ?? []).filter((b) => b.id !== id)
+      return { ...sm, effectBusses: next.length ? next : undefined }
+    })
+    if (selectedBusId === id) selectedBusId = null
+  }
+
+  // The bottom dock shows ONE thing. Selecting a bus closes a track editor and
+  // vice versa — two stacked docks is both ugly and ambiguous about which
+  // thing the controls belong to.
+  let selectedBusId = $state<string | null>(null)
+  function selectBus(id: string | null): void {
+    selectedBusId = id
+    if (id) selectedLaneKey = null
+  }
+  function selectLane(key: string | null): void {
+    selectedLaneKey = key
+    if (key) selectedBusId = null
+  }
+  const selectedBus = $derived(effectBusses.find((b) => b.id === selectedBusId) ?? null)
+  /** Which pane of the mixer is showing: the channels, or the effect busses. */
+  let mixerTab = $state<'tracks' | 'effects'>('tracks')
+
   function syncLanesFromEngine() {
     if (!engine) return
-    lanes = engine.listTracks().map((t, i) => ({
-      key: t.key,
-      label: t.label,
-      color: LANE_COLORS[i % LANE_COLORS.length]!,
-      buffer: t.buffer,
-      volume: t.volume,
-      muted: t.muted,
-      soloed: t.soloed,
-    }))
+    const tracks = engine.listTracks().filter((t) => !HIDDEN_LANE_KEYS.has(t.key))
+    const byKey = new Map(tracks.map((t) => [t.key, t]))
+    const ordered = sortBySavedOrder(
+      tracks.map((t) => t.key),
+      laneOrder,
+    )
+    lanes = ordered.flatMap((key, i) => {
+      const t = byKey.get(key)
+      if (!t) return []
+      return [
+        {
+          key: t.key,
+          label: t.label,
+          // The original mix is the reference every other lane is heard
+          // against, so it gets its own colour rather than a rotation slot.
+          color: t.key === 'original' ? ORIGINAL_LANE_COLOR : LANE_COLORS[i % LANE_COLORS.length]!,
+          buffer: t.buffer ?? null,
+          volume: t.volume,
+          muted: t.muted,
+          soloed: t.soloed,
+        },
+      ]
+    })
+  }
+
+  // ── Lane order (drag to reorder; the original mix is pinned at the top) ───
+  /** Remembered key order, seeded from `mixState.tracks` and saved back to it. */
+  let laneOrder = $state<string[]>([])
+  /** The lane being dragged, and the lane it is currently over. */
+  let draggingKey = $state<string | null>(null)
+  let dropTargetKey = $state<string | null>(null)
+
+  function onLaneDragStart(key: string) {
+    draggingKey = key
+  }
+  function onLaneDragOver(key: string) {
+    if (draggingKey && key !== draggingKey) dropTargetKey = key
+  }
+  function onLaneDragEnd() {
+    draggingKey = null
+    dropTargetKey = null
+  }
+  function onLaneDrop(key: string) {
+    const from = draggingKey
+    onLaneDragEnd()
+    if (!from) return
+    laneOrder = moveKey(
+      lanes.map((l) => l.key),
+      from,
+      key,
+    )
+    syncLanesFromEngine()
+    schedulePersist()
   }
 
   /** Compute the silence-prepend each source needs so all tracks share t=0. */
@@ -270,7 +686,7 @@
     // of their own buffer. Stems + original get the same preamble of silence
     // prepended so musical time aligns: the cue's "beat 1" sits at the same
     // mix-timeline second as each stem's `trim.startSec` sample.
-    if (forKey === 'cue' || forKey === 'click' || forKey === 'drums-gen' || forKey === 'bass-gen') return 0
+    if (laneHasPrebakedPreamble(forKey)) return 0
     const preludeSec = titleCuePreludeSec(sm, getPrimaryCueTrack(sm))
     let prependSec = 0
     const countInBeats = effectiveCountInBeats(sm)
@@ -508,7 +924,7 @@
     return views
   })
   const nextChordView = $derived(chordApproachViews.find((seg) => !seg.active) ?? null)
-  const currentChordHeading = $derived(snapshot.state === 'playing' ? 'Playing chord' : 'Current chord')
+  const currentChordHeading = $derived(transportState === 'playing' ? 'Playing chord' : 'Current chord')
 
   const sectionTimelineRanges = $derived.by<SectionTimelineRange[]>(() => {
     const sm = $songMap
@@ -590,11 +1006,13 @@
 
   const laneLights = $derived.by<LaneLight[]>(() => {
     const anySoloed = lanes.some((lane) => lane.soloed)
+    // Reads the DISCRETE `transportState`, not `snapshot.positionSec`, so this
+    // (and everything it feeds — lane pills, canonical stem slots, APC LEDs) is
+    // recomputed only on play/pause + mute/solo/volume, NOT 60×/s.
     return lanes.map((lane) => {
-      const inRange = !!lane.buffer && snapshot.positionSec < lane.buffer.duration - 0.02
       const audible =
-        snapshot.state === 'playing' &&
-        inRange &&
+        transportState === 'playing' &&
+        !!lane.buffer &&
         lane.volume > 0.001 &&
         !lane.muted &&
         (!anySoloed || lane.soloed)
@@ -885,6 +1303,28 @@
       })
     }
 
+    // The programmed drum machine — its own lane, independent of the detected
+    // drum track above. A song can carry both at once, like tracks in a DAW.
+    // Always re-synthesized: the part is derived from settings + timeline, so
+    // it must follow bar/beat/section edits rather than trust a stale render.
+    if (showBand && sm && sm.drumMachine?.enabled) {
+      const machineKitIsCustom = sm.drumMachine.kit === 'custom'
+      plan.push({
+        key: 'drum-machine',
+        label: 'Drum Machine',
+        loader: async () => {
+          try {
+            const custom =
+              machineKitIsCustom && ps.osPath ? await loadProjectDrumKit(ps.osPath) : null
+            const r = await renderDrumMachineWavBlob(sm, custom ? { customKit: custom.kit } : {})
+            return r.blob
+          } catch {
+            return null
+          }
+        },
+      })
+    }
+
     // BarBro's generated bass track — same contract as the drums lane. No
     // `transposeSrcSubpath`: when the song is transposed we shift the NOTES
     // and re-synthesize — exact pitch, no stretch artifacts — so the loaded
@@ -911,23 +1351,93 @@
       })
     }
 
+    // The programmed bass machine — its own lane, independent of the detected
+    // bass above. Always re-synthesized: the line is derived from the CHORDS,
+    // so it must follow harmony edits rather than trust a stale render.
+    if (showBand && sm && sm.bassMachine?.enabled) {
+      const bassMachineSemis = transposeAudioEnabled ? transposeSemitones : 0
+      plan.push({
+        key: 'bass-machine',
+        label: 'Bass Machine',
+        loader: async () => {
+          try {
+            const r = await renderBassMachineWavBlob(sm, { transposeSemitones: bassMachineSemis })
+            return r.blob
+          } catch {
+            return null
+          }
+        },
+      })
+    }
+
     if (plan.length === 0) {
       loadError = 'No audio tracks found. Render stems or a cue track first.'
       loading = false
       return
     }
 
+    // Project-wide standard-stem default for live/playback loads. Computed once
+    // per load: which stems are audible, and whether this song actually has any
+    // of them (else keep the full mix audible so it isn't silent).
+    const liveStems = get(projectStore).data?.defaults?.liveStems
+    const hasAudibleStem = hasAudibleStemLane(
+      plan.map((p) => p.key),
+      liveStems,
+    )
+
+    // Saved live-button links for this song. Tracks without one are absent, so
+    // they keep falling back to the name guess.
+    {
+      const links: Record<string, LiveSlotLink> = {}
+      for (const t of $songMap?.mixState?.tracks ?? []) {
+        if (isLiveSlotLink(t.liveSlot)) links[t.key] = t.liveSlot
+      }
+      liveSlotByKey = links
+      // The saved lane order IS the order of mixState.tracks.
+      laneOrder = ($songMap?.mixState?.tracks ?? []).map((t) => t.key)
+      // Saved channel EQs. Nodes belong to the old context, so drop them and
+      // let the next insert build fresh ones on this engine.
+      const eqs: Record<string, ChannelEq> = {}
+      for (const t of $songMap?.mixState?.tracks ?? []) {
+        if (t.eq) eqs[t.key] = t.eq
+      }
+      eqByKey = eqs
+      eqNodesByKey = new Map()
+    }
+
+    const transposeActive = transposeAudioEnabled && transposeSemitones !== 0
+    const activeSongId = ps.activeSongId
+    // Stems this song already has PRE-DECODED (warmed by the live prefetcher
+    // while the previous song played) → install with zero fetch/decode, so the
+    // switch is instant instead of watching a loading ticker. Only trusted at
+    // written pitch; a transposed load re-decodes + shifts from source.
+    const preloaded = !transposeActive && activeSongId ? getPreloadedStems(activeSongId) : undefined
+    // Raw (untransposed, un-prepended) stem decodes from THIS load, to seed the
+    // cache so a switch BACK to this song is instant too.
+    const decodedStemsThisLoad = new Map<string, AudioBuffer>()
+
     let done = 0
     for (const p of plan) {
-      loadingMsg = `Loading ${p.label}… (${done + 1} / ${plan.length})`
+      const isStemLane = p.key.startsWith('stem:')
       try {
-        const blob = await p.loader()
-        if (!blob) continue
-        let buf = await decodeBlob(engine, blob)
+        let buf: AudioBuffer
+        const cached = preloaded && isStemLane ? preloaded.get(p.key) : undefined
+        if (cached) {
+          buf = cached
+        } else {
+          loadingMsg = `Loading ${p.label}… (${done + 1} / ${plan.length})`
+          const blob = await p.loader()
+          if (!blob) continue
+          buf = await decodeBlob(engine, blob)
+        }
+        // Remember the raw decode before transpose/prepend so a switch back to
+        // this song reuses it (only untransposed stems are cache-eligible).
+        if (isStemLane && !transposeActive) decodedStemsThisLoad.set(p.key, buf)
         // Client-side transpose (signalsmith-stretch, MIT): shift the decoded
         // musical lanes in-browser. Cue/click lanes never set
-        // `transposeSrcSubpath`, so speech and clicks stay unshifted.
-        if (transposeAudioEnabled && transposeSemitones !== 0 && p.transposeSrcSubpath !== undefined) {
+        // `transposeSrcSubpath`, so speech and clicks stay unshifted. Never runs
+        // for a cached stem — the cache only holds untransposed buffers.
+        if (transposeActive && p.transposeSrcSubpath !== undefined) {
           loadingMsg = `Transposing ${p.label}… (${done + 1} / ${plan.length})`
           buf = await pitchShiftAudioBuffer(buf, transposeSemitones)
         }
@@ -939,7 +1449,7 @@
           label: p.label,
           buffer: buf,
           volume: saved?.volume ?? 1,
-          muted: initialMutedFor(p.key, saved),
+          muted: initialMutedFor(p.key, saved, liveStems, hasAudibleStem),
           // A saved solo (from arranging) would silence every other lane in the
           // live default, so ignore it in playback context.
           soloed: inPlaybackContext() ? false : !!saved?.soloed,
@@ -948,13 +1458,15 @@
         syncLanesFromEngine()
       } catch (e) {
         console.warn('Failed to load', p.key, e)
-        if (transposeAudioEnabled && transposeSemitones !== 0 && p.transposeSrcSubpath !== undefined) {
+        if (transposeActive && p.transposeSrcSubpath !== undefined) {
           const msg = e instanceof Error ? e.message : String(e)
           loadError = `Could not render transposed ${p.label}: ${msg}`
         }
       }
       done++
     }
+    if (activeSongId && decodedStemsThisLoad.size > 0)
+      putPreloadedStems(activeSongId, decodedStemsThisLoad)
     applyProjectSound()
     loading = false
   }
@@ -973,6 +1485,43 @@
   let soundBypassed = $state(false)
   const projectSoundOn = $derived(!!$projectStore.data?.mastering?.enabled)
 
+  /**
+   * The ONE builder for a lane's insert. The channel EQ and the project-sound
+   * chain both live on `track.insert`, so they have to be composed here rather
+   * than each writing it — whichever wrote last would otherwise silently erase
+   * the other.
+   *
+   *     source → [channel EQ] → [project sound] → track gain
+   *
+   * EQ first: it is the user's own corrective move on the raw channel, and the
+   * project's compressor should react to the sound they actually chose.
+   */
+  function buildLaneInsert(track: MixerTrack, cfg: ProjectMastering | undefined): MixerInsert | undefined {
+    if (!engine) return undefined
+    const ctx = engine.ac
+    const eqChain = isEqActive(eqByKey[track.key]) ? laneEqNodes(track.key) : null
+
+    let soundChain: MixerInsert | undefined
+    const kind = stemKindForLaneKey(track.key)
+    // The project-sound chain is fitted to a stem's measured level, so it only
+    // applies to AUDIO tracks — a MIDI track has no buffer to measure.
+    if (cfg?.enabled && kind && track.buffer) {
+      const buf = track.buffer
+      let rms = laneRms.get(buf)
+      if (rms === undefined) {
+        rms = bufferRmsDb(buf)
+        laneRms.set(buf, rms)
+      }
+      soundChain = buildStemChain(ctx, kind, cfg, rms) ?? undefined
+    }
+
+    if (eqChain && soundChain) {
+      eqChain.output.connect(soundChain.input)
+      return { input: eqChain.input, output: soundChain.output }
+    }
+    return eqChain ?? soundChain
+  }
+
   function applyProjectSound() {
     if (!engine) return
     const saved = get(projectStore).data?.mastering
@@ -981,21 +1530,60 @@
     const pos = snapshot.positionSec
     engine.setMasterChain(cfg ? buildMasterChain(engine.ac, cfg) : null)
     for (const t of engine.listTracks()) {
-      const kind = stemKindForLaneKey(t.key)
-      let insert: MixerInsert | undefined
-      if (cfg?.enabled && kind) {
-        let rms = laneRms.get(t.buffer)
-        if (rms === undefined) {
-          rms = bufferRmsDb(t.buffer)
-          laneRms.set(t.buffer, rms)
-        }
-        insert = buildStemChain(engine.ac, kind, cfg, rms) ?? undefined
-      }
-      engine.setTrack({ ...t, insert })
+      engine.setTrack({ ...t, insert: buildLaneInsert(t, cfg) })
     }
     syncLanesFromEngine()
     lastAppliedSoundJson = JSON.stringify(saved ?? null)
     if (wasPlaying) void engine.play(pos)
+  }
+
+  // ── Channel EQ (a per-lane insert; nothing to do with the busses) ─────────
+  /** laneKey → its EQ. Absent / flat = no filters are inserted for that lane. */
+  let eqByKey = $state<Record<string, ChannelEq>>({})
+  /** Live filter nodes per lane, kept so a slider drag retunes instead of rewiring. */
+  let eqNodesByKey = new Map<string, ChannelEqNodes>()
+
+  function laneEqNodes(key: string): ChannelEqNodes {
+    let nodes = eqNodesByKey.get(key)
+    if (!nodes) {
+      nodes = createChannelEqNodes(engine!.ac)
+      nodes.update(eqByKey[key])
+      eqNodesByKey.set(key, nodes)
+    }
+    return nodes
+  }
+
+  /**
+   * Apply an EQ edit.
+   *
+   * The common case — dragging a band on a lane that already has an EQ — only
+   * retunes existing filters, so it is heard instantly with no rewire and no
+   * re-seek. Only turning the EQ on or off changes the graph SHAPE, and that is
+   * the one case that has to re-seek, because replacing a track's insert
+   * disconnects the old chain and the lane would otherwise drop out.
+   */
+  function onEqChange(key: string, next: ChannelEq | undefined) {
+    if (!engine) return
+    const wasActive = isEqActive(eqByKey[key])
+    if (next === undefined) {
+      const { [key]: _dropped, ...rest } = eqByKey
+      eqByKey = rest
+    } else {
+      eqByKey = { ...eqByKey, [key]: next }
+    }
+    const nowActive = isEqActive(eqByKey[key])
+
+    eqNodesByKey.get(key)?.update(eqByKey[key])
+
+    if (wasActive !== nowActive) {
+      const track = engine.listTracks().find((t) => t.key === key)
+      if (track) {
+        const cfg = soundBypassed ? undefined : get(projectStore).data?.mastering
+        engine.setTrack({ ...track, insert: buildLaneInsert(track, cfg) })
+        if (snapshot.state === 'playing') void engine.play(snapshot.positionSec)
+      }
+    }
+    schedulePersist()
   }
 
   /** Before/after: flip the bypass and re-apply, resuming at the playhead. */
@@ -1022,11 +1610,26 @@
     persistTimer = setTimeout(() => {
       persistTimer = null
       if (!engine) return
-      const tracks: MixTrackState[] = engine.listTracks().map((t) => {
+      // Written in LANE order — the array order is what restores the rows.
+      const byKey = new Map(engine.listTracks().map((t) => [t.key, t]))
+      const orderedTracks = sortBySavedOrder(
+        [...byKey.keys()],
+        lanes.map((l) => l.key),
+      )
+      const tracks: MixTrackState[] = orderedTracks.flatMap((key) => {
+        const t = byKey.get(key)
+        if (!t) return []
         const entry: MixTrackState = { key: t.key, volume: t.volume }
         if (t.muted) entry.muted = true
         if (t.soloed) entry.soloed = true
-        return entry
+        // Only an EXPLICIT link is written; an untouched track stays absent so
+        // it keeps following the name-based guess.
+        const link = liveSlotByKey[t.key]
+        if (link !== undefined) entry.liveSlot = link
+        // A flat EQ is not worth storing; a deliberately bypassed one is.
+        const eq = eqByKey[t.key]
+        if (isEqWorthStoring(eq)) entry.eq = eq
+        return [entry]
       })
       const next: MixState = { tracks }
       patchSongMap((m) => ({ ...m, mixState: next }))
@@ -1063,6 +1666,22 @@
     engine.seek(frac * snapshot.durationSec)
   }
 
+  // Keep the published handles current so the shell transport reflects THIS
+  // engine's state (enabled/playing/position), not the shell's own.
+  $effect(() => {
+    controls = {
+      canPlay: mixerCanPlay,
+      isPlaying: snapshot.state === 'playing',
+      positionSec: snapshot.positionSec,
+      durationSec: snapshot.durationSec,
+      playPause: onPlayPause,
+      stop: onStop,
+      restart: onRestartSong,
+      clickOn: !clickMuted,
+      setClick: setClickOn,
+    }
+  })
+
   function onPlayPause() {
     if (!mixerCanPlay) return
     if (!engine) return
@@ -1081,6 +1700,8 @@
     replayOnceSectionId = null
     replayOnceConsumed = false
     if (snapshot.state === 'playing') {
+      lastLinearCuePos = 0 // restart-from-top: re-scan cues from the start
+      loopCueArmedForId = null
       engine.seek(0)
     } else {
       announcedPlay(0)
@@ -1097,7 +1718,16 @@
       loadError = null
       loadingMsg = `Loading ${target.title}…`
       onStop()
-      await loadProjectSongIntoEditor(target.id)
+      // Collab (browser-cloud) mode has no local folder (`osPath` is null), so
+      // the disk loader throws "No active project" — the exact reason in-mixer
+      // prev/next did nothing in browser mode. Route through the cloud loader,
+      // mirroring the setlist page's openSong().
+      if (isBrowserCloudProject(get(projectStore))) {
+        const r = await loadCloudSongIntoEditor(target.id)
+        if (!r.ok) loadError = r.error
+      } else {
+        await loadProjectSongIntoEditor(target.id)
+      }
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e)
       loading = false
@@ -1140,19 +1770,39 @@
 
   /** The lanes toggleable from the controller's bottom row: stems + cue + click
    *  (not the original mix or the generated band). Stable order. */
-  const liveLanes = $derived.by(() => {
-    return laneLights
-      .filter((l) => l.key.startsWith('stem:') || l.key === 'cue' || l.key === 'click')
-      .slice(0, 8)
-      .map((l) => ({
-        key: l.key,
-        on: !l.muted,
-        kind: (l.key.startsWith('stem:') ? 'stem' : l.key === 'cue' ? 'cue' : 'click') as
-          | 'stem'
-          | 'cue'
-          | 'click',
-      }))
+  // FIXED canonical slots (0-7): a given instrument is ALWAYS the same pad/button,
+  // every song. `null` = no lane for that slot in this song (button stays dark).
+  // This is what makes the APC stem buttons trustworthy live.
+  // A slot can drive SEVERAL lanes (e.g. drums + percussion on the Drums
+  // button), so each slot carries the whole group. It reads as ON when anything
+  // in it sounds, and one press moves the group together.
+  type LiveLane = { keys: string[]; on: boolean; kind: 'stem' | 'cue' | 'click' }
+  const liveLanes = $derived.by<(LiveLane | null)[]>(() => {
+    const mutedByKey = new Map(laneLights.map((l) => [l.key, l.muted]))
+    const isMuted = (k: string) => mutedByKey.get(k) !== false
+    return liveSlotLanes.map((keys, slot) => {
+      // Only lanes that actually exist in this song light a button.
+      const present = keys.filter((k) => mutedByKey.has(k))
+      if (present.length === 0) return null
+      const name = slotNameByIndex(slot)
+      return {
+        keys: present,
+        on: isGroupOn(present, isMuted),
+        kind: name === 'click' ? 'click' : name === 'cue' ? 'cue' : 'stem',
+      }
+    })
   })
+
+  /** Press a live button: move every lane linked to that slot as one. */
+  function toggleLiveSlot(slot: number) {
+    const lane = liveLanes[slot]
+    if (!engine || !lane) return
+    const muted = new Map(engine.listTracks().map((t) => [t.key, !!t.muted]))
+    const next = nextGroupMuted(lane.keys, (k) => muted.get(k) !== false)
+    for (const key of lane.keys) engine.setMuted(key, next)
+    syncLanesFromEngine()
+    schedulePersist()
+  }
 
   /** Beat-start times in MIXER time — drives the current-section beat blink. */
   const beatStartsMixer = $derived.by<number[]>(() => {
@@ -1180,13 +1830,13 @@
   })
 
   const liveLedState = $derived<LiveLedState>({
-    playing: snapshot.state === 'playing',
+    playing: transportState === 'playing',
     loopActive: !!repeatSectionRange,
     replayArmed: !!replayOnceSectionRange,
     canReplay: !!currentSectionRange,
     canPrev: canGoPreviousProjectSong,
     canNext: canGoNextProjectSong,
-    lanes: liveLanes.map((l) => ({ on: l.on, kind: l.kind })),
+    lanes: liveLanes.map((l) => (l ? { on: l.on, kind: l.kind } : null)),
     sectionKinds: sectionTimelineRanges.slice(0, 32).map((s) => s.kind),
     currentSection: currentSectionRange
       ? sectionTimelineRanges.findIndex((s) => s.id === currentSectionRange!.id)
@@ -1361,6 +2011,11 @@
   function announcedPlay(fromSec?: number) {
     if (!engine) return
     const startAt = fromSec ?? snapshot.positionSec
+    // Fresh play/replay: reset the linear-cue scan from the start position so the
+    // opening spoken cue fires again (it stayed stale ≈duration after the last
+    // play finished, which suppressed the intro cue on every replay).
+    lastLinearCuePos = startAt
+    loopCueArmedForId = null
     const clip = announcementClip
     if (startAt < 0.05 && announcementMode === 'auto' && clip) {
       announceSongNow()
@@ -1447,11 +2102,17 @@
       case 'announce-song':
         announceSongNow()
         break
-      case 'toggle-stem': {
-        const lane = liveLanes[cmd.index]
-        if (lane) onToggleMuted(lane.key)
+      case 'toggle-stem':
+        toggleLiveSlot(cmd.index)
         break
-      }
+      case 'toggle-jam':
+        // A pad press IS a user gesture, so this is where the jam's audio
+        // contexts are allowed to start.
+        chordJam.toggleVoice(cmd.voice)
+        break
+      case 'cycle-arp-rate':
+        chordJam.cycleArpRate()
+        break
       case 'jump-section': {
         const now = performance.now()
         const isDouble =
@@ -1514,6 +2175,13 @@
 
   function handleTransportUpdate(s: MixerSnapshot) {
     snapshot = s
+    if (s.state !== transportState) transportState = s.state // discrete, off the per-frame path
+    // Drive the chord jam from THIS engine's playhead, converted to song time
+    // (the `.smap` base its schedules are in). Called before the early-returns
+    // below so stopping still releases the voices.
+    if (chordJam.anyOn || s.state !== 'playing') {
+      chordJam.setPosition(s.positionSec - mixerSongOffsetSec, s.state === 'playing', 'mixer')
+    }
     if (Math.abs(mixerDurationSec - s.durationSec) > 1e-4) {
       mixerDurationSec = s.durationSec
     }
@@ -1600,24 +2268,31 @@
    * then switching to Mix would show no cue lane until the user navigated
    * back through /project to trigger a refresh.
    */
-  async function syncAndLoad() {
+  async function syncAndLoad(rescan = true) {
     loading = true
     loadError = null
-    loadingMsg = 'Scanning project…'
-    try {
-      await refreshProjectInfo()
-    } catch {
-      /* sidecar offline — fall through with whatever's cached */
+    // The sidecar rescan reflects on-disk changes (e.g. a cue track just
+    // rendered) but it's a full HTTP round-trip. On a live SONG SWITCH every
+    // song's stem metadata is already loaded, so the rescan only delays the
+    // load without changing what we load — skip it there (`rescan=false`) to
+    // keep switching instant. Keep it on mount + explicit refresh signals.
+    if (rescan) {
+      loadingMsg = 'Scanning project…'
+      try {
+        await refreshProjectInfo()
+      } catch {
+        /* sidecar offline — fall through with whatever's cached */
+      }
     }
     await loadAndRegisterTracks()
   }
 
-  async function reload() {
+  async function reload(rescan = true) {
     if (!engine) return
     // Wipe existing tracks + buffers so re-loading is a clean slate.
     for (const t of engine.listTracks()) engine.removeTrack(t.key)
     syncLanesFromEngine()
-    await syncAndLoad()
+    await syncAndLoad(rescan)
   }
 
   $effect(() => {
@@ -1664,7 +2339,7 @@
     const resumeAt = snapshot.positionSec
     if (wasPlaying) engine.pause()
     void (async () => {
-      await reload()
+      await reload(false) // pitch change only — no on-disk metadata changed
       if (generation !== transposeReloadGeneration || !engine || loadError) return
       engine.seek(resumeAt)
       if (wasPlaying) await engine.play(resumeAt)
@@ -1685,7 +2360,111 @@
     replayOnceConsumed = false
     repeatSectionEnabled = false
     repeatSectionId = null
-    void reload()
+    void reload(false) // song switch — metadata already loaded; keep it instant
+  })
+
+  // ── Live prefetch — never watch stems load mid-set ─────────────────────────
+  // While the current song plays, pre-DECODE the next song's stems on this
+  // engine's persistent AudioContext and evict songs outside the window, so
+  // hitting Next installs buffers with zero fetch/decode. Bytes for the rest of
+  // the set are warmed (cloud → IndexedDB) so even a far jump never waits on the
+  // network. Auto/background; live stage only. Pure policy lives in
+  // `livePrefetch.ts`; the decoded-buffer cache in `liveAudioCache.ts`.
+
+  /** Map a setlist song id to a stem descriptor (disk folder + cloud id). */
+  function stemDescriptorFor(
+    songId: string,
+  ): { osPath: string | null; folder: string | null; songId: string } | null {
+    const ps = get(projectStore)
+    const entry = ps.data?.songs.find((s) => s.id === songId)
+    return { osPath: ps.osPath, folder: entry?.folder ?? null, songId }
+  }
+
+  let prefetchGeneration = 0
+  async function runLivePrefetch() {
+    if (!engine) return
+    const setlist = projectSongNavItems.map((s) => s.id)
+    const currentIndex = activeProjectSongIndex
+    if (currentIndex < 0 || setlist.length < 2) return
+
+    const generation = (prefetchGeneration += 1)
+    const alive = () => engine != null && generation === prefetchGeneration
+    const activeId = get(projectStore).activeSongId
+    // "Fetched" (blue dot) = bytes cached in IndexedDB that OUTLIVE eviction — a
+    // cloud-only concept. For a disk project the bytes are always local, so the
+    // only meaningful states are cold and ready; don't flag disk songs fetched.
+    const isCloud = isBrowserCloudProject(get(projectStore))
+
+    const plan = prefetchPlan({
+      setlist,
+      currentIndex,
+      decoded: decodedSongIds(),
+      fetched: get(liveFetchedSongs),
+      window: 1,
+    })
+
+    // Evict first — free RAM before allocating the next song's buffers.
+    for (const id of plan.evict) if (id !== activeId) evictPreloaded(id)
+
+    // Pre-decode the upcoming song(s). Skip the current song (the foreground
+    // load already decoded + cached it) and anything already resident.
+    for (const songId of plan.decode) {
+      if (!alive()) return
+      if (songId === activeId || getPreloadedStems(songId)) continue
+      const desc = stemDescriptorFor(songId)
+      if (!desc) continue
+      try {
+        const blobs = await loadSongStemBlobsFor(desc)
+        if (!alive()) return
+        if (blobs.length === 0) {
+          if (isCloud) markFetched(songId)
+          continue
+        }
+        const decoded = new Map<string, AudioBuffer>()
+        for (const b of blobs) {
+          if (!alive()) return
+          decoded.set(b.key, await engine.ac.decodeAudioData(await b.blob.arrayBuffer()))
+        }
+        if (!alive()) return
+        putPreloadedStems(songId, decoded)
+        if (isCloud) markFetched(songId)
+      } catch (e) {
+        console.warn('[live-prefetch] decode failed', songId, e)
+      }
+    }
+
+    // Warm the rest of the set's BYTES nearest-first — CLOUD ONLY. For cloud,
+    // `loadSongStemBlobsFor` fetches over the network and caches to IndexedDB,
+    // so a far jump then only pays decode, never the wire. For a disk project
+    // the bytes are already local (localhost reads are fast) and the slow part
+    // is decode, which the window already covers — reading whole stem files off
+    // disk just to drop them would be pointless IO, so we skip it.
+    if (isCloud) {
+      for (const songId of plan.fetch) {
+        if (!alive()) return
+        if (songId === activeId || get(liveFetchedSongs).has(songId)) continue
+        const desc = stemDescriptorFor(songId)
+        if (!desc) continue
+        try {
+          await loadSongStemBlobsFor(desc) // side effect: fills the cloud byte cache
+          markFetched(songId)
+        } catch (e) {
+          console.warn('[live-prefetch] warm failed', songId, e)
+        }
+      }
+    }
+  }
+
+  $effect(() => {
+    if (!liveMode || !engineReady) return
+    // Track: re-warm whenever the position in the setlist changes.
+    const idx = activeProjectSongIndex
+    void projectSongNavItems.map((s) => s.id).join('|')
+    if (idx < 0) return
+    // Defer so the foreground load of the CURRENT song (what the operator is
+    // waiting on) isn't slowed by background decode work.
+    const handle = setTimeout(() => void runLivePrefetch(), 1200)
+    return () => clearTimeout(handle)
   })
 
   // Keep the cue lane's mute in sync with mixState (per-machine, stripped from
@@ -1701,8 +2480,72 @@
     }
   })
 
+  // ── Chord jam (keys / bass / arp as a live instrument) ───────────────────
+  // The schedules derive from the song map; the playhead is pushed in from
+  // `handleTransportUpdate`. Settings are per-device and pushed into the synths
+  // here so a MIDI-driven change takes effect without a UI round-trip.
+  $effect(() => {
+    chordJam.configure($songMap)
+  })
+  $effect(() => {
+    chordJam.syncSettings()
+  })
+  onDestroy(() => chordJam.releaseAll())
+
+  // ── Naive transpose (varispeed) ──────────────────────────────────────────
+  // The mixer runs its OWN MixerEngine, separate from the shared transport, so
+  // it needs the rate applied here too — otherwise transposing does nothing in
+  // Overview / live, which is exactly how this was first reported. The offset
+  // itself lives on the transport (one source of truth); this only mirrors it
+  // into this engine. Everything on the timeline is a buffer, including the
+  // baked click and cue lanes, so they varispeed together and stay in sync.
+  $effect(() => {
+    const rate = transport.transposeRate
+    if (engine) engine.setPlaybackRate(rate)
+  })
+
+  // Tempo hold: the residual pitch shift runs as ONE live worklet on this
+  // engine's master bus. No click compensation is needed here (unlike the
+  // transport) because the mixer's click and cue lanes are BUFFERS on the same
+  // timeline, so they pass through the shifter and pick up its latency too.
+  let mixerShifter: LivePitchShifter | null = null
+  let mixerShifterPending: Promise<LivePitchShifter | null> | null = null
+  $effect(() => {
+    const shift = transport.residualShiftSemitones
+    if (!engine) return
+    if (shift === 0) {
+      engine.setMasterTailNode(null)
+      return
+    }
+    const ac = engine.ac
+    if (!mixerShifterPending) mixerShifterPending = createLivePitchShifter(ac, 2)
+    void mixerShifterPending.then((made) => {
+      if (!made || !engine) return
+      mixerShifter = made
+      // Re-read: the offset may have changed while the node was constructed.
+      const live = transport.residualShiftSemitones
+      if (live === 0) {
+        engine.setMasterTailNode(null)
+        return
+      }
+      made.setSemitones(live)
+      engine.setMasterTailNode(made.node)
+    })
+  })
+  onDestroy(() => {
+    mixerShifter?.dispose()
+    mixerShifter = null
+    // A queued machine refresh must not fire into a torn-down engine.
+    machineRefreshQueue.cancel()
+  })
+
   onMount(() => {
+    // Fresh engine → fresh AudioContext. Any buffers cached against a prior
+    // context are now invalid, so wipe the live prefetch cache before we start
+    // warming this session's songs.
+    clearLiveAudioCache()
     engine = new MixerEngine()
+    engine.setPlaybackRate(transport.transposeRate) // carry any offset set before mount
     engine.onUpdate(handleTransportUpdate)
     // Cues tap the master bus: they get master volume + master processing but
     // are unaffected by individual stem mutes/solos.
@@ -1750,18 +2593,26 @@
   //   Space play/pause · S stop · ←/→ prev/next song · R replay section once
   //   · L loop section · 1–8 toggle stem
   $effect(() => {
-    if (!playbackMode || typeof window === 'undefined') return
+    if (typeof window === 'undefined') return
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
 
       if (e.code === 'Space' || e.key === ' ') {
+        // Space is the transport EVERYWHERE in the mixer, not just on the
+        // playback stage. But a focused button/tab/slider must still get its
+        // own Space — stealing it would break keyboard use of the editors.
+        if (t?.closest('button, select, [role="tab"], [role="radio"], [role="slider"]')) return
         e.preventDefault()
         e.stopPropagation()
         if (mixerCanPlay) onPlayPause()
         return
       }
+
+      // Everything below is a STAGE control (song nav, section replay/loop,
+      // stem toggles) and stays scoped to playback mode.
+      if (!playbackMode) return
       if (e.key === 'ArrowRight') {
         if (!canGoNextProjectSong) return
         e.preventDefault()
@@ -1775,10 +2626,12 @@
         return
       }
       if (/^[1-8]$/.test(e.key)) {
-        const lane = laneLights[Number(e.key) - 1]
-        if (!lane) return
+        // Same fixed slots as the APC pads, so key 1 and pad 1 are one control
+        // and both follow the track's live-button link.
+        const slot = Number(e.key) - 1
+        if (!liveLanes[slot]) return
         e.preventDefault()
-        onToggleMuted(lane.key)
+        toggleLiveSlot(slot)
         return
       }
       const k = e.key.toLowerCase()
@@ -1805,7 +2658,7 @@
     ? 'flex min-h-0 flex-1 flex-col gap-3 px-0 py-0'
     : playbackMode
       ? 'fixed bottom-0 left-0 right-0 z-[100] flex flex-col gap-3 overflow-hidden px-4 py-4 sm:px-8'
-      : 'border-foreground bg-background space-y-3 border-2 px-3 py-3'}
+      : 'bg-background space-y-3 px-3 py-3'}
   style={liveMode
     ? undefined
     : playbackMode
@@ -1815,20 +2668,6 @@
   <!-- Transport bar — full controls in overview only; playback mode uses a clean header. -->
   {#if !playbackMode}
   <div class="border-foreground/30 flex flex-wrap items-center gap-2 border-b-2 pb-2">
-    <Button
-      variant="default"
-      size="sm"
-      class="h-9 w-9 p-0"
-      onclick={onPlayPause}
-      disabled={!mixerCanPlay}
-      aria-label={snapshot.state === 'playing' ? 'Pause' : 'Play'}
-    >
-      {#if snapshot.state === 'playing'}
-        <Pause class="size-4" aria-hidden="true" />
-      {:else}
-        <Play class="size-4" aria-hidden="true" />
-      {/if}
-    </Button>
     <Button
       variant="outline"
       size="sm"
@@ -1840,69 +2679,9 @@
     >
       <RotateCcw class="size-3.5" aria-hidden="true" />
     </Button>
-    <Button
-      variant="outline"
-      size="sm"
-      class="h-9 w-9 p-0"
-      onclick={onStop}
-      disabled={!mixerCanPlay}
-      aria-label="Stop"
-    >
-      <Square class="size-3.5" aria-hidden="true" />
-    </Button>
-    <Button
-      variant={replayOnceSectionRange ? 'default' : 'outline'}
-      size="sm"
-      class="h-8 gap-1.5"
-      onclick={replayCurrentSectionOnce}
-      disabled={!currentSectionRange}
-      title={replayOnceSectionRange
-        ? replayOnceConsumed
-          ? `Replaying ${replayOnceSectionRange.label} one time`
-          : `Will replay ${replayOnceSectionRange.label} once at the end`
-        : currentSectionRange
-          ? `Replay ${currentSectionRange.label} once`
-          : 'No section at the playhead'}
-    >
-      <Repeat1 class="size-3.5" aria-hidden="true" />
-      {replayOnceButtonLabel}
-    </Button>
     <div class="font-mono text-sm tabular-nums">
       {fmtTime(snapshot.positionSec)} / {fmtTime(snapshot.durationSec)}
     </div>
-    {#if !lockPlaybackMode}
-      <label
-        class="text-foreground inline-flex h-8 items-center gap-2 rounded-[var(--radius)] px-2.5 text-xs font-bold shadow-sm"
-        style="background: linear-gradient(120deg, color-mix(in oklch, var(--studio-orange) 32%, var(--background)) 0%, color-mix(in oklch, var(--studio-orange-soft) 46%, var(--background)) 55%, color-mix(in oklch, var(--studio-orange) 28%, var(--background)) 100%);"
-        title="Show a minimal band playback view"
-      >
-        <input type="checkbox" bind:checked={playbackMode} class="accent-foreground size-3.5" />
-        Playback mode
-      </label>
-    {/if}
-    <!-- Declutter toggles: generated Band + live-rig hardware are off by default. -->
-    <button
-      type="button"
-      class="inline-flex h-8 items-center rounded-[var(--radius)] border-2 px-2 text-xs font-bold transition-colors {showBand
-        ? 'border-foreground bg-foreground text-background'
-        : 'border-foreground/40 bg-background text-muted-foreground'}"
-      onclick={toggleBand}
-      aria-pressed={showBand}
-      title="Show/hide the generated BarBro Band (drums + bass)"
-    >
-      Band
-    </button>
-    <button
-      type="button"
-      class="inline-flex h-8 items-center rounded-[var(--radius)] border-2 px-2 text-xs font-bold transition-colors {showRig
-        ? 'border-foreground bg-foreground text-background'
-        : 'border-foreground/40 bg-background text-muted-foreground'}"
-      onclick={toggleRig}
-      aria-pressed={showRig}
-      title="Show/hide the live-rig controls (XR18 mixer / APC Key 25)"
-    >
-      Live rig
-    </button>
     {#if projectSoundOn}
       <button
         type="button"
@@ -1922,20 +2701,6 @@
         {soundBypassed ? 'Original' : 'Project sound'}
       </button>
     {/if}
-    <Button
-      variant={repeatSectionEnabled ? 'default' : 'outline'}
-      size="sm"
-      class="h-8"
-      onclick={toggleRepeatSection}
-      disabled={!repeatSectionEnabled && !currentSectionRange}
-      title={repeatSectionEnabled && repeatSectionRange
-        ? `Repeating ${repeatSectionRange.label}`
-        : currentSectionRange
-          ? `Repeat ${currentSectionRange.label}`
-          : 'No section at the playhead'}
-    >
-      {repeatSectionButtonLabel}
-    </Button>
     {#if !playbackMode}
       <div
         class="bg-muted/70 ring-foreground/10 flex min-w-0 flex-[1_1_24rem] items-center gap-2 overflow-hidden rounded-[var(--radius)] px-2 py-1 ring-1"
@@ -2124,6 +2889,15 @@
           >
             <Repeat class="size-4" aria-hidden="true" />
             Loop
+          </button>
+          <button
+            type="button"
+            class="border-foreground/40 text-foreground hover:border-foreground inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border-2 px-3 text-xs font-black transition-colors"
+            onclick={() => (xairPanelOpen = true)}
+            title="XR18 live rig — routing, in-ear monitor mixes, house-safety"
+          >
+            <Cable class="size-4" aria-hidden="true" />
+            Rig
           </button>
           <!-- Setlist prev / next — the new song loads ready at its start. -->
           <button
@@ -2330,7 +3104,38 @@
     </section>
     {/if}
   {:else if lanes.length > 0}
-    <div class="flex flex-col gap-1.5">
+    <!-- Mixer panes: the CHANNELS, or the EFFECT BUSSES. Routing is edited
+         from the bus, so a channel strip stays a channel strip. -->
+    <div class="flex items-center gap-1" role="tablist" aria-label="Mixer view">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mixerTab === 'tracks'}
+        class="rounded-[var(--radius)] border-2 px-2.5 py-1 text-xs font-bold transition-colors {mixerTab ===
+        'tracks'
+          ? 'border-foreground bg-foreground text-background'
+          : 'border-foreground/25 bg-background hover:border-foreground/50'}"
+        onclick={() => (mixerTab = 'tracks')}
+      >
+        Channels
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mixerTab === 'effects'}
+        class="rounded-[var(--radius)] border-2 px-2.5 py-1 text-xs font-bold transition-colors {mixerTab ===
+        'effects'
+          ? 'border-foreground bg-foreground text-background'
+          : 'border-foreground/25 bg-background hover:border-foreground/50'}"
+        onclick={() => (mixerTab = 'effects')}
+      >
+        Effects{effectBusses.length ? ` (${effectBusses.length})` : ''}
+      </button>
+    </div>
+
+    <!-- A ruled list, not a stack of cards: each row draws its own hairline,
+         the container closes the top edge. -->
+    <div class="border-foreground/15 flex flex-col border-t" hidden={mixerTab !== 'tracks'}>
       {#each lanes as lane, i (lane.key)}
         <MixerTrackLane
           label={lane.label}
@@ -2343,12 +3148,420 @@
           durationSec={snapshot.durationSec}
           {sectionBands}
           showSectionLabels={i === 0}
+          selected={selectedLaneKey === lane.key}
+          onSelect={EDITABLE_LANE_KEYS.has(lane.key)
+            ? () => selectLane(selectedLaneKey === lane.key ? null : lane.key)
+            : undefined}
           onVolumeChange={(v) => onVolume(lane.key, v)}
           onToggleMuted={() => onToggleMuted(lane.key)}
           onToggleSoloed={() => onToggleSoloed(lane.key)}
           onSeekFraction={onSeekFraction}
+          liveSlot={slotLinkFor(lane.key)}
+          liveSlotOptions={LIVE_SLOT_OPTIONS}
+          onLiveSlotChange={(v) => onChangeLiveSlot(lane.key, v as LiveSlotLink)}
+          pinned={lane.key === 'original'}
+          reorderable={isLaneReorderable(lane.key)}
+          dragging={draggingKey === lane.key}
+          dropTarget={dropTargetKey === lane.key}
+          onDragStartLane={() => onLaneDragStart(lane.key)}
+          onDragOverLane={() => onLaneDragOver(lane.key)}
+          onDropLane={() => onLaneDrop(lane.key)}
+          onDragEndLane={onLaneDragEnd}
+          eq={eqByKey[lane.key]}
+          onEqChange={(next) => onEqChange(lane.key, next)}
         />
       {/each}
     </div>
+
+    {#if mixerTab === 'effects'}
+      <div class="flex flex-col gap-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              class="border-foreground/40 text-muted-foreground hover:border-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] border-2 border-dashed px-2.5 text-xs font-bold transition-colors"
+            >
+              <Plus class="size-3.5" /> Add effect bus
+            </DropdownMenuTrigger>
+            <DropdownMenuContent class="" align="start">
+              {#each EFFECT_BUS_KINDS as k (k.kind)}
+                <DropdownMenuItem class="" onSelect={() => addEffectBus(k.kind)}>
+                  {k.label}
+                </DropdownMenuItem>
+              {/each}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {#if effectBusses.length === 0}
+            <span class="text-muted-foreground text-[11px]">
+              Create a bus, then hook up the channels you want feeding it.
+            </span>
+          {/if}
+        </div>
+
+        {#if effectBusses.length > 0}
+          <!-- Bus list: pick one to edit. Its routing lives inside it. -->
+          <div class="flex flex-wrap gap-1">
+            {#each effectBusses as bus (bus.id)}
+              {@const hooked = Object.keys(bus.sends).length}
+              <button
+                type="button"
+                aria-pressed={selectedBusId === bus.id}
+                class="rounded-[var(--radius)] border-2 px-2 py-1 text-left text-xs font-bold transition-colors {selectedBusId ===
+                bus.id
+                  ? 'border-foreground bg-foreground text-background'
+                  : 'border-foreground/25 bg-background hover:border-foreground/50'} {bus.muted
+                  ? 'opacity-50'
+                  : ''}"
+                onclick={() => selectBus(selectedBusId === bus.id ? null : bus.id)}
+              >
+                {bus.label}
+                <span class="ml-1 opacity-70">
+                  {hooked === 0 ? 'no channels' : `${hooked} ch`}
+                </span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
   {/if}
+
+  <!-- Editors for the SELECTED lane only, the way a DAW shows the selected
+       track's instrument — plus the "+ Add track" menu underneath. -->
+  {#if !playbackMode}
+    <div class="mt-2 flex items-center gap-2">
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          class="border-foreground/40 text-muted-foreground hover:border-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] border-2 border-dashed px-2.5 text-xs font-bold transition-colors"
+        >
+          <Plus class="size-3.5" /> Add track
+        </DropdownMenuTrigger>
+        <DropdownMenuContent class="" align="start">
+          <!-- PROGRAMMED tracks: play from your sections and chords, no stem
+               needed. Each song gets at most one of each. -->
+          <DropdownMenuItem
+            class=""
+            disabled={!canAddDrumMachine}
+            onSelect={() => canAddDrumMachine && addMachineTrack('drum')}
+          >
+            Drum machine
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            class=""
+            disabled={!canAddBassMachine}
+            onSelect={() => canAddBassMachine && addMachineTrack('bass')}
+          >
+            Bass machine
+          </DropdownMenuItem>
+          <DropdownMenuSeparator class="" />
+          <!-- GENERATORS: a different thing entirely — they detect what the
+               real recording played and re-voice it, so they need a stem. -->
+          <DropdownMenuItem class="" onSelect={() => (generatorPanel = 'drums')}>
+            Drum generator (from stem)
+          </DropdownMenuItem>
+          <DropdownMenuItem class="" onSelect={() => (generatorPanel = 'bass')}>
+            Bass generator (from stem)
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  {/if}
+
+  <!-- The open machine editor DOCKS to the bottom of the mixer's own scroll
+       area, the way a DAW pins its editor pane: the lane list scrolls above it
+       while the controls you're dialling stay put. `sticky` (not `fixed`) is
+       deliberate — it stays inside the mixer column, so the sidebar is never
+       covered, and it keeps its place in flow so no spacer is needed. -->
+  {#if selectedBus}
+    {@const bus = selectedBus}
+    <div
+      class="border-foreground bg-background sticky bottom-0 z-20 -mx-3 -mb-3 max-h-[60vh] overflow-y-auto border-t-2 px-3 py-2 shadow-[0_-10px_28px_rgba(0,0,0,0.18)]"
+    >
+      <header class="mb-2 flex flex-wrap items-center gap-2">
+        <input
+          class="border-foreground/25 bg-background h-7 w-40 rounded-[var(--radius)] border-2 px-1.5 text-sm font-bold"
+          value={bus.label}
+          oninput={(e) => updateBus(bus.id, (b) => renameBus(b, e.currentTarget.value))}
+          aria-label="Bus name"
+        />
+        <span class="text-muted-foreground text-[11px] font-bold uppercase">{bus.kind}</span>
+        <button
+          type="button"
+          class="inline-flex h-7 items-center rounded-[var(--radius)] border-2 px-2 text-xs font-bold transition-colors {bus.muted
+            ? 'border-foreground/40 bg-background text-muted-foreground'
+            : 'border-foreground bg-foreground text-background'}"
+          onclick={() => updateBus(bus.id, (b) => ({ ...b, muted: !b.muted }))}
+        >
+          {bus.muted ? 'Off' : 'On'}
+        </button>
+        <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+          Return
+          <input
+            type="range"
+            min="0"
+            max="1.5"
+            step="0.02"
+            class="accent-foreground w-24"
+            value={bus.level}
+            oninput={(e) => updateBus(bus.id, (b) => ({ ...b, level: Number(e.currentTarget.value) }))}
+            aria-label="Return level"
+          />
+        </label>
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground ml-auto inline-flex h-7 items-center gap-1 px-1.5 text-[11px] font-bold"
+          onclick={() => removeEffectBus(bus.id)}
+          title="Delete this bus"
+        >
+          <Trash2 class="size-3.5" /> Delete
+        </button>
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground inline-flex h-7 items-center gap-1 px-1 text-[11px] font-bold"
+          onclick={() => selectBus(null)}
+        >
+          <X class="size-3.5" /> Close
+        </button>
+      </header>
+
+      <!-- The effect's own controls. -->
+      <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        {#if bus.kind === 'reverb'}
+          {@const rv = normalizeReverb(bus.reverb)}
+          <div class="flex gap-1">
+            {#each REVERB_PRESETS as p (p.id)}
+              <button
+                type="button"
+                class="rounded-[var(--radius)] border-2 px-1.5 py-0.5 text-[11px] font-bold transition-colors {rv.sizeSec ===
+                p.settings.sizeSec
+                  ? 'border-foreground bg-foreground text-background'
+                  : 'border-foreground/25 bg-background hover:border-foreground/50'}"
+                onclick={() => updateBus(bus.id, (b) => ({ ...b, reverb: p.settings }))}
+              >
+                {p.label}
+              </button>
+            {/each}
+          </div>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Size
+            <input
+              type="range" min="0.15" max="8" step="0.05" class="accent-foreground w-24"
+              value={rv.sizeSec}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  reverb: normalizeReverb({ ...rv, sizeSec: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Reverb size"
+            />
+            <span class="text-muted-foreground w-9 font-mono tabular-nums">{rv.sizeSec.toFixed(1)}s</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Tone
+            <input
+              type="range" min="500" max="16000" step="100" class="accent-foreground w-24"
+              value={rv.dampHz}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  reverb: normalizeReverb({ ...rv, dampHz: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Reverb tone"
+            />
+          </label>
+        {:else if bus.kind === 'widener'}
+          {@const wd = normalizeWidener(bus.widener)}
+          <div class="flex gap-1">
+            {#each WIDENER_PRESETS as p (p.id)}
+              <button
+                type="button"
+                class="rounded-[var(--radius)] border-2 px-1.5 py-0.5 text-[11px] font-bold transition-colors {wd.rateHz ===
+                p.settings.rateHz && wd.width === p.settings.width
+                  ? 'border-foreground bg-foreground text-background'
+                  : 'border-foreground/25 bg-background hover:border-foreground/50'}"
+                onclick={() => updateBus(bus.id, (b) => ({ ...b, widener: p.settings }))}
+              >
+                {p.label}
+              </button>
+            {/each}
+          </div>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Width
+            <input
+              type="range" min="0" max="2" step="0.05" class="accent-foreground w-24"
+              value={wd.width}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  widener: normalizeWidener({ ...wd, width: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Stereo width"
+            />
+            <span class="text-muted-foreground w-8 font-mono tabular-nums">{wd.width.toFixed(2)}</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Speed
+            <input
+              type="range" min="0.02" max="8" step="0.02" class="accent-foreground w-20"
+              value={wd.rateHz}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  widener: normalizeWidener({ ...wd, rateHz: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Widener speed"
+            />
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Depth
+            <input
+              type="range" min="0" max="1" step="0.02" class="accent-foreground w-20"
+              value={wd.depth}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  widener: normalizeWidener({ ...wd, depth: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Widener depth"
+            />
+          </label>
+          <!-- The control that makes this usable on bass and drums: everything
+               below it stays mono and centred, straight off the dry channel. -->
+          <label
+            class="inline-flex items-center gap-1.5 text-[11px] font-bold"
+            title="Everything below this stays mono and centred, so the kick and the bass keep their punch"
+          >
+            Keep lows mono
+            <input
+              type="range" min="20" max="2000" step="10" class="accent-[var(--studio-orange)] w-24"
+              value={wd.monoBelowHz}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  widener: normalizeWidener({ ...wd, monoBelowHz: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Keep lows mono below"
+            />
+            <span class="text-muted-foreground w-12 font-mono tabular-nums">
+              {Math.round(wd.monoBelowHz)}Hz
+            </span>
+          </label>
+        {:else}
+          {@const dl = normalizeDelay(bus.delay)}
+          <div class="flex gap-1">
+            {#each DELAY_PRESETS as p (p.id)}
+              <button
+                type="button"
+                class="rounded-[var(--radius)] border-2 px-1.5 py-0.5 text-[11px] font-bold transition-colors {dl.timeSec ===
+                p.settings.timeSec
+                  ? 'border-foreground bg-foreground text-background'
+                  : 'border-foreground/25 bg-background hover:border-foreground/50'}"
+                onclick={() => updateBus(bus.id, (b) => ({ ...b, delay: p.settings }))}
+              >
+                {p.label}
+              </button>
+            {/each}
+          </div>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Time
+            <input
+              type="range" min="0.02" max="2" step="0.01" class="accent-foreground w-24"
+              value={dl.timeSec}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  delay: normalizeDelay({ ...dl, timeSec: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Delay time"
+            />
+            <span class="text-muted-foreground w-10 font-mono tabular-nums">{dl.timeSec.toFixed(2)}s</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-[11px] font-bold">
+            Repeats
+            <input
+              type="range" min="0" max="0.9" step="0.02" class="accent-foreground w-24"
+              value={dl.feedback}
+              oninput={(e) =>
+                updateBus(bus.id, (b) => ({
+                  ...b,
+                  delay: normalizeDelay({ ...dl, feedback: Number(e.currentTarget.value) }),
+                }))}
+              aria-label="Delay feedback"
+            />
+          </label>
+        {/if}
+      </div>
+
+      <!-- ROUTING lives here: hook a channel up, then set how much of it feeds
+           this bus. No slider on every channel strip. -->
+      <div class="border-foreground/10 border-t-2 pt-2">
+        <span class="text-muted-foreground text-[11px] font-bold uppercase">Channels</span>
+        <div class="mt-1 flex flex-col gap-0.5">
+          {#each lanes as lane (lane.key)}
+            {@const on = isHookedUp(bus, lane.key)}
+            <div class="flex items-center gap-2">
+              <label class="flex w-40 shrink-0 items-center gap-1.5 text-xs font-bold">
+                <input
+                  type="checkbox"
+                  class="accent-foreground size-3.5"
+                  checked={on}
+                  onchange={(e) =>
+                    updateBus(bus.id, (b) => setHookedUp(b, lane.key, e.currentTarget.checked))}
+                />
+                <span class="truncate">{lane.label}</span>
+              </label>
+              {#if on}
+                <input
+                  type="range" min="0" max="1.5" step="0.02" class="accent-foreground w-40"
+                  value={bus.sends[lane.key] ?? 0}
+                  oninput={(e) =>
+                    updateBus(bus.id, (b) =>
+                      setSendAmount(b, lane.key, Number(e.currentTarget.value)),
+                    )}
+                  aria-label="{lane.label} send to {bus.label}"
+                />
+                <span class="text-muted-foreground w-8 text-right font-mono text-[10px] tabular-nums">
+                  {Math.round((bus.sends[lane.key] ?? 0) * 100)}
+                </span>
+              {:else}
+                <span class="text-muted-foreground text-[10px]">not connected</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if openEditor && !selectedBus}
+    <div
+      class="border-foreground bg-background sticky bottom-0 z-20 -mx-3 -mb-3 max-h-[60vh] overflow-y-auto border-t-2 px-3 py-3 shadow-[0_-10px_28px_rgba(0,0,0,0.18)]"
+    >
+      <div class="mb-1 flex justify-end">
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground inline-flex h-6 items-center gap-1 px-1 text-[11px] font-bold"
+          onclick={() => (selectedLaneKey = null)}
+          title="Close the editor"
+        >
+          <X class="size-3.5" /> Close
+        </button>
+      </div>
+      {#if openEditor === 'drum'}
+        <DrumMachinePanel onChanged={onMachineChanged} />
+      {:else}
+        <BassMachinePanel onChanged={onMachineChanged} />
+      {/if}
+    </div>
+  {/if}
+
+  <!-- XR18 "Live Rig" settings — connect, route, per-performer monitor mixes,
+       and the verified house-safety check. Reachable from the live stage. -->
+  <Dialog bind:open={xairPanelOpen}>
+    <DialogContent class="max-h-[85vh] w-[min(48rem,calc(100vw-2rem))] overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle>XR18 live rig</DialogTitle>
+      </DialogHeader>
+      <XAirSettingsPanel lanes={liveHardwareLanes} projectId={$projectStore.data?.id ?? null} />
+    </DialogContent>
+  </Dialog>
 </div>

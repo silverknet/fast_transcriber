@@ -7,6 +7,8 @@
   import SectionSuggestionBanner from '$lib/components/SectionSuggestionBanner.svelte'
   import ChordAutoFillBanner from '$lib/components/ChordAutoFillBanner.svelte'
   import ChordRadialQuickSelect from '$lib/components/ChordRadialQuickSelect.svelte'
+  import KeysSynthController from '$lib/components/KeysSynthController.svelte'
+  import { getChordAuditionSynth, primeChordAudition } from '$lib/audio/chordAudition'
   import { inspectorPortal } from '$lib/components/editor/inspectorPortal.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Layers, Wand2 } from '@lucide/svelte'
@@ -61,6 +63,7 @@
   import { proposeChordSuggestions, type ChordSuggestion } from '$lib/chords/suggestFromChroma'
   import { chordSuggestionVisibilityState } from '$lib/chords/suggestionVisibility'
   import {
+    chordRootToPitchClass,
     formatChordSymbol,
     parseChordClipboard,
     resolveChordAtEachBeat,
@@ -68,6 +71,59 @@
     songKeyPreferFlats,
     transposeChord,
   } from '$lib/chords'
+  import {
+    resumeChordPlayback,
+    playChordPlayback,
+    stopChordPlayback,
+    setChordPlaybackVolume,
+    setChordPatch,
+    getInstrumentPatch,
+    CHORD_PLAYBACK_INSTRUMENT_NAMES,
+    DEFAULT_CHORD_PLAYBACK_INSTRUMENT,
+  } from '$lib/audio/chordPlayback'
+  import { voiceChordProgression } from '$lib/audio/chordPlaybackVoicing'
+  import {
+    resumeBass,
+    playBassNote,
+    stopBass,
+    setBassVolume,
+    setBassPatch,
+    buildBassHits,
+    BASS_PATCH,
+    BASS_PATTERNS,
+    BASS_PATTERN_LABELS,
+    type BassPattern,
+  } from '$lib/audio/chordBass'
+  import {
+    resumeArp,
+    playArpNote,
+    stopArp,
+    setArpVolume,
+    setArpPatch,
+    buildArpHits,
+    arpSubsPerBeat,
+    ARP_PATCH,
+    ARP_RATES,
+    ARP_DIRECTIONS,
+    ARP_DIRECTION_LABELS,
+    type ArpRate,
+    type ArpDirection,
+  } from '$lib/audio/chordArp'
+  import {
+    resumeKick,
+    playKick,
+    stopKick,
+    setKickVolume,
+    setKickPunch,
+    buildKickHits,
+    KICK_PATTERNS,
+    KICK_PATTERN_LABELS,
+    type KickPattern,
+  } from '$lib/audio/chordKick'
+  import { transport } from '$lib/audio/transport.svelte'
+  import { stemNameForKey } from '$lib/audio/liveStemDefaults'
+  import { structuredClonePatch, type SynthPatch } from '$lib/audio/keysSynth'
+  import SynthKnobs from '$lib/components/editor/SynthKnobs.svelte'
   import {
     transposeChordForDisplay,
     transposeChordForStorage,
@@ -791,6 +847,535 @@
   // its search panel (empty = open the normal radial view).
   let chordSearchInitialQuery = $state('')
 
+  // The shared synth the chord picker auditions AND the APC Key 25 keybed plays
+  // while the chords section is open (see the KeysSynthController mount below).
+  const auditionSynth = getChordAuditionSynth()
+
+  // Warm the synth's audio context when entering chords mode, so the keybed and
+  // picker are audible immediately. The mode switch that got us here is a user
+  // gesture, so resume() is allowed (no autoplay block).
+  $effect(() => {
+    if (browser && editMode === 'chords') void primeChordAudition()
+  })
+
+  // ── Hear placed chords during playback (chords view only) ──────────────────
+  // A checkbox + volume in the inspector; the chords sound through their own
+  // synth (chordPlayback.ts) as the playhead crosses each chord change. Prefs
+  // are per-device.
+  const HEAR_CHORDS_KEY = 'barbro:hearChords'
+  const HEAR_CHORDS_VOL_KEY = 'barbro:hearChordsVol'
+  const HEAR_CHORDS_INSTR_KEY = 'barbro:hearChordsInstr'
+  const HEAR_CHORDS_PATCH_KEY = 'barbro:hearChordsPatch'
+  const HEAR_CHORDS_OCT_KEY = 'barbro:hearChordsOct'
+  const HEAR_CHORDS_OCT_MIN = -2
+  const HEAR_CHORDS_OCT_MAX = 2
+  const BASS_ON_KEY = 'barbro:chordBassOn'
+  const BASS_PATTERN_KEY = 'barbro:chordBassPattern'
+  const BASS_VOL_KEY = 'barbro:chordBassVol'
+  const BASS_OCT_KEY = 'barbro:chordBassOct'
+  const BASS_PATCH_KEY = 'barbro:chordBassPatch'
+  const ARP_ON_KEY = 'barbro:chordArpOn'
+  const ARP_RATE_KEY = 'barbro:chordArpRate'
+  const ARP_DIR_KEY = 'barbro:chordArpDir'
+  const ARP_VOL_KEY = 'barbro:chordArpVol'
+  const ARP_OCT_KEY = 'barbro:chordArpOct'
+  const ARP_OCTAVES_KEY = 'barbro:chordArpOctaves'
+  const ARP_SWING_KEY = 'barbro:chordArpSwing'
+  const ARP_PATCH_KEY = 'barbro:chordArpPatch'
+  const KICK_ON_KEY = 'barbro:chordKickOn'
+  const KICK_PATTERN_KEY = 'barbro:chordKickPattern'
+  const KICK_VOL_KEY = 'barbro:chordKickVol'
+  const KICK_PUNCH_KEY = 'barbro:chordKickPunch'
+
+  let hearChords = $state(browser && localStorage.getItem(HEAR_CHORDS_KEY) === '1')
+  let hearChordsVolume = $state(readStoredVolume())
+  let hearChordsInstrument = $state(readStoredInstrument())
+  let hearChordsOctave = $state(readStoredOctave())
+  let chordPatch = $state<SynthPatch>(
+    readStoredPatch(HEAR_CHORDS_PATCH_KEY, () => getInstrumentPatch(readStoredInstrument())),
+  )
+  let showChordKnobs = $state(false)
+
+  // Bass voice (own patch + rhythm pattern + its OWN octave, decoupled from keys).
+  let bassOn = $state(browser && localStorage.getItem(BASS_ON_KEY) === '1')
+  let bassPattern = $state<BassPattern>(readStoredPattern())
+  let bassVolume = $state(readStoredBassVolume())
+  let bassOctave = $state(readStoredBassOctave())
+  let bassPatch = $state<SynthPatch>(readStoredPatch(BASS_PATCH_KEY, () => structuredClonePatch(BASS_PATCH)))
+  let showBassKnobs = $state(false)
+  function readStoredBassOctave(): number {
+    const raw = browser ? Number(localStorage.getItem(BASS_OCT_KEY)) : 0
+    if (!Number.isFinite(raw)) return 0
+    return Math.max(HEAR_CHORDS_OCT_MIN, Math.min(HEAR_CHORDS_OCT_MAX, Math.round(raw)))
+  }
+  function nudgeBassOctave(delta: number): void {
+    bassOctave = Math.max(HEAR_CHORDS_OCT_MIN, Math.min(HEAR_CHORDS_OCT_MAX, bassOctave + delta))
+  }
+
+  // Arpeggiator voice (own patch, rhythm rate, direction, octave).
+  let arpOn = $state(browser && localStorage.getItem(ARP_ON_KEY) === '1')
+  let arpRate = $state<ArpRate>(readStoredArpRate())
+  let arpDirection = $state<ArpDirection>(readStoredArpDir())
+  let arpVolume = $state(readStoredArpVolume())
+  let arpOctave = $state(readStoredArpOctave())
+  let arpOctaves = $state(readStoredArpOctaves())
+  let arpSwing = $state(readStoredArpSwing())
+  let arpPatch = $state<SynthPatch>(readStoredPatch(ARP_PATCH_KEY, () => structuredClonePatch(ARP_PATCH)))
+  let showArpKnobs = $state(false)
+  function readStoredArpOctaves(): number {
+    const v = browser ? Number(localStorage.getItem(ARP_OCTAVES_KEY)) : 1
+    return Number.isFinite(v) && v >= 1 ? Math.min(4, Math.round(v)) : 1
+  }
+  function readStoredArpSwing(): number {
+    if (!browser) return 0
+    const v = Number(localStorage.getItem(ARP_SWING_KEY))
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0
+  }
+  function readStoredArpRate(): ArpRate {
+    const raw = browser ? localStorage.getItem(ARP_RATE_KEY) : null
+    return raw && (ARP_RATES as string[]).includes(raw) ? (raw as ArpRate) : '1/8'
+  }
+  function readStoredArpDir(): ArpDirection {
+    const raw = browser ? localStorage.getItem(ARP_DIR_KEY) : null
+    return raw && (ARP_DIRECTIONS as string[]).includes(raw) ? (raw as ArpDirection) : 'up'
+  }
+  function readStoredArpVolume(): number {
+    if (!browser) return 0.5
+    const v = Number(localStorage.getItem(ARP_VOL_KEY))
+    return Number.isFinite(v) && v > 0 ? Math.min(1, v) : 0.5
+  }
+  function readStoredArpOctave(): number {
+    const raw = browser ? localStorage.getItem(ARP_OCT_KEY) : null
+    if (raw == null) return 1 // arps sit nicely an octave above the pad by default
+    const v = Number(raw)
+    if (!Number.isFinite(v)) return 1
+    return Math.max(HEAR_CHORDS_OCT_MIN, Math.min(HEAR_CHORDS_OCT_MAX, Math.round(v)))
+  }
+  function nudgeArpOctave(delta: number): void {
+    arpOctave = Math.max(HEAR_CHORDS_OCT_MIN, Math.min(HEAR_CHORDS_OCT_MAX, arpOctave + delta))
+  }
+
+  // Kick voice — the pulse under the jam. No pitch, so no octave/patch: just a
+  // rhythm pattern, a level and how hard it hits (see chordKick.ts).
+  let kickOn = $state(browser && localStorage.getItem(KICK_ON_KEY) === '1')
+  let kickPattern = $state<KickPattern>(readStoredKickPattern())
+  let kickVolume = $state(readStoredKickVolume())
+  let kickPunch = $state(readStoredKickPunch())
+  function readStoredKickPattern(): KickPattern {
+    const raw = browser ? localStorage.getItem(KICK_PATTERN_KEY) : null
+    return raw && (KICK_PATTERNS as string[]).includes(raw) ? (raw as KickPattern) : '1+3'
+  }
+  function readStoredKickVolume(): number {
+    if (!browser) return 0.6
+    const v = Number(localStorage.getItem(KICK_VOL_KEY))
+    return Number.isFinite(v) && v > 0 ? Math.min(1, v) : 0.6
+  }
+  function readStoredKickPunch(): number {
+    if (!browser) return 0.6
+    const raw = localStorage.getItem(KICK_PUNCH_KEY)
+    if (raw == null) return 0.6
+    const v = Number(raw)
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.6
+  }
+
+  // ── Punch: the kick inside the song's OWN drums stem ───────────────────────
+  // Distinct from the Kick voice above — that ADDS a kick, this makes the
+  // recorded one hit harder. A monitor switch: local to this device, applied to
+  // the transport's drums lane so it can be A/B'd while editing. The project's
+  // saved Kick setting is what the live mixer and the export use.
+  const STEM_PUNCH_ON_KEY = 'barbro:stemKickPunchOn'
+  const STEM_PUNCH_AMT_KEY = 'barbro:stemKickPunchAmt'
+  let stemPunchOn = $state(browser && localStorage.getItem(STEM_PUNCH_ON_KEY) === '1')
+  let stemPunchAmount = $state(readStoredStemPunch())
+  function readStoredStemPunch(): number {
+    if (!browser) return 0.6
+    const raw = localStorage.getItem(STEM_PUNCH_AMT_KEY)
+    if (raw == null) return 0.6
+    const v = Number(raw)
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.6
+  }
+  /** Only meaningful when this song actually has a separated drums stem. */
+  const hasDrumStem = $derived(transport.stems.some((s) => stemNameForKey(s.key) === 'drums'))
+
+  function readStoredOctave(): number {
+    const raw = browser ? Number(localStorage.getItem(HEAR_CHORDS_OCT_KEY)) : 0
+    if (!Number.isFinite(raw)) return 0
+    return Math.max(HEAR_CHORDS_OCT_MIN, Math.min(HEAR_CHORDS_OCT_MAX, Math.round(raw)))
+  }
+  function nudgeHearChordsOctave(delta: number): void {
+    hearChordsOctave = Math.max(
+      HEAR_CHORDS_OCT_MIN,
+      Math.min(HEAR_CHORDS_OCT_MAX, hearChordsOctave + delta),
+    )
+  }
+  function readStoredVolume(): number {
+    if (!browser) return 0.5
+    const raw = localStorage.getItem(HEAR_CHORDS_VOL_KEY)
+    const v = raw == null ? 0.5 : Number(raw)
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.5
+  }
+  function readStoredBassVolume(): number {
+    if (!browser) return 0.75
+    const v = Number(localStorage.getItem(BASS_VOL_KEY))
+    return Number.isFinite(v) && v > 0 ? Math.min(1, v) : 0.75
+  }
+  function readStoredInstrument(): string {
+    const raw = browser ? localStorage.getItem(HEAR_CHORDS_INSTR_KEY) : null
+    return raw && CHORD_PLAYBACK_INSTRUMENT_NAMES.includes(raw)
+      ? raw
+      : DEFAULT_CHORD_PLAYBACK_INSTRUMENT
+  }
+  function readStoredPattern(): BassPattern {
+    const raw = browser ? localStorage.getItem(BASS_PATTERN_KEY) : null
+    return raw && (BASS_PATTERNS as string[]).includes(raw) ? (raw as BassPattern) : '4/4'
+  }
+  function readStoredPatch(key: string, fallback: () => SynthPatch): SynthPatch {
+    if (!browser) return fallback()
+    try {
+      const raw = localStorage.getItem(key)
+      if (raw) {
+        const p = JSON.parse(raw)
+        if (p?.oscA && p?.oscB && p?.filter && p?.env && p?.fx) return p as SynthPatch
+      }
+    } catch {
+      /* corrupt entry — fall back to the preset */
+    }
+    return fallback()
+  }
+  /** Load a preset into the live chord patch (the picker's onchange). */
+  function selectChordInstrument(name: string): void {
+    hearChordsInstrument = name
+    chordPatch = getInstrumentPatch(name)
+  }
+
+  /**
+   * Chord CHANGE points along the song, in buffer-time. Each entry is a beat
+   * where the sounding (carry-forward) chord differs from the previous beat,
+   * with that chord already voiced to MIDI notes. N.C. and pre-first-chord beats
+   * voice to `[]` (silence). Recomputes only when the map changes — NOT per
+   * frame. Stored chords are voiced (not the display transpose): the audio is in
+   * its original key, so the chords should sound in it too.
+   */
+  const chordChanges = $derived.by<{ timeSec: number; chord: ChordSymbol | null }[]>(() => {
+    const sm = $songMap
+    if (!sm) return []
+    const resolved = resolveChordAtEachBeat(sm)
+    const beats = sortBeatsByTime(sm.timeline.beats)
+    const changes: { timeSec: number; chord: ChordSymbol | null }[] = []
+    let prevKey: string | null = '--init--'
+    for (const b of beats) {
+      const chord = resolved.get(b.id) ?? null
+      const key = chord ? formatChordSymbol(chord) : 'none'
+      if (key === prevKey) continue // same chord carried forward → no re-attack
+      prevKey = key
+      changes.push({ timeSec: b.timeSec, chord })
+    }
+    return changes
+  })
+
+  /** The pad's voiced change points, at the keys octave. */
+  const chordPlaybackPoints = $derived.by<{ timeSec: number; notes: number[] }[]>(() => {
+    // Voice the WHOLE progression together so inversions connect chord-to-chord.
+    const voiced = voiceChordProgression(
+      chordChanges.map((c) => c.chord),
+      hearChordsOctave,
+    )
+    return chordChanges.map((c, i) => ({ timeSec: c.timeSec, notes: voiced[i] ?? [] }))
+  })
+
+  /**
+   * Index into `chordPlaybackPoints` of the chord sounding under the playhead —
+   * or -1 when we shouldn't be playing (disabled, paused, or off the chords
+   * view). Recomputes every frame (reads the live playhead) but returns a stable
+   * number, so the play effect below fires ONLY when the chord actually changes.
+   */
+  const activeChordPlaybackIndex = $derived.by(() => {
+    if (!hearChords || editMode !== 'chords' || !playbackController.isPlaying) return -1
+    const t = playbackController.currentTime // buffer-time; beat.timeSec shares this base
+    const pts = chordPlaybackPoints
+    let idx = -1
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i]!.timeSec <= t + 1e-6) idx = i
+      else break
+    }
+    return idx
+  })
+
+  // Fire the synth on chord change; release on change / stop / unmount.
+  $effect(() => {
+    if (!browser) return
+    const idx = activeChordPlaybackIndex
+    const pts = chordPlaybackPoints
+    if (idx < 0) {
+      stopChordPlayback() // no-op if the synth was never created
+      return
+    }
+    playChordPlayback(pts[idx]?.notes ?? [])
+    return () => stopChordPlayback()
+  })
+
+  // ── Bass voice: rhythmic bass hits under the chords ────────────────────────
+  const bassHitPoints = $derived.by<{ timeSec: number; midi: number }[]>(() => {
+    const sm = $songMap
+    if (!sm) return []
+    const resolved = resolveChordAtEachBeat(sm)
+    const beats = sortBeatsByTime(sm.timeline.beats).map((b) => {
+      const chord = resolved.get(b.id) ?? null
+      const bassPc =
+        chord && !chord.noChord
+          ? chord.bass
+            ? chordRootToPitchClass(chord.bass, chord.bassAccidental)
+            : chordRootToPitchClass(chord.root, chord.accidental)
+          : null
+      return { timeSec: b.timeSec, barId: b.barId, bassPc }
+    })
+    return buildBassHits(beats, bassPattern, bassOctave)
+  })
+
+  // Active bass hit under the playhead (stable index → fires only on advance).
+  const activeBassIndex = $derived.by(() => {
+    if (!bassOn || editMode !== 'chords' || !playbackController.isPlaying) return -1
+    const t = playbackController.currentTime
+    const hits = bassHitPoints
+    let idx = -1
+    for (let i = 0; i < hits.length; i++) {
+      if (hits[i]!.timeSec <= t + 1e-6) idx = i
+      else break
+    }
+    return idx
+  })
+
+  let lastFiredBass = -1
+  $effect(() => {
+    if (!browser) return
+    const idx = activeBassIndex
+    const hits = bassHitPoints
+    if (idx < 0) {
+      stopBass()
+      lastFiredBass = -1
+      return
+    }
+    if (idx > lastFiredBass) {
+      // Fire the hits we crossed; cap the catch-up so a SEEK doesn't machine-gun.
+      const from = idx - lastFiredBass <= 3 ? lastFiredBass + 1 : idx
+      for (let i = from; i <= idx; i++) playBassNote(hits[i]!.midi)
+    }
+    lastFiredBass = idx
+    return () => stopBass()
+  })
+
+  // ── Arpeggiator: step through each chord's notes on a rhythmic grid ─────────
+  const arpHitPoints = $derived.by<{ timeSec: number; midi: number }[]>(() => {
+    const sm = $songMap
+    if (!sm || !arpOn) return []
+    // Voice the chords at the ARP's own octave (decoupled from the keys octave).
+    const voiced = voiceChordProgression(
+      chordChanges.map((c) => c.chord),
+      arpOctave,
+    )
+    const arpPts = chordChanges.map((c, i) => ({ timeSec: c.timeSec, notes: voiced[i] ?? [] }))
+    // Per-beat carry-forward of the active chord's arp notes.
+    const beats = sortBeatsByTime(sm.timeline.beats).map((b) => {
+      let notes: number[] = []
+      for (let i = 0; i < arpPts.length; i++) {
+        if (arpPts[i]!.timeSec <= b.timeSec + 1e-6) notes = arpPts[i]!.notes
+        else break
+      }
+      return { timeSec: b.timeSec, notes }
+    })
+    return buildArpHits(beats, arpSubsPerBeat(arpRate), arpDirection, arpOctaves, arpSwing)
+  })
+
+  const activeArpIndex = $derived.by(() => {
+    if (!arpOn || editMode !== 'chords' || !playbackController.isPlaying) return -1
+    const t = playbackController.currentTime
+    const hits = arpHitPoints
+    let idx = -1
+    for (let i = 0; i < hits.length; i++) {
+      if (hits[i]!.timeSec <= t + 1e-6) idx = i
+      else break
+    }
+    return idx
+  })
+
+  let lastFiredArp = -1
+  $effect(() => {
+    if (!browser) return
+    const idx = activeArpIndex
+    const hits = arpHitPoints
+    if (idx < 0) {
+      stopArp()
+      lastFiredArp = -1
+      return
+    }
+    if (idx > lastFiredArp) {
+      const from = idx - lastFiredArp <= 3 ? lastFiredArp + 1 : idx
+      for (let i = from; i <= idx; i++) playArpNote(hits[i]!.midi)
+    }
+    lastFiredArp = idx
+    return () => stopArp()
+  })
+
+  // ── Kick voice: the pulse under the jam ────────────────────────────────────
+  // Rhythm only — it follows the BAR grid, not the chords, so it keeps playing
+  // through bars that have no chord placed yet.
+  const kickHitPoints = $derived.by<{ timeSec: number; velocity: number }[]>(() => {
+    const sm = $songMap
+    if (!sm || !kickOn) return []
+    const beats = sortBeatsByTime(sm.timeline.beats).map((b) => ({
+      timeSec: b.timeSec,
+      barId: b.barId,
+    }))
+    return buildKickHits(beats, kickPattern)
+  })
+
+  const activeKickIndex = $derived.by(() => {
+    if (!kickOn || editMode !== 'chords' || !playbackController.isPlaying) return -1
+    const t = playbackController.currentTime
+    const hits = kickHitPoints
+    let idx = -1
+    for (let i = 0; i < hits.length; i++) {
+      if (hits[i]!.timeSec <= t + 1e-6) idx = i
+      else break
+    }
+    return idx
+  })
+
+  let lastFiredKick = -1
+  $effect(() => {
+    if (!browser) return
+    const idx = activeKickIndex
+    const hits = kickHitPoints
+    if (idx < 0) {
+      stopKick()
+      lastFiredKick = -1
+      return
+    }
+    if (idx > lastFiredKick) {
+      // Fire the hits we crossed; cap the catch-up so a SEEK doesn't machine-gun.
+      const from = idx - lastFiredKick <= 3 ? lastFiredKick + 1 : idx
+      for (let i = from; i <= idx; i++) playKick(hits[i]!.velocity)
+    }
+    lastFiredKick = idx
+    return () => stopKick()
+  })
+
+  // ── Live sync: knob edits + volumes → the synths; warm up on enable ────────
+  $effect(() => {
+    if (browser) setChordPlaybackVolume(hearChordsVolume)
+  })
+  $effect(() => {
+    if (browser) setChordPatch(chordPatch)
+  })
+  $effect(() => {
+    if (browser && hearChords && editMode === 'chords') void resumeChordPlayback()
+  })
+  $effect(() => {
+    if (browser) setBassPatch(bassPatch)
+  })
+  $effect(() => {
+    if (browser) setBassVolume(bassVolume)
+  })
+  $effect(() => {
+    if (browser && bassOn && editMode === 'chords') void resumeBass()
+  })
+  $effect(() => {
+    if (browser) setArpPatch(arpPatch)
+  })
+  $effect(() => {
+    if (browser) setArpVolume(arpVolume)
+  })
+  $effect(() => {
+    if (browser && arpOn && editMode === 'chords') void resumeArp()
+  })
+  $effect(() => {
+    if (browser) setKickVolume(kickVolume)
+  })
+  $effect(() => {
+    if (browser) setKickPunch(kickPunch)
+  })
+  $effect(() => {
+    if (browser && kickOn && editMode === 'chords') void resumeKick()
+  })
+  // Drums-stem punch → the transport's drums lane (a non-reactive audio sink).
+  $effect(() => {
+    if (browser) transport.setKickPunch(stemPunchOn ? stemPunchAmount : 0)
+  })
+
+  // ── Persistence (per device) ───────────────────────────────────────────────
+  $effect(() => {
+    if (browser) localStorage.setItem(HEAR_CHORDS_KEY, hearChords ? '1' : '0')
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(HEAR_CHORDS_VOL_KEY, String(hearChordsVolume))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(HEAR_CHORDS_INSTR_KEY, hearChordsInstrument)
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(HEAR_CHORDS_OCT_KEY, String(hearChordsOctave))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(HEAR_CHORDS_PATCH_KEY, JSON.stringify(chordPatch))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(BASS_ON_KEY, bassOn ? '1' : '0')
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(BASS_PATTERN_KEY, bassPattern)
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(BASS_VOL_KEY, String(bassVolume))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(BASS_OCT_KEY, String(bassOctave))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(BASS_PATCH_KEY, JSON.stringify(bassPatch))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_ON_KEY, arpOn ? '1' : '0')
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_RATE_KEY, arpRate)
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_DIR_KEY, arpDirection)
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_VOL_KEY, String(arpVolume))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_OCT_KEY, String(arpOctave))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_OCTAVES_KEY, String(arpOctaves))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_SWING_KEY, String(arpSwing))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(ARP_PATCH_KEY, JSON.stringify(arpPatch))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(KICK_ON_KEY, kickOn ? '1' : '0')
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(KICK_PATTERN_KEY, kickPattern)
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(KICK_VOL_KEY, String(kickVolume))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(KICK_PUNCH_KEY, String(kickPunch))
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(STEM_PUNCH_ON_KEY, stemPunchOn ? '1' : '0')
+  })
+  $effect(() => {
+    if (browser) localStorage.setItem(STEM_PUNCH_AMT_KEY, String(stemPunchAmount))
+  })
+
   function sectionDisplayLabel(section: Section, ordinal?: number): string {
     const defaultLabel = defaultSectionLabel(section.kind)
     const explicitLabel = section.label?.trim()
@@ -1353,6 +1938,46 @@
     return () => window.removeEventListener('keydown', fn, true)
   })
 
+  // Tab / Shift+Tab move the chord selection along the beat grid:
+  //   Tab       → first beat of the NEXT bar
+  //   Shift+Tab → the NEXT beat (across bars)
+  // Only in chords mode with a selected beat; skipped while typing or with the
+  // picker open, and preventDefault'd so focus never tabs off the grid. Uses the
+  // input-field guard (not blocksChordGlobalShortcut) because the beat itself is
+  // a <button> and would otherwise be treated as a shortcut-blocking target.
+  $effect(() => {
+    if (!browser || editMode !== 'chords') return
+    const fn = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || e.metaKey || e.ctrlKey || e.altKey) return
+      const el = e.target
+      if (
+        el instanceof HTMLElement &&
+        (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+      ) {
+        return
+      }
+      if (chordPickerOpen) return
+      const sm = get(songMap)
+      const current = selectedBeatId ?? chordsSelectionBeatIds[0] ?? null
+      if (!sm || !current) return
+      const sorted = sortBeatsByTime(sm.timeline.beats)
+      const i = sorted.findIndex((b) => b.id === current)
+      if (i < 0) return
+      const cur = sorted[i]
+      const rest = sorted.slice(i + 1)
+      const next = e.shiftKey
+        ? rest[0] // Shift+Tab: next beat
+        : rest.find((b) => b.barId !== cur.barId) // Tab: first beat of next bar
+      e.preventDefault() // consume Tab either way so focus never leaves the grid
+      if (!next) return // at the end — stay put
+      selectedFraction = null
+      chordsSelectionBeatIds = []
+      selectedBeatId = next.id
+    }
+    window.addEventListener('keydown', fn, true)
+    return () => window.removeEventListener('keydown', fn, true)
+  })
+
   $effect(() => {
     if (editMode !== 'chords') {
       chordPickerOpen = false
@@ -1886,6 +2511,168 @@
         <input type="checkbox" bind:checked={showChordSuggestions} class="accent-foreground size-3.5" />
         Suggestions
       </label>
+
+      <!-- Hear the placed chords through the synth as playback crosses them. -->
+      <label
+        class="inline-flex items-center gap-2 font-bold"
+        title="Play the chords you've placed through the synth, in time with playback"
+      >
+        <input type="checkbox" bind:checked={hearChords} class="accent-foreground size-3.5" />
+        Hear chords
+      </label>
+      {#if hearChords}
+        <label class="inline-flex items-center gap-1.5 font-bold" title="Chord playback instrument">
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Sound</span>
+          <select
+            value={hearChordsInstrument}
+            onchange={(e) => selectChordInstrument(e.currentTarget.value)}
+            class="border-foreground/30 bg-background rounded-[var(--radius)] border px-1.5 py-0.5 text-xs font-bold"
+            aria-label="Chord playback instrument"
+          >
+            {#each CHORD_PLAYBACK_INSTRUMENT_NAMES as name (name)}
+              <option value={name}>{name}</option>
+            {/each}
+          </select>
+          <button
+            type="button"
+            class="border-foreground/40 hover:bg-muted rounded-[var(--radius)] border px-1.5 leading-none"
+            onclick={() => selectChordInstrument(hearChordsInstrument)}
+            title="Reload this preset (discard tweaks)"
+            aria-label="Reset sound to preset"
+          >
+            ↺
+          </button>
+        </label>
+        <span class="inline-flex items-center gap-1 font-bold" title="Shift chord playback up/down an octave">
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Oct</span>
+          <button
+            type="button"
+            class="border-foreground/40 hover:bg-muted disabled:opacity-40 rounded-[var(--radius)] border px-1.5 leading-none"
+            onclick={() => nudgeHearChordsOctave(-1)}
+            disabled={hearChordsOctave <= HEAR_CHORDS_OCT_MIN}
+            aria-label="Chords octave down"
+          >
+            −
+          </button>
+          <span class="w-6 text-center font-mono text-xs tabular-nums">
+            {hearChordsOctave > 0 ? `+${hearChordsOctave}` : hearChordsOctave}
+          </span>
+          <button
+            type="button"
+            class="border-foreground/40 hover:bg-muted disabled:opacity-40 rounded-[var(--radius)] border px-1.5 leading-none"
+            onclick={() => nudgeHearChordsOctave(1)}
+            disabled={hearChordsOctave >= HEAR_CHORDS_OCT_MAX}
+            aria-label="Chords octave up"
+          >
+            +
+          </button>
+        </span>
+        <label class="inline-flex items-center gap-1.5 font-bold" title="Chord playback volume">
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Vol</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            bind:value={hearChordsVolume}
+            class="w-20 accent-[var(--studio-orange)]"
+            aria-label="Chord playback volume"
+          />
+        </label>
+        <button
+          type="button"
+          class="border-foreground/40 hover:bg-muted rounded-[var(--radius)] border px-2 py-0.5 text-xs font-bold {showChordKnobs
+            ? 'bg-foreground text-background'
+            : ''}"
+          onclick={() => (showChordKnobs = !showChordKnobs)}
+          aria-pressed={showChordKnobs}
+          title="Tweak the sound + bass"
+        >
+          Tweak
+        </button>
+      {/if}
+
+      <!-- Kick: a top-level toggle, NOT nested under "Hear chords" — playing to
+           a pulse is useful with the chords muted. Its controls reveal inline. -->
+      <label
+        class="inline-flex items-center gap-2 font-bold"
+        title="Play a kick drum on the beat grid while the song plays — nothing is added to the song or the export"
+      >
+        <input type="checkbox" bind:checked={kickOn} class="accent-foreground size-3.5" />
+        Kick
+      </label>
+      {#if kickOn}
+        <label class="inline-flex items-center gap-1.5 font-bold" title="Which beats the kick lands on">
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Feel</span>
+          <select
+            bind:value={kickPattern}
+            class="border-foreground/30 bg-background rounded-[var(--radius)] border px-1.5 py-0.5 text-xs font-bold"
+            aria-label="Kick pattern"
+          >
+            {#each KICK_PATTERNS as p (p)}
+              <option value={p}>{KICK_PATTERN_LABELS[p]}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          class="inline-flex items-center gap-1.5 font-bold"
+          title="Softer is a round, open drum; harder moves the energy into the attack for a tight, punchy live kick"
+        >
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Punch</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            bind:value={kickPunch}
+            class="w-16 accent-[var(--studio-orange)]"
+            aria-label="Kick punch"
+          />
+        </label>
+        <label class="inline-flex items-center gap-1.5 font-bold" title="Kick volume">
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Vol</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            bind:value={kickVolume}
+            class="w-16 accent-[var(--studio-orange)]"
+            aria-label="Kick volume"
+          />
+        </label>
+      {/if}
+
+      <!-- Punch: the kick in the song's OWN drums stem. Only shown when the
+           song has one, since there is nothing to punch otherwise. Nothing is
+           written to the audio — it is processing on the way to the speakers. -->
+      {#if hasDrumStem}
+        <label
+          class="inline-flex items-center gap-2 font-bold"
+          title="Make the kick in the song's own drum stem hit harder. Affects playback here only — the audio file is never changed, and the project's saved setting is what the mixer and exports use."
+        >
+          <input type="checkbox" bind:checked={stemPunchOn} class="accent-foreground size-3.5" />
+          Punch
+        </label>
+        {#if stemPunchOn}
+          <label class="inline-flex items-center gap-1.5 font-bold" title="How hard the stem's kick hits">
+            <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Amt</span>
+            <input
+              type="range"
+              min="0.05"
+              max="1"
+              step="0.05"
+              bind:value={stemPunchAmount}
+              class="w-16 accent-[var(--studio-orange)]"
+              aria-label="Drum stem kick punch amount"
+            />
+            <span class="w-8 text-right font-mono text-[10px] tabular-nums">
+              {Math.round(stemPunchAmount * 100)}%
+            </span>
+          </label>
+        {/if}
+      {/if}
+
       <span class="text-muted-foreground">
         {currentChordSection
           ? sectionDisplayLabel(currentChordSection)
@@ -1916,6 +2703,199 @@
       </button>
     {/snippet}
   </EditSectionToolbar>
+
+  <!-- Sound design: knobs for the keys + a tweakable rhythmic bass. -->
+  {#if hearChords && showChordKnobs}
+    <div class="border-foreground/15 mb-3 flex flex-col gap-3 border p-2.5">
+      <div>
+        <p class="text-muted-foreground mb-2 font-mono text-[10px] font-bold uppercase tracking-wider">
+          Keys · {hearChordsInstrument}
+        </p>
+        <SynthKnobs bind:patch={chordPatch} />
+      </div>
+
+      <div class="border-foreground/15 border-t pt-2.5">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <label class="inline-flex items-center gap-2 text-sm font-bold">
+            <input type="checkbox" bind:checked={bassOn} class="accent-foreground size-3.5" />
+            Bass
+          </label>
+          {#if bassOn}
+            <label class="inline-flex items-center gap-1.5 font-bold" title="Bass rhythm">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Feel</span>
+              <select
+                bind:value={bassPattern}
+                class="border-foreground/30 bg-background rounded-[var(--radius)] border px-1.5 py-0.5 text-xs font-bold"
+                aria-label="Bass rhythm pattern"
+              >
+                {#each BASS_PATTERNS as p (p)}
+                  <option value={p}>{BASS_PATTERN_LABELS[p]} · {p}</option>
+                {/each}
+              </select>
+            </label>
+            <span class="inline-flex items-center gap-1 font-bold" title="Shift the bass up/down an octave (independent of the keys)">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Oct</span>
+              <button
+                type="button"
+                class="border-foreground/40 hover:bg-muted disabled:opacity-40 rounded-[var(--radius)] border px-1.5 leading-none"
+                onclick={() => nudgeBassOctave(-1)}
+                disabled={bassOctave <= HEAR_CHORDS_OCT_MIN}
+                aria-label="Bass octave down"
+              >
+                −
+              </button>
+              <span class="w-6 text-center font-mono text-xs tabular-nums">
+                {bassOctave > 0 ? `+${bassOctave}` : bassOctave}
+              </span>
+              <button
+                type="button"
+                class="border-foreground/40 hover:bg-muted disabled:opacity-40 rounded-[var(--radius)] border px-1.5 leading-none"
+                onclick={() => nudgeBassOctave(1)}
+                disabled={bassOctave >= HEAR_CHORDS_OCT_MAX}
+                aria-label="Bass octave up"
+              >
+                +
+              </button>
+            </span>
+            <label class="inline-flex items-center gap-1.5 font-bold" title="Bass volume">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Vol</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                bind:value={bassVolume}
+                class="w-16 accent-[var(--studio-orange)]"
+                aria-label="Bass volume"
+              />
+            </label>
+            <button
+              type="button"
+              class="border-foreground/40 hover:bg-muted rounded-[var(--radius)] border px-2 py-0.5 text-xs font-bold {showBassKnobs
+                ? 'bg-foreground text-background'
+                : ''}"
+              onclick={() => (showBassKnobs = !showBassKnobs)}
+              aria-pressed={showBassKnobs}
+            >
+              Bass tone
+            </button>
+          {/if}
+        </div>
+        {#if bassOn && showBassKnobs}
+          <SynthKnobs bind:patch={bassPatch} />
+        {/if}
+      </div>
+
+      <div class="border-foreground/15 border-t pt-2.5">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <label class="inline-flex items-center gap-2 text-sm font-bold">
+            <input type="checkbox" bind:checked={arpOn} class="accent-foreground size-3.5" />
+            Arp
+          </label>
+          {#if arpOn}
+            <label class="inline-flex items-center gap-1.5 font-bold" title="Arp direction">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Dir</span>
+              <select
+                bind:value={arpDirection}
+                class="border-foreground/30 bg-background rounded-[var(--radius)] border px-1.5 py-0.5 text-xs font-bold"
+                aria-label="Arp direction"
+              >
+                {#each ARP_DIRECTIONS as d (d)}
+                  <option value={d}>{ARP_DIRECTION_LABELS[d]}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="inline-flex items-center gap-1.5 font-bold" title="Arp rate">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Rate</span>
+              <select
+                bind:value={arpRate}
+                class="border-foreground/30 bg-background rounded-[var(--radius)] border px-1.5 py-0.5 text-xs font-bold"
+                aria-label="Arp rate"
+              >
+                {#each ARP_RATES as r (r)}
+                  <option value={r}>{r}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="inline-flex items-center gap-1.5 font-bold" title="How many octaves the arp spans">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Oct span</span>
+              <select
+                bind:value={arpOctaves}
+                class="border-foreground/30 bg-background rounded-[var(--radius)] border px-1.5 py-0.5 text-xs font-bold"
+                aria-label="Arp octave span"
+              >
+                {#each [1, 2, 3, 4] as n (n)}
+                  <option value={n}>{n}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="inline-flex items-center gap-1.5 font-bold" title="Swing / shuffle the off-beats">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Swing</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                bind:value={arpSwing}
+                class="w-16 accent-[var(--studio-orange)]"
+                aria-label="Arp swing"
+              />
+            </label>
+            <span class="inline-flex items-center gap-1 font-bold" title="Shift the arp up/down an octave">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Oct</span>
+              <button
+                type="button"
+                class="border-foreground/40 hover:bg-muted disabled:opacity-40 rounded-[var(--radius)] border px-1.5 leading-none"
+                onclick={() => nudgeArpOctave(-1)}
+                disabled={arpOctave <= HEAR_CHORDS_OCT_MIN}
+                aria-label="Arp octave down"
+              >
+                −
+              </button>
+              <span class="w-6 text-center font-mono text-xs tabular-nums">
+                {arpOctave > 0 ? `+${arpOctave}` : arpOctave}
+              </span>
+              <button
+                type="button"
+                class="border-foreground/40 hover:bg-muted disabled:opacity-40 rounded-[var(--radius)] border px-1.5 leading-none"
+                onclick={() => nudgeArpOctave(1)}
+                disabled={arpOctave >= HEAR_CHORDS_OCT_MAX}
+                aria-label="Arp octave up"
+              >
+                +
+              </button>
+            </span>
+            <label class="inline-flex items-center gap-1.5 font-bold" title="Arp volume">
+              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Vol</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                bind:value={arpVolume}
+                class="w-16 accent-[var(--studio-orange)]"
+                aria-label="Arp volume"
+              />
+            </label>
+            <button
+              type="button"
+              class="border-foreground/40 hover:bg-muted rounded-[var(--radius)] border px-2 py-0.5 text-xs font-bold {showArpKnobs
+                ? 'bg-foreground text-background'
+                : ''}"
+              onclick={() => (showArpKnobs = !showArpKnobs)}
+              aria-pressed={showArpKnobs}
+            >
+              Arp tone
+            </button>
+          {/if}
+        </div>
+        {#if arpOn && showArpKnobs}
+          <SynthKnobs bind:patch={arpPatch} />
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if chordsPlaceErr || chordsPlaceMsg || draftMsg}
     <p
       class="mb-3 px-1 text-xs {chordsPlaceErr ? 'text-destructive' : 'text-muted-foreground'}"
@@ -2289,6 +3269,8 @@
           onCommit={commitChord}
           onClearChord={clearChordAtBeat}
         />
+        <!-- APC Key 25 keybed → the shared synth, playable throughout chords mode. -->
+        <KeysSynthController enabled={editMode === 'chords'} synth={auditionSynth} />
       {/if}
     {/if}
     {#if editMode === 'grid' && sm.timeline.beats.length > 0}

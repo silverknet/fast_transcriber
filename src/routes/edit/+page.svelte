@@ -8,6 +8,7 @@
   import TransportBar from '$lib/components/editor/TransportBar.svelte'
   import LyricsEditor from '$lib/components/editor/LyricsEditor.svelte'
   import MixerPanel from '$lib/components/editor/MixerPanel.svelte'
+  import type { MixerControls } from '$lib/components/editor/TransportBar.svelte'
   import CueEditor from '$lib/components/editor/CueEditor.svelte'
   import EditInspector from '$lib/components/editor/EditInspector.svelte'
   import HelpHint from '$lib/components/HelpHint.svelte'
@@ -23,6 +24,9 @@
     transposeSongKey,
   } from '$lib/songmap/transposition'
   import { transport } from '$lib/audio/transport.svelte'
+  import { heldTempoPercent } from '$lib/audio/varispeed'
+  import { loadSongStemBlobs } from '$lib/audio/loadSongStems'
+  import StemToggleDock from '$lib/components/editor/StemToggleDock.svelte'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
   import { pitchShiftAudioBuffer } from '$lib/audio/clientPitchShift'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
@@ -405,6 +409,12 @@
   /** Main workspace mode. */
   type EditMode = 'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'
   let editMode = $state<EditMode>('overview')
+  /** The mixer's minimal band view. Lives here because it's a RAIL tab now,
+   *  not a toggle inside the mixer's transport bar. */
+  let playbackMode = $state(false)
+  /** Overview's mixer owns its own engine, so the top transport drives THOSE
+   *  handles there instead of the shell transport. */
+  let mixerControls = $state<MixerControls | null>(null)
 
   /** Human labels for each mode — used by the rail buttons. */
   const MODE_LABEL: Record<EditMode, string> = {
@@ -528,6 +538,57 @@
   // chords-&-key-only feature; playback keeps the original audio. Flip back to
   // true to re-enable the pitch-shifted audio path (all wiring is intact).
   const transposeAudioEnabled: boolean = false
+
+  /**
+   * EXPERIMENT — naive (varispeed) transpose of the audio.
+   *
+   * The opposite trade from the disabled stretch path above: instead of
+   * preserving tempo with a phase vocoder that doesn't sound good enough, just
+   * change the playback RATE, like a tape machine. Pitch and tempo move
+   * together and the song gets faster/slower — accepted, by design.
+   *
+   * Nothing is rendered and nothing is cached: the engine plays the ORIGINAL
+   * decoded buffer with `playbackRate` set, so switching back to 0 restores
+   * bit-identical playback. The `.smap` is never rescaled either — the playhead
+   * keeps reporting ORIGINAL audio time, so bars, beats, sections and chords
+   * stay aligned with no changes on their side. See `varispeed.ts`.
+   *
+   * Per-device, like the transpose offset itself.
+   */
+  const VARISPEED_KEY = 'barbro:transposeVarispeed'
+  let varispeedAudio = $state(browser && localStorage.getItem(VARISPEED_KEY) === '1')
+  $effect(() => {
+    if (browser) localStorage.setItem(VARISPEED_KEY, varispeedAudio ? '1' : '0')
+  })
+  /**
+   * How much of the tempo change to cancel, 0…1. 0 = pure varispeed (perfect
+   * audio, song speeds up); 1 = original tempo, with a live stretch worklet
+   * doing all the pitch work. In between the worklet only shifts the residual,
+   * so artifacts scale with the dial. Per-device.
+   */
+  const TEMPO_HOLD_KEY = 'barbro:transposeTempoHold'
+  let tempoHold = $state(readStoredTempoHold())
+  function readStoredTempoHold(): number {
+    if (!browser) return 0
+    const v = Number(localStorage.getItem(TEMPO_HOLD_KEY))
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0
+  }
+  $effect(() => {
+    if (browser) localStorage.setItem(TEMPO_HOLD_KEY, String(tempoHold))
+  })
+  // Drive the transport. Recomputed from the SEMITONE every time, never by
+  // composing rates — that is what keeps the round trip exact.
+  $effect(() => {
+    transport.setTransposeSemitones(varispeedAudio ? transposeSemitones : 0)
+  })
+  $effect(() => {
+    transport.setTempoHold(varispeedAudio ? tempoHold : 0)
+  })
+  const varispeedTempoLabel = $derived.by(() => {
+    const pct = heldTempoPercent(transposeSemitones, tempoHold)
+    if (Math.abs(pct) < 0.05) return 'tempo kept'
+    return `${pct > 0 ? '+' : ''}${pct.toFixed(0)}% tempo`
+  })
   let transposeAudioStatus = $state<'idle' | 'rendering' | 'ready' | 'error'>('idle')
   let transposeAudioError = $state('')
   let transposePlaybackBuffer = $state<AudioBuffer | null>(null)
@@ -589,6 +650,44 @@
   // TODO(M1b-next): fold mixer+live onto the shared transport.
   $effect(() => {
     if (editMode === 'overview') transport.pause()
+  })
+
+  // ── Load this song's stems into the shared transport (edit views) ──────────
+  // The stems dock (bottom-right) toggles them; all-on plays the original mix.
+  // Loaded once per song the first time we're in a non-overview view (the mixer
+  // owns its own stems), keyed on the song so switching songs reloads.
+  let stemsLoadedForKey = ''
+  async function loadStemsForSong(key: string): Promise<void> {
+    try {
+      const blobs = await loadSongStemBlobs()
+      if (key !== stemsLoadedForKey) return // song changed mid-fetch
+      await transport.setStems(blobs)
+    } catch {
+      /* stems are optional — never block editing on a load failure */
+    }
+  }
+  $effect(() => {
+    if (!browser || editMode === 'overview') return
+    const file = $audioSession.file
+    const ps = $projectStore
+    const sm = $songMap
+    if (!file) return
+    const songId = ps.activeSongId || ps.activeSongFolder || sm?.audio?.sha256 || file.name
+    // Include a signature of the AVAILABLE stems so we (re)load when the sidecar's
+    // folder scan lands after first render — keying on the song alone would cache
+    // an empty result and never pick the stems up once metadata arrives.
+    const folderMeta =
+      ps.osPath && ps.activeSongFolder ? ps.metadataByFolder[ps.activeSongFolder] : undefined
+    const best = selectBestStemSet(folderMeta)
+    const stemSig = best
+      ? `${best.preset}:${best.files.join(',')}`
+      : !ps.osPath && ps.activeSongId
+        ? 'cloud'
+        : 'none'
+    const key = `${songId}::${stemSig}`
+    if (key === stemsLoadedForKey) return
+    stemsLoadedForKey = key
+    void loadStemsForSong(key)
   })
 
   async function decodePlaybackBlob(blob: Blob): Promise<AudioBuffer> {
@@ -1071,6 +1170,30 @@
               </button>
             {/each}
           {/each}
+          <!-- Playback: not an edit MODE, it's a view of the mix — so it sits
+               below the groups and toggles rather than selecting a workspace. -->
+          <div class="text-muted-foreground/70 px-2 pt-2.5 pb-1 text-[8px] font-black uppercase tracking-[0.15em]">
+            Play
+          </div>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={playbackMode}
+            onclick={() => {
+              editMode = 'overview'
+              playbackMode = !playbackMode
+            }}
+            title="Minimal band playback view"
+            class="group relative mx-1.5 mb-1 flex flex-col items-center gap-1 rounded-[var(--radius)] px-1 py-2 text-center transition-colors {playbackMode
+              ? 'bg-foreground text-background'
+              : 'text-foreground hover:bg-accent'}"
+          >
+            {#if playbackMode}
+              <span class="absolute inset-y-1 -left-1.5 w-1 rounded-full bg-[var(--studio-orange)]"></span>
+            {/if}
+            <Play class="size-5" aria-hidden="true" />
+            <span class="text-[9.5px] font-bold leading-tight tracking-tight">Playback</span>
+          </button>
         </div>
 
         <div class="mt-auto px-1.5 py-2">
@@ -1139,7 +1262,10 @@
             <span>{sm.metadata.bpm != null ? `${Math.round(sm.metadata.bpm)} BPM` : '— BPM'}</span>
             <span class="text-muted-foreground/40" aria-hidden="true">·</span>
             <span class="inline-flex items-center gap-1">
-              {keyLabel ?? '— key'}
+              <!-- Fixed width: the label re-widths as you transpose ("C major"
+                   → "C♯ minor"), which would shove the stepper sideways under
+                   the cursor. 8ch fits the widest form (root + ♯/♭ + " minor"). -->
+              <span class="inline-block min-w-[8ch]">{keyLabel ?? '— key'}</span>
               <button
                 type="button"
                 class="text-muted-foreground/50 hover:text-foreground transition-colors disabled:opacity-40"
@@ -1167,7 +1293,8 @@
               >
                 -1
               </button>
-              <span class="border-foreground/20 min-w-8 border-x px-1.5 py-0.5 text-center">
+              <!-- Fixed width so "+1" → "-12" doesn't nudge the +1 button. -->
+              <span class="border-foreground/20 w-10 border-x px-1.5 py-0.5 text-center">
                 {formatTransposeLabel(transposeSemitones)}
               </span>
               <button
@@ -1179,17 +1306,67 @@
               >
                 +1
               </button>
-              {#if transposeSemitones !== 0}
-                <button
-                  type="button"
-                  class="hover:bg-foreground hover:text-background border-foreground/20 border-l px-1.5 py-0.5 transition-colors"
-                  onclick={() => setTransposeBase(0)}
-                  aria-label="Reset transpose"
-                >
-                  reset
-                </button>
-              {/if}
+              <!-- Always occupies its slot: mounting it only at ≠0 shifted
+                   everything to its right the moment you left zero. `invisible`
+                   also drops it from the tab order while it's inert. -->
+              <button
+                type="button"
+                class="hover:bg-foreground hover:text-background border-foreground/20 border-l px-1.5 py-0.5 transition-colors {transposeSemitones ===
+                0
+                  ? 'invisible'
+                  : ''}"
+                onclick={() => setTransposeBase(0)}
+                aria-label="Reset transpose"
+                aria-hidden={transposeSemitones === 0}
+              >
+                reset
+              </button>
             </span>
+
+            <!-- EXPERIMENT: move the audio with the chords, the naive way.
+                 Speeds the song up / slows it down (no tempo preservation) —
+                 the audio itself is never altered, only its playback rate. -->
+            <label
+              class="border-foreground/30 bg-background inline-flex cursor-pointer items-center gap-1.5 rounded-[var(--radius)] border px-1.5 py-0.5 text-[11px] font-bold"
+              title="Transpose the AUDIO too, the simple way: play it faster or slower. The song changes tempo as well as pitch, and the audio file itself is never touched — switching this off restores the original exactly."
+            >
+              <input type="checkbox" bind:checked={varispeedAudio} class="accent-foreground size-3" />
+              Audio
+              {#if varispeedAudio}
+                <!-- Reserved width: "+6%" → "+12% tempo" must not resize the
+                     control you are currently clicking. -->
+                <span
+                  class="text-muted-foreground inline-block min-w-[10ch] font-mono text-[10px] tabular-nums"
+                >
+                  {varispeedTempoLabel}
+                </span>
+              {/if}
+            </label>
+
+            {#if varispeedAudio}
+              <!-- Tempo hold: how much of the speed-up to cancel. 0 = pure
+                   varispeed (perfect audio). 1 = original tempo, at the cost of
+                   a live stretcher. The middle is the useful part — it only has
+                   to shift the residual, so artifacts scale with the dial. -->
+              <label
+                class="border-foreground/30 bg-background inline-flex items-center gap-1.5 rounded-[var(--radius)] border px-1.5 py-0.5 text-[11px] font-bold"
+                title="How much of the tempo change to cancel. Left = fastest, cleanest audio (the song speeds up). Right = keeps the original tempo, using a live time-stretcher — more correction means more artefacts, so the sweet spot is usually part-way."
+              >
+                <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Hold</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  bind:value={tempoHold}
+                  class="accent-foreground h-1 w-16"
+                  aria-label="Hold tempo through the transpose"
+                />
+                <span class="w-8 text-right font-mono text-[10px] tabular-nums">
+                  {tempoHold === 0 ? 'off' : `${Math.round(tempoHold * 100)}%`}
+                </span>
+              </label>
+            {/if}
           </div>
 
           <div class="flex-1"></div>
@@ -1197,7 +1374,7 @@
           <!-- persistent transport — its own component (click loop / count-in /
                auto-stop); the shell only positions it here. -->
           <div class="min-w-0 shrink-0">
-            <TransportBar {editMode} />
+            <TransportBar {editMode} {mixerControls} />
           </div>
         </div>
 
@@ -1220,7 +1397,7 @@
       {/if}
 
       {#if editMode === 'overview'}
-        <MixerPanel {keyLabel} />
+        <MixerPanel {keyLabel} bind:playbackMode bind:controls={mixerControls} />
       {/if}
 
       {#if editMode === 'lyrics'}
@@ -1273,6 +1450,13 @@
             />
           </aside>
         </div>
+
+        <!-- Docked stems strip: a real bottom bar of the content column (sibling
+             to the top strip), not a floating overlay. Hidden in the mixer, which
+             has full per-stem controls; self-hides when the song has no stems. -->
+        {#if editMode !== 'overview'}
+          <StemToggleDock />
+        {/if}
       </div>
     </div>
 
@@ -1294,7 +1478,6 @@
       onDuplicate={newDraftFromCurrent}
       onNewEmpty={newEmptyDraft}
     />
-
 
   {/if}
 </div>

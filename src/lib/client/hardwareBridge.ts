@@ -96,3 +96,39 @@ export function setXAirChannelOn(channel: number, on: boolean): Promise<Hardware
 export function setXAirBusSend(channel: number, bus: number, value: number): Promise<HardwareResult> {
   return postHardware('/native/hardware/xair/bus-send', { channel, bus, value })
 }
+
+/** FOH-safety: `on:false` takes a channel OFF the main/LR (house) bus. */
+export function setXAirChannelMainAssign(channel: number, on: boolean): Promise<HardwareResult> {
+  return postHardware('/native/hardware/xair/channel-main-assign', { channel, on })
+}
+
+/** Aux-bus master fader (bus 1..6) — a performer's overall in-ear level. */
+export function setXAirBusFader(bus: number, value: number): Promise<HardwareResult> {
+  return postHardware('/native/hardware/xair/bus-fader', { bus, value })
+}
+
+/** Per-channel desk readback (`lr` 0 = off the house bus). */
+export type XAirChannelState = { lr?: number; on?: number; fader?: number }
+export type XAirReadback =
+  | { ok: true; channels: Record<number, XAirChannelState> }
+  | { ok: false; error: string }
+
+/** Query the desk and return its actual per-channel state — the "prove it" read-back. */
+export async function refreshXAirState(): Promise<XAirReadback> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/native/hardware/xair/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      cache: 'no-store',
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+  const data = await readJson(res)
+  if (!res.ok || data.ok !== true || typeof data.channels !== 'object' || !data.channels) {
+    return { ok: false, error: typeof data.error === 'string' ? data.error : `Read-back failed (HTTP ${res.status})` }
+  }
+  return { ok: true, channels: data.channels as Record<number, XAirChannelState> }
+}

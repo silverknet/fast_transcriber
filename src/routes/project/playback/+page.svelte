@@ -13,6 +13,8 @@
   import { loadProjectSongIntoEditor, refreshProjectInfo } from '$lib/project/commit'
   import { loadCloudSongIntoEditor } from '$lib/client/browserCloudProject'
   import { project as projectStore, isBrowserCloudProject } from '$lib/stores/project'
+  import { liveReadySongs, liveFetchedSongs } from '$lib/audio/liveAudioCache'
+  import { readyState } from '$lib/audio/livePrefetch'
   import { songMap } from '$lib/stores/songMap'
   import { ArrowLeft, HelpCircle, ListMusic, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
   import ApcKey25Guide from '$lib/components/ApcKey25Guide.svelte'
@@ -62,6 +64,22 @@
   const upcomingItem = $derived(activeIndex >= 0 ? setlistItems[activeIndex + 1] ?? null : setlistItems[0] ?? null)
   const hasProject = $derived(!!$projectStore.data)
   const hasLoadedSong = $derived(!!activeSongId && !!$songMap)
+
+  // Per-song warmth for the setlist "ready" light. The live prefetcher (in
+  // MixerView, which owns the cache) fills these Sets as it pre-decodes the next
+  // song and warms the rest of the set's bytes. green = instant, blue = quick.
+  function readyDotClass(id: string): string {
+    const s = readyState(id, $liveReadySongs, $liveFetchedSongs)
+    if (s === 'ready') return 'bg-emerald-500'
+    if (s === 'fetched') return 'bg-sky-400'
+    return 'bg-foreground/20'
+  }
+  function readyDotTitle(id: string): string {
+    const s = readyState(id, $liveReadySongs, $liveFetchedSongs)
+    if (s === 'ready') return 'Ready — instant switch'
+    if (s === 'fetched') return 'Warmed — quick to load'
+    return 'Not loaded yet'
+  }
 
   async function openSong(songId: string) {
     if (!songId || loadingSongId === songId) return
@@ -422,7 +440,7 @@
                 <button
                   type="button"
                   data-active={item.id === activeSongId}
-                  class="grid w-full grid-cols-[2rem_minmax(0,1fr)] items-center gap-2 border-b border-foreground/10 px-3 py-2 text-left transition-colors {item.id === activeSongId
+                  class="grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-foreground/10 px-3 py-2 text-left transition-colors {item.id === activeSongId
                     ? 'bg-primary text-primary-foreground'
                     : 'hover:bg-muted/60'}"
                   onclick={() => void openSong(item.id)}
@@ -435,6 +453,11 @@
                       {item.keyLabel} · {item.bpmLabel} BPM{item.artist ? ` · ${item.artist}` : ''}
                     </span>
                   </span>
+                  <span
+                    class="size-2 shrink-0 rounded-full {readyDotClass(item.id)}"
+                    title={readyDotTitle(item.id)}
+                    aria-hidden="true"
+                  ></span>
                 </button>
               </li>
             {/each}
@@ -524,7 +547,7 @@
                   <li>
                     <button
                       type="button"
-                      class="grid w-full grid-cols-[2rem_minmax(0,1fr)] items-center gap-2 border-b border-foreground/10 px-3 py-3 text-left {item.id === activeSongId ? 'bg-primary text-primary-foreground' : 'active:bg-muted/60'}"
+                      class="grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-foreground/10 px-3 py-3 text-left {item.id === activeSongId ? 'bg-primary text-primary-foreground' : 'active:bg-muted/60'}"
                       onclick={() => {
                         songMenuOpen = false
                         void openSong(item.id)
@@ -538,6 +561,11 @@
                           {item.keyLabel} · {item.bpmLabel} BPM{item.artist ? ` · ${item.artist}` : ''}
                         </span>
                       </span>
+                      <span
+                        class="size-2 shrink-0 rounded-full {readyDotClass(item.id)}"
+                        title={readyDotTitle(item.id)}
+                        aria-hidden="true"
+                      ></span>
                     </button>
                   </li>
                 {/each}

@@ -2,6 +2,8 @@ export { chordRootToPitchClass, pitchClassToRootAcc, transposePitchClass, LETTER
 export { parseChordText, refreshDisplayRaw, type ParseChordResult } from './parseChordText'
 export { formatChordSymbol, type FormatOptions } from './formatChordSymbol'
 export { transposeChord } from './transposeChord'
+export { NO_CHORD_SYMBOL, isNoChord } from './noChord'
+export { chordVoicingMidi } from './chordVoicing'
 export {
   diatonicChordVariationsForDegree,
   diatonicChordsInKey,

@@ -2,13 +2,21 @@
   /**
    * One track lane in the multi-track mixer. Layout:
    *
-   *   [ name ] [ M ][ S ] [ vol slider ] [ waveform canvas + playhead ]
+   *   [ ⠿ ] [ name ] [ M ][ S ] [ live button ] [ vol slider ] [ waveform ]
+   *
+   * Rows are separated by a single hairline rather than each being boxed — a
+   * stack of bordered cards reads as many objects; a ruled list reads as one
+   * mixer. Selection shows as a left accent bar + tinted row instead, so it
+   * stays obvious without reintroducing the box.
    *
    * Waveform drawing/resizing is centralized in `WaveformCanvas` so the
    * mixer lanes and stage waveform keep the same block rendering behavior.
    */
   import { Button } from '$lib/components/ui/button'
   import WaveformCanvas from '$lib/components/WaveformCanvas.svelte'
+  import { GripVertical, Lock } from '@lucide/svelte'
+  import ChannelEqPopover from '$lib/components/ChannelEqPopover.svelte'
+  import type { ChannelEq } from '$lib/audio/channelEq'
 
   let {
     label,
@@ -25,6 +33,21 @@
     onToggleMuted,
     onToggleSoloed,
     onSeekFraction,
+    selected = false,
+    onSelect,
+    liveSlot,
+    liveSlotOptions = [],
+    onLiveSlotChange,
+    pinned = false,
+    reorderable = false,
+    dragging = false,
+    dropTarget = false,
+    onDragStartLane,
+    onDragOverLane,
+    onDropLane,
+    onDragEndLane,
+    eq,
+    onEqChange,
   } = $props<{
     label: string
     buffer: AudioBuffer | null
@@ -46,6 +69,33 @@
     onToggleSoloed: () => void
     /** Fraction is 0..1 relative to mix duration. */
     onSeekFraction: (frac: number) => void
+    /** Selected lanes are outlined; the mixer shows the matching editor. */
+    selected?: boolean
+    /** Absent = this lane isn't selectable (no editor behind it). */
+    onSelect?: () => void
+    /**
+     * Which live BUTTON this track is on. Several tracks may name the same slot
+     * — one press then moves them all. Absent `onLiveSlotChange` hides the
+     * picker entirely, so lanes that shouldn't be re-linked simply don't offer it.
+     */
+    liveSlot?: string
+    liveSlotOptions?: { value: string; label: string }[]
+    onLiveSlotChange?: (value: string) => void
+    /** Fixed at the top (the original mix) — shown tinted, with a lock. */
+    pinned?: boolean
+    /** Drag-to-reorder is available for this lane. */
+    reorderable?: boolean
+    /** This lane is the one currently being dragged. */
+    dragging?: boolean
+    /** A dragged lane is hovering over this one. */
+    dropTarget?: boolean
+    onDragStartLane?: () => void
+    onDragOverLane?: () => void
+    onDropLane?: () => void
+    onDragEndLane?: () => void
+    /** This channel's EQ. Absent handler = no EQ button on this lane. */
+    eq?: ChannelEq
+    onEqChange?: (next: ChannelEq | undefined) => void
   }>()
 
   const WAVE_HEIGHT = 44
@@ -56,14 +106,84 @@
   let endFrac = $derived(durationSec > 0 ? bufferDur / durationSec : 0)
 </script>
 
-<div class="border-foreground/30 bg-background flex items-center gap-2 border-2 px-2 py-1.5">
-  <!-- Name -->
-  <div class="w-28 shrink-0 min-w-0">
-    <div class="truncate text-xs font-semibold">{label}</div>
-    <div class="text-muted-foreground font-mono text-[10px] truncate">
-      {buffer ? `${buffer.duration.toFixed(1)}s` : '—'}
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="relative flex items-center gap-2 border-b px-2 py-1.5 transition-colors
+    {pinned ? 'bg-foreground/[0.06] border-foreground/25' : 'border-foreground/15'}
+    {selected ? 'bg-foreground/10' : ''}
+    {dragging ? 'opacity-40' : ''}
+    {dropTarget ? 'border-t-foreground border-t-2' : ''}"
+  ondragover={(e) => {
+    if (!onDragOverLane) return
+    e.preventDefault() // required, or the drop never fires
+    onDragOverLane()
+  }}
+  ondrop={(e) => {
+    if (!onDropLane) return
+    e.preventDefault()
+    onDropLane()
+  }}
+>
+  <!-- Selected lanes get an accent bar instead of a border box. -->
+  {#if selected}
+    <span class="bg-foreground absolute inset-y-0 left-0 w-[3px]" aria-hidden="true"></span>
+  {/if}
+
+  <!-- Drag handle. The pinned original shows a lock in the same slot so the
+       rows stay aligned and it's clear WHY it can't move. -->
+  {#if reorderable}
+    <span
+      class="text-muted-foreground hover:text-foreground shrink-0 cursor-grab active:cursor-grabbing"
+      draggable="true"
+      role="button"
+      tabindex="-1"
+      aria-label="Reorder {label}"
+      title="Drag to reorder"
+      ondragstart={(e) => {
+        // Firefox refuses to start a drag without payload.
+        e.dataTransfer?.setData('text/plain', label)
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+        onDragStartLane?.()
+      }}
+      ondragend={() => onDragEndLane?.()}
+    >
+      <GripVertical class="size-3.5" aria-hidden="true" />
+    </span>
+  {:else}
+    <span
+      class="text-muted-foreground/50 shrink-0"
+      title={pinned ? 'The original mix stays at the top' : undefined}
+    >
+      {#if pinned}
+        <Lock class="size-3" aria-hidden="true" />
+      {:else}
+        <span class="block size-3.5" aria-hidden="true"></span>
+      {/if}
+    </span>
+  {/if}
+
+  <!-- Name. Selectable only when there's an editor behind the lane. -->
+  {#if onSelect}
+    <button
+      type="button"
+      class="w-28 shrink-0 min-w-0 rounded-[var(--radius)] px-1 py-0.5 text-left transition-colors hover:bg-foreground/10"
+      aria-pressed={selected}
+      onclick={() => onSelect?.()}
+      title="Edit {label}"
+    >
+      <div class="truncate text-xs font-semibold">{label}</div>
+      <div class="text-muted-foreground truncate font-mono text-[10px]">
+        {buffer ? `${buffer.duration.toFixed(1)}s` : '—'}
+      </div>
+    </button>
+  {:else}
+    <div class="w-28 shrink-0 min-w-0">
+      <div class="truncate text-xs font-semibold">{label}</div>
+      <div class="text-muted-foreground truncate font-mono text-[10px]">
+        {buffer ? `${buffer.duration.toFixed(1)}s` : '—'}
+      </div>
     </div>
-  </div>
+  {/if}
 
   <!-- M / S -->
   <div class="flex shrink-0 gap-0.5">
@@ -88,6 +208,26 @@
       S
     </Button>
   </div>
+
+  <!-- Channel EQ — an insert on this lane only, not a bus. -->
+  {#if onEqChange}
+    <ChannelEqPopover {label} {eq} onChange={onEqChange} />
+  {/if}
+
+  <!-- Which live button toggles this track. Several tracks can share one. -->
+  {#if onLiveSlotChange}
+    <select
+      class="border-foreground/30 bg-background h-7 w-[4.5rem] shrink-0 rounded-[var(--radius)] border px-1 text-[11px] font-bold"
+      value={liveSlot ?? 'none'}
+      onchange={(e) => onLiveSlotChange?.((e.currentTarget as HTMLSelectElement).value)}
+      aria-label="{label} live button"
+      title="Which live button turns {label} on and off. Link several tracks to the same button to move them together."
+    >
+      {#each liveSlotOptions as opt (opt.value)}
+        <option value={opt.value}>{opt.label}</option>
+      {/each}
+    </select>
+  {/if}
 
   <!-- Volume -->
   <input

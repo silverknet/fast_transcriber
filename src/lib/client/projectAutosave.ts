@@ -59,7 +59,7 @@ let pendingWhileWriting = false
 let cloudPushing = false
 let cloudPendingWhilePushing = false
 
-async function tryWriteOnce(): Promise<void> {
+async function tryWriteOnce(force = false): Promise<void> {
   const snap = get(project)
   const sm = get(songMap)
   if (!sm) return
@@ -69,9 +69,11 @@ async function tryWriteOnce(): Promise<void> {
   if (!snap.activeSongFolder || !snap.activeSongId) return
   if (snap.editingMode !== 'project-song') return
 
-  // Guard 5: route
+  // Guard 5: route. `force` (a navigation/teardown flush) bypasses this: the
+  // pending edit is real and about to be lost, and the remaining guards still
+  // confine the write to the active project song.
   const p = get(page)
-  if (p?.route?.id !== '/edit') return
+  if (!force && p?.route?.id !== '/edit') return
 
   // Guard 7: manifest invariant (id + folder match)
   const entry = snap.data.songs.find(
@@ -129,14 +131,19 @@ function schedule(): void {
  * 409, increments pendingChanges, and a later pull will resolve).
  * Phase 8 wires the actual merge UI.
  */
-async function tryCloudPushOnce(): Promise<void> {
+async function tryCloudPushOnce(force = false): Promise<void> {
   const snap = get(project)
   const sm = get(songMap)
   if (!sm || !snap.data || !snap.data.cloud) return
   if (!snap.activeSongId) return
   if (snap.editingMode !== 'project-song') return
-  // Only push when actively editing in /edit, mirroring the disk-write guard.
-  if (get(page)?.route?.id !== '/edit') return
+  // Only push when actively editing in /edit, mirroring the disk-write guard —
+  // EXCEPT a `force` flush (navigation away / tab hide), which must send the
+  // pending edit even though the user has already left /edit. Without this,
+  // browser mode (no disk fallback) silently loses any edit made in the
+  // trailing 7s debounce window before navigating back to the project. The
+  // dirty-check below still prevents a no-op push, so forcing is safe.
+  if (!force && get(page)?.route?.id !== '/edit') return
   // Don't keep firing pushes that will 409 while a conflict is awaiting
   // resolution. The dialog's Apply re-merges with the current songMap
   // and pushes once with the fresh base revision; until then, edits
@@ -343,7 +350,7 @@ function flushPendingCloudPush(): void {
     return
   }
   cloudPushing = true
-  tryCloudPushOnce()
+  tryCloudPushOnce(true)
     .catch(() => {})
     .finally(() => {
       cloudPushing = false
@@ -352,6 +359,43 @@ function flushPendingCloudPush(): void {
         scheduleCloudPush()
       }
     })
+}
+
+/** Disk-write twin of {@link flushPendingCloudPush} — fires the trailing 1.5s
+ *  disk debounce immediately so a desktop edit isn't lost on the same
+ *  navigate-away race. No-op in browser mode (the write guards on `osPath`). */
+function flushPendingDiskWrite(): void {
+  if (!debounceTimer) return
+  clearTimeout(debounceTimer)
+  debounceTimer = null
+  if (writing) {
+    pendingWhileWriting = true
+    return
+  }
+  writing = true
+  tryWriteOnce(true)
+    .catch(() => {})
+    .finally(() => {
+      writing = false
+      if (pendingWhileWriting) {
+        pendingWhileWriting = false
+        schedule()
+      }
+    })
+}
+
+/**
+ * Flush ANY pending disk write + cloud push right now, bypassing the `/edit`
+ * route guard. Call this the instant the user leaves the editor — SPA
+ * navigation (`beforeNavigate`) fires none of the tab-hide events, so without
+ * this an edit made in the trailing debounce window is dropped (in browser
+ * mode, permanently — there is no disk copy to fall back to). Idempotent and
+ * cheap: each half no-ops when its timer isn't pending.
+ */
+export function flushProjectAutosave(): void {
+  if (!browser || !started) return
+  flushPendingDiskWrite()
+  flushPendingCloudPush()
 }
 
 /**
@@ -395,9 +439,9 @@ export function startProjectAutosave(): void {
   // flushPendingCloudPush). visibilitychange→hidden is the reliable signal on
   // both desktop tab-close and mobile; pagehide is the belt-and-suspenders.
   const onHide = () => {
-    if (document.visibilityState === 'hidden') flushPendingCloudPush()
+    if (document.visibilityState === 'hidden') flushProjectAutosave()
   }
-  const onPageHide = () => flushPendingCloudPush()
+  const onPageHide = () => flushProjectAutosave()
   document.addEventListener('visibilitychange', onHide)
   window.addEventListener('pagehide', onPageHide)
   unsubs.push(() => document.removeEventListener('visibilitychange', onHide))

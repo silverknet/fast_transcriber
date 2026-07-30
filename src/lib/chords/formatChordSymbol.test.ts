@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { formatChordSymbol } from './formatChordSymbol'
+import { NO_CHORD_SYMBOL } from './noChord'
 import { parseChordText } from './parseChordText'
 import type { ChordSymbol } from '$lib/songmap/types'
 
@@ -75,6 +76,16 @@ describe('formatChordSymbol — colour tones & bass', () => {
   it('renders a slash bass with its own accidental', () => {
     expect(formatChordSymbol(chord({ quality: 'major', bass: 'E' }))).toBe('C/E')
     expect(formatChordSymbol(chord({ quality: 'min7', bass: 'B', bassAccidental: 'flat' }))).toBe('Cm7/Bb')
+  })
+})
+
+describe('formatChordSymbol — N.C. (no chord)', () => {
+  it('prints N.C. and ignores root/quality for a no-chord symbol', () => {
+    expect(formatChordSymbol(NO_CHORD_SYMBOL)).toBe('N.C.')
+    // The flag wins over any structural fields that happen to be present.
+    expect(formatChordSymbol(chord({ noChord: true, root: 'G', quality: 'min7' }))).toBe('N.C.')
+    // Unicode/flat options don't change it.
+    expect(formatChordSymbol(NO_CHORD_SYMBOL, { unicode: true, preferFlats: true })).toBe('N.C.')
   })
 })
 

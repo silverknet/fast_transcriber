@@ -167,6 +167,9 @@ function parsePerformers(raw: unknown): ProjectFile['performers'] | undefined {
     const p: NonNullable<ProjectFile['performers']>[number] = { id: o.id, name: o.name }
     if (typeof o.role === 'string' && o.role.trim()) p.role = o.role
     if (typeof o.userId === 'string' && o.userId) p.userId = o.userId
+    if (typeof o.monitorBus === 'number' && o.monitorBus >= 1 && o.monitorBus <= 6) {
+      p.monitorBus = Math.round(o.monitorBus)
+    }
     out.push(p)
   }
   return out.length > 0 ? out : undefined
@@ -180,6 +183,9 @@ function parseMastering(raw: unknown): ProjectFile['mastering'] | undefined {
   const out: NonNullable<ProjectFile['mastering']> = { enabled: r.enabled }
   if (typeof r.matchLoudness === 'boolean') out.matchLoudness = r.matchLoudness
   if (typeof r.masterGlue === 'boolean') out.masterGlue = r.masterGlue
+  if (typeof r.kickPunch === 'number' && Number.isFinite(r.kickPunch)) {
+    out.kickPunch = Math.max(0, Math.min(1, r.kickPunch))
+  }
   const stems = r.stems as Record<string, unknown> | undefined
   if (stems && typeof stems === 'object') {
     const parsed: NonNullable<NonNullable<ProjectFile['mastering']>['stems']> = {}

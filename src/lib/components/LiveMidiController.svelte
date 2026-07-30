@@ -119,7 +119,12 @@
     sendApc(apcSingleLedMessage(APC_RECORD_NOTE, 'off'))
     sendApc(apcSingleLedMessage(APC_STOP_ALL_CLIPS_NOTE, 'off'))
     for (let i = 0; i < 5; i++) sendApc(apcSceneLaunchLedMessage(i, 'off'))
-    for (let i = 0; i < 8; i++) sendApc(apcTrackButtonLedMessage(i, 'off'))
+    // Track buttons MIRROR the bottom pad-row stems (same canonical slots): lit =
+    // audible, dark = muted/absent. So stems toggle from either control.
+    for (let i = 0; i < 8; i++) {
+      const lane = led.lanes[i]
+      sendApc(apcTrackButtonLedMessage(i, lane?.on ? 'on' : 'off'))
+    }
 
     lightButton(map['play-pause'], led.awaitingStart ? 'blink' : 'on')
     lightButton(map['stop'], 'on')
