@@ -44,6 +44,14 @@
     type BusTopology,
   } from '$lib/hardware/deskTopology'
   import { patchList, performerInputProblems } from '$lib/project/performerInputs'
+  import {
+    DEFAULT_STAGE_SEND,
+    MAX_MONITOR_SEND,
+    buildStageInputSends,
+    monitorBuses,
+    stageInputRows,
+    stageSendVerifyPlan,
+  } from '$lib/hardware/stageInputSends'
   import type { LiveRigConfig } from '$lib/project/types'
   import { setProjectPerformers } from '$lib/project/commit'
   import type { Performer } from '$lib/project/types'
@@ -645,6 +653,68 @@
     }
   }
 
+  // ── Stage inputs → in-ear mixes ──────────────────────────────────────────
+  let stageBusy = $state(false)
+  let stageReport = $state('')
+  let stageOk = $state(false)
+  let stageLevel = $state(DEFAULT_STAGE_SEND)
+  const stageRows = $derived(stageInputRows(performers))
+  const stageBuses = $derived(monitorBuses(performers))
+
+  /**
+   * Raise every stage input into every in-ear mix, then READ IT BACK.
+   *
+   * The band plugged in and heard only the click, because BarBro's channels
+   * had sends and theirs did not. This is that fix as one press — and it
+   * reports what the desk actually says afterwards, because "21 commands sent"
+   * is not evidence on a desk that ignores addresses it does not have.
+   */
+  async function wireStageInputs() {
+    if (stageBusy || !connected) return
+    stageBusy = true
+    stageReport = ''
+    stageOk = false
+    try {
+      const writes = buildStageInputSends(performers, stageLevel)
+      if (writes.length === 0) {
+        stageReport =
+          'No inputs to wire yet — add each performer’s desk inputs in Project settings, and give everyone a monitor bus.'
+        return
+      }
+      for (const w of writes) {
+        const r = await setXAirBusSend(w.channel, w.bus, w.value)
+        if (!r.ok) throw new Error(`ch ${w.channel} → bus ${w.bus}: ${r.error}`)
+      }
+      const plan = stageSendVerifyPlan(writes)
+      const q = await queryXAirPaths(plan.map((p) => p.address), 1200)
+      if (!q.ok) {
+        stageReport = `Sent ${writes.length} sends, but the desk did not answer the read-back — check before trusting it.`
+        return
+      }
+      const wrong = plan.filter((p) => {
+        const got = q.replies[p.address]?.[0]
+        return typeof got !== 'number' || Math.abs(got - p.expect) > 0.02
+      })
+      if (wrong.length > 0) {
+        stageReport = `The desk did not accept ${wrong.length} of ${plan.length} sends (${wrong
+          .slice(0, 3)
+          .map((w) => w.address)
+          .join(', ')}…).`
+        return
+      }
+      stageOk = true
+      stageReport = `Verified from the desk: ${stageRows.length} input${
+        stageRows.length === 1 ? '' : 's'
+      } feeding ${stageBuses.length} in-ear mix${stageBuses.length === 1 ? '' : 'es'} — ${
+        writes.length
+      } sends. Raise each person by ear from here.`
+    } catch (e) {
+      stageReport = e instanceof Error ? e.message : String(e)
+    } finally {
+      stageBusy = false
+    }
+  }
+
   /** The ONE first-time confirmation, then it is automatic on every connect. */
   async function claimSplitStrips() {
     saveRigSetup({ ...loadRigSetup(), splitStripsClaimed: true })
@@ -922,25 +992,76 @@
   {/if}
 
   <!-- ── The patch list: where the band plugs in ──────────────────────────── -->
-  {#if patchRows.length > 0}
+  {#if performers.length > 0}
     <div>
       <p class="mb-1.5 text-xs font-black uppercase tracking-wide">Plug in</p>
       {#each inputProblems as problem (problem)}
         <p class="mb-1 text-xs font-bold text-amber-600 dark:text-amber-400">{problem}</p>
       {/each}
-      <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-        {#each patchRows as row (row.performer + row.label)}
-          <span>
-            <span class="font-bold">{row.performer}</span>
-            {row.label} →
-            <span class="font-mono">{row.channels.join('/')}</span>
-          </span>
-        {/each}
-      </div>
+      {#if patchRows.length === 0}
+        <p class="text-muted-foreground text-xs">
+          Nothing listed yet. Add what each person plugs in under Project settings → their name →
+          “+ desk input” (e.g. Mic → 1, Keys → 5 and 6, Guitar → 7 and 8), then come back here and
+          press “Wire up monitors”.
+        </p>
+      {:else}
+        <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          {#each patchRows as row (row.performer + row.label)}
+            <span>
+              <span class="font-bold">{row.performer}</span>
+              {row.label} →
+              <span class="font-mono">{row.channels.join('/')}</span>
+            </span>
+          {/each}
+        </div>
+      {/if}
       <p class="text-muted-foreground mt-1 text-[11px]">
         Set each performer’s inputs in Project settings. Channels carrying BarBro’s own audio are
         never offered there.
       </p>
+
+      <!-- The fix for "we plugged in and hear only the click": a desk channel
+           reaches nobody's ears until its send is raised. One press does all of
+           them, then reads the desk back to prove it. -->
+      <div class="border-foreground/15 mt-2 flex flex-wrap items-center gap-2 rounded-[var(--radius)] border p-2">
+        <div class="min-w-0 flex-1">
+          <p class="text-xs font-bold">Send these into everyone’s in-ears</p>
+          <p class="text-muted-foreground text-[11px]">
+            {stageRows.length} input{stageRows.length === 1 ? '' : 's'} → {stageBuses.length} mix{stageBuses.length ===
+            1
+              ? ''
+              : 'es'}. Starts modest on purpose — raise each person by ear afterwards.
+          </p>
+        </div>
+        <label class="text-muted-foreground inline-flex items-center gap-1 text-[11px] font-bold">
+          Level
+          <input
+            type="range"
+            min="0"
+            max={MAX_MONITOR_SEND}
+            step="0.05"
+            bind:value={stageLevel}
+            class="accent-[var(--studio-orange)] w-24"
+          />
+          <span class="w-8 text-right font-mono">{Math.round(stageLevel * 100)}</span>
+        </label>
+        <Button
+          size="sm"
+          class=""
+          onclick={() => void wireStageInputs()}
+          disabled={!connected || stageBusy || stageRows.length === 0 || stageBuses.length === 0}
+          title={!connected
+            ? 'Connect to the desk first.'
+            : 'Raise every stage input into every in-ear mix, then read the desk back.'}
+        >
+          {stageBusy ? 'Wiring…' : 'Wire up monitors'}
+        </Button>
+      </div>
+      {#if stageReport}
+        <p class="mt-1 text-xs {stageOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive'}">
+          {stageReport}
+        </p>
+      {/if}
     </div>
   {/if}
 

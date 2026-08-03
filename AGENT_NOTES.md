@@ -1830,3 +1830,27 @@ is mutation-proven (reverting it fails 4 tests).
   is single-select today and rewriting its pointer handling mid-session was the
   riskier option. Drag-select + real right-click context menu is the follow-up.
 - Suites: 2248 unit / 393 browser / 0 typecheck.
+
+## 2026-08-03 (Fable) — "Wire up monitors": stage inputs → in-ear mixes (live need)
+
+- Martin plugged the band in (mics 1/2/3, keys 5-6, guitar 7-8) and heard ONLY
+  the click in the ears. Cause: BarBro's own strips have bus sends (set earlier
+  today); the analog channels never did. A desk channel reaches nobody until its
+  send is raised.
+- `src/lib/hardware/stageInputSends.ts` (11 tests): stageInputRows / monitorBuses
+  from the roster, `buildStageInputSends(performers, level)` = every input
+  channel × every performer bus, de-duplicated; `busSendPath` zero-pads BOTH
+  channel and bus; `stageSendVerifyPlan` for read-back.
+  SAFETY PINNED BY TEST: MAX_MONITOR_SEND 0.7 — clamped below X-Air unity (0.75 =
+  full line level into a P2) however high the caller asks; negative floors to 0.
+  Default 0.55, adjustable by slider.
+- XAirSettingsPanel: "Send these into everyone's in-ears" with a level slider and
+  a "Wire up monitors" button — writes every send via setXAirBusSend then reads
+  them all back and reports what the DESK says (n of m rejected, or verified).
+  The "Plug in" block now also shows when a roster exists but no inputs are
+  entered, telling the user exactly where to add them.
+- Martin must first enter the patch under Project settings → performer →
+  "+ desk input". Desk was offline when this was built — NOT yet exercised
+  against hardware; the writes/read-back path is the same one that configured
+  strips 11/12 successfully.
+- Suites: 2259 unit / 393 browser / 0 typecheck.
