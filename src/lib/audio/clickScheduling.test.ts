@@ -196,3 +196,71 @@ describe('exported constants', () => {
     expect(CLICK_PAST_GRACE_SEC).toBe(0.018)
   })
 })
+
+describe('a count-in that reaches PAST time 0 — the late-song-start case', () => {
+  /**
+   * The whole count-in does not always fit in silence before the audio.
+   *
+   * When a song's first downbeat sits further into the file than the count-in
+   * is long (a long intro, or the song start moved later), only part of the
+   * count-in needs prepended silence — the rest lands INSIDE the audio, at
+   * POSITIVE plan times. `countInClickTimes` pre-schedules every count-in
+   * click regardless of sign, so the rAF loop must skip every one of them.
+   *
+   * It used to decide "is this a count-in click?" by asking "is its time
+   * negative?", which is only the same question while the count-in fits in
+   * the prepend. On a late-starting song the positive count-in clicks were
+   * scheduled TWICE — once against ctxStart, once by the loop against now —
+   * two voices a few milliseconds apart: a flammed, doubled click.
+   *
+   * Real case: Valerie, first downbeat 2.71 s, 8-beat count-in of 4.5 s →
+   * count-in spans −1.79 … +2.15, so four of the eight are positive.
+   */
+  const lateStartPlan = () =>
+    plan([
+      cp(-1.79, false, true),
+      cp(-1.23, false, true),
+      cp(-0.67, false, true),
+      cp(-0.10, false, true),
+      cp(0.46, false, true), // ← inside the audio, still a COUNT-IN click
+      cp(1.02, false, true),
+      cp(1.59, false, true),
+      cp(2.15, false, true),
+      cp(2.71, true, false), // the song's first downbeat
+      cp(3.27, false, false),
+    ])
+
+  it('pre-scheduling still covers every count-in click, positive ones included', () => {
+    const fires = countInClickTimes(lateStartPlan(), 10, 0, 0)
+    expect(fires).toHaveLength(8)
+  })
+
+  it('the loop NEVER re-fires a count-in click that sits after time 0', () => {
+    const p = lateStartPlan()
+    // Sweep the whole count-in region: no window may produce a count-in fire.
+    for (let t = -2; t <= 2.6; t += 0.1) {
+      const { fires } = dueClicks(p, 0, t, 100, 0)
+      for (const f of fires) {
+        expect(
+          p.clickPoints[f.idx]!.isCountIn,
+          `the loop re-fired the count-in click at ${p.clickPoints[f.idx]!.timeSec}s ` +
+            `(planTime ${t.toFixed(1)}) — it was already pre-scheduled, so it double-strikes`,
+        ).toBe(false)
+      }
+    }
+  })
+
+  it('the song clicks are still scheduled normally', () => {
+    const p = lateStartPlan()
+    const { fires } = dueClicks(p, 0, 2.71, 100, 0)
+    expect(fires.length, 'the first downbeat must still fire').toBeGreaterThan(0)
+    expect(p.clickPoints[fires[0]!.idx]!.timeSec).toBe(2.71)
+  })
+
+  it('the loop STARTS at the first song click, not inside the count-in', () => {
+    const p = lateStartPlan()
+    const i = initialClickIndex(p, -1.79)
+    expect(p.clickPoints[i]!.isCountIn, 'loop started on a count-in click').toBe(false)
+    expect(p.clickPoints[i]!.timeSec).toBe(2.71)
+  })
+})

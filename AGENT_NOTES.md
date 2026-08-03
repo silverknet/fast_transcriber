@@ -1782,3 +1782,26 @@ is mutation-proven (reverting it fails 4 tests).
 - Dead prop removed: TimelineBeatGrid no longer takes `onSetStartBar` (it only
   displays the marker now); pass-through dropped from WaveformPlayer.
 - Suites: 2231 unit / 68 component-browser / 0 typecheck.
+
+## 2026-08-03 (Fable) — DOUBLED CLICK on late-starting songs (Valerie) — real bug, fixed
+
+- Martin: "click track starts normal, then after pause→stop→play the click is
+  fucked up". Root cause found by measurement, NOT the restart at all — it is the
+  SONG START position.
+- `dueClicks` (clickScheduling.ts) skipped count-in clicks by asking
+  `c.timeSec >= -1e-9` ("is it after zero?") instead of `!c.isCountIn`. Those two
+  agree ONLY while the whole count-in fits inside the prepended silence.
+  When the first downbeat is further into the file than the count-in is long,
+  part of the count-in lands at POSITIVE plan times — and `countInClickTimes`
+  pre-schedules ALL count-in clicks, so the loop scheduled the positive ones a
+  SECOND time, milliseconds apart → flammed/doubled click.
+  `initialClickIndex` had the same wrong predicate (started the loop INSIDE the
+  count-in). Both now test `isCountIn`.
+- Valerie (while Martin was editing it): first downbeat 2.71s, 8-beat count-in
+  4.5s → count-in spans −1.79…+2.15, so 4 of 8 were doubled. Also explains his
+  "after 2 seconds it starts playing": prependSec had become 1.79 s.
+- Tests: clickScheduling.test.ts +5, PROVEN RED without the fix (2 failures
+  naming the re-fired click). Suites: 2235 unit / 393 browser / 0 typecheck.
+- NOTE: the earlier probe of Valerie read prepend 4.04 and a later one 1.79 —
+  the file changed on disk mid-analysis because Martin was editing the same song.
+  When diagnosing live, re-read rather than trusting an earlier dump.

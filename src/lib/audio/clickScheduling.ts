@@ -74,7 +74,11 @@ type ClickPlan = Pick<PlaybackPlan, 'clickPoints'>
  */
 export function initialClickIndex(plan: ClickPlan, planTime: number): number {
   const pts = plan.clickPoints
-  let i = pts.findIndex((c) => !c.isCountIn || c.timeSec >= -1e-9)
+  // The loop owns the SONG clicks only; the count-in is pre-scheduled whole in
+  // `play()`. Same correction as in `dueClicks`: a count-in click can sit at a
+  // positive time when the song starts late, so the sign of the time is not a
+  // test for "is this part of the count-in".
+  let i = pts.findIndex((c) => !c.isCountIn)
   if (i < 0) i = pts.length
   while (i < pts.length && pts[i]!.timeSec < planTime - CLICK_PAST_GRACE_SEC) i++
   return i
@@ -156,8 +160,16 @@ export function dueClicks(
   const fires: DueClick[] = []
   while (idx < pts.length && pts[idx]!.timeSec <= planTime + lookahead) {
     const c = pts[idx]!
-    // Skip count-in clicks — those were pre-scheduled in `play()`.
-    if (c.timeSec >= -1e-9) {
+    // Skip count-in clicks — `play()` pre-scheduled every one of them.
+    //
+    // Ask the real question (`isCountIn`), not "is its time negative". Those
+    // agree only while the whole count-in fits in the prepended silence. When
+    // a song's first downbeat is further in than the count-in is long, part of
+    // the count-in lands INSIDE the audio at positive times — and the sign
+    // test then let those through to be scheduled a SECOND time, a few
+    // milliseconds off the pre-scheduled voice. That is the flammed, doubled
+    // click heard on a song whose start sits late in the file.
+    if (!c.isCountIn) {
       const delta = c.timeSec - planTime // plan-time (audio seconds)
       // → wall seconds before it should sound. The calibration offset is
       // already in ctx-time and is added after the conversion, not scaled.
