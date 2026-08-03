@@ -75,6 +75,7 @@
   import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
   import MonitorStatusStrip from '$lib/components/MonitorStatusStrip.svelte'
   import { Cable, Pause, Play, Repeat, Repeat1, RotateCcw, SkipBack, SkipForward, Square, Trash2, X } from '@lucide/svelte'
+  import ALargeSmall from '@lucide/svelte/icons/a-large-small'
   import {
     formatChordSymbol,
     formatSongKeyLabel,
@@ -136,6 +137,8 @@
     type MixerTrack,
   } from '$lib/audio/mixerEngine'
   import { chordJam } from '$lib/audio/chordJam.svelte'
+  import { UNITY, planFaderReset } from '$lib/audio/faderReset'
+  import { lanesByRole, roleStackGainDb, stackedRoles } from '$lib/audio/stemRoles'
   import { audioDevice } from '$lib/audio/audioDevice'
   import { mayStartSong } from '$lib/audio/clickStartGate'
   import { liveRigLayout } from '$lib/hardware/liveRigPlan'
@@ -150,6 +153,7 @@
     bufferRmsDb,
     buildMasterChain,
     buildStemChain,
+    loudnessMatchGainDb,
     stemKindForLaneKey,
   } from '$lib/audio/mastering'
   import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
@@ -373,6 +377,13 @@
     volume: number
     muted: boolean
     soloed: boolean
+    /**
+     * Automatic loudness-match gain for this lane, in dB (0 when matching is
+     * off or the lane is not a stem). Shown next to the fader: this gain sits
+     * BEFORE the fader in the chain, so without it on screen a stem can be
+     * audibly louder than its fader suggests and nothing says why.
+     */
+    matchGainDb: number
   }
 
   interface ChordTimelineSegment {
@@ -430,6 +441,7 @@
   // their own stacking context above the editor — so the stage fills the area
   // BELOW the chrome (measured) rather than fighting z-index with the navbar.
   let chromeInsetPx = $state(0)
+  let largeStageText = $state(false)
   let repeatSectionEnabled = $state(false)
   let repeatSectionId = $state<string | null>(null)
   let repeatSeekGuard = false
@@ -1095,9 +1107,32 @@
           volume: t.volume,
           muted: t.muted,
           soloed: t.soloed,
+          matchGainDb: matchGainDbFor(t.key, t.buffer ?? null),
         },
       ]
     })
+  }
+
+  /**
+   * The automatic gain loudness-matching is applying to this lane right now.
+   *
+   * Reads the SAME measurement the audio chain uses (the cached buffer RMS),
+   * so the number on screen cannot drift from the number being heard. Zero
+   * when matching is off, the lane is not a separated stem, or it has no
+   * buffer to measure.
+   */
+  function matchGainDbFor(key: string, buffer: AudioBuffer | null): number {
+    if (!buffer) return 0
+    const cfg = get(projectStore).data?.mastering
+    if (!cfg?.enabled || !cfg.matchLoudness || soundBypassed) return 0
+    const kind = stemKindForLaneKey(key)
+    if (!kind) return 0
+    let rms = laneRms.get(buffer)
+    if (rms === undefined) {
+      rms = bufferRmsDb(buffer)
+      laneRms.set(buffer, rms)
+    }
+    return loudnessMatchGainDb(kind, rms)
   }
 
   // ── Lane order (drag to reorder; the original mix is pinned at the top) ───
@@ -2415,6 +2450,35 @@
       const next: MixState = { tracks }
       patchSongMap((m) => ({ ...m, mixState: next }))
     }, 800)
+  }
+
+  /** What "Faders → unity" would do, recomputed from the live lane state. */
+  const faderResetPlan = $derived(
+    planFaderReset(lanes.map((l) => ({ key: l.key, volume: l.volume, muted: l.muted }))),
+  )
+  const stackedRoleNames = $derived(
+    stackedRoles(lanes.map((l) => ({ key: l.key, volume: l.volume, muted: l.muted }))),
+  )
+  /** How far a blended role overshoots a per-lane target, for the note above. */
+  const stackedRoleExcessDb = $derived.by(() => {
+    const byRole = lanesByRole(lanes.map((l) => ({ key: l.key, volume: l.volume, muted: l.muted })))
+    let worst = 0
+    for (const role of stackedRoleNames) {
+      worst = Math.max(worst, roleStackGainDb(byRole.get(role) ?? []))
+    }
+    return worst
+  })
+
+  /**
+   * Clear the per-song fader compensation so loudness matching is the only
+   * thing setting stem levels. Goes through the ENGINE and the existing
+   * persist path — no second writer of `mixState`.
+   */
+  function resetStemFaders() {
+    if (!engine) return
+    for (const key of faderResetPlan.reset) engine.setVolume(key, UNITY)
+    syncLanesFromEngine()
+    schedulePersist()
   }
 
   function onVolume(key: string, v: number) {
@@ -3921,6 +3985,21 @@
           </div>
         </div>
         <div class="flex max-w-full flex-wrap items-center justify-end gap-1.5">
+          {#if liveMode}
+            <button
+              type="button"
+              class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-black transition-colors {largeStageText
+                ? 'bg-[var(--studio-orange)] text-[var(--studio-ink)] shadow-sm'
+                : 'bg-foreground/8 text-muted-foreground hover:bg-foreground/15 hover:text-foreground'}"
+              onclick={() => (largeStageText = !largeStageText)}
+              aria-pressed={largeStageText}
+              aria-label="Large chords and lyrics"
+              title="Make upcoming chords and lyrics larger"
+            >
+              <ALargeSmall class="size-4" aria-hidden="true" />
+              Large view
+            </button>
+          {/if}
           <!-- The 10 canonical live slots, in controller order: slots 1-8 are
                the APC's bottom row / track buttons; Custom 1/2 begin row 4.
                The arranging mixer below
@@ -4013,7 +4092,7 @@
         </div>
 
         <!-- Upcoming chords approach lane (Guitar-Hero style) — half height. -->
-        <div class="w-full max-w-4xl">
+        <div class="w-full {largeStageText ? 'max-w-6xl' : 'max-w-4xl'}">
           <div class="flex items-center justify-between gap-3 px-1">
             <div class="text-muted-foreground text-xs font-black uppercase">Upcoming chords</div>
             <div class="text-muted-foreground flex items-center gap-1 font-mono text-[10px] font-bold tabular-nums">
@@ -4043,7 +4122,7 @@
             pitch with a 33.6px bar needs 109px, and the old height clipped the
             bottom row.
           -->
-          <div class="relative mt-2 h-28">
+          <div class="relative mt-2 {largeStageText ? 'h-36' : 'h-28'}">
             <!--
               A WASH IN THE SECTION'S OWN COLOUR, POURED FROM THE PLAYHEAD.
 
@@ -4126,10 +4205,14 @@
                   to match — 30px would have overlapped them.
                 -->
                 <div
-                  class="absolute h-[2.1rem] overflow-hidden rounded-[var(--radius)] transition-[left,top,width,opacity] duration-100 ease-linear {seg.active
+                  class="absolute overflow-hidden rounded-[var(--radius)] transition-[left,top,width,opacity] duration-100 ease-linear {largeStageText
+                    ? 'h-11'
+                    : 'h-[2.1rem]'} {seg.active
                     ? ''
-                    : 'min-w-[3.5rem]'}"
-                  style={`left: ${seg.leftPct}%; top: ${seg.row * 36 + 3}px; width: ${seg.widthPct}%; opacity: ${seg.opacity}; z-index: ${seg.active ? 4 : seg.id === nextChordView?.id ? 3 : 1};`}
+                    : largeStageText
+                      ? 'min-w-[4.75rem]'
+                      : 'min-w-[3.5rem]'}"
+                  style={`left: ${seg.leftPct}%; top: ${seg.row * (largeStageText ? 48 : 36) + 3}px; width: ${seg.widthPct}%; opacity: ${seg.opacity}; z-index: ${seg.active ? 4 : seg.id === nextChordView?.id ? 3 : 1};`}
                   title={`${seg.label} in ${seg.startsInLabel}`}
                 >
                   <!--
@@ -4148,7 +4231,11 @@
                         ? 'background: color-mix(in oklch, var(--studio-orange) 88%, white); color: var(--studio-ink); box-shadow: 0 1px 4px color-mix(in oklch, var(--foreground) 26%, transparent);'
                         : 'background: var(--background); box-shadow: 0 1px 3px color-mix(in oklch, var(--foreground) 20%, transparent);'}
                   >
-                    <span class="whitespace-nowrap font-mono text-sm leading-none font-black tabular-nums">{seg.label}</span>
+                    <span
+                      class="whitespace-nowrap font-mono leading-none font-black tabular-nums {largeStageText
+                        ? 'text-2xl'
+                        : 'text-sm'}">{seg.label}</span
+                    >
                   </div>
                 </div>
               {/each}
@@ -4169,7 +4256,9 @@
           chord above shrinking.
         -->
         <div
-          class="flex min-h-[8.5rem] shrink-0 flex-col items-center justify-center gap-1.5 px-4 text-center"
+          class="flex shrink-0 flex-col items-center justify-center gap-1.5 px-4 text-center {largeStageText
+            ? 'min-h-[10rem]'
+            : 'min-h-[8.5rem]'}"
           aria-label="Lyrics"
           aria-live="polite"
         >
@@ -4180,17 +4269,23 @@
               nextText={lyricBreak.nextLine ? lyricBreak.nextLine.words.map((w) => w.text).join(' ') : ''}
             />
           {:else}
-          <div class="text-muted-foreground/70 min-h-6 truncate text-lg font-bold">
+          <div
+            class="text-muted-foreground/70 min-h-6 truncate font-bold {largeStageText ? 'text-xl' : 'text-lg'}"
+          >
             {prev ? prev.words.map((w) => w.text).join(' ') : ' '}
           </div>
-          <div class="min-h-12 text-3xl font-black leading-snug sm:text-4xl">
+          <div
+            class="min-h-12 font-black leading-snug {largeStageText ? 'text-4xl sm:text-5xl' : 'text-3xl sm:text-4xl'}"
+          >
             {#if cur}
               <LyricConfidenceLine words={cur.words} songTime={lyricsSongTime} />
             {:else if next}
               <span class="text-muted-foreground">{next.words.map((w) => w.text).join(' ')}</span>
             {/if}
           </div>
-          <div class="text-muted-foreground min-h-6 truncate text-lg font-bold">
+          <div
+            class="text-muted-foreground min-h-6 truncate font-bold {largeStageText ? 'text-xl' : 'text-lg'}"
+          >
             {cur && next ? next.words.map((w) => w.text).join(' ') : ' '}
           </div>
           {/if}
@@ -4290,7 +4385,29 @@
       >
         Effects{effectBusses.length ? ` (${effectBusses.length})` : ''}
       </button>
+
+      <!-- Old per-song fader compensation double-counts against loudness
+           matching. One press clears it — and deliberately leaves a role you
+           have blended from several lanes alone. -->
+      {#if mixerTab === 'tracks' && faderResetPlan.reset.length > 0}
+        <button
+          type="button"
+          class="border-foreground/25 bg-background hover:border-foreground/50 ml-auto rounded-[var(--radius)] border-2 px-2.5 py-1 text-[11px] font-bold transition-colors"
+          onclick={resetStemFaders}
+          title={faderResetPlan.summary}
+        >
+          Faders → unity ({faderResetPlan.reset.length})
+        </button>
+      {/if}
     </div>
+    {#if mixerTab === 'tracks' && stackedRoleNames.length > 0}
+      <p class="text-muted-foreground px-1 pt-1 text-[11px]">
+        You have blended more than one lane into
+        <span class="font-bold">{stackedRoleNames.join(' and ')}</span> — loudness matching measures
+        each lane on its own, so the combined level sits about
+        {stackedRoleExcessDb.toFixed(1)} dB above the target. Set the blend by ear.
+      </p>
+    {/if}
 
     <!-- A ruled list, not a stack of cards: each row draws its own hairline,
          the container closes the top edge. -->
@@ -4303,6 +4420,7 @@
           sourceDurationSec={lane.sourceDurationSec}
           midiVisual={lane.midiVisual}
           volume={lane.volume}
+          matchGainDb={lane.matchGainDb}
           muted={lane.muted}
           soloed={lane.soloed}
           color={lane.color}

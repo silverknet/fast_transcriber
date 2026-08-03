@@ -1854,3 +1854,37 @@ is mutation-proven (reverting it fails 4 tests).
   against hardware; the writes/read-back path is the same one that configured
   strips 11/12 successfully.
 - Suites: 2259 unit / 393 browser / 0 typecheck.
+
+## 2026-08-03 (Fable) — loudness matching made LEGIBLE + role model (Martin's catch)
+
+MEASURED across all 16 songs (ffmpeg RMS per stem): bass spread 16.6 dB, drums
+12.8, vocals 15.6, other 19.0. Bass-vs-drums balance drifts 7.5 dB song to song
+(−3.7 .. +3.8). matchLoudness would collapse those to 2.0 / 0.3 / 1.6 / 4.5 dB
+and the bass-drums drift to 1.7 dB. `mastering.enabled` was FALSE in his project.
+Why he disliked it before: his config had bass+drums intensity "light" AND tone
+"shaped" AND masterGlue — three sound-CHANGING processes bundled with the pure
+level change. Surgical setting = enabled + matchLoudness, all intensities off,
+tone unchecked, glue off ⇒ buildStemChain reduces to a single gain node.
+CONFIRMED: mastering never rewrites source audio; it is a playback insert
+(only `renderBufferThroughStemChain` bakes it, and only into EXPORT files).
+
+MARTIN'S CATCH (important): a role is often several lanes — `stem:drums.wav`
+PLUS `drum-machine`/`drums-gen`. `stemKindForLaneKey` only matches `stem:*`, so
+machines were INVISIBLE to matching: the stem got pulled to target and the
+machine rode on top unmeasured. Real in his set (Calleth, Diggiloo, Hell Yeah,
+Ramlar, Love NFSG, Can't tame her, Dum av dig).
+- NEW `stemRoles.ts` (13 tests): `roleForLaneKey` maps machines/generated lanes
+  to their musical role; `lanesByRole`, `stackedRoles` (roles with >1 AUDIBLE
+  lane), `roleStackGainDb` (power sum — two lanes at unity = +3.01 dB).
+- NEW `faderReset.ts` (6 tests): `planFaderReset` clears per-song fader
+  compensation but REFUSES to touch a blended role (that balance is a decision)
+  and never touches original/click/cue. Goes through engine.setVolume +
+  the existing persist path — no second writer of mixState.
+- MixerView: per-lane "match +3.2" readout beside the fader (reads the SAME
+  cached RMS the audio chain uses, so screen and sound cannot drift);
+  "Faders → unity (N)" button; a note naming blended roles and how many dB they
+  overshoot a per-lane target.
+- STILL OPEN (design, next session): make loudness matching itself ROLE-aware —
+  measure the sum of a role's audible lanes and apply one gain to the group.
+  Until then the readout + note tell the truth instead of the app pretending.
+- Suites: 2278 unit / 393 browser / 0 typecheck.
