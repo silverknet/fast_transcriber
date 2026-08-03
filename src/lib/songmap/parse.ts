@@ -1010,6 +1010,13 @@ function parseBassMidi(raw: unknown, path: string): import('./types').BassMidi |
   }
   const style = optString(o.style)
   if (style === 'steady' || style === 'detected') out.style = style
+  // The voice — same fields and same normalization as the bass machine, so
+  // the two sound identical when set identically.
+  const sound = optString(o.sound)
+  if (sound !== undefined) out.sound = sound
+  if (o.tone && typeof o.tone === 'object' && !Array.isArray(o.tone)) {
+    out.tone = normalizeBassTone(o.tone as Partial<import('$lib/audio/bassTone').BassTone>)
+  }
   const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
   if (renderExport) out.renderExport = renderExport
   return out

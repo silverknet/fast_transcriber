@@ -345,5 +345,13 @@ export async function renderBassTrackWavBlob(
     const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
     events = quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
   }
-  return renderBassEventsToWav(sm, trimBassOverlaps(events))
+  // The detected bass gets a VOICE the same way the machine does. Without a
+  // saved sound this passes undefined and falls through to the original fixed
+  // tone, so songs that never chose one sound exactly as they did before.
+  return renderBassEventsToWav(
+    sm,
+    trimBassOverlaps(events),
+    bm.tone ? normalizeBassTone(bm.tone) : undefined,
+    bm.sound,
+  )
 }

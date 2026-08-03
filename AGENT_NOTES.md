@@ -1888,3 +1888,37 @@ Ramlar, Love NFSG, Can't tame her, Dum av dig).
   measure the sum of a role's audible lanes and apply one gain to the group.
   Until then the readout + note tell the truth instead of the app pretending.
 - Suites: 2278 unit / 393 browser / 0 typecheck.
+
+## 2026-08-03 (Fable) — BarBro Bass gets a VOICE (Martin request, piece 1 of 3)
+
+FINDING: the renderer ALREADY supported a chosen voice — `renderBassEventsToWav`
+takes `tone`/`soundId`, the machine passed them, and the DETECTED path passed
+nothing (line ~348), so BarBro Bass was locked to one hard-coded tone. Not DSP
+work: a data + wiring gap.
+- `BassMidi` gains `sound?: string` and `tone?: BassTone` (same fields, same
+  `normalizeBassTone` on read, as BassMachine). Absent = unchanged behaviour.
+- parse.ts parseBassMidi reads them; detected render path passes them.
+- FINGERPRINT BUMPED v1→v2 with sound+tone included. Without this, changing the
+  bass would leave the saved render on disk looking fresh and the OLD sound
+  would keep playing — the stale-render trap. 3 tests pin the invalidation.
+- UI: sound picker in the BarBro Bass row of DrumTrackPanel (same
+  `bassSoundGroups()` list the machine uses).
+- No sidecar mirror needed: song maps are opaque bytes to the sidecar (only the
+  project MANIFEST has a parser there).
+- 8 tests in bassMidiVoice.test.ts. Suites: 2286 unit / 393 browser / 0 check.
+- NOTE: `bassMachineSchema > a local re-render alone does not count as a change`
+  failed ONCE in a full run, passed in isolation and on the next full run —
+  possible ordering-dependent test, worth watching.
+
+STILL TO DO (Martin asked for three things):
+ 2. BLEND between "as detected" and "steady": `inferBassGroove` applies four
+    INDEPENDENT liberties (register fold, timing snap, legato/phrasing,
+    dynamics flatten) as all-or-nothing. Splitting them into separate amounts
+    gives every point in between. Contained, pure, testable.
+ 3. KICK-FOLLOW mode + link to the drum machine: snap/bias bass onsets toward
+    kick hits. Kick times exist in `drumMidi` (detected) and the drum machine
+    pattern. Fits as a fifth liberty in bassGroove.
+ 4. DETECTION QUALITY: `transcribe_bass.py` is v1 — `librosa.yin` + RMS gate +
+    median filter. `librosa.pyin` (voiced probability) plus onset-informed
+    segmentation and a cleanup pass is the known upgrade; can be measured
+    against Martin's real bass stems on disk before/after.

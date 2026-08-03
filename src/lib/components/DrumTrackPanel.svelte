@@ -23,6 +23,7 @@
   import { DRUM_KITS, DRUM_KIT_SAMPLE_RATE, loadDrumKit, type DrumKit, type DrumKitId } from '$lib/audio/drumKits'
   import { renderDrumTrackWavBlob } from '$lib/audio/renderDrumTrack'
   import { synthBassNote, renderBassTrackWavBlob } from '$lib/audio/renderBassTrack'
+  import { DEFAULT_BASS_SOUND_ID, bassSoundGroups } from '$lib/audio/bassSounds'
   import {
     DRUM_ANALYZER_VERSION,
     DRUM_TRACK_REL,
@@ -301,6 +302,12 @@
 
   function setBassStyle(style: 'steady' | 'detected') {
     patchSongMap((m) => (m.bassMidi ? { ...m, bassMidi: { ...m.bassMidi, style } } : m))
+    onChanged?.()
+  }
+
+  /** The detected bass's voice — same instrument list as the bass machine. */
+  function setBassSound(sound: string) {
+    patchSongMap((m) => (m.bassMidi ? { ...m, bassMidi: { ...m.bassMidi, sound } } : m))
     onChanged?.()
   }
 
@@ -680,6 +687,26 @@
           </select>
         </label>
       {/if}
+      <!-- The VOICE — the same picker the bass machine has. The renderer always
+           supported a chosen sound; only the detected path never passed one. -->
+      <label class="inline-flex items-center gap-1.5">
+        <span class="text-muted-foreground">Sound</span>
+        <select
+          class="border-input bg-background text-foreground border-2 px-1.5 py-0.5 text-xs"
+          value={bm.sound ?? DEFAULT_BASS_SOUND_ID}
+          onchange={(e) => setBassSound(e.currentTarget.value)}
+          aria-label="BarBro bass sound"
+          title="Which bass this plays. Same instruments the bass machine uses."
+        >
+          {#each bassSoundGroups() as g (g.group)}
+            <optgroup label={g.group}>
+              {#each g.sounds as snd (snd.id)}
+                <option value={snd.id}>{snd.label}</option>
+              {/each}
+            </optgroup>
+          {/each}
+        </select>
+      </label>
       <Button
         variant="outline"
         size="sm"

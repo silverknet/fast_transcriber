@@ -18,8 +18,13 @@ export function bassTrackFingerprintPayload(sm: SongMap): unknown {
   const trim = sm.audio?.trim ?? { startSec: 0, endSec: 0 }
   const bm = sm.bassMidi
   return {
-    // v1: YIN-detected notes + sustained synth voice on the shared mix bus.
-    v: 1,
+    // v2: the detected bass gained a chosen VOICE (sound + tone), so those
+    // have to be part of the identity — otherwise picking a different bass
+    // leaves the saved render on disk looking fresh and the old sound keeps
+    // playing, which is the stale-render trap this fingerprint exists for.
+    v: 2,
+    sound: bm?.sound ?? null,
+    tone: bm?.tone ?? null,
     events: (bm?.events ?? []).map((e) => ({
       t: round6(e.timeSec),
       d: round6(e.durationSec),

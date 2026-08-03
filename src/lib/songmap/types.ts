@@ -438,6 +438,13 @@ export type BassMidi = {
    * 'detected': play the raw detected notes.
    */
   style?: 'steady' | 'detected'
+  /**
+   * THE VOICE — the same two fields the bass machine has, so the detected bass
+   * can be dialled in instead of being stuck on one hard-coded sound. Absent
+   * keeps the original fixed tone, so existing songs are unchanged.
+   */
+  sound?: string
+  tone?: BassTone
   /** Saved render of the bass track, when written into the project. */
   renderExport?: RenderedCueExport
 }
