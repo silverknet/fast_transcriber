@@ -1017,6 +1017,8 @@ function parseBassMidi(raw: unknown, path: string): import('./types').BassMidi |
   if (o.tone && typeof o.tone === 'object' && !Array.isArray(o.tone)) {
     out.tone = normalizeBassTone(o.tone as Partial<import('$lib/audio/bassTone').BassTone>)
   }
+  const kickFollow = optUnit(o.kickFollow)
+  if (kickFollow !== undefined) out.kickFollow = kickFollow
   const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
   if (renderExport) out.renderExport = renderExport
   return out

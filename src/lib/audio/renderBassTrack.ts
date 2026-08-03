@@ -22,6 +22,8 @@ import { normalizeBassTone, type BassTone } from './bassTone'
 import { renderBassVoice } from './renderBassVoice'
 import { transposeMidiNote } from './midiTranspose'
 import { inferBassGroove } from '$lib/songmap/bassGroove'
+import { followKick, kickTimesFrom } from '$lib/songmap/bassKickFollow'
+import { generateDrumGroove } from '$lib/songmap/generateDrumGroove'
 import { DRUM_KIT_SAMPLE_RATE } from './drumKits'
 import { applyBusCompression, applySaturation } from './drumBus'
 import { normalizeDrumBuffer } from './renderDrumTrack'
@@ -332,14 +334,39 @@ export function detectedBassEvents(
   }
   if (style === 'steady') {
     // Confident-bassist pass — already grid-locked, so no extra quantize.
-    return inferBassGroove(sm, events)
-  }
-  if (quantize !== 'off') {
+    events = inferBassGroove(sm, events)
+  } else if (quantize !== 'off') {
     const beatsSorted = sortBeatsByTime(sm.timeline.beats)
     const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
-    return quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
+    events = quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
   }
-  return events
+  // LAST: lock onto the kick. After the grid pass, so it has the final word on
+  // where a note starts — the kick is the thing a bassist actually plays with,
+  // and a note snapped to the grid a hair off the kick still sounds loose.
+  return applyKickFollow(sm, events, bm.kickFollow ?? 0)
+}
+
+/**
+ * Pull bass onsets onto the kick, using the drum machine's kicks when it is
+ * playing and the detected drums otherwise. Reach is half a beat: far enough
+ * to catch a late note, short enough that it can never pull a note onto the
+ * wrong beat.
+ */
+function applyKickFollow(sm: SongMap, events: BassMidiEvent[], amount: number): BassMidiEvent[] {
+  if (!(amount > 0) || events.length === 0) return events
+  const machineKicks = sm.drumMachine?.enabled
+    ? kickTimesFrom(generateDrumGroove(sm, sm.drumMachine))
+    : []
+  const kicks = machineKicks.length > 0 ? machineKicks : kickTimesFrom(sm.drumMidi?.events ?? [])
+  if (kicks.length === 0) return events
+  const beats = sortBeatsByTime(sm.timeline.beats)
+  const spans: number[] = []
+  for (let i = 1; i < beats.length; i++) {
+    const s = beats[i]!.timeSec - beats[i - 1]!.timeSec
+    if (s > 0.1 && s < 3) spans.push(s)
+  }
+  const beatSec = spans.length ? spans.sort((a, b) => a - b)[spans.length >> 1]! : 0.5
+  return followKick(events, kicks, amount, beatSec / 2)
 }
 
 export async function renderBassTrackWavBlob(

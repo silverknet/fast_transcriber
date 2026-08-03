@@ -1950,3 +1950,28 @@ was the LANE REGISTRATION:
 - Saved WAV on disk is still what the Ableton export uses; only mixer playback
   became live.
 - Suites: 2286 unit / 393 browser / 0 typecheck.
+
+## 2026-08-04 (Fable) — bass "Lock to kick" (Martin's third ask)
+
+- `src/lib/songmap/bassKickFollow.ts` (13 tests): `followKick(events, kickTimes,
+  amount, maxPullSec)` moves each onset a FRACTION of the way to the nearest
+  kick — a pull, not a snap, because a bassist fractionally behind the kick is
+  grooving and welded is a sequencer. Notes with no kick inside the reach are
+  untouched (never dragged across the bar); never invents or drops a note;
+  lengths preserved (moves starts, not phrasing); amount clamped 0..1; output
+  re-sorted. `kickTimesFrom(events)` pulls kicks out of any drum event list.
+- Wired in `detectedBassEvents` AFTER the grid pass, so the kick has the final
+  word on onsets. Kick source: the DRUM MACHINE's generated groove when it is
+  enabled, else the detected `drumMidi`. Reach = half a median beat.
+  Same time base throughout (original audio seconds) — no conversion needed.
+- `BassMidi.kickFollow?: number` (0..1) + parser + added to the render
+  fingerprint, so changing it invalidates a saved WAV.
+- UI: "Lock to kick" slider in the BarBro Bass row.
+- Suites: 2299 unit / 393 browser / 0 typecheck.
+
+REMAINING from Martin's bass requests:
+  - blend between "as detected" and "steady" (split inferBassGroove's four
+    liberties into independent amounts)
+  - detector quality: transcribe_bass.py is still YIN + RMS gate; pyin +
+    onset-informed segmentation + cleanup is the upgrade, measurable against
+    his real stems.

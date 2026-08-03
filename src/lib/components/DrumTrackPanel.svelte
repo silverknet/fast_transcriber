@@ -311,6 +311,13 @@
     onChanged?.()
   }
 
+  /** How hard the bass locks onto the kick (0 = off, 1 = welded to it). */
+  function setBassKickFollow(amount: number) {
+    const v = Math.max(0, Math.min(1, amount))
+    patchSongMap((m) => (m.bassMidi ? { ...m, bassMidi: { ...m.bassMidi, kickFollow: v } } : m))
+    onChanged?.()
+  }
+
   // ── Pads: audition the kit voices + the bass voice ─────────────────────
   let padCtx: AudioContext | null = null
   const PAD_VOICES: { cls: DrumClass; label: string }[] = [
@@ -687,6 +694,27 @@
           </select>
         </label>
       {/if}
+      <!-- Lock the line to the kick. Kicks come from the drum machine when it
+           is playing, otherwise from the detected drums. A pull, not a snap:
+           playing fractionally behind the kick is groove, welded is a
+           sequencer, and which you want is a musical choice. -->
+      <label class="inline-flex items-center gap-1.5" title="Pull bass notes onto the kick. Off leaves the line as played; higher locks it tighter.">
+        <span class="text-muted-foreground">Lock to kick</span>
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value={bm.kickFollow ?? 0}
+          oninput={(e) => setBassKickFollow(Number((e.currentTarget as HTMLInputElement).value))}
+          class="accent-[var(--studio-orange)] w-20"
+          aria-label="Lock bass to kick"
+        />
+        <span class="text-muted-foreground w-7 text-right font-mono text-[10px] tabular-nums">
+          {Math.round((bm.kickFollow ?? 0) * 100)}
+        </span>
+      </label>
+
       <!-- The VOICE — the same picker the bass machine has. The renderer always
            supported a chosen sound; only the detected path never passed one. -->
       <label class="inline-flex items-center gap-1.5">

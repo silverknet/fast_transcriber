@@ -445,6 +445,12 @@ export type BassMidi = {
    */
   sound?: string
   tone?: BassTone
+  /**
+   * 0..1 — how strongly onsets are pulled onto the kick. 0 (absent) leaves the
+   * line alone; 1 welds it to the kick. The kicks come from the drum machine
+   * when it is on, otherwise from the detected drums.
+   */
+  kickFollow?: number
   /** Saved render of the bass track, when written into the project. */
   renderExport?: RenderedCueExport
 }
