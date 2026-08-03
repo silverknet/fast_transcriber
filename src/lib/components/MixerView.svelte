@@ -138,7 +138,6 @@
   } from '$lib/audio/mixerEngine'
   import { chordJam } from '$lib/audio/chordJam.svelte'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
-  import { lanesByRole, roleStackGainDb, stackedRoles } from '$lib/audio/stemRoles'
   import { audioDevice } from '$lib/audio/audioDevice'
   import { mayStartSong } from '$lib/audio/clickStartGate'
   import { liveRigLayout } from '$lib/hardware/liveRigPlan'
@@ -2456,19 +2455,6 @@
   const faderResetPlan = $derived(
     planFaderReset(lanes.map((l) => ({ key: l.key, volume: l.volume, muted: l.muted }))),
   )
-  const stackedRoleNames = $derived(
-    stackedRoles(lanes.map((l) => ({ key: l.key, volume: l.volume, muted: l.muted }))),
-  )
-  /** How far a blended role overshoots a per-lane target, for the note above. */
-  const stackedRoleExcessDb = $derived.by(() => {
-    const byRole = lanesByRole(lanes.map((l) => ({ key: l.key, volume: l.volume, muted: l.muted })))
-    let worst = 0
-    for (const role of stackedRoleNames) {
-      worst = Math.max(worst, roleStackGainDb(byRole.get(role) ?? []))
-    }
-    return worst
-  })
-
   /**
    * Clear the per-song fader compensation so loudness matching is the only
    * thing setting stem levels. Goes through the ENGINE and the existing
@@ -4400,14 +4386,6 @@
         </button>
       {/if}
     </div>
-    {#if mixerTab === 'tracks' && stackedRoleNames.length > 0}
-      <p class="text-muted-foreground px-1 pt-1 text-[11px]">
-        You have blended more than one lane into
-        <span class="font-bold">{stackedRoleNames.join(' and ')}</span> — loudness matching measures
-        each lane on its own, so the combined level sits about
-        {stackedRoleExcessDb.toFixed(1)} dB above the target. Set the blend by ear.
-      </p>
-    {/if}
 
     <!-- A ruled list, not a stack of cards: each row draws its own hairline,
          the container closes the top edge. -->
