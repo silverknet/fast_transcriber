@@ -1805,3 +1805,28 @@ is mutation-proven (reverting it fails 4 tests).
 - NOTE: the earlier probe of Valerie read prepend 4.04 and a later one 1.79 —
   the file changed on disk mid-analysis because Martin was editing the same song.
   When diagnosing live, re-read rather than trusting an earlier dump.
+
+## 2026-08-03 (Fable) — two multi-bar grid tools (Martin request)
+
+- `evenOutBars(map, barIds)` — spreads every beat in a contiguous selection
+  equally over the span the selection already occupies. Bar lines move to their
+  beats; the FIRST bar's start and the LAST bar's end are pinned, so the rest of
+  the song is untouched. Beats-per-bar preserved.
+- `offsetSelectionDownbeat(map, barIds, offsetBeats, idFactory)` — re-bars a
+  selection when detection put "one" on the wrong beat. Beat TIMES never move;
+  only the grouping shifts by N. Displaced leading beats become a short pickup
+  bar (never dropped); trailing remainder likewise. Bar ids reused so bar-anchored
+  chords survive; bars after the selection are renumbered.
+- Shared `repairHarmonyAnchors`: a chord anchored to a beat follows it (barId,
+  beatAnchor.indexInBar, startSec/endSec re-derived); an OFF-GRID chord
+  (barFraction) keeps its absolute time by re-deriving bar + fraction.
+- Both added to `BarGridAction` + `applyBarGridAction`, so they flow through the
+  existing patchSongMap/validate path.
+- 13 tests (timelineEditMultiBar.test.ts): even spacing, pinned edges, untouched
+  neighbours, no beat lost, chord follows its beat, validate() clean, refusals
+  for non-contiguous selections and nonsense offsets.
+- UI (WaveformPlayer grid toolbar): "From here, N bars (bars 5–8)" + "Even out"
+  + "Downbeat → +1/+2/+3". Deliberately a TYPED span, not drag-select: grid mode
+  is single-select today and rewriting its pointer handling mid-session was the
+  riskier option. Drag-select + real right-click context menu is the follow-up.
+- Suites: 2248 unit / 393 browser / 0 typecheck.

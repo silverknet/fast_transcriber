@@ -486,6 +486,30 @@
       : null,
   )
 
+  /**
+   * How many bars the range tools (even out / offset downbeat) cover, counting
+   * from the selected bar. Clamped to what actually exists so a big number can
+   * never address bars past the end.
+   */
+  let rangeBarCount = $state(4)
+  const rangeBarIds = $derived.by(() => {
+    if (!beatGrid || !selectedBarId) return [] as string[]
+    const start = beatGrid.bars.findIndex((b) => b.id === selectedBarId)
+    if (start < 0) return [] as string[]
+    const n = Math.max(1, Math.min(Math.round(rangeBarCount) || 1, beatGrid.bars.length - start))
+    return beatGrid.bars.slice(start, start + n).map((b) => b.id)
+  })
+  /** "bars 5–8" — so it is obvious what is about to be rewritten. */
+  const rangeBarLabel = $derived.by(() => {
+    if (!beatGrid || rangeBarIds.length === 0) return 'select a bar'
+    const first = beatGrid.bars.find((b) => b.id === rangeBarIds[0])
+    const last = beatGrid.bars.find((b) => b.id === rangeBarIds[rangeBarIds.length - 1])
+    if (!first || !last) return ''
+    return first.id === last.id
+      ? `bar ${first.index + 1}`
+      : `bars ${first.index + 1}–${last.index + 1}`
+  })
+
   /** Grid mode: seek to the selected bar's start when the SELECTION changes. */
   $effect(() => {
     const barId = gridSeekBarId
@@ -2325,6 +2349,52 @@
             >
               ▼ Song starts here
             </Button>
+          </div>
+
+          <!-- RANGE TOOLS. Both rewrite a run of bars starting at the selected
+               one: evening out a stretch that detection left breathing, and
+               re-barring a stretch whose downbeat landed on the wrong beat.
+               The span is typed rather than dragged so it is unambiguous. -->
+          <div class="border-foreground/10 flex flex-wrap items-center gap-1.5 border-t px-2 py-1.5">
+            <label class="text-muted-foreground inline-flex items-center gap-1 text-[11px] font-bold">
+              From here,
+              <input
+                type="number"
+                min="1"
+                max={Math.max(1, beatGrid.bars.length)}
+                class="border-foreground/25 bg-background h-7 w-14 rounded-[var(--radius)] border px-1 text-center text-xs font-bold tabular-nums"
+                bind:value={rangeBarCount}
+                title="How many bars these tools apply to, counting from the selected bar"
+              />
+              bars
+            </label>
+            <span class="text-muted-foreground text-[11px]">({rangeBarLabel})</span>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              class="h-7 text-xs"
+              disabled={rangeBarIds.length < 1}
+              onclick={() => onBarGridAction?.({ type: 'evenOutBars', barIds: rangeBarIds })}
+              title="Give every beat in these bars the same length. The first bar's start and the last bar's end stay put."
+            >
+              Even out
+            </Button>
+            <span class="text-muted-foreground ml-1 text-[11px] font-bold">Downbeat →</span>
+            {#each [1, 2, 3] as d (d)}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                class="h-7 w-8 text-xs"
+                disabled={rangeBarIds.length < 1}
+                onclick={() =>
+                  onBarGridAction?.({ type: 'offsetDownbeat', barIds: rangeBarIds, offsetBeats: d })}
+                title={`Move the bar lines ${d} beat${d > 1 ? 's' : ''} later — for when the analysis put "one" on the wrong beat. The beats themselves do not move.`}
+              >
+                +{d}
+              </Button>
+            {/each}
           </div>
         {/if}
         {#if beatGridEditing && timelineStripMode === 'sections' && onApplySectionTag}

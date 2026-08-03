@@ -633,6 +633,242 @@ export function removeBarAtEnd(map: SongMap): TimelineEditResult {
   return removeBarById(map, sorted[sorted.length - 1]!.id)
 }
 
+// ── Multi-bar operations ──────────────────────────────────────────────────
+//
+// Both take a SELECTION of neighbouring bars and rewrite it as a whole. They
+// share two promises, because a grid edit that quietly moves music is worse
+// than one that refuses:
+//
+//   1. The selection's OUTER edges never move — whatever came before and after
+//      is untouched, so these are safe to use on part of a song.
+//   2. Chords keep the moment they sound. Their anchors are repaired (a beat
+//      that changes bar takes its chord's `barId` with it); off-grid chords
+//      keep their absolute time by re-deriving their fraction.
+
+/** The selection as real bars, in timeline order — or null if it isn't a contiguous run. */
+function selectionBars(map: SongMap, barIds: readonly string[]): Bar[] | null {
+  const byId = new Map(map.timeline.bars.map((b) => [b.id, b]))
+  const picked: Bar[] = []
+  for (const id of barIds) {
+    const bar = byId.get(id)
+    if (!bar) return null
+    picked.push(bar)
+  }
+  if (picked.length === 0) return null
+  picked.sort((a, b) => a.index - b.index)
+  for (let i = 1; i < picked.length; i++) {
+    if (picked[i]!.index !== picked[i - 1]!.index + 1) return null
+  }
+  return picked
+}
+
+/** Beats of the selection, in bar order then beat order. */
+function flatBeats(map: SongMap, bars: readonly Bar[]): Beat[] | null {
+  const out: Beat[] = []
+  for (const bar of bars) {
+    const inBar = beatsForBarByIndex(map, bar.id)
+    if (inBar.length !== bar.beatCount) return null
+    out.push(...inBar)
+  }
+  return out
+}
+
+/**
+ * Put every chord back on the beat it belongs to after bars/beats moved.
+ *
+ * Only touches chords inside the rewritten span. A chord anchored to a beat
+ * follows that beat (new bar, new index, new time); an OFF-GRID chord (bar +
+ * fraction, the ÷N feature) keeps its absolute time by re-deriving which bar
+ * it now sits in and where inside it.
+ */
+function repairHarmonyAnchors(map: SongMap, spanStartSec: number, spanEndSec: number): SongMap {
+  const beatsById = new Map(map.timeline.beats.map((b) => [b.id, b]))
+  const barsById = new Map(map.timeline.bars.map((b) => [b.id, b]))
+  const sorted = sortBeatsByTime(map.timeline.beats)
+  const harmony = map.harmony.map((h): HarmonyEvent => {
+    if (h.beatId) {
+      const beat = beatsById.get(h.beatId)
+      if (!beat) return h
+      const span = beatHarmonySpanLocal(beat, sorted, barsById)
+      return {
+        ...h,
+        barId: beat.barId,
+        startSec: span.startSec,
+        endSec: span.endSec,
+        ...(h.beatAnchor ? { beatAnchor: { indexInBar: beat.indexInBar } } : {}),
+      }
+    }
+    if (typeof h.barFraction === 'number') {
+      // Off-grid: keep the SOUNDING time, re-derive the anchor around it.
+      if (h.startSec < spanStartSec - T_EPS || h.startSec > spanEndSec + T_EPS) return h
+      const host = map.timeline.bars.find(
+        (b) => h.startSec >= b.startSec - T_EPS && h.startSec < b.endSec - T_EPS,
+      )
+      if (!host) return h
+      const d = host.endSec - host.startSec
+      if (!(d > 0)) return h
+      const frac = Math.min(0.999999, Math.max(0, (h.startSec - host.startSec) / d))
+      return { ...h, barId: host.id, barFraction: frac }
+    }
+    return h
+  })
+  return { ...map, harmony }
+}
+
+/** Local copy of the half-open beat span (importing harmonyEdit here would cycle). */
+function beatHarmonySpanLocal(
+  beat: Beat,
+  allBeatsSorted: readonly Beat[],
+  barsById: Map<string, Bar>,
+): { startSec: number; endSec: number } {
+  const bar = barsById.get(beat.barId)
+  const barEnd = bar?.endSec ?? beat.timeSec + 0.25
+  const idx = allBeatsSorted.findIndex((b) => b.id === beat.id)
+  const next = idx >= 0 && idx + 1 < allBeatsSorted.length ? allBeatsSorted[idx + 1]! : null
+  let endSec = barEnd
+  if (next && next.timeSec > beat.timeSec) endSec = Math.min(next.timeSec, barEnd)
+  if (!(endSec > beat.timeSec)) endSec = Math.min(beat.timeSec + 0.02, barEnd)
+  return { startSec: beat.timeSec, endSec }
+}
+
+/**
+ * EVEN OUT — one steady pulse across the whole selection.
+ *
+ * Detection often leaves a run of bars breathing slightly: each bar is
+ * internally even, but the bars themselves are a few milliseconds long or
+ * short, so the click wanders against a track that is actually machine-steady.
+ * This spreads EVERY beat in the selection equally over the span the selection
+ * already occupies. Bar lines move to wherever their beats land; the first
+ * bar's start and the last bar's end do not move, so the surrounding song is
+ * untouched. Beats per bar are preserved.
+ */
+export function evenOutBars(map: SongMap, barIds: readonly string[]): TimelineEditResult {
+  const bars = selectionBars(map, barIds)
+  if (!bars) return fail('Select a run of neighbouring bars to even out.')
+  const first = bars[0]!
+  const last = bars[bars.length - 1]!
+  const span = last.endSec - first.startSec
+  if (!(span > 0)) return fail('The selected bars have no length to spread beats over.')
+  const flat = flatBeats(map, bars)
+  if (!flat) return fail('A selected bar’s beat list does not match its beat count.')
+  if (flat.length < 1) return fail('There are no beats in the selection.')
+
+  const step = span / flat.length
+  const timeAt = (i: number) => first.startSec + i * step
+  const nextTime = new Map<string, number>()
+  flat.forEach((b, i) => nextTime.set(b.id, timeAt(i)))
+
+  // Bar j starts where its first beat lands; outer edges are pinned.
+  const startIndexOfBar: number[] = []
+  let acc = 0
+  for (const bar of bars) {
+    startIndexOfBar.push(acc)
+    acc += bar.beatCount
+  }
+  const selected = new Map(bars.map((b, j) => [b.id, j]))
+
+  const nextBars = map.timeline.bars.map((b) => {
+    const j = selected.get(b.id)
+    if (j === undefined) return b
+    return {
+      ...b,
+      startSec: j === 0 ? first.startSec : timeAt(startIndexOfBar[j]!),
+      endSec: j === bars.length - 1 ? last.endSec : timeAt(startIndexOfBar[j + 1]!),
+    }
+  })
+  const nextBeats = map.timeline.beats.map((b) =>
+    nextTime.has(b.id) ? { ...b, timeSec: nextTime.get(b.id)! } : b,
+  )
+
+  const moved: SongMap = {
+    ...map,
+    timeline: { ...map.timeline, bars: nextBars, beats: sortBeatsByTime(nextBeats) },
+  }
+  return ok(repairHarmonyAnchors(moved, first.startSec, last.endSec))
+}
+
+/**
+ * OFFSET THE DOWNBEAT — move the bar lines, not the beats.
+ *
+ * Detection regularly hears the pulse correctly but lands "one" on the wrong
+ * beat, so the whole song (or a stretch of it) is barred a beat or two late.
+ * Nothing is wrong with the beats themselves, so nothing here moves them: only
+ * the grouping into bars shifts by `offsetBeats`, which is what a musician
+ * means by "the downbeat is on the 2".
+ *
+ * The beats pushed out of the front become a short pickup bar rather than
+ * being dropped — losing beats to fix a barring mistake would be a worse bug
+ * than the one being fixed. The tail is short for the same reason.
+ */
+export function offsetSelectionDownbeat(
+  map: SongMap,
+  barIds: readonly string[],
+  offsetBeats: number,
+  idFactory: IdFactory,
+): TimelineEditResult {
+  const bars = selectionBars(map, barIds)
+  if (!bars) return fail('Select a run of neighbouring bars to re-bar.')
+  const flat = flatBeats(map, bars)
+  if (!flat) return fail('A selected bar’s beat list does not match its beat count.')
+  const d = Math.round(offsetBeats)
+  if (!Number.isFinite(d) || d < 1) return fail('Choose how many beats to move the downbeat by.')
+  if (d >= flat.length) return fail('That is more beats than the selection holds.')
+
+  // Group sizes: a short pickup of `d`, then the original bar lengths again.
+  const sizes = [d, ...bars.map((b) => b.beatCount)]
+  const groups: Beat[][] = []
+  let cursor = 0
+  for (const size of sizes) {
+    if (cursor >= flat.length) break
+    groups.push(flat.slice(cursor, cursor + size))
+    cursor += size
+  }
+  if (cursor < flat.length) groups.push(flat.slice(cursor)) // safety: never drop beats
+
+  const first = bars[0]!
+  const last = bars[bars.length - 1]!
+  // Reuse the selection's bar identities so chords anchored to a bar survive;
+  // mint one only if the pickup makes the selection longer than it was.
+  const ids = groups.map((_, j) => bars[j]?.id ?? idFactory())
+  const meterOf = (j: number) => bars[Math.min(j, bars.length - 1)]!.meter
+
+  const rebuiltBars: Bar[] = groups.map((g, j) => ({
+    id: ids[j]!,
+    index: first.index + j,
+    startSec: j === 0 ? first.startSec : g[0]!.timeSec,
+    endSec:
+      j === groups.length - 1 ? last.endSec : groups[j + 1]![0]!.timeSec,
+    meter: { ...meterOf(j), numerator: g.length },
+    beatCount: g.length,
+    beatIds: g.map((b) => b.id),
+  }))
+
+  const rebuiltBeats: Beat[] = groups.flatMap((g, j) =>
+    g.map((b, i) => ({ ...b, barId: ids[j]!, indexInBar: i })),
+  )
+
+  const selectedIds = new Set(bars.map((b) => b.id))
+  const movedBeatIds = new Set(rebuiltBeats.map((b) => b.id))
+  const before = map.timeline.bars.filter((b) => b.index < first.index)
+  const after = map.timeline.bars.filter((b) => b.index > last.index)
+  const shift = rebuiltBars.length - bars.length
+  const nextBars = sortBarsByIndex([
+    ...before,
+    ...rebuiltBars,
+    ...after.map((b) => ({ ...b, index: b.index + shift })),
+  ])
+  const nextBeats = sortBeatsByTime([
+    ...map.timeline.beats.filter((b) => !selectedIds.has(b.barId) && !movedBeatIds.has(b.id)),
+    ...rebuiltBeats,
+  ])
+
+  const moved: SongMap = {
+    ...map,
+    timeline: { ...map.timeline, bars: nextBars, beats: nextBeats },
+  }
+  return ok(repairHarmonyAnchors(moved, first.startSec, last.endSec))
+}
+
 export type BarGridAction =
   | { type: 'setBarBeatCount'; barId: string; count: number }
   | { type: 'splitBarAtMidpoint'; barId: string }
@@ -650,6 +886,8 @@ export type BarGridAction =
   | { type: 'addBarAtEnd' }
   | { type: 'removeBarAtStart' }
   | { type: 'removeBarAtEnd' }
+  | { type: 'evenOutBars'; barIds: string[] }
+  | { type: 'offsetDownbeat'; barIds: string[]; offsetBeats: number }
 
 export function applyBarGridAction(
   map: SongMap,
@@ -682,6 +920,10 @@ export function applyBarGridAction(
       return removeBarAtStart(map)
     case 'removeBarAtEnd':
       return removeBarAtEnd(map)
+    case 'evenOutBars':
+      return evenOutBars(map, action.barIds)
+    case 'offsetDownbeat':
+      return offsetSelectionDownbeat(map, action.barIds, action.offsetBeats, idFactory)
     default:
       return fail('Unknown bar grid action')
   }
