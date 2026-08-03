@@ -1922,3 +1922,31 @@ STILL TO DO (Martin asked for three things):
     median filter. `librosa.pyin` (voiced probability) plus onset-informed
     segmentation and a cleanup pass is the known upgrade; can be measured
     against Martin's real bass stems on disk before/after.
+
+## 2026-08-04 (Fable) — BarBro Bass is now a LIVE MIDI lane (Martin: "its still not midi")
+
+He was right; the sound picker alone did not answer the request. The difference
+was the LANE REGISTRATION:
+    bass-machine → `instrument:`  (live MIDI, sound change = re-schedule)
+    bass-gen     → `loader:`      (rendered WAV, sound change = full re-render)
+- `detectedBassEvents(sm, opts)` extracted from `renderBassTrackWavBlob` —
+  transpose + feel + timing in ONE place, so the live instrument and the
+  offline render cannot play different lines.
+- NEW `detectedBassTrack.ts`: `detectedBassPart` / `createDetectedBassInstrument`
+  / `updateDetectedBassInstrument`, mirroring `bassMachineTrack.ts` and reusing
+  `buildBassPart` + `createBassMidiInstrument` + `measureBassNormalizeGain`.
+  (Transpose is applied inside detectedBassEvents, so buildBassPart gets 0 —
+  passing it twice would shift the line twice.)
+- MixerView: `bass-gen` registered with `instrument:`; added to
+  PITCHED_MACHINE_LANES (transpose = re-schedule, not a whole-plan reload — that
+  `void reload(false)` is gone); own branch in `refreshMachineLane` (its on/off
+  is "are there detected notes", not `machine.enabled`); new
+  `detectedBassSignature` effect so feel/timing/sound changes re-schedule live.
+- CLICKING THE LANE: `bass-gen` was missing from `EDITABLE_LANE_KEYS`, so it got
+  no `onSelect` and clicking did nothing. Added, plus an `openEditor` branch
+  ('barbro-bass') rendering `DrumTrackPanel show="bass"` in the dock.
+  `mixerEditableLanes.test.ts` — which exists to catch exactly this drift —
+  passed its two consistency checks and only needed its roster updated to five.
+- Saved WAV on disk is still what the Ableton export uses; only mixer playback
+  became live.
+- Suites: 2286 unit / 393 browser / 0 typecheck.

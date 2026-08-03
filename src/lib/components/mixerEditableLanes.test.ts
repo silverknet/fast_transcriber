@@ -54,9 +54,12 @@ describe('mixer editable lanes', () => {
     }
   })
 
-  it('covers the four machines', () => {
+  it('covers every lane that has an editor behind it', () => {
+    // `bass-gen` (BarBro Bass) joined when it became a live MIDI instrument
+    // with its own detect / feel / timing / sound panel. Before that it was a
+    // rendered WAV with no editor, and clicking it did nothing.
     expect(editableLaneKeys().sort()).toEqual(
-      ['arp-machine', 'bass-machine', 'chord-machine', 'drum-machine'].sort(),
+      ['arp-machine', 'bass-gen', 'bass-machine', 'chord-machine', 'drum-machine'].sort(),
     )
   })
 

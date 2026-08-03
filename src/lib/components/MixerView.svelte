@@ -136,6 +136,11 @@
     type MixerSnapshot,
     type MixerTrack,
   } from '$lib/audio/mixerEngine'
+  import DrumTrackPanel from '$lib/components/DrumTrackPanel.svelte'
+  import {
+    createDetectedBassInstrument,
+    updateDetectedBassInstrument,
+  } from '$lib/audio/detectedBassTrack'
   import { chordJam } from '$lib/audio/chordJam.svelte'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
   import { audioDevice } from '$lib/audio/audioDevice'
@@ -556,6 +561,40 @@
     const eng = engine
     const sm = get(songMap)
     if (!eng || !sm) return
+
+    // BarBro Bass: a live instrument like the machine, but its on/off switch is
+    // "are there detected notes", not a `machine.enabled` flag — so it takes
+    // its own short path rather than being bent through the machine logic.
+    if (key === 'bass-gen') {
+      const prev = eng.listTracks().find((t) => t.key === key)
+      if (!sm.bassMidi || sm.bassMidi.events.length === 0) {
+        if (prev) {
+          eng.removeTrack(key)
+          syncLanesFromEngine()
+        }
+        if (selectedLaneKey === key) selectedLaneKey = null
+        return
+      }
+      if (!prev) {
+        await reload()
+        return
+      }
+      try {
+        const inst = prev.instrument as BassMidiInstrument | undefined
+        if (!inst) return
+        const alive = await updateDetectedBassInstrument(inst, sm, transposeSemitones)
+        if (!alive) {
+          eng.removeTrack(key)
+          syncLanesFromEngine()
+          return
+        }
+        if (snapshot.state === 'playing') void engine?.play(snapshot.positionSec)
+      } catch (e) {
+        console.warn('bass-gen refresh failed', e)
+      }
+      return
+    }
+
     const isDrum = key === 'drum-machine'
     // The chords/arp lanes are driven by the Chords-tab knobs, not by `.smap`,
     // so their on/off switch is the jam's rather than a machine's.
@@ -733,10 +772,37 @@
     })
   }
 
+  /**
+   * BarBro Bass's settings, for the same live-refresh treatment the machines
+   * get. The detected NOTES are summarized rather than serialized — there can
+   * be hundreds and they only change on a re-detect, which `analyzedAt`
+   * already marks.
+   */
+  function detectedBassSignature(sm: SongMap | null | undefined): string {
+    const bm = sm?.bassMidi
+    if (!bm || bm.events.length === 0) return ''
+    const { renderExport: _renderExport, events: _events, ...settings } = bm
+    return JSON.stringify({
+      timing: machineTimingSignature(sm),
+      settings,
+      noteCount: bm.events.length,
+    })
+  }
+
   const drumAutoRefreshSig = $derived(drumMachineSignature($songMap))
   const bassAutoRefreshSig = $derived(bassMachineSignature($songMap))
+  const detectedBassRefreshSig = $derived(detectedBassSignature($songMap))
   let lastDrumAutoRefreshSig: string | null = null
   let lastBassAutoRefreshSig: string | null = null
+  let lastDetectedBassSig: string | null = null
+
+  $effect(() => {
+    const sig = detectedBassRefreshSig
+    if (!sig || !engine || loading || !lanes.some((l) => l.key === 'bass-gen')) return
+    if (lastDetectedBassSig === sig) return
+    lastDetectedBassSig = sig
+    machineRefreshQueue.schedule('bass-gen')
+  })
 
   $effect(() => {
     const sig = drumAutoRefreshSig
@@ -810,6 +876,9 @@
   const EDITABLE_LANE_KEYS = new Set([
     'drum-machine',
     'bass-machine',
+    // BarBro Bass has an editor too (detect / feel / timing / sound). It was
+    // missing here, so the lane got no `onSelect` and clicking it did nothing.
+    'bass-gen',
     'chord-machine',
     'arp-machine',
   ])
@@ -844,13 +913,18 @@
   }
 
   /** Which machine editor is open, if any — drives the bottom dock. */
-  const openEditor = $derived<'drum' | 'bass' | 'keys' | 'arp' | null>(
+  const openEditor = $derived<'drum' | 'bass' | 'barbro-bass' | 'keys' | 'arp' | null>(
     playbackMode
       ? null
       : selectedLaneKey === 'drum-machine' && $songMap?.drumMachine
         ? 'drum'
         : selectedLaneKey === 'bass-machine' && $songMap?.bassMachine
           ? 'bass'
+          : // BarBro Bass opens the BAND panel (detect / feel / timing / sound),
+            // which is where its controls live — it had no case at all, so
+            // clicking the lane did nothing.
+            selectedLaneKey === 'bass-gen' && $songMap?.bassMidi
+            ? 'barbro-bass'
           : // The chord voices have no `.smap` entry to check — the lane
             // existing IS the switch, and it's driven by `chordJam`.
             selectedLaneKey === 'chord-machine'
@@ -1272,7 +1346,7 @@
    * Drums are deliberately absent: they are never transposed, by note or by
    * pitch. See `drumTransposeImmunity.browser.test.ts`.
    */
-  const PITCHED_MACHINE_LANES = ['bass-machine', 'chord-machine', 'arp-machine']
+  const PITCHED_MACHINE_LANES = ['bass-machine', 'bass-gen', 'chord-machine', 'arp-machine']
   let lastTransposeSemis: number | null = null
   $effect(() => {
     const semis = transposeSemitones
@@ -1284,9 +1358,6 @@
     for (const key of PITCHED_MACHINE_LANES) {
       if (lanes.some((l) => l.key === key)) machineRefreshQueue.schedule(key)
     }
-    // `bass-gen` is a rendered WAV rather than a live instrument, so it can only
-    // pick up a new transpose by being re-rendered with the whole plan.
-    if (lanes.some((l) => l.key === 'bass-gen')) void reload(false)
   })
 
   let shifter: LivePitchShifter | null = null
@@ -2013,15 +2084,14 @@
       plan.push({
         key: 'bass-gen',
         label: 'BarBro Bass',
-        loader: async () => {
-          if (bassSemis === 0 && bmRel && ps.osPath && ps.activeSongFolder) {
-            const r = await readProjectSongAsset(ps.osPath, ps.activeSongFolder, bmRel)
-            if (r.ok) return r.blob
-          }
+        // MIDI, like the bass machine: the detected line is scheduled live, so
+        // changing its sound costs a re-schedule instead of a full re-render.
+        // The saved WAV on disk stays what the Ableton export uses.
+        instrument: async () => {
           try {
-            const r = await renderBassTrackWavBlob(sm, { transposeSemitones: bassSemis })
-            return r.blob
-          } catch {
+            return await createDetectedBassInstrument(engine!.ac, sm, bassSemis)
+          } catch (e) {
+            console.warn('detected bass instrument failed', e)
             return null
           }
         },
@@ -4767,6 +4837,8 @@
           onScopeChange={(next) => (bassMachineScope = next)}
           showSectionStrip={false}
         />
+      {:else if openEditor === 'barbro-bass'}
+        <DrumTrackPanel show="bass" onChanged={onMachineChanged} />
       {:else}
         <ChordMachinePanel
           voice={openEditor}

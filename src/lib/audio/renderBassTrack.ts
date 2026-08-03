@@ -307,6 +307,41 @@ export async function renderBassMachineWavBlob(
   )
 }
 
+/**
+ * The detected bass's notes, after transpose, feel and timing are applied.
+ *
+ * Extracted so the LIVE instrument and the offline render play the same line.
+ * They used to be one code path only because the live version did not exist;
+ * two copies of "what the bass plays" is exactly the drift this codebase keeps
+ * paying for, so there is one.
+ */
+export function detectedBassEvents(
+  sm: SongMap,
+  opts: { quantize?: DrumQuantize; transposeSemitones?: number } = {},
+): BassMidiEvent[] {
+  const bm = sm.bassMidi
+  if (!bm || bm.events.length === 0) return []
+  const quantize = opts.quantize ?? bm.quantize ?? 'off'
+  const style = bm.style ?? 'steady'
+  let events: BassMidiEvent[] = bm.events
+  // Transposing a SYNTHESIZED lane means shifting the notes — exact pitch,
+  // zero time-stretch artifacts (unlike the audio lanes).
+  const semis = Math.round(opts.transposeSemitones ?? 0)
+  if (semis !== 0) {
+    events = events.map((e) => ({ ...e, midi: transposeMidiNote(e.midi, semis) }))
+  }
+  if (style === 'steady') {
+    // Confident-bassist pass — already grid-locked, so no extra quantize.
+    return inferBassGroove(sm, events)
+  }
+  if (quantize !== 'off') {
+    const beatsSorted = sortBeatsByTime(sm.timeline.beats)
+    const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
+    return quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
+  }
+  return events
+}
+
 export async function renderBassTrackWavBlob(
   sm: SongMap,
   opts: { quantize?: DrumQuantize; transposeSemitones?: number } = {},
@@ -325,26 +360,7 @@ export async function renderBassTrackWavBlob(
   const totalSec = preludeSec + prependSec + plan.songDurationSec
   if (!(totalSec > 0)) throw new Error('Bass track duration is zero')
 
-  const quantize = opts.quantize ?? bm.quantize ?? 'off'
-  const style = bm.style ?? 'steady'
-  let events: BassMidiEvent[] = bm.events
-  // Transposing a SYNTHESIZED lane means shifting the notes — exact pitch,
-  // zero time-stretch artifacts (unlike the audio lanes).
-  const semis = Math.round(opts.transposeSemitones ?? 0)
-  if (semis !== 0) {
-    events = events.map((e) => ({
-      ...e,
-      midi: transposeMidiNote(e.midi, semis),
-    }))
-  }
-  if (style === 'steady') {
-    // Confident-bassist pass — already grid-locked, so no extra quantize.
-    events = inferBassGroove(sm, events)
-  } else if (quantize !== 'off') {
-    const beatsSorted = sortBeatsByTime(sm.timeline.beats)
-    const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
-    events = quantizeTimesToGrid(events, beatsSorted, barsById, quantize)
-  }
+  const events = detectedBassEvents(sm, opts)
   // The detected bass gets a VOICE the same way the machine does. Without a
   // saved sound this passes undefined and falls through to the original fixed
   // tone, so songs that never chose one sound exactly as they did before.
