@@ -1,5 +1,8 @@
 import { derived, get, writable } from 'svelte/store'
-import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+import {
+  fingerprintClickTrackInputs,
+  fingerprintCueTrackInputs,
+} from '$lib/songmap/cueTrackFingerprint'
 import { fingerprintBassTrackInputs } from '$lib/songmap/bassTrackFingerprint'
 import { fingerprintDrumTrackInputs } from '$lib/songmap/drumTrackFingerprint'
 import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
@@ -163,7 +166,7 @@ function computeNextMap(
       return fp === track.renderExport.fingerprint ? track : { ...track, renderExport: undefined }
     })
     const primaryTrack = getPrimaryCueTrack({ ...next, cueTracks })
-    const clickFp = fingerprintCueTrackInputs(next, primaryTrack)
+    const clickFp = fingerprintClickTrackInputs(next, primaryTrack)
     next = {
       ...next,
       cueTracks,

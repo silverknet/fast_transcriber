@@ -51,6 +51,7 @@ import { selectBestStemSet } from '$lib/project/commit'
 import { project } from '$lib/stores/project'
 import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
 import type { SongMap } from '$lib/songmap/types'
+import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 // Has enough English function words that detectLyricsLanguage confidently → 'en'.
@@ -62,7 +63,7 @@ function makeSongMap(title: string, opts: { sourceText?: string | null; original
   // parseSongMap, which validates, so the batch's own validate guard only ever
   // rejects a map the NEW lyrics made invalid — never the fixture itself.
   return {
-    formatVersion: 6,
+    formatVersion: SONGMAP_FORMAT_VERSION,
     metadata: { title, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z' },
     ...(sourceText ? { lyrics: { words: [], sourceText } } : {}),
     ...(opts.originalPath === null ? {} : { audio: { originalPath: opts.originalPath ?? 'audio/mix.wav' } }),

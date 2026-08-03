@@ -18,7 +18,8 @@
  * Pure and unit-testable: events + timeline + sections in, events out.
  */
 import { sortBeatsByTime } from './normalize'
-import type { Bar, Beat, DrumClass, DrumMidiEvent, Section, SongMap } from './types'
+import { buildSectionRangesForBars } from './sectionBlocks'
+import type { Bar, Beat, DrumClass, DrumMidiEvent, SongMap } from './types'
 
 const SLOTS_PER_BEAT = 4 // 16ths
 
@@ -78,20 +79,8 @@ export function buildBarSlots(sm: SongMap): BarSlots[] {
 
 /** Sections covering every bar; uncovered bars form implicit blocks. */
 export function sectionBlocks(sm: SongMap, barCount: number): { start: number; end: number }[] {
-  const blocks: { start: number; end: number }[] = []
-  const sections = [...sm.sections].sort(
-    (a: Section, b: Section) => a.barRange.startBarIndex - b.barRange.startBarIndex,
-  )
-  let cursor = 0
-  for (const s of sections) {
-    const start = Math.max(0, s.barRange.startBarIndex)
-    const end = Math.min(barCount - 1, s.barRange.endBarIndex)
-    if (start > cursor) blocks.push({ start: cursor, end: start - 1 })
-    if (end >= start) blocks.push({ start, end })
-    cursor = Math.max(cursor, end + 1)
-  }
-  if (cursor <= barCount - 1) blocks.push({ start: cursor, end: barCount - 1 })
-  return blocks.length > 0 ? blocks : [{ start: 0, end: barCount - 1 }]
+  const bars = [...sm.timeline.bars].sort((a, b) => a.index - b.index).slice(0, barCount)
+  return buildSectionRangesForBars(sm.sections, bars)
 }
 
 function median(xs: number[]): number {

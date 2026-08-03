@@ -13,6 +13,13 @@ export type DesktopPingPayload = {
   platform?: string
   /** Semantic feature flags; absent on older sidecars (treat as capable). */
   capabilities?: { pauseResume?: boolean }
+  /**
+   * The sidecar's own offline app window is open.
+   *
+   * Absent on older sidecars, which is correctly falsy: a sidecar that predates
+   * offline mode cannot have an offline window open.
+   */
+  offlineAppOpen?: boolean
 }
 
 export type DesktopCapabilities = { pauseResume: boolean }
@@ -104,6 +111,8 @@ export async function probeDesktopCompanion(): Promise<{
   ok: boolean
   version: string | null
   capabilities: DesktopCapabilities | null
+  /** See `DesktopPingPayload.offlineAppOpen` and `editingLock.ts`. */
+  offlineAppOpen: boolean
   error: string | null
 }> {
   const ctrl = new AbortController()
@@ -116,7 +125,7 @@ export async function probeDesktopCompanion(): Promise<{
     })
     clearTimeout(t)
     if (!res.ok) {
-      return { ok: false, version: null, capabilities: null, error: `HTTP ${res.status}` }
+      return { ok: false, version: null, capabilities: null, offlineAppOpen: false, error: `HTTP ${res.status}` }
     }
     const data = (await res.json()) as DesktopPingPayload
     if (data?.ok === true && data?.name === 'barbro-desktop') {
@@ -125,16 +134,17 @@ export async function probeDesktopCompanion(): Promise<{
         version: typeof data.version === 'string' ? data.version : null,
         // Absent on older sidecars → default to capable (mac behavior).
         capabilities: { pauseResume: data.capabilities?.pauseResume !== false },
+        offlineAppOpen: data.offlineAppOpen === true,
         error: null,
       }
     }
-    return { ok: false, version: null, capabilities: null, error: 'Unexpected ping response' }
+    return { ok: false, version: null, capabilities: null, offlineAppOpen: false, error: 'Unexpected ping response' }
   } catch (e) {
     clearTimeout(t)
     const msg = e instanceof Error ? e.message : String(e)
     if (msg === 'The user aborted a request.' || /abort/i.test(msg)) {
-      return { ok: false, version: null, capabilities: null, error: null }
+      return { ok: false, version: null, capabilities: null, offlineAppOpen: false, error: null }
     }
-    return { ok: false, version: null, capabilities: null, error: msg }
+    return { ok: false, version: null, capabilities: null, offlineAppOpen: false, error: msg }
   }
 }

@@ -10,7 +10,8 @@
   import { alignLyricsToTranscription, tokenizeLyrics } from '$lib/lyrics/align'
   import { detectLyricsLanguage } from '$lib/lyrics/detectLyricsLanguage'
   import { selectBestStemSet, refreshProjectInfo } from '$lib/project/commit'
-  import { readProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import { readProjectSongAsset, writeProjectSongAsset } from '$lib/client/desktopProjectFs'
+  import AddAudioDialog from '$lib/components/AddAudioDialog.svelte'
   import { vocalPresenceFromBuffer } from '$lib/audio/vocalPresence'
   import {
     getLyricsSetupStatus,
@@ -191,6 +192,43 @@
       return
     }
     await runVocalImport(picked.path, false)
+  }
+
+  // ── Vocals source from YouTube — the SAME dialog the regular audio path
+  //    uses, not a second implementation. The importer needs a file ON DISK
+  //    (the sidecar aligns and separates from paths), so whatever the dialog
+  //    produces — a picked file or a downloaded YouTube audio — is written
+  //    into the song folder first, then flows through the one import path. ──
+  let vocalSourceDialogOpen = $state(false)
+  async function importVocalsFromBlob(file: File, fileName: string) {
+    const ps = get(projectStore)
+    if (!ps.osPath || !ps.activeSongFolder) {
+      vocalImportErr = 'This song needs a local project folder for vocal import.'
+      return
+    }
+    vocalImportBusy = true
+    vocalImportErr = ''
+    vocalImportMsg = 'Saving the vocals source into the project…'
+    try {
+      const ext = (fileName.split('.').pop() || 'audio').toLowerCase().replace(/[^a-z0-9]/g, '') || 'audio'
+      const subpath = `imports/vocals-source.${ext}`
+      const w = await writeProjectSongAsset(
+        ps.osPath,
+        ps.activeSongFolder,
+        subpath,
+        new Uint8Array(await file.arrayBuffer()),
+      )
+      if (!w.ok) {
+        vocalImportErr = 'error' in w && w.error ? String(w.error) : 'Could not save the file into the project.'
+        return
+      }
+      vocalImportBusy = false // runVocalImport manages its own busy state
+      await runVocalImport(`${ps.osPath}/${ps.activeSongFolder}/${subpath}`, false)
+    } catch (e) {
+      vocalImportErr = e instanceof Error ? e.message : String(e)
+    } finally {
+      vocalImportBusy = false
+    }
   }
 
   async function runVocalImport(uploadAbs: string, force: boolean) {
@@ -532,14 +570,24 @@
                 same recording, lines it up, pulls a clean vocal stem, and fits your lyrics.
               </p>
             </div>
-            <button
-              type="button"
-              class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 shrink-0 border-2 px-3 py-1 text-xs font-bold"
-              onclick={() => void pickAndImportVocals()}
-              disabled={vocalImportBusy}
-            >
-              {vocalImportBusy ? 'Working…' : 'Add vocals source'}
-            </button>
+            <div class="flex shrink-0 flex-col items-end gap-1.5">
+              <button
+                type="button"
+                class="border-foreground bg-foreground text-background hover:bg-foreground/85 disabled:opacity-40 shrink-0 border-2 px-3 py-1 text-xs font-bold"
+                onclick={() => void pickAndImportVocals()}
+                disabled={vocalImportBusy}
+              >
+                {vocalImportBusy ? 'Working…' : 'Add vocals source'}
+              </button>
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-foreground text-[11px] font-bold underline disabled:opacity-40"
+                onclick={() => (vocalSourceDialogOpen = true)}
+                disabled={vocalImportBusy}
+              >
+                …or from YouTube
+              </button>
+            </div>
           </div>
           {#if vocalImportBusy && vocalImportMsg}
             <p class="text-muted-foreground mt-2 text-xs" role="status">✨ {vocalImportMsg}</p>
@@ -659,3 +707,17 @@
     </div>
   </div>
 </section>
+
+<!-- The SAME add-audio dialog the regular audio path uses — file or YouTube.
+     Whatever it produces is saved into the song folder and flows through the
+     one vocal-import pipeline; no second implementation. -->
+<AddAudioDialog
+  bind:open={vocalSourceDialogOpen}
+  title="Add a version of this song WITH vocals"
+  desktopReachable={$desktopCompanionStatus.reachable}
+  onFile={(f: File) => void importVocalsFromBlob(f, f.name)}
+  onImported={(a: { file?: File; fileName: string }) => {
+    if (a.file) void importVocalsFromBlob(a.file, a.fileName)
+    else vocalImportErr = 'The import finished but produced no local file — try the file picker instead.'
+  }}
+/>

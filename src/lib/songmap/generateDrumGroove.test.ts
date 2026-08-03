@@ -115,6 +115,47 @@ describe('generateDrumGroove', () => {
     expect(slotsOf(out, 5, 'cymbal')).not.toContain(0)
   })
 
+  it('maps a shared boundary bar to the next section instead of double-playing it', () => {
+    const overlappedBoundary: SongMap = {
+      ...base,
+      sections: [section('verse1', 'verse', 0, 4), section('chorus1', 'chorus', 4, 7)],
+    }
+    const out = generateDrumGroove(overlappedBoundary, {
+      style: 'rock',
+      fills: 1,
+      crashOnSectionStart: true,
+      perSection: { chorus1: { style: 'disco', complexity: 0.85 } },
+    })
+
+    // The verse fill leads into bar 4; it does not land on top of the chorus.
+    expect(slotsOf(out, 3, 'tom').length).toBeGreaterThan(0)
+    expect(slotsOf(out, 4, 'tom')).toEqual([])
+    // Bar 4 is the chorus downbeat: one crash and the chorus-only disco kick pattern.
+    expect(slotsOf(out, 4, 'cymbal')).toEqual([0])
+    expect(slotsOf(out, 4, 'kick')).toEqual([0, 4, 8, 12])
+  })
+
+  it('uses Bar.index for section ranges instead of assuming array offsets', () => {
+    const shiftedIndexes: SongMap = {
+      ...base,
+      timeline: {
+        ...base.timeline,
+        bars: base.timeline.bars.map((bar) => ({ ...bar, index: bar.index + 10 })),
+      },
+      sections: [section('verse1', 'verse', 10, 13), section('chorus1', 'chorus', 14, 17)],
+    }
+    const out = generateDrumGroove(shiftedIndexes, {
+      style: 'rock',
+      fills: 1,
+      crashOnSectionStart: true,
+      perSection: { chorus1: { style: 'disco', complexity: 0.85 } },
+    })
+
+    expect(slotsOf(out, 3, 'tom').length).toBeGreaterThan(0)
+    expect(slotsOf(out, 4, 'cymbal')).toEqual([0])
+    expect(slotsOf(out, 4, 'kick')).toEqual([0, 4, 8, 12])
+  })
+
   it('applies a per-section style override without touching other sections', () => {
     const out = generateDrumGroove(twoSections, {
       style: 'rock',

@@ -88,6 +88,7 @@ async function freshJam() {
   jam.keysOn = false
   jam.bassOn = false
   jam.arpOn = false
+  jam.setTransposeSemitones(0)
   jam.configure(makeSong())
   return jam
 }
@@ -123,6 +124,16 @@ describe('chordJam — schedules', () => {
     expect(jam.arpHitsForTest.length).toBeGreaterThan(eighths)
     jam.arpRate = '1/4'
     expect(jam.arpHitsForTest.length).toBeLessThan(eighths)
+  })
+
+  it('transposes pitched MIDI voices by note number', async () => {
+    const jam = await freshJam()
+    jam.bassPattern = '4/4'
+    const keys = jam.keysPointsForTest[0]!.notes
+    const bass = jam.bassHitsForTest[0]!.midi
+    jam.setTransposeSemitones(2)
+    expect(jam.keysPointsForTest[0]!.notes).toEqual(keys.map((m) => m + 2))
+    expect(jam.bassHitsForTest[0]!.midi).toBe(bass + 2)
   })
 })
 
@@ -165,6 +176,38 @@ describe('chordJam — firing', () => {
     played.bass = []
     jam.setPosition(7.5, true) // jumped ~15 hits forward
     expect(played.bass.length).toBe(1) // just the one under the playhead
+  })
+
+  // ── Suppression: the mixer hosts keys and arp as scheduled MIDI lanes ────
+  // Without this, a voice would sound twice — once from the lane on the mixer's
+  // clock, once from the frame-driven jam on its own context.
+
+  it('does not fire a voice the calling surface plays itself', async () => {
+    const jam = await freshJam()
+    jam.keysOn = true
+    jam.arpOn = true
+    jam.setPosition(0, true, 'mixer', ['keys', 'arp'])
+    jam.setPosition(2, true, 'mixer', ['keys', 'arp'])
+    expect(played.chord).toEqual([])
+    expect(played.arp).toEqual([])
+  })
+
+  it('still fires the voices the surface does NOT host', async () => {
+    // The mixer hosts keys and arp, but the jam's bass stays frame-driven.
+    const jam = await freshJam()
+    jam.keysOn = true
+    jam.bassOn = true
+    jam.bassPattern = '4/4'
+    jam.setPosition(0, true, 'mixer', ['keys', 'arp'])
+    expect(played.chord).toEqual([])
+    expect(played.bass.length).toBe(1)
+  })
+
+  it('suppressing nothing behaves exactly as before', async () => {
+    const jam = await freshJam()
+    jam.keysOn = true
+    jam.setPosition(0, true, 'mixer', [])
+    expect(played.chord.length).toBe(1)
   })
 
   it('releases every voice when playback stops', async () => {

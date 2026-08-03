@@ -40,6 +40,11 @@ import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
 import { patchMetadataForFolder, project, setProjectData } from '$lib/stores/project'
 import { patchSongMap, songMap } from '$lib/stores/songMap'
+import { reportCloudPush, reportDiskSave, reportEditPending } from '$lib/stores/persistStatus'
+import { isOfflineClient } from '$lib/stores/offlineBuild'
+import { isEditingPaused } from '$lib/client/editingLock'
+import { readOfflineSession, writeOfflineSession } from '$lib/client/offlineSessionIo'
+import { newOfflineSession, withTouchedSong, type OfflineSession } from '$lib/project/offlineSession'
 import type { ProjectFile } from '$lib/project/types'
 
 const DEBOUNCE_MS = 1500
@@ -58,6 +63,42 @@ let writing = false
 let pendingWhileWriting = false
 let cloudPushing = false
 let cloudPendingWhilePushing = false
+
+/**
+ * The offline session marker, cached in memory and keyed by project path.
+ *
+ * Cached because this is consulted on every disk save — once per 1.5 s while
+ * you work — and re-reading a small file that only changes when a NEW song is
+ * first touched would be pointless traffic through the sidecar.
+ */
+let offlineSession: OfflineSession | null = null
+let offlineSessionPath: string | null = null
+
+/**
+ * Note that this song was edited offline.
+ *
+ * Runs after the disk write succeeds, so the marker can never claim an edit
+ * that was not actually saved. Best-effort: the marker makes offline edits
+ * VISIBLE later, it is not what preserves them — the `.smap` on disk is.
+ */
+async function recordOfflineTouch(osPath: string, songId: string): Promise<void> {
+  if (!isOfflineClient()) return
+  if (offlineSessionPath !== osPath) {
+    offlineSessionPath = osPath
+    offlineSession = await readOfflineSession(osPath)
+  }
+  const existing = offlineSession
+  // No marker means "Prepare for offline" was never run. Start one anyway: the
+  // edits are real, and they must not be invisible on the way home just because
+  // the pre-flight was skipped. Such a session has no base revisions, so
+  // reconcile falls back to the manifest's watermarks — which is what it would
+  // have used regardless.
+  const base = existing ?? newOfflineSession(new Date().toISOString())
+  const next = withTouchedSong(base, songId)
+  if (existing && next === existing) return // already recorded — no write
+  offlineSession = next
+  await writeOfflineSession(osPath, next)
+}
 
 async function tryWriteOnce(force = false): Promise<void> {
   const snap = get(project)
@@ -82,7 +123,22 @@ async function tryWriteOnce(force = false): Promise<void> {
   if (!entry) return
 
   // Guard 6: sidecar reachable
-  if (!get(desktopCompanionStatus).reachable) return
+  const companion = get(desktopCompanionStatus)
+  if (!companion.reachable) return
+
+  // Guard 6b: ONE BARBRO AT A TIME. The offline app is editing this same folder
+  // right now, and both of us writing `song.smap` from our own copy in memory
+  // means whoever writes last erases the other. Standing down is not a lost
+  // edit — it is the only way to avoid one. See `editingLock.ts`.
+  if (
+    isEditingPaused({
+      offlineAppOpen: companion.offlineAppOpen,
+      isOfflineApp: isOfflineClient(),
+      hasLocalProject: snap.osPath !== null,
+    })
+  ) {
+    return
+  }
 
   const sess = get(audioSession)
   const state = restorableSongState(sm, sess.file ?? null)
@@ -96,9 +152,16 @@ async function tryWriteOnce(force = false): Promise<void> {
 
   const bytes = new Uint8Array(await blob.arrayBuffer())
   const r = await writeProjectSong(snap.osPath, snap.activeSongFolder, bytes)
+  reportDiskSave(r.ok, r.ok ? undefined : r.error)
   if (!r.ok) return
 
   patchMetadataForFolder(snap.activeSongFolder, metadataLiteFromSongMap(sm))
+
+  // Offline only: leave a trace so the browser can offer these edits for sync
+  // when you are back. Deliberately after the write and deliberately awaited-
+  // but-swallowed — a failed marker is a worse experience later, not a lost
+  // edit now.
+  await recordOfflineTouch(snap.osPath, snap.activeSongId).catch(() => {})
 }
 
 function schedule(): void {
@@ -132,9 +195,34 @@ function schedule(): void {
  * Phase 8 wires the actual merge UI.
  */
 async function tryCloudPushOnce(force = false): Promise<void> {
+  // The offline build has no cloud to push to — not "no connection right now",
+  // but no configured client at all, so every attempt would throw. The edits are
+  // not lost: they are on disk, and the session marker written above is what
+  // makes the browser offer to send them when you are back.
+  if (isOfflineClient()) return
   const snap = get(project)
   const sm = get(songMap)
   if (!sm || !snap.data || !snap.data.cloud) return
+  // Same interlock as the disk write. Pushing a copy we are not allowed to save
+  // locally would put the stale side in the cloud and make it authoritative.
+  if (
+    isEditingPaused({
+      offlineAppOpen: get(desktopCompanionStatus).offlineAppOpen,
+      isOfflineApp: isOfflineClient(),
+      hasLocalProject: snap.osPath !== null,
+    })
+  ) {
+    // The pause is CORRECT (two writers would clobber each other) — but it
+    // silently ate half an hour of chord edits once: the browser session kept
+    // accepting edits while every push returned here, unsaid. Never unsaid
+    // again — the badge turns red with these exact words.
+    reportCloudPush(
+      false,
+      undefined,
+      'Saving is PAUSED — the desktop app has this project open. Edit there, or close it; edits made here are NOT being saved.',
+    )
+    return
+  }
   if (!snap.activeSongId) return
   if (snap.editingMode !== 'project-song') return
   // Only push when actively editing in /edit, mirroring the disk-write guard —
@@ -171,6 +259,7 @@ async function tryCloudPushOnce(force = false): Promise<void> {
   // Mark the active song + project synced through `revision`/`hash`. Re-reads
   // the store because an await may have elapsed since the snapshot.
   function markSynced(revision: number, hash: string): void {
+    reportCloudPush(true, revision)
     const cur = get(project)
     if (!cur.data || !cur.data.cloud) return
     const next: ProjectFile = {
@@ -419,6 +508,7 @@ export function startProjectAutosave(): void {
   started = true
   unsubs.push(
     songMap.subscribe(() => {
+      reportEditPending()
       schedule()
       // Independent timer — cloud push runs in parallel with disk write,
       // not chained after it. Disk failure must not block cloud, and
@@ -459,5 +549,7 @@ export function stopProjectAutosave(): void {
     clearTimeout(cloudDebounceTimer)
     cloudDebounceTimer = null
   }
+  offlineSession = null
+  offlineSessionPath = null
   started = false
 }

@@ -8,7 +8,7 @@
   import WaveformCanvas from '$lib/components/WaveformCanvas.svelte'
   import { APC_PALETTE } from '$lib/hardware/apcPalette'
   import { SECTION_KIND_COLOR } from '$lib/songmap/sectionColors'
-  import { sectionToPad, STEM_ON_VELOCITY } from '$lib/hardware/liveMidiMap'
+  import { LIVE_SLOT_PAD_COUNT, sectionToPad, STEM_ON_VELOCITY } from '$lib/hardware/liveMidiMap'
   import { midiStatus, ensureMidi, sendPadRaw, sendPadDim, clearAllLeds } from '$lib/hardware/midiService'
 
   type Palette = Record<string, string>
@@ -91,7 +91,7 @@
   function sendToAkai(colors: Palette) {
     clearAllLeds()
     // Stems row, like live mode: turquoise — some on (bright), some muted (dim).
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < LIVE_SLOT_PAD_COUNT; i++) {
       if (i % 3 === 0) sendPadDim(i, STEM_ON_VELOCITY)
       else sendPadRaw(i, STEM_ON_VELOCITY, 'solid')
     }

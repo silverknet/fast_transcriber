@@ -288,12 +288,23 @@ describe('titleCuePreludeSec uses the resolved announcement', () => {
 
 describe('buildCueSpeechEvents uses the announcement override', () => {
   it('emits the override as the title event (not metadata.title)', () => {
+    // Since the derived-announcement model: the EVENT supplies the words, the
+    // project setting supplies the switch — so the switch is passed here. An
+    // event alone no longer speaks (that made per-song events the de-facto
+    // switch, and the project setting lied).
     const sm = mapWithCountIn(4)
     sm.metadata.title = 'Valerie (Amy Winehouse cover) — live'
     setIntroCue(sm, 'Valerie')
-    const ev = buildCueSpeechEvents(sm)
+    const ev = buildCueSpeechEvents(sm, undefined, { announceTitle: true })
     const titleEv = ev.find((e) => e.kind === 'title')
     expect(titleEv?.text).toBe('Valerie.')
+  })
+
+  it('the event alone is silent — words are not a switch', () => {
+    const sm = mapWithCountIn(4)
+    setIntroCue(sm, 'Valerie')
+    const ev = buildCueSpeechEvents(sm) // announceTitle defaults off
+    expect(ev.find((e) => e.kind === 'title')).toBeUndefined()
   })
 
   it('does not emit an implicit title event when no intro cue is set', () => {

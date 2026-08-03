@@ -28,13 +28,13 @@ import {
 import { chordIntervalSemitones } from '$lib/chords/chordVoicing'
 import { chordRootToPitchClass } from '$lib/chords/pitchClass'
 import { bassMidiFor } from '$lib/audio/chordBass'
+import { buildSectionBlocksForBars, type SectionBlock } from './sectionBlocks'
 import type {
   BassMachine,
   BassMachineSection,
   BassMidiEvent,
   ChordSymbol,
   HarmonyEvent,
-  Section,
   SongMap,
 } from './types'
 
@@ -48,23 +48,8 @@ export type BassGrooveSpec = Pick<
 const MIN_NOTE_SEC = 0.05
 const NOTE_GAP_SEC = 0.015
 
-type Block = { start: number; end: number; section: Section | null }
-
-function blocksWithSections(sm: SongMap, barCount: number): Block[] {
-  const blocks: Block[] = []
-  const sections = [...sm.sections].sort(
-    (a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex,
-  )
-  let cursor = 0
-  for (const s of sections) {
-    const start = Math.max(0, s.barRange.startBarIndex)
-    const end = Math.min(barCount - 1, s.barRange.endBarIndex)
-    if (start > cursor) blocks.push({ start: cursor, end: start - 1, section: null })
-    if (end >= start) blocks.push({ start, end, section: s })
-    cursor = Math.max(cursor, end + 1)
-  }
-  if (cursor <= barCount - 1) blocks.push({ start: cursor, end: barCount - 1, section: null })
-  return blocks.length > 0 ? blocks : [{ start: 0, end: barCount - 1, section: null }]
+function blocksWithSections(sm: SongMap, barSlots: ReturnType<typeof buildBarSlots>): SectionBlock[] {
+  return buildSectionBlocksForBars(sm.sections, barSlots.map((slot) => slot.bar))
 }
 
 /**
@@ -141,7 +126,7 @@ type ResolvedBlock = {
   muted: boolean
 }
 
-function resolveBlock(block: Block, spec: BassGrooveSpec): ResolvedBlock {
+function resolveBlock(block: SectionBlock, spec: BassGrooveSpec): ResolvedBlock {
   const override = block.section ? spec.perSection?.[block.section.id] : undefined
   if (override?.muted) {
     return { steps: [], followsChordChanges: true, gain: 1, octaveShift: 0, muted: true }
@@ -171,7 +156,7 @@ export function generateBassGroove(sm: SongMap, spec: BassGrooveSpec): BassMidiE
   // user just hasn't written the harmony yet.
   if (barSlots.length === 0 || timeline.length === 0) return []
 
-  const blocks = blocksWithSections(sm, barSlots.length)
+  const blocks = blocksWithSections(sm, barSlots)
   const out: BassMidiEvent[] = []
 
   blocks.forEach((block) => {

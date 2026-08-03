@@ -1,5 +1,11 @@
 # Hardware Control
 
+> **Implementation reference, not live-audio authority.** Target routing,
+> readiness, lifecycle, and ownership are defined from
+> [`../architecture/audio-system-overview.md`](../architecture/audio-system-overview.md).
+> Where this file describes current behavior that differs, the architecture and
+> contracts are the future implementation authority.
+
 Planned live hardware integration for controlling an external digital mixer and
 MIDI controller from BarBro.
 
@@ -75,9 +81,17 @@ Current web surface:
 - The song Overview mixer shows a compact XR18 strip.
 - Connect opens the sidecar UDP OSC socket; Follow mixer must be armed
   separately before BarBro writes faders/mutes.
-- Routes are saved locally per project/browser. Defaults are intentionally
-  conservative: original mix -> channels 17/18, click -> 15, cue -> 16, stems
-  unmapped until the user assigns XR18 channels.
+- Routes are saved on the project (`ProjectFile.liveRig`). Defaults: original mix
+  -> channels 9/10, click -> 15, cue -> 16.
+- **The XR18 has SIXTEEN channel strips.** `/ch/17` and `/ch/18` do not exist —
+  verified against a real XR18V2 (fw 1.19), which answers `/ch/16/mix/fader` and
+  stays silent for 17 and 18. Click and cue were once routed there, so every
+  write went to an address the desk does not have; X-Air ignores unknown
+  addresses with no reply and no error, so it failed completely silently. What
+  the desk calls 17/18 is the aux return, `/rtn/aux/...`.
+- The default lane->channel table is **not injective** and this is a known bug
+  being fixed: `stem:other` defaults to 15/16 (exactly click and cue) and
+  `stem:drums` to 9/10 (exactly `original`). See `docs/live-rig-plan-review.md`.
 - The strip mirrors lane volume to XR18 channel fader and BarBro mute/solo state
   to XR18 channel on/off for mapped lanes only.
 - The song Overview mixer and dedicated `/project/playback` live route show a

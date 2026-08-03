@@ -2,6 +2,14 @@
   import { get } from 'svelte/store'
   import EditSectionToolbar from '$lib/components/EditSectionToolbar.svelte'
   import CueTimeline from '$lib/components/CueTimeline.svelte'
+  import PerformerMixPanel from '$lib/components/editor/PerformerMixPanel.svelte'
+  import {
+    announcementOverrideText,
+    withAnnouncementOverride,
+    withSpokenCountIn,
+  } from '$lib/songmap/cueTracks'
+  import { effectiveCountInBeats } from '$lib/songmap/countIn'
+  import { project as cueProjectStore } from '$lib/stores/project'
   import { sectionKindColor } from '$lib/songmap/sectionColors'
   import { patchSongMap, songMap } from '$lib/stores/songMap'
   import { project as projectStore } from '$lib/stores/project'
@@ -32,6 +40,35 @@
     if (!sm) return null
     return sm.cueTracks.find((track) => track.id === selectedCueTrackId) ?? getPrimaryCueTrack(sm) ?? null
   })
+  // ── The spoken parts of the selected track ───────────────────────────────
+  //
+  // The announcement's SWITCH lives in Project Settings (derived everywhere);
+  // here a person authors only the WORDS ("Winehouse" instead of the full
+  // title) and the spoken count-in. Both write through the pure helpers so the
+  // Auto-generate pass and the bulk pass can never disagree with this field.
+  const announcementOn = $derived(
+    ($cueProjectStore.data?.defaults?.preCountInCue?.mode ?? 'off') !== 'off',
+  )
+  const overrideText = $derived(selectedCueTrack ? (announcementOverrideText(selectedCueTrack) ?? '') : '')
+  const songCountInBeats = $derived($songMap ? effectiveCountInBeats($songMap) : 0)
+
+  function patchSelectedTrack(fn: (t: CueTrack) => CueTrack): void {
+    const id = selectedCueTrack?.id
+    if (!id) return
+    patchSongMap((m) => ({
+      ...m,
+      cueTracks: m.cueTracks.map((t) => (t.id === id ? fn(t) : t)),
+    }))
+  }
+
+  function setAnnouncementOverride(text: string): void {
+    patchSelectedTrack((t) => withAnnouncementOverride(t, text))
+  }
+
+  function setSpokenCountIn(on: boolean): void {
+    patchSelectedTrack((t) => withSpokenCountIn(t, on))
+  }
+
   let selectedCueEvents = $derived.by(() => {
     const track = selectedCueTrack
     if (!track) return [] as CueEvent[]
@@ -445,6 +482,45 @@
       {/if}
     </div>
 
+    {#if selectedCueTrack}
+      <div class="border-foreground/15 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-[var(--radius)] border p-2">
+        <label class="flex min-w-0 flex-1 items-center gap-2 text-xs" title={announcementOn
+            ? 'What the announcement says for this song. Leave empty to speak the song title (and keep following renames).'
+            : 'Announcements are switched off for this project (Project settings → Song announcement). The words are kept for when it is switched on.'}>
+          <span class="shrink-0 font-semibold">Announced as</span>
+          <input
+            type="text"
+            value={overrideText}
+            placeholder={$songMap?.metadata.title?.trim() || 'Song title'}
+            onchange={(e) => setAnnouncementOverride(e.currentTarget.value)}
+            class="border-foreground/30 bg-background min-w-0 flex-1 border-2 px-2 py-1 text-xs focus:border-foreground focus:outline-none {announcementOn
+              ? ''
+              : 'opacity-60'}"
+          />
+        </label>
+        {#if !announcementOn}
+          <span class="text-muted-foreground text-[10px]">announcements off in Project settings</span>
+        {/if}
+        <label
+          class="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs {songCountInBeats > 0
+            ? ''
+            : 'opacity-50'}"
+          title={songCountInBeats > 0
+            ? `Speak the count-in: “${$songMap?.metadata.title?.trim() || 'Song'} … ${songCountInBeats}” then the numbers on the beats.`
+            : 'This song has no count-in — set one in the Grid tab first.'}
+        >
+          <input
+            type="checkbox"
+            checked={!!selectedCueTrack.spokenCountIn}
+            disabled={songCountInBeats === 0}
+            onchange={(e) => setSpokenCountIn(e.currentTarget.checked)}
+            class="accent-foreground size-3.5"
+          />
+          <span class="font-semibold">Speak the count-in</span>
+        </label>
+      </div>
+    {/if}
+
     <CueTimeline
       sections={cueSectionRegions}
       customCues={cueTimelineCues}
@@ -454,5 +530,9 @@
       onSetSpeechText={setSectionSpeechText}
       onInsertAtSec={insertCueAtSec}
     />
+
+    {#if selectedCueTrack}
+      <PerformerMixPanel track={selectedCueTrack} />
+    {/if}
   </div>
 </section>

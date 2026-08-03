@@ -461,15 +461,43 @@
   let minimapHoverTarget = $state('outside')
   let pendingMainPeaksRecompute = false
 
-  /** Grid mode: seek to selected bar start when selection changes (same as before). */
+  /**
+   * WHICH bar a grid selection wants the playhead at — derived, and a plain
+   * STRING on purpose.
+   *
+   * The seek below used to read `beatGrid` directly, which made every edit to
+   * the grid a reason to seek: resize a bar → new grid object → effect runs →
+   * `seek()` → the transport emits an update → re-render → new grid object →
+   * seek again, until Svelte killed it with `effect_update_depth_exceeded`.
+   * Merging a bar appeared to work only because it happened to settle first.
+   *
+   * Deriving a string breaks that loop at the root: the id is unchanged by
+   * resizing, merging or splitting bars, so a derived that recomputes to the
+   * same value notifies nobody. Only actually SELECTING a different bar can
+   * move the playhead — which was always the intent.
+   */
+  const gridSeekBarId = $derived(
+    mediaReady &&
+      timelineStripMode === 'grid' &&
+      beatGridEditing &&
+      selectedBarId &&
+      beatGrid?.bars.some((x) => x.id === selectedBarId)
+      ? selectedBarId
+      : null,
+  )
+
+  /** Grid mode: seek to the selected bar's start when the SELECTION changes. */
   $effect(() => {
-    if (timelineStripMode !== 'grid' || !beatGridEditing || !selectedBarId || !beatGrid) return
-    const bar = beatGrid.bars.find((x) => x.id === selectedBarId)
-    if (!bar) return
-    const d = timelineSec
-    if (!(d > 0) || !mediaReady) return
-    const t = Math.min(Math.max(0, bar.startSec), d)
-    controller.seek(t)
+    const barId = gridSeekBarId
+    if (!barId) return
+    // Everything else is read untracked: the geometry and the transport's own
+    // timeline are inputs to the seek, never reasons to perform one.
+    untrack(() => {
+      const bar = beatGrid?.bars.find((x) => x.id === barId)
+      const d = timelineSec
+      if (!bar || !(d > 0)) return
+      controller.seek(Math.min(Math.max(0, bar.startSec), d))
+    })
   })
 
   /** Sections mode: seek after pointer-up (selection commit), not on every drag frame. */
@@ -2167,7 +2195,6 @@
           audioBorderTicks={audioBorderTicks}
           countInTicks={countInTicks}
           songStartBarIndex={songStartBarIndex}
-          onSetStartBar={onSetStartBar}
         />
         {#if beatGridEditing && timelineStripMode === 'grid' && onBarGridAction}
           <div
@@ -2264,6 +2291,39 @@
               }}
             >
               + Beat
+            </Button>
+            <!-- Type the number instead of nudging to it. The wheel/stepper is
+                 fine for ±1 but miserable for "this bar is 7" — and worse, a
+                 stray scroll over the strip changes the bar. -->
+            <label class="text-muted-foreground inline-flex items-center gap-1 text-[11px] font-bold">
+              Beats
+              <input
+                type="number"
+                min="1"
+                max="32"
+                class="border-foreground/25 bg-background h-8 w-14 rounded-[var(--radius)] border px-1.5 text-center text-xs font-bold tabular-nums"
+                value={beatGrid.bars.find((b) => b.id === selectedBarId)?.beatCount ?? ''}
+                onchange={(e) => {
+                  const n = Math.round(Number((e.currentTarget as HTMLInputElement).value))
+                  if (!Number.isFinite(n) || n < 1 || n > 32) return
+                  onBarGridAction?.({ type: 'setBarBeatCount', barId: selectedBarId!, count: n })
+                }}
+                title="Beats in the selected bar"
+              />
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-8 text-xs"
+              disabled={songStartBarIndex === beatGrid.bars.find((b) => b.id === selectedBarId)?.index}
+              onclick={() => {
+                const bar = beatGrid.bars.find((b) => b.id === selectedBarId)
+                if (bar) onSetStartBar?.(bar.index)
+              }}
+              title="The count-in and every click begin at this bar"
+            >
+              ▼ Song starts here
             </Button>
           </div>
         {/if}

@@ -14,6 +14,7 @@
    */
   import { Button } from '$lib/components/ui/button'
   import WaveformCanvas from '$lib/components/WaveformCanvas.svelte'
+  import type { MidiVisual } from '$lib/audio/mixerEngine'
   import { GripVertical, Lock } from '@lucide/svelte'
   import ChannelEqPopover from '$lib/components/ChannelEqPopover.svelte'
   import type { ChannelEq } from '$lib/audio/channelEq'
@@ -29,10 +30,12 @@
     color = '#7c3aed',
     sectionBands = [],
     showSectionLabels = false,
+    activeSectionId = null,
     onVolumeChange,
     onToggleMuted,
     onToggleSoloed,
     onSeekFraction,
+    onSectionSelect,
     selected = false,
     onSelect,
     liveSlot,
@@ -48,6 +51,9 @@
     onDragEndLane,
     eq,
     onEqChange,
+    isInstrument = false,
+    sourceDurationSec = 0,
+    midiVisual = null,
   } = $props<{
     label: string
     buffer: AudioBuffer | null
@@ -61,14 +67,18 @@
     /** Waveform stroke color. */
     color?: string
     /** Song sections as mix-timeline fractions [0..1], drawn as shaded bands. */
-    sectionBands?: { startFrac: number; endFrac: number; label: string; index: number }[]
+    sectionBands?: { id?: string; startFrac: number; endFrac: number; label: string; index: number; color?: string }[]
     /** Draw section labels — only the top lane sets this true. */
     showSectionLabels?: boolean
+    /** Highlight the section currently scoped in the machine editor. */
+    activeSectionId?: string | null
     onVolumeChange: (v: number) => void
     onToggleMuted: () => void
     onToggleSoloed: () => void
     /** Fraction is 0..1 relative to mix duration. */
     onSeekFraction: (frac: number) => void
+    /** When supplied, waveform section clicks select a machine section. */
+    onSectionSelect?: (sectionId: string) => void
     /** Selected lanes are outlined; the mixer shows the matching editor. */
     selected?: boolean
     /** Absent = this lane isn't selectable (no editor behind it). */
@@ -81,6 +91,12 @@
     liveSlot?: string
     liveSlotOptions?: { value: string; label: string }[]
     onLiveSlotChange?: (value: string) => void
+    /** MIDI lanes are played live and have no waveform to draw. */
+    isInstrument?: boolean
+    /** Mix-timeline length, from the buffer or the instrument's part. */
+    sourceDurationSec?: number
+    /** A MIDI lane draws its pattern here instead of a waveform. */
+    midiVisual?: MidiVisual | null
     /** Fixed at the top (the original mix) — shown tinted, with a lock. */
     pinned?: boolean
     /** Drag-to-reorder is available for this lane. */
@@ -101,7 +117,7 @@
   const WAVE_HEIGHT = 44
 
   /** This lane's buffer duration; may be shorter than mix duration. */
-  let bufferDur = $derived(buffer ? buffer.duration : 0)
+  let bufferDur = $derived(buffer ? buffer.duration : sourceDurationSec)
   /** Where this lane's audio ends, expressed as a fraction of mix duration. */
   let endFrac = $derived(durationSec > 0 ? bufferDur / durationSec : 0)
 </script>
@@ -173,14 +189,18 @@
     >
       <div class="truncate text-xs font-semibold">{label}</div>
       <div class="text-muted-foreground truncate font-mono text-[10px]">
-        {buffer ? `${buffer.duration.toFixed(1)}s` : '—'}
+        {#if buffer}{buffer.duration.toFixed(1)}s{:else if isInstrument}MIDI · {sourceDurationSec.toFixed(
+            1,
+          )}s{:else}—{/if}
       </div>
     </button>
   {:else}
     <div class="w-28 shrink-0 min-w-0">
       <div class="truncate text-xs font-semibold">{label}</div>
       <div class="text-muted-foreground truncate font-mono text-[10px]">
-        {buffer ? `${buffer.duration.toFixed(1)}s` : '—'}
+        {#if buffer}{buffer.duration.toFixed(1)}s{:else if isInstrument}MIDI · {sourceDurationSec.toFixed(
+            1,
+          )}s{:else}—{/if}
       </div>
     </div>
   {/if}
@@ -245,6 +265,8 @@
     {Math.round(volume * 100)}%
   </span>
 
+  <!-- A MIDI lane has no buffer BY DESIGN — it is played live, not decoded — so
+       it must not sit on the canvas's "loading..." state, which reads as broken. -->
   <WaveformCanvas
     class="flex-1"
     {buffer}
@@ -254,10 +276,13 @@
     {durationSec}
     {sectionBands}
     {showSectionLabels}
-    bufferEndFraction={endFrac < 1 ? endFrac : null}
+    {activeSectionId}
+    bufferEndFraction={!isInstrument && endFrac < 1 ? endFrac : null}
     label={`Seek ${label}`}
+    {midiVisual}
     loadingLabel="loading..."
     playheadClass="bg-rose-500 pointer-events-none absolute top-0 bottom-0 z-[2] w-px"
     {onSeekFraction}
+    {onSectionSelect}
   />
 </div>

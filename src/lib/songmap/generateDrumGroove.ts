@@ -28,6 +28,7 @@ import {
   type PatternBar,
   type Step,
 } from './drumPatterns'
+import { buildSectionBlocksForBars, type SectionBlock } from './sectionBlocks'
 import type {
   DrumClass,
   DrumMachine,
@@ -35,7 +36,6 @@ import type {
   DrumMidiEvent,
   DrumPulseVoice,
   DrumVoiceToggles,
-  Section,
   SongMap,
 } from './types'
 
@@ -61,27 +61,12 @@ export type SectionGrooveOverride = DrumMachineSection
 const CRASH_VEL = 0.9
 const DRUM_CLASSES: DrumClass[] = ['kick', 'snare', 'hihat', 'tom', 'cymbal', 'ride']
 
-type Block = { start: number; end: number; section: Section | null }
-
 /**
  * Bars grouped by section, with gaps between sections kept as unlabelled
  * blocks so an un-sectioned song still gets a groove.
  */
-function blocksWithSections(sm: SongMap, barCount: number): Block[] {
-  const blocks: Block[] = []
-  const sections = [...sm.sections].sort(
-    (a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex,
-  )
-  let cursor = 0
-  for (const s of sections) {
-    const start = Math.max(0, s.barRange.startBarIndex)
-    const end = Math.min(barCount - 1, s.barRange.endBarIndex)
-    if (start > cursor) blocks.push({ start: cursor, end: start - 1, section: null })
-    if (end >= start) blocks.push({ start, end, section: s })
-    cursor = Math.max(cursor, end + 1)
-  }
-  if (cursor <= barCount - 1) blocks.push({ start: cursor, end: barCount - 1, section: null })
-  return blocks.length > 0 ? blocks : [{ start: 0, end: barCount - 1, section: null }]
+function blocksWithSections(sm: SongMap, barSlots: ReturnType<typeof buildBarSlots>): SectionBlock[] {
+  return buildSectionBlocksForBars(sm.sections, barSlots.map((slot) => slot.bar))
 }
 
 /** Lowest slot touched by a fill — where the groove hands over. */
@@ -148,7 +133,7 @@ type ResolvedBlock = {
  * value, else — for complexity only — the section KIND's default. That last
  * fallback is what makes an untouched song follow its own arrangement.
  */
-function resolveBlock(block: Block, spec: DrumGrooveSpec): ResolvedBlock {
+function resolveBlock(block: SectionBlock, spec: DrumGrooveSpec): ResolvedBlock {
   const override = block.section ? spec.perSection?.[block.section.id] : undefined
   if (override?.muted) {
     return {
@@ -190,7 +175,7 @@ export function generateDrumGroove(sm: SongMap, spec: DrumGrooveSpec): DrumMidiE
   if (barSlots.length === 0) return []
 
   const withCrash = spec.crashOnSectionStart ?? true
-  const blocks = blocksWithSections(sm, barSlots.length)
+  const blocks = blocksWithSections(sm, barSlots)
   const out: DrumMidiEvent[] = []
 
   const emit = (slotTimes: number[], cls: DrumClass, step: Step, gain: number) => {

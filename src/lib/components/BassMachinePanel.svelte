@@ -23,7 +23,18 @@
   } from '$lib/audio/bassSounds'
   import type { BassMachine, BassMachineSection, BassStyleId, Section } from '$lib/songmap/types'
 
-  let { onChanged }: { onChanged?: () => void } = $props()
+  let {
+    onChanged,
+    scope: externalScope,
+    onScopeChange,
+    showSectionStrip = true,
+  }: {
+    onChanged?: () => void
+    /** 'song' = whole-song defaults; otherwise a Section.id. */
+    scope?: string
+    onScopeChange?: (scope: string) => void
+    showSectionStrip?: boolean
+  } = $props()
 
   const DEFAULT_LOUDNESS = 0.5
 
@@ -36,7 +47,12 @@
   const totalBars = $derived($songMap?.timeline.bars.length ?? 0)
   const chordCount = $derived($songMap?.harmony.length ?? 0)
 
-  let scope = $state<string>('song')
+  let localScope = $state<string>('song')
+  const scope = $derived(externalScope ?? localScope)
+  function setScope(next: string): void {
+    if (externalScope === undefined) localScope = next
+    onScopeChange?.(next)
+  }
   const scopeValid = $derived(scope === 'song' || sections.some((s) => s.id === scope))
   const activeScope = $derived(scopeValid ? scope : 'song')
   const activeSection = $derived<Section | null>(
@@ -96,7 +112,7 @@
       const { bassMachine: _drop, ...rest } = sm
       return rest
     })
-    scope = 'song'
+    setScope('song')
     onChanged?.()
   }
 
@@ -181,23 +197,35 @@
          renders for a lane that already exists, so this is a safety net. -->
     <p class="text-muted-foreground text-xs">No bass machine track on this song.</p>
   {:else}
+    {#if showSectionStrip}
     <div class="mb-2">
       <SectionStrip
         {sections}
         {totalBars}
         {activeScope}
         ariaLabel="Bass sections"
-        onSelect={(next) => (scope = next)}
+        onSelect={setScope}
         subtitleFor={(s) => (sectionMuted(s) ? 'silent' : styleLabel(sectionStyle(s)))}
         overriddenFor={sectionOverridden}
         mutedFor={sectionMuted}
       />
     </div>
+    {/if}
 
     <div class="mb-2 flex flex-wrap items-center gap-1.5">
       <span class="text-muted-foreground text-[11px] font-bold uppercase">
         Editing {activeSection ? activeSection.label : 'whole song'}
       </span>
+      {#if !showSectionStrip && activeSection}
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground inline-flex h-7 items-center gap-1 px-1.5 text-[11px] font-bold"
+          onclick={() => setScope('song')}
+          title="Edit the whole-song defaults"
+        >
+          Whole song
+        </button>
+      {/if}
       {#if activeSection && sectionHasOverride}
         <button
           type="button"

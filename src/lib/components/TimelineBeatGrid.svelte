@@ -132,7 +132,6 @@
      * on any bar. Receives the bar's 0-based `index`. Undefined
      * disables the affordance.
      */
-    onSetStartBar = undefined as ((barIndex: number) => void) | undefined,
   }: {
     viewStart: number
     viewEnd: number
@@ -177,7 +176,6 @@
     audioBorderTicks?: AudioBorderTick[]
     countInTicks?: { timeSec: number; downbeat: boolean }[]
     songStartBarIndex?: number | null
-    onSetStartBar?: (barIndex: number) => void
   } = $props()
 
   let gridEl = $state<HTMLDivElement | undefined>()
@@ -1584,34 +1582,22 @@
     {/if}
   </div>
 
-  <!-- Per-bar "Set as song start" affordance (grid mode). Every bar
-       gets a small anchor button at its left edge: dim by default,
-       full opacity on hover, and full opacity + amber tint on the
-       currently-anchored bar (so the user always sees where the song
-       starts from). Click → parent's `onSetStartBar(barIndex)` updates
-       `startBeatId`; the plan reactively re-derives, count-in ghost
-       ticks shift, click loop respects the new anchor on next play.
-       One write, every consumer follows. -->
-  {#if editing && stripMode === 'grid' && onSetStartBar}
-    {#each barSlices as slice (slice.bar.id)}
-      {@const isStart = slice.bar.index === songStartBarIndex}
-      <button
-        type="button"
-        class="absolute top-0 z-[30] flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm leading-none transition-opacity hover:bg-foreground/15 {isStart
-          ? 'text-amber-400 opacity-100'
-          : 'text-foreground opacity-15 hover:opacity-95'}"
+  <!-- SONG START — a marker on the anchored bar, and nothing on the others.
+       Every bar used to carry its own clickable arrow, which put ~500 tiny
+       "move the song start" buttons along the strip: one stray click silently
+       moved where the count-in and every click begin, and that is exactly how
+       a song ended up with its start 70% of the way in and no clicks for the
+       first three minutes. Setting it is now a deliberate act from the bar
+       toolbar; this is only the readout of where it landed. -->
+  {#if editing && stripMode === 'grid' && songStartBarIndex !== null}
+    {#each barSlices.filter((s) => s.bar.index === songStartBarIndex) as slice (slice.bar.id)}
+      <div
+        class="pointer-events-none absolute top-0 z-[30] flex h-4 w-4 items-center justify-center leading-none text-amber-400"
         style:left="{slice.x0 + 2}px"
-        onclick={(ev) => {
-          ev.stopPropagation()
-          onSetStartBar?.(slice.bar.index)
-        }}
-        title={isStart
-          ? `Bar ${slice.bar.index + 1} is the song start`
-          : `Set bar ${slice.bar.index + 1} as song start`}
-        aria-label={`Set bar ${slice.bar.index + 1} as song start`}
+        title={`The song starts at bar ${slice.bar.index + 1}`}
       >
         <span class="text-[10px] font-bold tabular-nums leading-none">▼</span>
-      </button>
+      </div>
     {/each}
   {/if}
 

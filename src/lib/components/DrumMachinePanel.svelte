@@ -30,7 +30,18 @@
     Section,
   } from '$lib/songmap/types'
 
-  let { onChanged }: { onChanged?: () => void } = $props()
+  let {
+    onChanged,
+    scope: externalScope,
+    onScopeChange,
+    showSectionStrip = true,
+  }: {
+    onChanged?: () => void
+    /** 'song' = whole-song defaults; otherwise a Section.id. */
+    scope?: string
+    onScopeChange?: (scope: string) => void
+    showSectionStrip?: boolean
+  } = $props()
 
   const DEFAULT_LOUDNESS = 0.5
   const DEFAULT_FILLS = 0.5
@@ -42,8 +53,13 @@
     ),
   )
 
-  /** 'song' = the whole-song defaults; otherwise a Section.id. */
-  let scope = $state<string>('song')
+  /** Fallback when the panel owns its own scope, such as in isolated tests. */
+  let localScope = $state<string>('song')
+  const scope = $derived(externalScope ?? localScope)
+  function setScope(next: string): void {
+    if (externalScope === undefined) localScope = next
+    onScopeChange?.(next)
+  }
   // A section can be deleted while selected — fall back rather than edit a ghost.
   const scopeValid = $derived(scope === 'song' || sections.some((s) => s.id === scope))
   const activeScope = $derived(scopeValid ? scope : 'song')
@@ -152,7 +168,7 @@
       const { drumMachine: _drop, ...rest } = sm
       return rest
     })
-    scope = 'song'
+    setScope('song')
     onChanged?.()
   }
 
@@ -265,25 +281,37 @@
          renders for a lane that already exists, so this is a safety net. -->
     <p class="text-muted-foreground text-xs">No drum machine track on this song.</p>
   {:else}
-    <!-- The arrangement. Click a section to edit just that part — Logic edits
-         one Drummer region at a time and this is that, laid out by bar count. -->
+    <!-- In the mixer this scope is driven by clicking the section bands on the
+         drum-machine lane. The strip remains available for standalone usage. -->
+    {#if showSectionStrip}
     <div class="mb-2">
       <SectionStrip
         {sections}
         {totalBars}
         {activeScope}
         ariaLabel="Drum sections"
-        onSelect={(next) => (scope = next)}
+        onSelect={setScope}
         subtitleFor={(s) => (sectionMuted(s) ? 'silent' : styleLabel(sectionStyle(s)))}
         overriddenFor={sectionOverridden}
         mutedFor={sectionMuted}
       />
     </div>
+    {/if}
 
     <div class="mb-2 flex flex-wrap items-center gap-1.5">
       <span class="text-muted-foreground text-[11px] font-bold uppercase">
         Editing {activeSection ? activeSection.label : 'whole song'}
       </span>
+      {#if !showSectionStrip && activeSection}
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground inline-flex h-7 items-center gap-1 px-1.5 text-[11px] font-bold"
+          onclick={() => setScope('song')}
+          title="Edit the whole-song defaults"
+        >
+          Whole song
+        </button>
+      {/if}
       {#if activeSection && sectionHasOverride}
         <button
           type="button"

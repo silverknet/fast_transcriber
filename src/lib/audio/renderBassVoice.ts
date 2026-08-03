@@ -22,46 +22,22 @@
  * this is covered by `*.browser.test.ts`.
  */
 import type { BassTone } from './bassTone'
-import { bassSound, nearestRoot, type BassSound } from './bassSounds'
+import { bassSound } from './bassSounds'
+import {
+  bassVoiceSetup,
+  createBassBus,
+  scheduleBassNote,
+  type BassVoiceNote,
+} from './bassVoiceGraph'
 
-export type BassVoiceNote = {
-  /** Seconds into the rendered buffer. */
-  atSec: number
-  durationSec: number
-  midi: number
-  /** 0..1 */
-  velocity: number
-}
+// Re-exported so existing consumers (and tests) keep their import path.
+export { BASS_BUS_HIGHPASS_HZ } from './bassVoiceGraph'
+export type { BassVoiceNote } from './bassVoiceGraph'
 
-/**
- * Below this the kick and the bass fight for the same energy, and a PA mostly
- * can't reproduce it — it just eats headroom. Clearing it lets the KICK own
- * the sub while the bass is carried by its harmonics, which is what makes both
- * audible on stage.
- */
-export const BASS_BUS_HIGHPASS_HZ = 50
 
-/** The exact curve `KeysSynth.makeDriveCurve` uses. */
-function driveCurve(drive: number): Float32Array<ArrayBuffer> | null {
-  if (drive <= 0.001) return null
-  const k = 1 + drive * 6
-  const norm = Math.tanh(k)
-  const n = 1024
-  const curve = new Float32Array(new ArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT))
-  for (let i = 0; i < n; i++) {
-    const x = (i / (n - 1)) * 2 - 1
-    curve[i] = Math.tanh(k * x) / norm
-  }
-  return curve
-}
 
-const midiToFreq = (midi: number) => 440 * 2 ** ((midi - 69) / 12)
 
-/** Sampled sets carry their own grit; the synth uses the patch's. */
-function driveFor(soundId: string | undefined, tone: BassTone): number {
-  const s = bassSound(soundId)
-  return s.kind === 'sample' ? s.drive : tone.drive
-}
+
 
 /**
  * Render `notes` to a mono Float32Array of `frames` samples.
@@ -80,7 +56,7 @@ export function clearBassSampleCache(): void {
   sampleCache.clear()
 }
 
-async function loadSampleSet(
+export async function loadSampleSet(
   ctx: BaseAudioContext,
   dir: string,
   roots: number[],
@@ -128,103 +104,20 @@ async function renderWindow(
   if (!Ctor) throw new Error('OfflineAudioContext is unavailable (browser-only render)')
   const ctx = new Ctor(1, Math.max(1, frames), sampleRate)
 
-  // ── Bus ──
-  const bus = ctx.createGain()
-  bus.gain.value = 1
-  const highpass = ctx.createBiquadFilter()
-  highpass.type = 'highpass'
-  highpass.frequency.value = BASS_BUS_HIGHPASS_HZ
-  const shaper = ctx.createWaveShaper()
-  const curve = driveCurve(driveFor(soundId, tone))
-  if (curve) shaper.curve = curve
-  bus.connect(highpass)
-  highpass.connect(shaper)
-  shaper.connect(ctx.destination)
+  // Bus + per-note voice come from `bassVoiceGraph`, the SAME construction the
+  // live MIDI bass track uses — a second copy would drift, and the difference
+  // would show up much later as "the mixer sounds different from the render".
+  const bus = createBassBus(ctx, tone, soundId)
+  bus.output.connect(ctx.destination)
 
-  const nyquist = sampleRate / 2
-
-  // A SAMPLED sound replaces the oscillators; everything after (filter, amp
-  // envelope, bus) is the same chain, so the two families stay comparable.
-  const sound: BassSound = bassSound(soundId)
+  const sound = bassSound(soundId)
   const samples =
     sound.kind === 'sample' ? await loadSampleSet(ctx, sound.dir, sound.roots) : null
-  // Files missing (no Logic on this machine) → fall back to the synth voice
-  // rather than rendering silence.
-  const useSamples = sound.kind === 'sample' && samples !== null
-  const shaping =
-    sound.kind === 'sample' ? { cutoffHz: sound.cutoffHz, drive: sound.drive } : null
+  const setup = bassVoiceSetup(soundId, samples)
 
   for (const n of notes) {
     const start = Math.max(0, n.atSec - windowStartSec)
-    if (!(n.durationSec > 0)) continue
-    const vel = Math.max(0, Math.min(1, n.velocity))
-    const f0 = midiToFreq(n.midi)
-
-    const amp = ctx.createGain()
-    const filter = ctx.createBiquadFilter()
-    filter.type = 'lowpass'
-    // Velocity opens the filter, exactly as the live patch's velToCutoff does.
-    filter.frequency.value = Math.max(
-      30,
-      Math.min(
-        nyquist * 0.95,
-        (shaping?.cutoffHz ?? tone.cutoffHz) * (1 + tone.velToCutoff * (vel - 0.5) * 2),
-      ),
-    )
-    filter.Q.value = useSamples ? 0.0001 : Math.max(0.0001, tone.resonance)
-
-    const mkOsc = (type: OscillatorType, level: number, detune: number) => {
-      const osc = ctx.createOscillator()
-      osc.type = type
-      osc.frequency.value = f0
-      osc.detune.value = detune
-      const g = ctx.createGain()
-      g.gain.value = level
-      osc.connect(g)
-      g.connect(filter)
-      return osc
-    }
-    const sources: { start: (t: number) => void; stop: (t: number) => void }[] = []
-    if (useSamples && samples) {
-      // Nearest recorded root, shifted — a sampler, not one stretched sample.
-      const root = nearestRoot([...samples.keys()], n.midi)
-      const buf = samples.get(root)!
-      const src = ctx.createBufferSource()
-      src.buffer = buf
-      src.playbackRate.value = 2 ** ((n.midi - root) / 12)
-      src.connect(filter)
-      sources.push(src)
-    } else {
-      sources.push(mkOsc(tone.waveA as OscillatorType, tone.levelA, tone.detuneA))
-      sources.push(mkOsc(tone.waveB as OscillatorType, tone.levelB, tone.detuneB))
-    }
-
-    filter.connect(amp)
-    amp.connect(bus)
-
-    // ADSR. A note shorter than attack+decay squeezes them in rather than
-    // running past its own length.
-    let a = tone.attack
-    let d = tone.decay
-    if (a + d > n.durationSec) {
-      const scale = n.durationSec / (a + d)
-      a *= scale
-      d *= scale
-    }
-    const peak = vel
-    const sustain = Math.max(0.0001, vel * tone.sustain)
-    const g = amp.gain
-    g.setValueAtTime(0.0001, start)
-    g.linearRampToValueAtTime(Math.max(0.0001, peak), start + a)
-    g.exponentialRampToValueAtTime(sustain, start + a + d)
-    g.setValueAtTime(sustain, start + n.durationSec)
-    g.exponentialRampToValueAtTime(0.0001, start + n.durationSec + tone.release)
-
-    const stopAt = start + n.durationSec + tone.release
-    for (const src of sources) {
-      src.start(start)
-      src.stop(stopAt)
-    }
+    scheduleBassNote(ctx, bus.input, n, start, tone, setup)
   }
 
   const rendered = await ctx.startRendering()

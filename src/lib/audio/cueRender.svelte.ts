@@ -27,7 +27,10 @@ import { cueTrackTotalDurationSec, renderCueTrackWavBlob } from '$lib/audio/rend
 import { getPiperTtsSetupStatus } from '$lib/client/desktopBridge'
 import { writeProjectSongAsset } from '$lib/client/desktopProjectFs'
 import { metadataLiteFromSongMap } from '$lib/project/commit'
-import { fingerprintCueTrackInputs } from '$lib/songmap/cueTrackFingerprint'
+import {
+  fingerprintClickTrackInputs,
+  fingerprintCueTrackInputs,
+} from '$lib/songmap/cueTrackFingerprint'
 import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
 import type { CueTrack, SongMap } from '$lib/songmap/types'
 
@@ -69,8 +72,17 @@ class CueRenderStore {
     if (!sm || !t) return false
     const exp = t.renderExport
     if (!exp?.relativePath) return false
-    return exp.fingerprint === fingerprintCueTrackInputs(sm, t)
+    return exp.fingerprint === fingerprintCueTrackInputs(sm, t, { announceTitle: this.#announceTitle() })
   })
+
+  /**
+   * THE announcement switch, derived from the project every time it is asked —
+   * never copied. This is what makes "all songs announce" true from the
+   * setting alone, including songs added after it was turned on.
+   */
+  #announceTitle(): boolean {
+    return (get(projectStore).data?.defaults?.preCountInCue?.mode ?? 'off') !== 'off'
+  }
 
   /** User-facing state of the cue render, for the Cue tab status badge. */
   #cueRenderStatus = $derived.by<CueRenderStatus | null>(() => {
@@ -155,10 +167,12 @@ class CueRenderStore {
     this.cueGenErr = ''
     this.cueSpeechNote = ''
     try {
+      const announceTitle = this.#announceTitle()
       const cueRenderResult = await renderCueTrackWavBlob(sm, {
         includeSpeech: true,
         includeClicks: false,
         cueTrack,
+        announceTitle,
       })
       const clickRenderResult = await renderCueTrackWavBlob(sm, {
         includeSpeech: false,
@@ -168,7 +182,8 @@ class CueRenderStore {
       if (cueRenderResult.speechSkippedReason) this.cueSpeechNote = cueRenderResult.speechSkippedReason
       const dur = cueTrackTotalDurationSec(sm, cueTrack)
       if (dur == null) throw new Error('Could not derive cue duration from trim + beats')
-      const fp = fingerprintCueTrackInputs(sm, cueTrack)
+      const fp = fingerprintCueTrackInputs(sm, cueTrack, { announceTitle })
+      const clickFp = fingerprintClickTrackInputs(sm, cueTrack)
       const now = new Date().toISOString()
       let cueRelativePath: string | undefined
       let clickWritten = false
@@ -224,7 +239,7 @@ class CueRenderStore {
         ),
         clickExport: clickWritten
           ? {
-              fingerprint: fp,
+              fingerprint: clickFp,
               durationSec: dur,
               sampleRate: 44100,
               generatedAt: now,

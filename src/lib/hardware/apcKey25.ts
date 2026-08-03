@@ -85,18 +85,39 @@ export function parseApcKey25Message(dataLike: ArrayLike<number>): ApcKey25Actio
   const isNoteOn = kind === 0x90 && data2 > 0
   const isNoteOff = kind === 0x80 || (kind === 0x90 && data2 === 0)
   if (!isNoteOn && !isNoteOff) return null
+
+  // APC UI buttons are not velocity-sensitive: a physical press arrives at
+  // full/normal button velocity, while host -> device single-LED commands use
+  // velocity 1 (on) or 2 (blink). Some MIDI paths echo those outbound LED
+  // messages back to the input. Treating 90 5B 01 as a second physical Play
+  // press immediately pauses playback after it starts.
+  const uiButtonPressed = isNoteOn && data2 >= 0x40
   const pressed = isNoteOn
 
   if (data1 >= APC_TRACK_BUTTON_BASE && data1 < APC_TRACK_BUTTON_BASE + 8) {
-    return { type: 'track-button', index: data1 - APC_TRACK_BUTTON_BASE, pressed }
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'track-button', index: data1 - APC_TRACK_BUTTON_BASE, pressed: uiButtonPressed }
   }
   if (data1 >= APC_SCENE_LAUNCH_BASE && data1 < APC_SCENE_LAUNCH_BASE + 5) {
-    return { type: 'scene-launch', index: data1 - APC_SCENE_LAUNCH_BASE, pressed }
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'scene-launch', index: data1 - APC_SCENE_LAUNCH_BASE, pressed: uiButtonPressed }
   }
-  if (data1 === APC_STOP_ALL_CLIPS_NOTE) return { type: 'stop-all-clips', pressed }
-  if (data1 === APC_PLAY_NOTE) return { type: 'play', pressed }
-  if (data1 === APC_RECORD_NOTE) return { type: 'record', pressed }
-  if (data1 === APC_SHIFT_NOTE) return { type: 'shift', pressed }
+  if (data1 === APC_STOP_ALL_CLIPS_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'stop-all-clips', pressed: uiButtonPressed }
+  }
+  if (data1 === APC_PLAY_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'play', pressed: uiButtonPressed }
+  }
+  if (data1 === APC_RECORD_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'record', pressed: uiButtonPressed }
+  }
+  if (data1 === APC_SHIFT_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'shift', pressed: uiButtonPressed }
+  }
   if (data1 >= 0x00 && data1 < APC_CLIP_PAD_COUNT) {
     return {
       type: 'clip-pad',

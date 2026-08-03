@@ -21,6 +21,7 @@
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
   import MidiSettingsDialog from '$lib/components/MidiSettingsDialog.svelte'
   import CloudSyncPill from '$lib/components/CloudSyncPill.svelte'
+  import RigStatusChip from '$lib/components/RigStatusChip.svelte'
   import {
     downloadBlob,
     exportRestorableStateAsSmapBlob,
@@ -56,9 +57,12 @@
   import Monitor from '@lucide/svelte/icons/monitor'
   import Moon from '@lucide/svelte/icons/moon'
   import Shield from '@lucide/svelte/icons/shield'
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal'
   import Sun from '@lucide/svelte/icons/sun'
+  import WifiOff from '@lucide/svelte/icons/wifi-off'
   import { page } from '$app/stores'
   import { userStore } from '$lib/stores/user'
+  import { offlineBuild } from '$lib/stores/offlineBuild'
 
   let dark = $state(browser && document.documentElement.classList.contains('dark'))
 
@@ -474,7 +478,34 @@
   </div>
 
   <div class="app-menu-actions">
-    <CloudSyncPill />
+    <!--
+      Rig setup. Had no entry point at all until now — the page existed and the
+      only way to reach it was to type the URL, which is impossible in the
+      offline app because that window has no address bar.
+
+      Always visible, including with no project open: connecting the desk and
+      proving click and cue are off the house is load-in work, done before
+      anyone opens a song.
+    -->
+    <button
+      type="button"
+      class="chrome-button"
+      class:is-active={$page.route?.id === '/rig'}
+      onclick={() => goto('/rig')}
+      title="Rig setup — connect the XR18, test the outputs, check the house is safe"
+      aria-current={$page.route?.id === '/rig' ? 'page' : undefined}
+    >
+      <SlidersHorizontal class="size-3.5" aria-hidden="true" />
+      Rig
+    </button>
+    <!-- Only visible once a desk has actually answered — see RigStatusChip. -->
+    <RigStatusChip />
+    <!-- Hidden offline: the pill's "N pending" promises a queue that will flush
+         when the connection returns, and in this build it never will. The
+         reconcile flow back in the browser is what actually sends these edits. -->
+    {#if !$offlineBuild}
+      <CloudSyncPill />
+    {/if}
     <button
       type="button"
       onclick={onModeBadgeClick}
@@ -517,7 +548,17 @@
       signed-out users get a small "Sign in" link. Compact on purpose — the
       header is busy. Full account UI lives at /account.
     -->
-    {#if $userStore}
+    {#if $offlineBuild}
+      <!--
+        The offline build has no account, so an avatar or a "Sign in" link would
+        both be lies. It says what it IS instead — which is also the reminder
+        that anything edited here still has to be synced from the browser later.
+      -->
+      <span class="chrome-link cursor-default" title="No account, no internet — edits are saved on this machine">
+        <WifiOff class="size-3.5" aria-hidden="true" />
+        Offline
+      </span>
+    {:else if $userStore}
       {@const initial = ($userStore.name?.[0] ?? $userStore.email?.[0] ?? '?').toUpperCase()}
       <!-- Account menu: avatar trigger + dropdown with the account link
            plus a Sign out item that POSTs to /logout. Lets users sign out
@@ -734,6 +775,13 @@
 
   .chrome-button.is-dev {
     opacity: 0.68;
+  }
+
+  /* Where you already are. Without this, tapping Rig from the Rig page looks
+     like nothing happened. */
+  .chrome-button.is-active {
+    background: var(--chrome-hover);
+    box-shadow: inset 0 0 0 1.5px var(--foreground);
   }
 
   .chrome-icon:hover,

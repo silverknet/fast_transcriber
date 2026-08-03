@@ -6,10 +6,11 @@
  *      user assigns each to whatever control they like via MIDI-learn (press the
  *      button you want). Defaults follow Ableton conventions.
  *   2. FIXED pad/button grid — the BOTTOM pad row (0–7) AND the 8 round track
- *      buttons both toggle stems, in a FIXED canonical instrument order
+ *      buttons toggle the first eight slots. The first two pads of the row above
+ *      are Custom 1/2, giving ten lane controls in a FIXED canonical order
  *      (`CANONICAL_LIVE_SLOTS` / `laneSlotIndex`) so a given stem is ALWAYS the
- *      same button, every song. The TOP 4 pad rows are the current song's
- *      sections (tap to jump). No song has more than 8×4 = 32 sections.
+ *      same button, every song. The remaining 30 pads are the current song's
+ *      sections (tap to jump).
  */
 import type { ApcKey25Action } from './apcKey25'
 
@@ -22,12 +23,12 @@ export type LiveLedState = {
   canPrev: boolean
   canNext: boolean
   /**
-   * The 8 live-toggleable lanes in FIXED canonical slots (index 0-7 = the same
+   * The 10 live-toggleable lanes in FIXED canonical slots (index 0-9 = the same
    * instrument every song; `null` = that slot has no lane in this song). Painted
-   * on BOTH the bottom pad row and the 8 track buttons.
+   * on the pad grid; slots 0-7 are also mirrored on the 8 track buttons.
    */
   lanes: ({ on: boolean; kind: 'stem' | 'cue' | 'click' } | null)[]
-  /** SectionKind per section index (length = section count, capped at 32). */
+  /** SectionKind per section index (length = section count, capped at 30). */
   sectionKinds: string[]
   /** Index of the currently-playing section (-1 = none). */
   currentSection: number
@@ -61,6 +62,26 @@ export const SECTION_DEFAULT_VELOCITY = 117
 export const STEM_ON_VELOCITY = 37 // #00A9FF (bright azure-turquoise)
 export const CUE_ON_VELOCITY = 9 // #FF5400 (orange) — spoken cues
 export const CLICK_ON_VELOCITY = 3 // #FFFFFF (white) — click / metronome
+export const ABSENT_LANE_VELOCITY = 5 // #FF0000 (red), always sent at dim brightness
+
+export type LiveLanePadLed = Readonly<{
+  velocity: number
+  dimmed: boolean
+}>
+
+/** Keep every live pad legible: dim red means the song has no lane there. */
+export function liveLanePadLed(
+  lane: LiveLedState['lanes'][number],
+): LiveLanePadLed {
+  if (!lane) return { velocity: ABSENT_LANE_VELOCITY, dimmed: true }
+  const velocity =
+    lane.kind === 'cue'
+      ? CUE_ON_VELOCITY
+      : lane.kind === 'click'
+        ? CLICK_ON_VELOCITY
+        : STEM_ON_VELOCITY
+  return { velocity, dimmed: !lane.on }
+}
 
 /** A high-level live action, device-independent. */
 export type LiveCommand =
@@ -134,10 +155,8 @@ export const DEFAULT_LIVE_MAPPING: LiveMapping = {
   'replay-once': 'record',
   loop: 'scene:2',
   'announce-song': 'scene:3',
-  // Jam voices ship UNASSIGNED on purpose. Every pad is already spoken for —
-  // the bottom row is stems and the four rows above are sections, so any default
-  // here would silently steal section pads (pads 32-39 are sections 0-7, the
-  // ones you reach for most). Learn them to whatever you can spare.
+  // Jam voices ship UNASSIGNED on purpose. Custom 1/2 are ordinary mixer slots,
+  // not direct jam switches: a user explicitly links whichever lanes they want.
   'jam-keys': '',
   'jam-bass': '',
   'jam-arp': '',
@@ -182,25 +201,37 @@ export function controlLabel(id: string | undefined): string {
 }
 
 // ── Positional pad grid ─────────────────────────────────────────────────────
-// Pad 0 is bottom-left (verified on hardware). Bottom row = stems; the 4 rows
-// above = sections, read top-left → bottom-right so section 0 is the top-left.
+// Pad 0 is bottom-left (verified on hardware). Bottom row = slots 0-7. Pads 8/9
+// (the first two pads of physical row 4, counting top-down) = Custom 1/2. All
+// remaining pads are sections, read top-left → bottom-right.
 
 export const STEM_PAD_COUNT = 8
+export const LIVE_SLOT_PAD_COUNT = 10
+export const SECTION_PAD_COUNT = 30
 
-/** Section index for a pad (top 4 rows), or null if it's a stem/out of range. */
+/** Canonical live-slot index for a pad, or null when that pad launches a section. */
+export function padToLiveSlot(pad: number): number | null {
+  return Number.isInteger(pad) && pad >= 0 && pad < LIVE_SLOT_PAD_COUNT ? pad : null
+}
+
+/** Section pads in chronological order: top-left to bottom-right, skipping Custom 1/2. */
+const SECTION_PADS = [
+  32, 33, 34, 35, 36, 37, 38, 39,
+  24, 25, 26, 27, 28, 29, 30, 31,
+  16, 17, 18, 19, 20, 21, 22, 23,
+  10, 11, 12, 13, 14, 15,
+] as const
+
+/** Section index for a pad, or null if it is a live slot/out of range. */
 export function padToSection(pad: number): number | null {
-  if (pad < 8 || pad > 39) return null
-  const row = Math.floor(pad / 8) // 1..4 (1 = just above stems, 4 = top)
-  const col = pad % 8
-  return (4 - row) * 8 + col
+  const section = (SECTION_PADS as readonly number[]).indexOf(pad)
+  return section >= 0 ? section : null
 }
 
 /** Pad index for a section (inverse of padToSection), or null if out of range. */
 export function sectionToPad(sectionIndex: number): number | null {
-  if (sectionIndex < 0 || sectionIndex >= 32) return null
-  const row = 4 - Math.floor(sectionIndex / 8)
-  const col = sectionIndex % 8
-  return row * 8 + col
+  if (!Number.isInteger(sectionIndex) || sectionIndex < 0) return null
+  return SECTION_PADS[sectionIndex] ?? null
 }
 
 /**
@@ -217,10 +248,14 @@ export const CANONICAL_LIVE_SLOTS = [
   'fx',
   'click',
   'cue',
+  'custom1',
+  'custom2',
 ] as const
 
 /**
- * The fixed slot (0-7) a mixer lane key belongs to, or `null` if it isn't a
+ * The automatically inferred slot a mixer lane key belongs to, or `null` if it
+ * isn't recognized. Custom 1/2 are deliberately never inferred: the user links
+ * those lanes explicitly in the mixer.
  * live-toggleable lane. Handles both disk (`stem:drums.wav`) and cloud
  * (`stem:Drums`) stem keys, plus the `click` / `cue` lanes.
  */
@@ -254,9 +289,10 @@ export function resolveLiveCommand(a: ApcKey25Action, mapping: LiveMapping): Liv
     if (mapping[action] === id) return actionCommand(action)
   }
 
-  // 2. Positional pad grid: bottom row = stems (canonical slots), top = sections.
+  // 2. Positional pad grid: ten canonical lane slots, then section launchers.
   if (a.type === 'clip-pad') {
-    if (a.index < STEM_PAD_COUNT) return { type: 'toggle-stem', index: a.index }
+    const slot = padToLiveSlot(a.index)
+    if (slot !== null) return { type: 'toggle-stem', index: slot }
     const section = padToSection(a.index)
     if (section !== null) return { type: 'jump-section', index: section }
   }

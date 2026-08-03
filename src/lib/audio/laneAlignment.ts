@@ -11,8 +11,14 @@
  * Recorded audio (the original mix, stems) carries no preamble, so it DOES
  * get silence prepended.
  *
- * If you add a lane whose loader calls one of the `render*WavBlob` helpers,
- * its key belongs here. `laneAlignment.test.ts` is the reminder.
+ * Two kinds of lane position themselves, and both belong here:
+ *   - lanes whose loader calls a `render*WavBlob` helper (the offset is baked
+ *     into the WAV's samples), and
+ *   - MIDI lanes, whose instrument adds the same offset when it schedules
+ *     (see `drumTrackLayout`).
+ *
+ * `laneAlignment.test.ts` scrapes MixerView for both shapes and fails if a
+ * generated lane stops being covered.
  */
 export const PREBAKED_PREAMBLE_LANE_KEYS: ReadonlySet<string> = new Set([
   'cue',
@@ -21,6 +27,8 @@ export const PREBAKED_PREAMBLE_LANE_KEYS: ReadonlySet<string> = new Set([
   'bass-gen',
   'drum-machine',
   'bass-machine',
+  'chord-machine',
+  'arp-machine',
 ])
 
 /** True when the lane's buffer already starts at the shared musical t=0. */

@@ -123,6 +123,7 @@
   import { transport } from '$lib/audio/transport.svelte'
   import { stemNameForKey } from '$lib/audio/liveStemDefaults'
   import { structuredClonePatch, type SynthPatch } from '$lib/audio/keysSynth'
+  import { transposeMidiNote } from '$lib/audio/midiTranspose'
   import SynthKnobs from '$lib/components/editor/SynthKnobs.svelte'
   import {
     transposeChordForDisplay,
@@ -1080,7 +1081,10 @@
       chordChanges.map((c) => c.chord),
       hearChordsOctave,
     )
-    return chordChanges.map((c, i) => ({ timeSec: c.timeSec, notes: voiced[i] ?? [] }))
+    return chordChanges.map((c, i) => ({
+      timeSec: c.timeSec,
+      notes: (voiced[i] ?? []).map((midi) => transposeMidiNote(midi, transposeSemitones)),
+    }))
   })
 
   /**
@@ -1129,7 +1133,10 @@
           : null
       return { timeSec: b.timeSec, barId: b.barId, bassPc }
     })
-    return buildBassHits(beats, bassPattern, bassOctave)
+    return buildBassHits(beats, bassPattern, bassOctave).map((h) => ({
+      timeSec: h.timeSec,
+      midi: transposeMidiNote(h.midi, transposeSemitones),
+    }))
   })
 
   // Active bass hit under the playhead (stable index → fires only on advance).
@@ -1183,7 +1190,12 @@
       }
       return { timeSec: b.timeSec, notes }
     })
-    return buildArpHits(beats, arpSubsPerBeat(arpRate), arpDirection, arpOctaves, arpSwing)
+    return buildArpHits(beats, arpSubsPerBeat(arpRate), arpDirection, arpOctaves, arpSwing).map(
+      (h) => ({
+        timeSec: h.timeSec,
+        midi: transposeMidiNote(h.midi, transposeSemitones),
+      }),
+    )
   })
 
   const activeArpIndex = $derived.by(() => {
@@ -1579,7 +1591,13 @@
       ) {
         return
       }
-      if (chordPickerOpen) return
+      // NOTE: no blanket `chordPickerOpen` bail-out here. Selecting a chord
+      // OPENS the picker, so that guard made Backspace dead in exactly the
+      // flow where people reach for it (select chords → press Backspace —
+      // "the same as right-click → Clear selected chords", which only worked
+      // because right-click closes the picker first). Typing in the picker's
+      // text field is already protected by the input check above; clearing
+      // closes the picker itself.
       if (e.key !== 'Delete' && e.key !== 'Backspace') return
       if (selectedFraction) {
         e.preventDefault()

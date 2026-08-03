@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PersistStatusBadge from '$lib/components/PersistStatusBadge.svelte'
   /**
    * Persistent context bar under the AppMenuBar showing which project is
    * currently loaded + a one-click way back to the project view. Visible
@@ -68,6 +69,11 @@
         <span class="text-muted-foreground truncate font-mono text-xs">{songTitle}</span>
       {/if}
     </div>
+
+    <!-- Save-evidence badge: green facts, or an unmissable red. Lives HERE so
+         it is on screen on every editing surface — its absence once cost half
+         an hour of chord edits made in a session that was silently not saving. -->
+    <PersistStatusBadge />
   </div>
 {/if}
 

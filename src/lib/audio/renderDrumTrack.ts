@@ -24,7 +24,7 @@ import { applyBusCompression, applyReverb, applySaturation, voicePanGains } from
 import type { DrumMidiEvent, DrumQuantize, SongMap } from '$lib/songmap/types'
 
 /** Matches the mixer's drums loudness target (see mastering.ts). */
-const DRUM_TRACK_TARGET_RMS_DB = -16
+export const DRUM_TRACK_TARGET_RMS_DB = -16
 const PEAK_CEILING = 0.95
 
 /** Fixed velocity curve — quiet hits stay audible, loud hits stay dynamic. */

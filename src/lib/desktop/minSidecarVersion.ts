@@ -59,8 +59,25 @@ export function compareSidecarVersion(a: string, b: string): number {
  * noise — the dev sidecar is the right one to talk to. Production
  * gating is untouched.
  */
-export function classifySidecarVersion(reported: string | null): SidecarVersionStatus {
-  if (import.meta.env.DEV) return 'ok'
+export function classifySidecarVersion(
+  reported: string | null,
+  // `dev` is injectable ONLY so this is testable. Under vitest
+  // `import.meta.env.DEV` is true, which returns 'ok' for everything and makes
+  // every assertion here pass for the wrong reason — including the ones meant to
+  // prove the `servedBySidecar` bypass works.
+  opts: { servedBySidecar?: boolean; dev?: boolean } = {},
+): SidecarVersionStatus {
+  // The offline app is SERVED BY the sidecar: same process, same build, shipped
+  // in one artifact. They cannot be mismatched, so asking whether the sidecar is
+  // new enough for the app is a question with no meaning.
+  //
+  // Answering it anyway is not harmless. `desktop/package.json` sits at 0.1.7
+  // while this constant is 0.1.14 (the constant is deliberately bumped ahead of
+  // cutting a desktop release), so the offline app declared its own sidecar
+  // outdated and redirected to `/download` — at a venue, with no internet, in
+  // the middle of a set.
+  if (opts.servedBySidecar) return 'ok'
+  if (opts.dev ?? import.meta.env.DEV) return 'ok'
   if (!reported) return 'unknown'
   return compareSidecarVersion(reported, MIN_SIDECAR_VERSION) >= 0 ? 'ok' : 'outdated'
 }

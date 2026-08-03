@@ -20,6 +20,23 @@ files:
   - native/**/*
   - package.json
 
+# The OFFLINE BUILD: the web app itself, so the desktop app can serve it with
+# no internet. Staged by `scripts/prepare-offline-bundle.mjs`, which ships NO
+# env file at all and refuses to stage if a secret — or the Supabase config
+# that would restore a sign-in — is found anywhere in the output.
+#
+# `extraResources` (not `files`) on purpose: it lands beside the asar rather
+# than inside it, which is where `resolveOfflineBuildDir()` looks first, and
+# keeps the server's own files readable at runtime.
+extraResources:
+  - from: ../build-node
+    to: build-node
+    filter:
+      - '**/*'
+      # Belt and braces against a stale env file from an older build tree —
+      # loaded at runtime it would put the sign-in screen back.
+      - '!.env'
+
 # Predictable, version-agnostic filenames so `releases/latest/download/<file>`
 # URLs in static/desktop-downloads.json keep resolving forever.
 artifactName: "BarBro-Desktop-${arch}.${ext}"

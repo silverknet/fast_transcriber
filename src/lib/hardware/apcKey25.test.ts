@@ -47,6 +47,15 @@ describe('parseApcKey25Message', () => {
     })
   })
 
+  it('does not mistake echoed single-LED commands for button presses', () => {
+    expect(parseApcKey25Message([0x90, APC_PLAY_NOTE, 0x01])).toBeNull()
+    expect(parseApcKey25Message([0x90, APC_PLAY_NOTE, 0x02])).toBeNull()
+    expect(parseApcKey25Message([0x90, APC_STOP_ALL_CLIPS_NOTE, 0x01])).toBeNull()
+    expect(parseApcKey25Message([0x90, APC_RECORD_NOTE, 0x02])).toBeNull()
+    expect(parseApcKey25Message([0x90, 0x42, 0x01])).toBeNull()
+    expect(parseApcKey25Message([0x90, 0x54, 0x02])).toBeNull()
+  })
+
   it('parses scene buttons and clip pads', () => {
     expect(parseApcKey25Message([0x90, 0x54, 0x7f])).toEqual({
       type: 'scene-launch',

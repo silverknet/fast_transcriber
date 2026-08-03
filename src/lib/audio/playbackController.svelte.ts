@@ -46,6 +46,7 @@ import {
 import { playMetronomeClick } from '$lib/audio/debugClickTrack'
 import { songPlaybackPlan, type PlaybackPlan } from '$lib/songmap/playbackPlan'
 import type { SongMap } from '$lib/songmap/types'
+import { audioDevice } from './audioDevice'
 
 /** Auto-stop epsilon at clip ends. Not a click-scheduling constant. */
 const END_EPS = 0.028
@@ -374,7 +375,12 @@ export class PlaybackController {
     this.#stopClickLoop()
     this.#stopTransport()
     this.#stopSourceOnly()
-    if (this.#ctx) void this.#ctx.close().catch(() => {})
+    // NOT closed: `#ensureGraph` ADOPTS the app-wide shared device, so closing
+    // it here would silence every other surface — the mixer, the rig tone, the
+    // machines — with no error raised anywhere. Disconnecting our own nodes is
+    // the whole job. See `audioDevice.ts`.
+    this.#clickMaster?.disconnect()
+    this.#songGain?.disconnect()
     this.#ctx = null
     this.#clickMaster = null
     this.#songGain = null
@@ -388,7 +394,7 @@ export class PlaybackController {
 
   #ensureGraph(): void {
     if (this.#ctx && this.#clickMaster && this.#songGain) return
-    const ctx = this.#ctx ?? new AudioContext()
+    const ctx = this.#ctx ?? audioDevice()
     if (!this.#clickMaster) {
       const click = ctx.createGain()
       click.gain.value = Math.max(0, this.clickVolume)

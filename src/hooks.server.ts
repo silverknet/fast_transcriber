@@ -14,13 +14,64 @@
  * The `filterSerializedResponseHeaders` line is mandatory per
  * `@supabase/ssr` docs — without it the auth helper's internal `Range`
  * header probing can break SvelteKit's response serialization.
+ *
+ * The OFFLINE branch below short-circuits all of that for the desktop build.
+ * See `src/lib/server/offlineMode.ts` for why a no-login client is the safe
+ * design rather than a shortcut.
  */
 import { createSupabaseServerClient } from '$lib/server/supabase/serverClient'
 import { consumePendingInvitesIfGranted, loadAccessForUser } from '$lib/server/access'
+import {
+  OFFLINE_ACCESS_STATUS,
+  OFFLINE_CLOUD_MESSAGE,
+  isCloudApiPath,
+  isOfflineBuild,
+  offlineLocalUser,
+  offlineRouteRedirect,
+} from '$lib/server/offlineMode'
 import { env as publicEnv } from '$env/dynamic/public'
 import type { Handle } from '@sveltejs/kit'
 
 export const handle: Handle = async ({ event, resolve }) => {
+  // OFFLINE BUILD: the app served from the player's own machine over loopback,
+  // with no cloud reachable and no sign-in. Checked FIRST — before the env
+  // check below — so that running the offline build from a source checkout
+  // whose `.env` happens to hold `PUBLIC_SUPABASE_*` still behaves exactly like
+  // the packaged one. The offline client is defined by what it is, not by what
+  // it happened to inherit from a shell.
+  if (isOfflineBuild()) {
+    // A cloud-only route reached offline is a dead end, and `/login` is worse
+    // than dead: it throws constructing a Supabase client it cannot configure.
+    const redirectTo = offlineRouteRedirect(event.url.pathname)
+    if (redirectTo) {
+      return new Response(null, { status: 303, headers: { location: redirectTo } })
+    }
+    // API calls get a sentence rather than a null-dereference 500. Nothing here
+    // waits on DNS, so this is immediate.
+    if (isCloudApiPath(event.url.pathname)) {
+      return new Response(JSON.stringify({ error: OFFLINE_CLOUD_MESSAGE, offline: true }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    // @ts-expect-error — locals.supabase is non-null in the type, but offline
+    // there genuinely is no client. `locals.offline` is the gate handlers check.
+    event.locals.supabase = null
+    event.locals.session = null
+    // Deliberately not a real `User`: it has no `aud`, no `app_metadata` and no
+    // `created_at`, because it did not come from an auth server. Anything that
+    // needs those fields is cloud code, and cloud code does not run here.
+    event.locals.user = offlineLocalUser() as unknown as typeof event.locals.user
+    event.locals.accessStatus = OFFLINE_ACCESS_STATUS
+    event.locals.isAdmin = false
+    event.locals.offline = true
+    return resolve(event, {
+      filterSerializedResponseHeaders: (name) => name === 'content-range',
+    })
+  }
+
+  event.locals.offline = false
+
   // If Supabase env vars aren't configured (e.g. CI without secrets, or a
   // fresh checkout before .env is set up), short-circuit gracefully: keep
   // the app booting; `event.locals.user` is null; auth-gated routes will
@@ -48,7 +99,11 @@ export const handle: Handle = async ({ event, resolve }) => {
   // server-side decision. `getSession()` only reads the cookie locally
   // and is fine for "is there a session-shaped cookie?" but NOT for
   // "is this user really who they claim to be?".
-  const { data: { user }, error } = await event.locals.supabase.auth.getUser()
+  const {
+    data: { user },
+    error,
+  } = await event.locals.supabase.auth.getUser()
+
   if (error || !user) {
     event.locals.user = null
     event.locals.session = null
@@ -58,7 +113,9 @@ export const handle: Handle = async ({ event, resolve }) => {
     event.locals.user = user
     // `getSession()` is cheap (no round-trip) and we already trust the
     // user above — pair them up for handlers that want both.
-    const { data: { session } } = await event.locals.supabase.auth.getSession()
+    const {
+      data: { session },
+    } = await event.locals.supabase.auth.getSession()
     event.locals.session = session
     // Resolve the invite-only access gate. Admin users always pass; other
     // users get their access_grants row (created lazily on first hit).

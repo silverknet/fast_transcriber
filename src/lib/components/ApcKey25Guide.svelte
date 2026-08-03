@@ -16,18 +16,30 @@
   ]
   // Fixed canonical stem order — same button every song (see liveMidiMap.ts).
   const STEM_LABELS = ['Drums', 'Bass', 'Vocals', 'Other', 'Guitar', 'FX', 'Click', 'Cue']
+  const CUSTOM_LABELS = ['Custom 1', 'Custom 2']
 </script>
 
 <div class="flex flex-col gap-3 {compact ? 'text-[11px]' : 'text-xs'}">
   <div class="flex gap-2">
-    <!-- Pad grid: top 4 rows = sections, bottom row = stems; track buttons mirror stems -->
+    <!-- Pad grid: 30 sections + 10 live slots; track buttons mirror slots 1-8. -->
     <div class="flex flex-1 flex-col gap-2">
       <div class="grid grid-cols-8 gap-1">
-        {#each Array(32) as _, i (i)}
+        {#each Array(24) as _, i (i)}
+          <div class="bg-foreground/15 aspect-square rounded-[3px]" title="Section pad · tap to jump"></div>
+        {/each}
+        {#each CUSTOM_LABELS as label, i (label)}
+          <div
+            class="border-foreground/40 bg-foreground text-background flex aspect-square items-center justify-center rounded-[3px] border p-0.5 text-center text-[8px] font-black leading-none"
+            title={`Row 4 pad ${i + 1} → ${label}`}
+          >
+            {label}
+          </div>
+        {/each}
+        {#each Array(6) as _, i (i)}
           <div class="bg-foreground/15 aspect-square rounded-[3px]" title="Section pad · tap to jump"></div>
         {/each}
       </div>
-      <p class="text-muted-foreground text-center text-[10px]">Top 4 rows · sections (tap to jump)</p>
+      <p class="text-muted-foreground text-center text-[10px]">30 section pads · Custom 1/2 start row 4</p>
       <div class="grid grid-cols-8 gap-1">
         {#each STEM_LABELS as label, i (label)}
           <div
@@ -38,7 +50,7 @@
           </div>
         {/each}
       </div>
-      <p class="text-muted-foreground text-center text-[10px]">Bottom pad row · stems (fixed order)</p>
+      <p class="text-muted-foreground text-center text-[10px]">Bottom pad row · slots 1–8 (fixed order)</p>
       <div class="grid grid-cols-8 gap-1">
         {#each STEM_LABELS as label, i (label)}
           <div

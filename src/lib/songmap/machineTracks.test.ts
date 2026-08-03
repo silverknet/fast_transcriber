@@ -39,6 +39,30 @@ describe('machine tracks', () => {
     expect(withMachineTrack(edited, 'drum')).toBe(edited)
   })
 
+  it('adding a disabled drum machine re-enables it without clobbering settings', () => {
+    const edited: SongMap = {
+      ...empty,
+      drumMachine: { enabled: false, style: 'funk', complexity: 0.9 },
+    }
+    expect(withMachineTrack(edited, 'drum').drumMachine).toEqual({
+      enabled: true,
+      style: 'funk',
+      complexity: 0.9,
+    })
+  })
+
+  it('adding a disabled bass machine re-enables it without clobbering settings', () => {
+    const edited: SongMap = {
+      ...empty,
+      bassMachine: { enabled: false, style: 'walking', octave: 1 },
+    }
+    expect(withMachineTrack(edited, 'bass').bassMachine).toEqual({
+      enabled: true,
+      style: 'walking',
+      octave: 1,
+    })
+  })
+
   it('removing drops only that track', () => {
     const both = withMachineTrack(withMachineTrack(empty, 'drum'), 'bass')
     const noDrums = withoutMachineTrack(both, 'drum')

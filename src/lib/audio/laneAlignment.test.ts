@@ -13,10 +13,23 @@ import { PREBAKED_PREAMBLE_LANE_KEYS, laneHasPrebakedPreamble } from './laneAlig
 const MIXER_VIEW = new URL('../components/MixerView.svelte', import.meta.url)
 
 /**
- * Lane keys whose loader renders audio through one of the `render*WavBlob`
- * helpers — those bake `titleCuePreludeSec + prependSec` into the buffer.
- * Scraped from the source so the test tracks the real lane list.
+ * Lane keys that position themselves on the mix timeline — either by baking
+ * the preamble into a rendered WAV, or (MIDI lanes) by adding it when they
+ * schedule. Scraped from the source so the test tracks the real lane list.
+ *
+ * Both markers matter: when the drum machine moved from a WAV render to a live
+ * instrument it stopped matching the first pattern, and without the second the
+ * guard would have gone on passing while silently covering one lane fewer.
  */
+const GENERATOR_MARKERS = [
+  /render[A-Za-z]*WavBlob\(/, // offline WAV lanes
+  /^\s*instrument:/m, // live MIDI lanes
+  // Direct-buffer lanes (the click): synthesized straight into an AudioBuffer
+  // at the engine's rate — no WAV, no decode — with the preamble baked into the
+  // samples exactly as the WAV path bakes it. See `renderClickTrackData`.
+  /^\s*bufferLoader:/m,
+]
+
 function generatedLaneKeysInMixerView(): string[] {
   const src = readFileSync(MIXER_VIEW, 'utf8')
   // Each chunk runs from one `plan.push({` to the next, so a lane's body can
@@ -26,7 +39,7 @@ function generatedLaneKeysInMixerView(): string[] {
   for (const chunk of chunks) {
     const key = /^\s*key:\s*[`']([^`']+)[`']/.exec(chunk)?.[1]
     if (!key) continue
-    if (/render[A-Za-z]*WavBlob\(/.test(chunk)) keys.push(key)
+    if (GENERATOR_MARKERS.some((m) => m.test(chunk))) keys.push(key)
   }
   return keys
 }
@@ -34,8 +47,19 @@ function generatedLaneKeysInMixerView(): string[] {
 describe('lane alignment', () => {
   it('every BarBro-rendered lane declares its baked-in preamble', () => {
     const generated = generatedLaneKeysInMixerView()
-    // Sanity: the scrape must actually find lanes, or the test proves nothing.
-    expect(generated.length).toBeGreaterThan(0)
+    // Naming the lanes explicitly, rather than just counting them, is what
+    // makes a lane silently dropping out of the scrape a failure.
+    expect(generated).toEqual(
+      expect.arrayContaining([
+        'click',
+        'drums-gen',
+        'drum-machine',
+        'bass-gen',
+        'bass-machine',
+        'chord-machine',
+        'arp-machine',
+      ]),
+    )
     for (const key of generated) {
       expect(laneHasPrebakedPreamble(key), `lane '${key}' must be in PREBAKED_PREAMBLE_LANE_KEYS`).toBe(
         true,
@@ -43,7 +67,10 @@ describe('lane alignment', () => {
     }
   })
 
-  it('includes the drum machine — it renders with the same preamble as the band', () => {
+  it('includes the drum machine — now a MIDI lane, same preamble either way', () => {
+    // It moved from a baked WAV to a live instrument; the property that its
+    // own time base already contains the preamble is unchanged, so it must
+    // still be exempt from `computePrepend`.
     expect(laneHasPrebakedPreamble('drum-machine')).toBe(true)
   })
 

@@ -31,6 +31,19 @@ export function createSupabaseServerClient(cookies: Cookies) {
   }
 
   return createServerClient(url, anon, {
+    auth: {
+      // A SERVER client is per-request: it must not run background timers.
+      //
+      // With the defaults, the auth client starts a token auto-refresh in the
+      // background. On a long-lived server that fires between requests, and if
+      // the auth host is unreachable the refresh rejects with nothing awaiting
+      // it — an unhandled rejection, which terminates the Node process. That is
+      // fatal for the offline desktop build, and pointless everywhere: the
+      // cookie jar is the session store here, and refreshing belongs to the
+      // browser.
+      autoRefreshToken: false,
+      persistSession: false,
+    },
     cookies: {
       getAll: () => cookies.getAll(),
       setAll: (toSet) => {

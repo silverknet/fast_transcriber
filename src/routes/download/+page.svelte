@@ -115,6 +115,7 @@
         version: r.version,
         capabilities: r.capabilities,
         versionStatus: classifySidecarVersion(r.version),
+        offlineAppOpen: r.offlineAppOpen,
         lastCheckedAt: new Date().toISOString(),
         lastError: r.error,
         pythonHealth,

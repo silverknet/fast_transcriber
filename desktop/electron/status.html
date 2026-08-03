@@ -1,0 +1,231 @@
+<!doctype html>
+<!--
+  The status window — BarBro Desktop's face.
+
+  It exists because the sidecar used to be invisible: a process with no window,
+  no tray on macOS, and no way to tell "running" from "not running" except by
+  loading the website and seeing whether it complained. And once the app grew a
+  second mode, invisibility became actively confusing — a window would appear
+  and there was nothing to say why, or which thing you were looking at.
+
+  So: one small window that names the mode and offers the switch. No build step,
+  no framework, no network. Inline everything.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>BarBro Desktop</title>
+    <style>
+      :root {
+        --bg: #fdfcf7;
+        --fg: #14110c;
+        --muted: #6b655a;
+        --line: #14110c;
+        --ok: #1f8a4c;
+        --idle: #b8b2a4;
+        --stale: #b45309;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14110c;
+          --fg: #fdfcf7;
+          --muted: #9a9384;
+          --line: #fdfcf7;
+          --ok: #4ade80;
+          --idle: #4a453c;
+          --stale: #f0b429;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 20px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-app-region: drag;
+      }
+      button, a { -webkit-app-region: no-drag; }
+      h1 { margin: 0 0 2px; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
+      .version { color: var(--muted); font-size: 11px; margin-bottom: 16px; }
+
+      .row {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        border: 2px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 10px;
+      }
+      .row.idle { border-style: dashed; opacity: 0.75; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; background: var(--idle); }
+      .dot.on { background: var(--ok); }
+      .row .body { flex: 1 1 auto; min-width: 0; }
+      .row .name { font-weight: 700; }
+      .row .detail { color: var(--muted); font-size: 11px; margin-top: 1px; }
+      code { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      button {
+        font: inherit;
+        font-weight: 700;
+        color: var(--bg);
+        background: var(--fg);
+        border: 2px solid var(--line);
+        border-radius: 7px;
+        padding: 7px 12px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button.secondary { color: var(--fg); background: transparent; }
+      button:disabled { opacity: 0.35; cursor: default; }
+      .note { color: var(--muted); font-size: 11px; margin-top: 12px; }
+      /* Not an error — you have done nothing wrong yet. It is the one moment
+         where a click would cost you edits, so it sits right above the button. */
+      .warn {
+        border: 2px solid var(--fg);
+        border-radius: 7px;
+        padding: 8px 10px;
+        font-size: 11px;
+        line-height: 1.4;
+        margin-top: 2px;
+      }
+      /* AFTER `.warn` on purpose: the shorthand above resets border-color, so a
+         modifier declared before it would be silently overridden.
+         Louder than the browser warning, because a stale bundle serves an old UI
+         with nothing to say so — which reads as "my change is broken". */
+      .warn.stale { border-color: var(--stale); color: var(--stale); }
+      .error { color: #c0392b; font-size: 11px; margin-top: 10px; font-weight: 700; }
+      @media (prefers-color-scheme: dark) { .error { color: #ff8a7a; } }
+    </style>
+  </head>
+  <body>
+    <h1>BarBro Desktop</h1>
+    <div class="version" id="version">—</div>
+
+    <div class="row" id="sidecar-row">
+      <div class="dot" id="sidecar-dot"></div>
+      <div class="body">
+        <div class="name" id="sidecar-name">Sidecar starting…</div>
+        <div class="detail" id="sidecar-detail">This is what BarBro on the web talks to.</div>
+      </div>
+    </div>
+
+    <div class="row idle" id="offline-row">
+      <div class="dot" id="offline-dot"></div>
+      <div class="body">
+        <div class="name">Offline app</div>
+        <div class="detail" id="offline-detail">Play a set with no internet. No sign-in needed.</div>
+      </div>
+      <button id="toggle" disabled>Open</button>
+    </div>
+
+    <div class="warn stale" id="stale" hidden>
+      <strong id="stale-title">This offline app is out of date.</strong>
+      <span id="stale-detail"></span>
+    </div>
+
+    <div class="warn" id="warn" hidden>
+      <strong>BarBro looks open in a browser right now.</strong>
+      Close that tab first — two BarBros editing one project overwrite each other's changes.
+    </div>
+
+    <div class="note" id="note"></div>
+    <div class="error" id="error" hidden></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id)
+      let busy = false
+
+      function render(s) {
+        var built = s.build && s.build.builtAt
+          ? ' · built ' + new Date(s.build.builtAt).toLocaleString()
+          : ''
+        $('version').textContent = (s.version ? 'v' + s.version : '') + built
+
+        $('sidecar-dot').classList.toggle('on', !!s.sidecarReady)
+        $('sidecar-row').classList.toggle('idle', !s.sidecarReady)
+        $('sidecar-name').textContent = s.sidecarReady ? 'Sidecar ready' : 'Sidecar starting…'
+        $('sidecar-detail').innerHTML = s.sidecarReady
+          ? 'Listening on <code>127.0.0.1:' + s.port + '</code> — this is what BarBro on the web talks to.'
+          : 'This is what BarBro on the web talks to.'
+
+        $('offline-dot').classList.toggle('on', !!s.offlineOpen)
+        $('offline-row').classList.toggle('idle', !s.offlineOpen)
+
+        const btn = $('toggle')
+        if (!s.offlineAvailable) {
+          btn.disabled = true
+          btn.textContent = 'Open'
+          $('offline-detail').textContent = 'Not included in this build.'
+        } else if (s.offlineOpen) {
+          btn.disabled = busy
+          btn.textContent = 'Close'
+          btn.classList.add('secondary')
+          $('offline-detail').textContent = 'Open in its own window. The sidecar keeps running.'
+        } else {
+          btn.disabled = busy
+          btn.textContent = busy ? 'Opening…' : 'Open'
+          btn.classList.remove('secondary')
+          $('offline-detail').textContent = 'Play a set with no internet. No sign-in needed.'
+        }
+
+        // Only worth saying while offline mode is CLOSED — once it is open the
+        // website has already stood down on its own, and repeating the warning
+        // would just be noise.
+        $('warn').hidden = !(s.webActive && !s.offlineOpen && s.offlineAvailable)
+
+        // Staleness. The bundle is compiled: an old one serves an old UI with
+        // nothing to say so, and you go hunting for a bug that is not there.
+        var b = s.build || {}
+        var stale = $('stale')
+        if (b.available && b.unstamped) {
+          stale.hidden = false
+          $('stale-title').textContent = 'This bundle was not staged properly.'
+          $('stale-detail').textContent =
+            ' It has no build stamp, so the size prune and the secret scan never ran. Rebuild with: npm run build:offline'
+        } else if (b.available && b.stale) {
+          stale.hidden = false
+          $('stale-title').textContent = 'This offline app is out of date.'
+          $('stale-detail').textContent =
+            ' The code has changed since it was built' +
+            (b.builtAt ? ' (' + new Date(b.builtAt).toLocaleString() + ')' : '') +
+            '. Rebuild with: npm run build:offline'
+        } else {
+          stale.hidden = true
+        }
+
+        $('note').textContent = s.offlineOpen
+          ? 'Closing this window leaves both running. Quit BarBro Desktop to stop them.'
+          : 'Closing this window leaves the sidecar running.'
+
+        const err = $('error')
+        err.hidden = !s.offlineError
+        err.textContent = s.offlineError || ''
+      }
+
+      $('toggle').addEventListener('click', async () => {
+        if (busy) return
+        busy = true
+        const before = await window.barbro.getState()
+        render(before)
+        try {
+          const next = before.offlineOpen
+            ? await window.barbro.closeOffline()
+            : await window.barbro.openOffline()
+          busy = false
+          render(next)
+        } catch (e) {
+          busy = false
+          render({ ...before, offlineError: String(e && e.message ? e.message : e) })
+        }
+      })
+
+      window.barbro.onState(render)
+      window.barbro.getState().then(render)
+    </script>
+  </body>
+</html>

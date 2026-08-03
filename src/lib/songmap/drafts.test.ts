@@ -13,6 +13,7 @@ import { MIGRATED_ACTIVE_DRAFT_ID, migrateLayersToDrafts } from './draftsMigrate
 import { createEmptySongMap } from './factory'
 import { parseSongMap } from './parse'
 import { validateSongMap } from './validate'
+import { SONGMAP_FORMAT_VERSION } from './version'
 import type { ChordLayer, HarmonyEvent, Lyrics, Section, SectionLayer, SongMap } from './types'
 
 let idCounter = 0
@@ -362,7 +363,7 @@ describe('parse — version ladder', () => {
       activeChordLayerName: 'My chords',
     })
     const map = parseSongMap(json)
-    expect(map.formatVersion).toBe(6)
+    expect(map.formatVersion).toBe(SONGMAP_FORMAT_VERSION)
     expect(map.activeDraftName).toBe('My chords')
     expect(map.drafts).toHaveLength(1)
     expect(map.drafts![0].name).toBe('Sheet import')
@@ -386,7 +387,10 @@ describe('parse — version ladder', () => {
 
   it('rejects a file from a newer build with an upgrade message', () => {
     const base = createEmptySongMap({ now: () => '2020-01-01T00:00:00.000Z' })
-    expect(() => parseSongMap(JSON.stringify({ ...base, formatVersion: 7 }))).toThrow(
+    expect(() => parseSongMap(JSON.stringify({
+      ...base,
+      formatVersion: SONGMAP_FORMAT_VERSION + 1,
+    }))).toThrow(
       /Update BarBro/,
     )
   })

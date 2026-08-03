@@ -69,3 +69,4 @@ static/drums/tr707/*.wav
 
 # Logic bass multisamples — Apple sample content, local only (see static/bass/README.md)
 static/bass/*/*.wav
+build-node/

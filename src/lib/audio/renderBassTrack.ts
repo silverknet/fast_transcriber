@@ -20,6 +20,7 @@ import { quantizeTimesToGrid } from '$lib/songmap/quantizeToGrid'
 import { generateBassGroove } from '$lib/songmap/generateBassGroove'
 import { normalizeBassTone, type BassTone } from './bassTone'
 import { renderBassVoice } from './renderBassVoice'
+import { transposeMidiNote } from './midiTranspose'
 import { inferBassGroove } from '$lib/songmap/bassGroove'
 import { DRUM_KIT_SAMPLE_RATE } from './drumKits'
 import { applyBusCompression, applySaturation } from './drumBus'
@@ -296,7 +297,7 @@ export async function renderBassMachineWavBlob(
   if (events.length === 0) throw new Error('Bass machine produced no notes — are there chords?')
   const semis = Math.round(opts.transposeSemitones ?? 0)
   if (semis !== 0) {
-    events = events.map((e) => ({ ...e, midi: Math.max(0, Math.min(127, e.midi + semis)) }))
+    events = events.map((e) => ({ ...e, midi: transposeMidiNote(e.midi, semis) }))
   }
   return renderBassEventsToWav(
     sm,
@@ -333,7 +334,7 @@ export async function renderBassTrackWavBlob(
   if (semis !== 0) {
     events = events.map((e) => ({
       ...e,
-      midi: Math.max(0, Math.min(127, e.midi + semis)),
+      midi: transposeMidiNote(e.midi, semis),
     }))
   }
   if (style === 'steady') {

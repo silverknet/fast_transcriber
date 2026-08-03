@@ -312,7 +312,9 @@ const kitCache = new Map<DrumKitId, Promise<DrumKit>>()
 export async function decodeToKitVoice(bytes: ArrayBuffer): Promise<Float32Array | null> {
   if (typeof AudioContext === 'undefined') return null
   try {
-    const ac = new AudioContext({ sampleRate: DRUM_KIT_SAMPLE_RATE })
+    // OFFLINE: decoding only, so it must not consume one of the browser's
+    // ~6 hardware AudioContext slots. See `audioDevice.ts`.
+    const ac = new OfflineAudioContext(1, 1, DRUM_KIT_SAMPLE_RATE)
     try {
       const buf = await ac.decodeAudioData(bytes)
       // Downmix to mono + resample to the kit rate.
@@ -328,7 +330,7 @@ export async function decodeToKitVoice(bytes: ArrayBuffer): Promise<Float32Array
           : linearResampleMono(mono, buf.sampleRate, destLen, DRUM_KIT_SAMPLE_RATE)
       return normalizeTo(resampled, 0.95)
     } finally {
-      await ac.close().catch(() => {})
+      // Nothing to close: an OfflineAudioContext holds no hardware slot.
     }
   } catch {
     return null

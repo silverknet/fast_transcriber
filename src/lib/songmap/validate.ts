@@ -210,6 +210,12 @@ function validateCueTrack(track: CueTrack, path: string, errors: string[]) {
   if (typeof track.name !== 'string' || !track.name.trim()) errors.push(`${path}.name required`)
   if (typeof track.enabled !== 'boolean') errors.push(`${path}.enabled must be boolean`)
   if (track.voiceId !== undefined && typeof track.voiceId !== 'string') errors.push(`${path}.voiceId invalid`)
+  if (track.performerId !== undefined && typeof track.performerId !== 'string') {
+    errors.push(`${path}.performerId invalid`)
+  }
+  if (track.spokenCountIn !== undefined && typeof track.spokenCountIn !== 'boolean') {
+    errors.push(`${path}.spokenCountIn invalid`)
+  }
   if (!Array.isArray(track.events)) errors.push(`${path}.events must be array`)
   else {
     track.events.forEach((event, i) => validateCueEvent(event, `${path}.events[${i}]`, errors))
@@ -527,6 +533,59 @@ export function validateSongMap(map: SongMap): ValidationResult {
             }
           }
         }
+      }
+    }
+  }
+
+  // Legacy/in-memory maps may not have reached the v7 parse boundary yet.
+  // Parse/serialize materialize an excluded-only compatibility block; absence
+  // here is therefore legacy state, not permission to route anything.
+  if (map.liveRouting === undefined) {
+    // Accepted for compatibility. Live input construction still fails closed.
+  } else if (map.liveRouting.version !== 1) {
+    errors.push('liveRouting.version must be 1')
+  } else {
+    const sourceIds = new Set<string>()
+    const channelIds = new Set<string>()
+    const sumGroupIds = new Set<string>()
+    for (const [index, source] of map.liveRouting.sources.entries()) {
+      const path = `liveRouting.sources[${index}]`
+      if (!source.id || sourceIds.has(source.id)) errors.push(`${path}.id invalid or duplicate`)
+      sourceIds.add(source.id)
+      if (!source.mixerChannelId) errors.push(`${path}.mixerChannelId invalid`)
+      if (source.admission !== 'included' && source.admission !== 'excluded') {
+        errors.push(`${path}.admission invalid`)
+      }
+      if (!Array.isArray(source.monitorSends)) errors.push(`${path}.monitorSends invalid`)
+      else {
+        for (const [sendIndex, send] of source.monitorSends.entries()) {
+          if (!send.performerId || !isFiniteNumber(send.gain) || send.gain < 0) {
+            errors.push(`${path}.monitorSends[${sendIndex}] invalid`)
+          }
+        }
+      }
+      if (source.producer.kind === 'stem-audio') {
+        if (!source.producer.stemId) {
+          errors.push(`${path}.producer stem identity invalid`)
+        }
+      }
+    }
+    for (const [index, channel] of map.liveRouting.mixerChannels.entries()) {
+      const path = `liveRouting.mixerChannels[${index}]`
+      if (!channel.id || channelIds.has(channel.id)) errors.push(`${path}.id invalid or duplicate`)
+      channelIds.add(channel.id)
+      if (!channel.sourceId) errors.push(`${path}.sourceId invalid`)
+      if (!isFiniteNumber(channel.processing.gain) || channel.processing.gain < 0) {
+        errors.push(`${path}.processing.gain invalid`)
+      }
+    }
+    for (const [index, group] of map.liveRouting.sumGroups.entries()) {
+      const path = `liveRouting.sumGroups[${index}]`
+      if (!group.id || sumGroupIds.has(group.id)) errors.push(`${path}.id invalid or duplicate`)
+      sumGroupIds.add(group.id)
+      if (!group.rigSourceLaneId) errors.push(`${path}.rigSourceLaneId invalid`)
+      if (!Array.isArray(group.mixerChannelIds) || group.mixerChannelIds.length < 2) {
+        errors.push(`${path}.mixerChannelIds must contain at least two channels`)
       }
     }
   }

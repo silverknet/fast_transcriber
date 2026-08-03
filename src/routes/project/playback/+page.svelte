@@ -294,91 +294,53 @@
     repeating-linear-gradient(0deg, color-mix(in oklch, var(--foreground) 6.5%, transparent) 0 1px, transparent 1px 42px);"
 >
   <div class="flex h-dvh flex-col gap-3 overflow-hidden px-3 py-3 lg:px-4">
-    <header class="flex shrink-0 flex-wrap items-center gap-2">
-      <Button
-        variant={exitArmed ? 'default' : 'outline'}
-        size="sm"
-        class="h-9 gap-1.5"
-        onclick={requestExit}
-        title="Leave live playback"
-      >
-        <ArrowLeft class="size-4" aria-hidden="true" />
-        {exitArmed ? 'Tap again to exit' : 'Project'}
-      </Button>
-      <div class="min-w-0 flex-1">
-        <p class="text-muted-foreground truncate text-[10px] font-black uppercase tracking-wide">Live playback</p>
-        <h1 class="truncate pb-0.5 text-2xl font-black leading-tight sm:text-3xl">{projectName}</h1>
-      </div>
-      {#if !$isNarrow}
+    <!--
+      NO TOP BAR ON THE DESKTOP STAGE.
+
+      It ran the full width to hold a back button, the project name and four
+      controls, and cost a whole row of height before a single note. Everything
+      in it belonged somewhere more specific:
+
+        back + project name -> the top of the setlist, which is what they
+                               describe, and which now runs the full height
+        Refresh / Controls / Keys -> the setlist FOOTER; they are between-songs
+                               controls, not performance ones
+        Fullscreen          -> a single icon in the stage corner
+
+      What is left at the top of the stage is the song title, which is the one
+      thing worth the space.
+
+      The phone keeps a compact bar: it has no setlist column to put any of this
+      in, and its stage is a separate layout with its own corner menu.
+    -->
+    {#if $isNarrow}
+      <header class="flex shrink-0 items-center gap-2">
+        <Button
+          variant={exitArmed ? 'default' : 'outline'}
+          size="sm"
+          class="h-9 gap-1.5"
+          onclick={requestExit}
+          title="Leave live playback"
+        >
+          <ArrowLeft class="size-4" aria-hidden="true" />
+          {exitArmed ? 'Tap again' : 'Project'}
+        </Button>
+        <h1 class="min-w-0 flex-1 truncate text-lg font-black leading-tight">{projectName}</h1>
         <Button
           variant="outline"
-          size="sm"
-          class="h-9 gap-1.5"
-          onclick={() => void refreshProject()}
-          disabled={refreshing}
+          size="icon"
+          class="size-9 shrink-0"
+          onclick={() => void toggleFullscreen()}
+          title={fullscreen ? 'Leave fullscreen' : 'Fullscreen'}
         >
-          <RefreshCw class="size-4 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
-          Refresh
-        </Button>
-        <Button
-          variant={showGuide ? 'default' : 'outline'}
-          size="sm"
-          class="h-9 gap-1.5"
-          onclick={() => (showGuide = !showGuide)}
-          title="How to drive live mode with keys + the APC Key 25"
-        >
-          <HelpCircle class="size-4" aria-hidden="true" />
-          Controls
-        </Button>
-        <div class="flex items-center gap-1.5">
-          <Button
-            variant={synthOn ? 'default' : 'outline'}
-            size="sm"
-            class="h-9 gap-1.5"
-            onclick={() => void toggleSynth()}
-            title="Play a synth with the APC Key 25 keyboard — the pads still control playback"
-          >
-            <Music4 class="size-4" aria-hidden="true" />
-            Keys
-          </Button>
-          {#if synthOn}
-            <select
-              value={synthPresetName}
-              onchange={(e) => pickSynthPreset((e.currentTarget as HTMLSelectElement).value)}
-              class="border-foreground/20 bg-card h-9 max-w-40 rounded-md border px-2 text-sm"
-              title="Synth sound"
-            >
-              <optgroup label="Built-in">
-                {#each BUILTIN_PRESETS as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
-              </optgroup>
-              {#if userPresets.length}
-                <optgroup label="Your presets">
-                  {#each userPresets as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
-                </optgroup>
-              {/if}
-            </select>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              bind:value={synthVolume}
-              class="w-20 accent-[var(--studio-orange)]"
-              title="Synth volume"
-            />
+          {#if fullscreen}
+            <Minimize2 class="size-4" aria-hidden="true" />
+          {:else}
+            <Maximize2 class="size-4" aria-hidden="true" />
           {/if}
-        </div>
-      {/if}
-      <Button variant="outline" size="sm" class="h-9 gap-1.5" onclick={() => void toggleFullscreen()}>
-        {#if fullscreen}
-          <Minimize2 class="size-4" aria-hidden="true" />
-          Window
-        {:else}
-          <Maximize2 class="size-4" aria-hidden="true" />
-          Fullscreen
-        {/if}
-      </Button>
-    </header>
+        </Button>
+      </header>
+    {/if}
 
     <KeysSynthController enabled={synthOn} {synth} />
 
@@ -426,12 +388,29 @@
       <div class="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)]">
         {#if !$isNarrow}
         <aside class="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius)] border-2 border-foreground bg-card">
-          <div class="shrink-0 border-b-2 border-foreground px-3 py-2">
-            <div class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
-              Setlist
-            </div>
-            <div class="font-mono text-xs font-bold tabular-nums">
-              {activeIndex >= 0 ? activeIndex + 1 : 0} / {setlistItems.length}
+          <!--
+            The head of the setlist IS the project header: the way out, what you
+            are in, and where you are in it. Previously these were a full-width
+            bar above everything; here they cost no extra height at all.
+          -->
+          <div class="flex shrink-0 items-center gap-2 border-b-2 border-foreground px-2 py-2">
+            <Button
+              variant={exitArmed ? 'default' : 'outline'}
+              size="icon"
+              class="size-8 shrink-0"
+              onclick={requestExit}
+              title={exitArmed ? 'Tap again to leave live playback' : 'Back to the project'}
+              aria-label={exitArmed ? 'Tap again to exit' : 'Back to the project'}
+            >
+              <ArrowLeft class="size-4" aria-hidden="true" />
+            </Button>
+            <div class="min-w-0 flex-1">
+              <h1 class="truncate text-sm font-black leading-tight">{projectName}</h1>
+              <div class="text-muted-foreground font-mono text-[11px] font-bold tabular-nums">
+                {exitArmed
+                  ? 'Tap again to exit'
+                  : `${activeIndex >= 0 ? activeIndex + 1 : 0} / ${setlistItems.length}`}
+              </div>
             </div>
           </div>
           <ol bind:this={setlistEl} class="min-h-0 flex-1 overflow-y-auto">
@@ -462,6 +441,69 @@
               </li>
             {/each}
           </ol>
+          <!--
+            Between-songs controls, out of the performance area entirely. None of
+            these are touched mid-song, so none of them belong next to Play.
+          -->
+          <div class="flex shrink-0 flex-wrap items-center gap-1 border-t-2 border-foreground px-2 py-1.5">
+            <Button
+              variant="outline"
+              size="icon"
+              class="size-8"
+              onclick={() => void refreshProject()}
+              disabled={refreshing}
+              title="Reload the project from disk"
+              aria-label="Refresh"
+            >
+              <RefreshCw class="size-4 {refreshing ? 'animate-spin' : ''}" aria-hidden="true" />
+            </Button>
+            <Button
+              variant={showGuide ? 'default' : 'outline'}
+              size="icon"
+              class="size-8"
+              onclick={() => (showGuide = !showGuide)}
+              title="How to drive live mode with keys + the APC Key 25"
+              aria-label="Controls guide"
+            >
+              <HelpCircle class="size-4" aria-hidden="true" />
+            </Button>
+            <Button
+              variant={synthOn ? 'default' : 'outline'}
+              size="icon"
+              class="size-8"
+              onclick={() => void toggleSynth()}
+              title="Play a synth with the APC Key 25 keyboard — the pads still control playback"
+              aria-label="Keys synth"
+            >
+              <Music4 class="size-4" aria-hidden="true" />
+            </Button>
+            {#if synthOn}
+              <select
+                value={synthPresetName}
+                onchange={(e) => pickSynthPreset((e.currentTarget as HTMLSelectElement).value)}
+                class="border-foreground/20 bg-card h-8 min-w-0 flex-1 rounded-md border px-1.5 text-xs"
+                title="Synth sound"
+              >
+                <optgroup label="Built-in">
+                  {#each BUILTIN_PRESETS as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
+                </optgroup>
+                {#if userPresets.length}
+                  <optgroup label="Your presets">
+                    {#each userPresets as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
+                  </optgroup>
+                {/if}
+              </select>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                bind:value={synthVolume}
+                class="w-full accent-[var(--studio-orange)]"
+                title="Synth volume"
+              />
+            {/if}
+          </div>
         </aside>
         {/if}
 
@@ -487,12 +529,15 @@
               </button>
             </div>
           {:else}
-            <div class="mb-3 flex shrink-0 flex-wrap items-center gap-2">
+            <!--
+              The song title sits at the very top of the stage now that the page
+              header is gone. The "Now" eyebrow went with it: the large title at
+              the top of the stage is self-evidently the song playing, and the
+              label was a line of height explaining something nobody was asking.
+            -->
+            <div class="mb-2 flex shrink-0 items-start gap-3">
               <div class="min-w-0 flex-1">
-                <p class="text-muted-foreground text-[10px] font-black uppercase tracking-wide">
-                  Now
-                </p>
-                <h2 class="truncate pb-0.5 text-3xl font-black leading-tight sm:text-4xl">
+                <h2 class="truncate text-3xl font-black leading-tight sm:text-4xl">
                   {activeItem?.title ?? 'Loading song'}
                 </h2>
                 {#if activeItem?.artist}
@@ -501,17 +546,31 @@
                   </p>
                 {/if}
               </div>
-              {#if upcomingItem}
-                <div class="rounded-[var(--radius)] bg-muted/60 px-3 py-2 text-right">
-                  <div class="text-muted-foreground text-[10px] font-black uppercase">Next</div>
-                  <div class="max-w-52 truncate text-sm font-black">{upcomingItem.title}</div>
-                </div>
-              {/if}
               {#if loadingSongId}
-                <div class="rounded-full bg-muted px-3 py-1 font-mono text-xs font-bold">
+                <div class="bg-muted shrink-0 rounded-full px-3 py-1 font-mono text-xs font-bold">
                   Loading…
                 </div>
               {/if}
+              {#if upcomingItem}
+                <div class="bg-muted/60 min-w-0 shrink rounded-[var(--radius)] px-3 py-1.5 text-right">
+                  <div class="text-muted-foreground text-[10px] font-black uppercase leading-none">Next</div>
+                  <div class="max-w-52 truncate text-sm font-black">{upcomingItem.title}</div>
+                </div>
+              {/if}
+              <Button
+                variant="outline"
+                size="icon"
+                class="size-9 shrink-0"
+                onclick={() => void toggleFullscreen()}
+                title={fullscreen ? 'Leave fullscreen' : 'Fullscreen'}
+                aria-label={fullscreen ? 'Leave fullscreen' : 'Fullscreen'}
+              >
+                {#if fullscreen}
+                  <Minimize2 class="size-4" aria-hidden="true" />
+                {:else}
+                  <Maximize2 class="size-4" aria-hidden="true" />
+                {/if}
+              </Button>
             </div>
           {/if}
 

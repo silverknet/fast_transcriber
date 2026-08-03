@@ -1,6 +1,12 @@
 <script lang="ts">
   const pages = [
     {
+      href: '/debug/click-sounds',
+      title: 'Click Sound Lab',
+      kicker: 'Monitoring · audio',
+      body: 'Compare eight click timbres over a real project song using its analyzed beat grid.',
+    },
+    {
       href: '/debug/edit-style',
       title: 'Edit Style Lab',
       kicker: 'Editor · styles',

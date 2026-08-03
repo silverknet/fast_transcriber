@@ -16,6 +16,8 @@
  * gesture), so importing this on the server is safe.
  */
 
+import { audioDevice } from './audioDevice'
+
 export type OscType = 'sine' | 'triangle' | 'sawtooth' | 'square'
 
 /** Post-voice effects (the FX bus). */
@@ -212,6 +214,12 @@ type Voice = {
   vfilter: BiquadFilterNode
   startedAt: number
   releaseSec: number
+  /**
+   * The level the ADSR settles at after decay. `scheduleNote` needs it to anchor
+   * the release at the note's END — see the comment there for why omitting this
+   * turned every sequenced note into a pluck.
+   */
+  sustainGain: number
 }
 
 export class KeysSynth {
@@ -224,6 +232,8 @@ export class KeysSynth {
    */
   #rand: () => number = Math.random
   #voices = new Map<number, Voice>()
+  /** Voices placed by `scheduleNote`, which the voice map deliberately skips. */
+  #scheduled: { voice: Voice; endAt: number }[] = []
   #volume = 0.8
   #patch: SynthPatch = structuredClonePatch(DEFAULT_PATCH)
 
@@ -251,6 +261,8 @@ export class KeysSynth {
   #convolver: ConvolverNode | null = null
   #reverbWet: GainNode | null = null
   #out: GainNode | null = null
+  /** Where the FX bus lands. Null = the context's own destination. */
+  #destination: AudioNode | null = null
   #reverbSizeBuilt: number | null = null
 
   get ready(): boolean {
@@ -307,11 +319,10 @@ export class KeysSynth {
 
   async resume(): Promise<void> {
     if (!this.#ctx) {
-      const Ctor: typeof AudioContext =
-        (globalThis as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
-          .AudioContext ??
-        (globalThis as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-      this.#ctx = new Ctor({ latencyHint: 0 }) as BaseAudioContext
+      // The SHARED device, not a private one. Each KeysSynth used to build its
+      // own context; with chord playback, bass, arp and kick that was four of
+      // the browser's ~six, and the app hit the cap during ordinary use.
+      this.#ctx = audioDevice()
       this.#buildGraph()
     }
     const live = this.#ctx as AudioContext
@@ -488,7 +499,9 @@ export class KeysSynth {
     shimmerLevel.connect(out)
 
     out.gain.value = this.#volume
-    out.connect(ctx.destination)
+    // A mixer lane supplies its own destination so the synth lands on a track
+    // gain (fader, mute/solo, effect sends) instead of straight on the speakers.
+    out.connect(this.#destination ?? ctx.destination)
 
     this.#voiceBus = voiceBus
     this.#busHighpass = busHighpass
@@ -641,7 +654,38 @@ export class KeysSynth {
     amp.gain.linearRampToValueAtTime(Math.max(0.0001, peak * sustain), t0 + Math.max(0.0005, attack) + decay)
     amp.connect(bus)
 
-    return { oscs, amp, vfilter: vf, startedAt: t0, releaseSec: p.env.release }
+    // Release the per-note nodes once the voice has finished sounding.
+    //
+    // Without this the filter and the amp stay wired to the voice bus forever:
+    // stopping an oscillator does NOT detach the nodes downstream of it. Playing
+    // a part through `scheduleNote` therefore leaked two nodes per note —
+    // thousands over a song — and the audio thread still walks every one of them
+    // on every render quantum, so CPU climbed the longer you played.
+    const last = oscs[oscs.length - 1]
+    if (last) {
+      last.addEventListener('ended', () => {
+        try {
+          this.#lfoGain?.disconnect(vf.frequency)
+        } catch {
+          /* not connected */
+        }
+        try {
+          vf.disconnect()
+          amp.disconnect()
+        } catch {
+          /* already gone */
+        }
+      })
+    }
+
+    return {
+      oscs,
+      amp,
+      vfilter: vf,
+      startedAt: t0,
+      releaseSec: p.env.release,
+      sustainGain: Math.max(0.0001, peak * sustain),
+    }
   }
 
   /**
@@ -651,6 +695,7 @@ export class KeysSynth {
    */
   scheduleNote(note: number, velocity: number, atSec: number, durationSec: number): void {
     if (!(durationSec > 0)) return
+    this.#pruneScheduled()
     const p = this.#patch
     // A note shorter than attack+decay squeezes them in rather than running
     // past its own length.
@@ -661,7 +706,20 @@ export class KeysSynth {
     if (!v) return
     const end = atSec + durationSec
     const rel = Math.max(0.005, p.env.release)
+    // Scheduled voices are deliberately NOT in `#voices` (no stealing during a
+    // render), so `panic` cannot see them. A live lane still has to be able to
+    // silence them on a seek, hence this separate list.
+    this.#scheduled.push({ voice: v, endAt: end + rel + 0.02 })
     try {
+      // HOLD the sustain until the note actually ends, THEN release.
+      //
+      // Without the anchor, `linearRampToValueAtTime` interpolates from the
+      // previous automation event — the end of the decay — so the gain slid
+      // from sustain to silence across the note's WHOLE length. Every held
+      // chord came out as a decaying pluck, which is exactly what a sequenced
+      // lane must not sound like. `noteOn`/`noteOff` never had this because the
+      // envelope simply rests at sustain until the release is triggered.
+      v.amp.gain.setValueAtTime(v.sustainGain, end)
       v.amp.gain.linearRampToValueAtTime(0.0001, end + rel)
     } catch {
       /* out of range */
@@ -692,12 +750,34 @@ export class KeysSynth {
     }
   }
 
+  /** Which context this synth is running on — for asserting it is the shared one. */
+  get contextForTest(): BaseAudioContext | null {
+    return this.#ctx
+  }
+
+  /** The end of the FX bus, once a graph exists — for routing into a mixer. */
+  get output(): AudioNode | null {
+    return this.#out
+  }
+
   /**
    * Attach an OfflineAudioContext and build the graph on it. The patch, the
    * voice and the whole FX bus are then exactly what the live instrument uses.
    * `seed` makes the analog detune reproducible.
    */
   attachOfflineContext(ctx: BaseAudioContext, seed = 0x9e3779b9): void {
+    this.attachContext(ctx, { seed })
+  }
+
+  /**
+   * Attach ANY context and build the graph on it, optionally routing the output
+   * somewhere other than the speakers. This is how a mixer lane hosts the synth:
+   * same patch, same voice, same FX bus, but landing on a track gain so it gets
+   * a fader and effect sends like every other lane.
+   */
+  attachContext(ctx: BaseAudioContext, opts: { destination?: AudioNode; seed?: number } = {}): void {
+    const seed = opts.seed ?? 0x9e3779b9
+    this.#destination = opts.destination ?? null
     this.#ctx = ctx
     let a = seed >>> 0
     this.#rand = () => {
@@ -747,6 +827,53 @@ export class KeysSynth {
 
   panic(): void {
     for (const note of [...this.#voices.keys()]) this.#endVoice(note, true)
+    this.stopScheduled()
+  }
+
+  /** Drop scheduled voices that have already finished sounding. */
+  #pruneScheduled(): void {
+    const now = this.#ctx?.currentTime ?? 0
+    if (this.#scheduled.length === 0) return
+    this.#scheduled = this.#scheduled.filter((s) => s.endAt > now)
+  }
+
+  /**
+   * Silence everything `scheduleNote` put on the clock, including notes that
+   * have not started yet. This is what a seek needs: the lane re-schedules from
+   * the new position, and the old schedule must not still be queued.
+   */
+  stopScheduled(atCtxTime?: number): void {
+    const now = this.#ctx?.currentTime ?? 0
+    // A bar-quantized jump commits ~80 ms before the boundary; silencing at
+    // `now` would cut the lane off early, so the caller can defer the stop.
+    const at = atCtxTime !== undefined && atCtxTime > now ? atCtxTime : now
+    for (const { voice } of this.#scheduled) {
+      try {
+        voice.amp.gain.cancelScheduledValues(at)
+        // A voice that has not started by `at` is still at zero; one that is
+        // sounding gets a short release so it does not click.
+        const started = voice.startedAt <= at
+        voice.amp.gain.setValueAtTime(started ? Math.max(0.0001, voice.amp.gain.value) : 0.0001, at)
+        voice.amp.gain.linearRampToValueAtTime(0.0001, at + 0.03)
+      } catch {
+        /* node already gone */
+      }
+      for (const osc of voice.oscs) {
+        try {
+          osc.stop(at + 0.05)
+        } catch {
+          /* already stopped */
+        }
+      }
+      if (this.#lfoGain) {
+        try {
+          this.#lfoGain.disconnect(voice.vfilter.frequency)
+        } catch {
+          /* not connected */
+        }
+      }
+    }
+    this.#scheduled = []
   }
 
   async close(): Promise<void> {
@@ -756,11 +883,8 @@ export class KeysSynth {
     } catch {
       /* ignore */
     }
-    try {
-      await (this.#ctx as AudioContext | null)?.close?.()
-    } catch {
-      /* ignore */
-    }
+    // Deliberately NOT closing the context: it is the app-wide shared device.
+    // Closing it here would silence the mixer, the editor and every other voice.
     this.#ctx = null
     this.#voiceBus = null
     this.#out = null

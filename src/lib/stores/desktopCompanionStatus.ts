@@ -26,6 +26,11 @@ export type DesktopCompanionStatus = {
   /** Sidecar feature flags (null until first successful ping). */
   capabilities: DesktopCapabilities | null
   versionStatus: SidecarVersionStatus
+  /**
+   * The sidecar's offline app window is open, so this browser must stand down —
+   * two editors on one `song.smap` lose data silently. See `editingLock.ts`.
+   */
+  offlineAppOpen: boolean
   lastCheckedAt: string | null
   lastError: string | null
   pythonHealth: PythonHealth
@@ -43,6 +48,7 @@ export const desktopCompanionStatus = writable<DesktopCompanionStatus>({
   version: null,
   capabilities: null,
   versionStatus: 'unknown',
+  offlineAppOpen: false,
   lastCheckedAt: null,
   lastError: null,
   pythonHealth: 'unknown',

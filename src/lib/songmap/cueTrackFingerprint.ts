@@ -4,6 +4,9 @@ import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { CueTrack, SongMap } from '$lib/songmap/types'
 
+/** Change only when the audible click renderer changes. */
+export const CLICK_TRACK_RENDER_VERSION = 'hybrid-v1'
+
 function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6
 }
@@ -36,7 +39,11 @@ function stripRenderExport(track: CueTrack | undefined): unknown {
   }
 }
 
-export function cueTrackFingerprintPayload(sm: SongMap, track: CueTrack | undefined = getPrimaryCueTrack(sm)): unknown {
+export function cueTrackFingerprintPayload(
+  sm: SongMap,
+  track: CueTrack | undefined = getPrimaryCueTrack(sm),
+  opts: { announceTitle?: boolean } = {},
+): unknown {
   const trim = sm.audio?.trim ?? { startSec: 0, endSec: 0 }
   const bars = sm.timeline.bars.map((b) => ({
     i: b.index,
@@ -61,13 +68,14 @@ export function cueTrackFingerprintPayload(sm: SongMap, track: CueTrack | undefi
   }))
 
   return {
-    v: 7, // bumped: count-in speech now onset-aligned (trimLeadingSilence)
+    v: 8, // bumped: title announcement is DERIVED from the project setting
+    announceTitle: !!opts.announceTitle,
     trim: { startSec: round6(trim.startSec), endSec: round6(trim.endSec) },
     audioSha256: sm.audio?.sha256 ?? '',
     countInBeats: effectiveCountInBeats(sm),
     startBeatId: sm.startBeatId ?? null,
     cueTrack: stripRenderExport(track),
-    titlePreludeSec: round6(titleCuePreludeSec(sm, track)),
+    titlePreludeSec: round6(titleCuePreludeSec(sm, track, opts)),
     spokenIntroText:
       track?.events.find((event) => event.enabled && event.kind === 'intro')?.text?.trim() ?? null,
     bars,
@@ -77,8 +85,31 @@ export function cueTrackFingerprintPayload(sm: SongMap, track: CueTrack | undefi
 }
 
 /** Stable short fingerprint (sync, for patch + UI). */
-export function fingerprintCueTrackInputs(sm: SongMap, track?: CueTrack): string {
-  const raw = JSON.stringify(cueTrackFingerprintPayload(sm, track))
+export function fingerprintCueTrackInputs(
+  sm: SongMap,
+  track?: CueTrack,
+  opts: { announceTitle?: boolean } = {},
+): string {
+  return shortFingerprint(cueTrackFingerprintPayload(sm, track, opts))
+}
+
+export function clickTrackFingerprintPayload(
+  sm: SongMap,
+  track: CueTrack | undefined = getPrimaryCueTrack(sm),
+): unknown {
+  return {
+    cueInputs: cueTrackFingerprintPayload(sm, track),
+    clickRenderer: CLICK_TRACK_RENDER_VERSION,
+  }
+}
+
+/** Cue timing plus the click renderer version, used only for click WAV freshness. */
+export function fingerprintClickTrackInputs(sm: SongMap, track?: CueTrack): string {
+  return shortFingerprint(clickTrackFingerprintPayload(sm, track))
+}
+
+function shortFingerprint(payload: unknown): string {
+  const raw = JSON.stringify(payload)
   let h = 5381
   for (let i = 0; i < raw.length; i++) {
     h = (h * 33) ^ raw.charCodeAt(i)

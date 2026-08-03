@@ -243,6 +243,35 @@ export async function encodeSmapFile(data: { project: SongProject }): Promise<Bl
 }
 
 /**
+ * The RAW JSON text inside a `.smap`, exactly as it sits in the file — no
+ * parsing, no whitelist, no migration. `decodeSmapFile` returns the project
+ * AFTER the parser has run, which is exactly the wrong input for anything that
+ * wants to detect what parsing would lose (the project health check compares
+ * this raw text against a parse → serialize round trip).
+ */
+export function smapRawJsonText(buf: Uint8Array): string {
+  if (buf.byteLength < 8) throw readTruncatedFileError(8, buf.byteLength)
+  validateMagic(buf)
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const version = view.getUint32(4, true)
+  let jsonStart: number
+  let jsonLen: number
+  if (version === SMAP_FILE_VERSION) {
+    jsonStart = SMAP_HEADER_BYTE_LENGTH
+    jsonLen = bigintToSafeNumber(view.getBigUint64(8, true), 'jsonLength')
+  } else if (version === SMAP_FILE_VERSION_V1) {
+    jsonStart = SMAP_HEADER_BYTE_LENGTH_V1
+    jsonLen = bigintToSafeNumber(view.getBigUint64(12, true), 'jsonLength')
+  } else {
+    throw readUnsupportedVersionError(version)
+  }
+  if (buf.byteLength < jsonStart + jsonLen) {
+    throw readFileShorterThanDeclaredError(jsonStart + jsonLen, buf.byteLength)
+  }
+  return new TextDecoder().decode(buf.subarray(jsonStart, jsonStart + jsonLen))
+}
+
+/**
  * Decode a `.smap` from a `Blob` or `File`.
  */
 export async function decodeSmapFile(fileOrBlob: Blob): Promise<SmapFileData> {

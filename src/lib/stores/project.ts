@@ -44,6 +44,14 @@ export interface ProjectSongMetadataLite {
   audioSha256?: string
   audioDurationSec?: number
   /**
+   * Project-folder-relative path of the ORIGINAL mix (e.g. `audio/song.wav`),
+   * straight from the song's `.smap`. Lets the live prefetcher decode the full
+   * mix for an upcoming song — without it, a "ready" green dot still paid the
+   * biggest decode on switch, which is exactly the broken promise a ready
+   * light must not make.
+   */
+  audioSubpath?: string
+  /**
    * Stem renderings on disk grouped by quality preset. See
    * `ProjectSongMetadataInfo.stemsByPreset` for the schema. Empty/absent
    * when no stems exist yet.

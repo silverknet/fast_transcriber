@@ -29,10 +29,12 @@
  * they are how THIS player likes to play, not part of the shared song.
  */
 import { browser } from '$app/environment'
-import { chordRootToPitchClass, formatChordSymbol, resolveChordAtEachBeat } from '$lib/chords'
+import { chordRootToPitchClass, resolveChordAtEachBeat } from '$lib/chords'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import type { ChordSymbol, SongMap } from '$lib/songmap/types'
-import { voiceChordProgression } from './chordPlaybackVoicing'
+import { clampTransposeSemitones } from '$lib/songmap/transposition'
+import { arpHitPoints, chordChangePoints, keysPoints } from './chordJamSchedule'
+import { transposeMidiNote } from './midiTranspose'
 import {
   playChordPlayback,
   resumeChordPlayback,
@@ -53,8 +55,6 @@ import {
   type BassPattern,
 } from './chordBass'
 import {
-  arpSubsPerBeat,
-  buildArpHits,
   playArpNote,
   resumeArp,
   setArpPatch,
@@ -66,6 +66,7 @@ import {
   type ArpRate,
 } from './chordArp'
 import { structuredClonePatch, type SynthPatch } from './keysSynth'
+import { parseBool, parseNum, parsePatch, parseStr } from './jamSettingsStorage'
 
 /** Octave nudge range, shared by every pitched voice. */
 export const JAM_OCT_MIN = -2
@@ -102,36 +103,21 @@ const KEY = {
   arpDir: 'barbro:chordArpDir',
   arpVol: 'barbro:chordArpVol',
   arpOct: 'barbro:chordArpOct',
+  arpOctaves: 'barbro:chordArpOctaves',
+  arpSwing: 'barbro:chordArpSwing',
   arpPatch: 'barbro:chordArpPatch',
 } as const
 
-function readBool(key: string, fallback = false): boolean {
-  if (!browser) return fallback
-  const raw = localStorage.getItem(key)
-  return raw == null ? fallback : raw === '1'
-}
-function readNum(key: string, fallback: number, min: number, max: number): number {
-  if (!browser) return fallback
-  const v = Number(localStorage.getItem(key))
-  if (!Number.isFinite(v)) return fallback
-  return Math.max(min, Math.min(max, v))
-}
-function readStr<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-  if (!browser) return fallback
-  const raw = localStorage.getItem(key)
-  return raw && (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback
-}
-function readPatch(key: string, fallback: () => SynthPatch): SynthPatch {
-  if (!browser) return fallback()
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return fallback()
-    const parsed = JSON.parse(raw) as SynthPatch
-    return parsed && typeof parsed === 'object' && parsed.env ? parsed : fallback()
-  } catch {
-    return fallback()
-  }
-}
+/** Absent on the server, so every reader falls back there. */
+const stored = (key: string): string | null => (browser ? localStorage.getItem(key) : null)
+
+const readBool = (key: string, fallback = false): boolean => parseBool(stored(key), fallback)
+const readNum = (key: string, fallback: number, min: number, max: number): number =>
+  parseNum(stored(key), fallback, min, max)
+const readStr = <T extends string>(key: string, allowed: readonly T[], fallback: T): T =>
+  parseStr(stored(key), allowed, fallback)
+const readPatch = (key: string, fallback: () => SynthPatch): SynthPatch =>
+  parsePatch(stored(key), fallback)
 function write(key: string, value: string): void {
   if (!browser) return
   try {
@@ -188,6 +174,10 @@ class ChordJam {
   )
   arpVolume = $state(readNum(KEY.arpVol, 0.5, 0, 1))
   arpOctave = $state(readNum(KEY.arpOct, 1, JAM_OCT_MIN, JAM_OCT_MAX))
+  /** How many octaves the pattern spans before repeating (1 = one octave). */
+  arpOctaves = $state(readNum(KEY.arpOctaves, 1, 1, 4))
+  /** 0..1 — pushes the off-beats later, up to roughly a triplet feel. */
+  arpSwing = $state(readNum(KEY.arpSwing, 0, 0, 1))
   arpPatch = $state<SynthPatch>(readPatch(KEY.arpPatch, () => structuredClonePatch(ARP_PATCH)))
 
   // ── Runtime input (pushed by whichever surface is sounding) ──────────────
@@ -200,6 +190,7 @@ class ChordJam {
   // stores the value un-proxied (identity holds) while still recomputing the
   // derived schedules when a genuinely new map is assigned.
   #songMap = $state.raw<SongMap | null>(null)
+  #transposeSemitones = $state(0)
   #playing = false
   /** Which surface is currently driving us (see setPosition). */
   #owner: string | null = null
@@ -214,6 +205,13 @@ class ChordJam {
     this.#resetFiring()
   }
 
+  setTransposeSemitones(semitones: number): void {
+    const next = clampTransposeSemitones(semitones)
+    if (next === this.#transposeSemitones) return
+    this.#transposeSemitones = next
+    this.releaseAll()
+  }
+
   /** Is any voice switched on? Hosts use this to skip work entirely. */
   get anyOn(): boolean {
     return this.keysOn || this.bassOn || this.arpOn
@@ -222,31 +220,22 @@ class ChordJam {
   // ── Derived schedules (recompute on song/setting change, never per frame) ─
 
   /**
-   * Chord CHANGE points, voiced to MIDI. Stored chords are voiced, NOT the
-   * display transpose: the audio is in its original key, so the jam must be too.
+   * Chord CHANGE points. Stored chords stay canonical; if playback audio is
+   * transposed, MIDI notes move here instead of pitch-shifting the synth output.
    */
   #chordChanges = $derived.by<{ timeSec: number; chord: ChordSymbol | null }[]>(() => {
     const sm = this.#songMap
     if (!sm) return []
-    const resolved = resolveChordAtEachBeat(sm)
-    const changes: { timeSec: number; chord: ChordSymbol | null }[] = []
-    let prevKey: string | null = '--init--'
-    for (const b of sortBeatsByTime(sm.timeline.beats)) {
-      const chord = resolved.get(b.id) ?? null
-      const key = chord ? formatChordSymbol(chord) : 'none'
-      if (key === prevKey) continue // carried forward → no re-attack
-      prevKey = key
-      changes.push({ timeSec: b.timeSec, chord })
-    }
-    return changes
+    return chordChangePoints(sm)
   })
 
   #keysPoints = $derived.by<{ timeSec: number; notes: number[] }[]>(() => {
-    const voiced = voiceChordProgression(
-      this.#chordChanges.map((c) => c.chord),
-      this.keysOctave,
-    )
-    return this.#chordChanges.map((c, i) => ({ timeSec: c.timeSec, notes: voiced[i] ?? [] }))
+    const sm = this.#songMap
+    if (!sm) return []
+    return keysPoints(sm, this.keysOctave).map((p) => ({
+      timeSec: p.timeSec,
+      notes: p.notes.map((midi) => transposeMidiNote(midi, this.#transposeSemitones)),
+    }))
   })
 
   #bassHits = $derived.by<{ timeSec: number; midi: number }[]>(() => {
@@ -263,26 +252,25 @@ class ChordJam {
           : null
       return { timeSec: b.timeSec, barId: b.barId, bassPc }
     })
-    return buildBassHits(beats, this.bassPattern, this.bassOctave)
+    return buildBassHits(beats, this.bassPattern, this.bassOctave).map((h) => ({
+      timeSec: h.timeSec,
+      midi: transposeMidiNote(h.midi, this.#transposeSemitones),
+    }))
   })
 
   #arpHits = $derived.by<{ timeSec: number; midi: number }[]>(() => {
     const sm = this.#songMap
     if (!sm) return []
-    const voiced = voiceChordProgression(
-      this.#chordChanges.map((c) => c.chord),
-      this.arpOctave,
-    )
-    const pts = this.#chordChanges.map((c, i) => ({ timeSec: c.timeSec, notes: voiced[i] ?? [] }))
-    const beats = sortBeatsByTime(sm.timeline.beats).map((b) => {
-      let notes: number[] = []
-      for (const p of pts) {
-        if (p.timeSec <= b.timeSec + 1e-6) notes = p.notes
-        else break
-      }
-      return { timeSec: b.timeSec, notes }
-    })
-    return buildArpHits(beats, arpSubsPerBeat(this.arpRate), this.arpDirection)
+    return arpHitPoints(sm, {
+      octave: this.arpOctave,
+      rate: this.arpRate,
+      direction: this.arpDirection,
+      octaves: this.arpOctaves,
+      swing: this.arpSwing,
+    }).map((h) => ({
+      timeSec: h.timeSec,
+      midi: transposeMidiNote(h.midi, this.#transposeSemitones),
+    }))
   })
 
   // ── The clock input ──────────────────────────────────────────────────────
@@ -292,7 +280,17 @@ class ChordJam {
    * `Beat.timeSec`). Call once per frame from whichever surface is sounding.
    * Fires whatever was crossed since the previous call.
    */
-  setPosition(positionSec: number, playing: boolean, owner = 'default'): void {
+  setPosition(
+    positionSec: number,
+    playing: boolean,
+    owner = 'default',
+    /**
+     * Voices this surface plays ITSELF and must not have fired here too. The
+     * mixer hosts keys and arp as scheduled MIDI lanes on its own clock, so
+     * firing them per frame as well would double them.
+     */
+    suppress: readonly JamVoice[] = [],
+  ): void {
     // Two surfaces can be mounted at once (the editor timeline and the mixer),
     // but only one is ever sounding. The one that reports PLAYING takes
     // ownership; a stop from anyone else is ignored, so an idle surface can't
@@ -309,7 +307,11 @@ class ChordJam {
     this.#playing = true
 
     // Keys: retrigger on chord CHANGE only (a held chord must not re-attack).
-    if (this.keysOn) {
+    const keysOn = this.keysOn && !suppress.includes('keys')
+    const bassOn = this.bassOn && !suppress.includes('bass')
+    const arpOn = this.arpOn && !suppress.includes('arp')
+
+    if (keysOn) {
       const idx = indexAt(this.#keysPoints, positionSec)
       if (idx !== this.#lastKeysIdx) {
         this.#lastKeysIdx = idx
@@ -321,7 +323,7 @@ class ChordJam {
     }
 
     this.#lastBassIdx = this.#fireHits(
-      this.bassOn,
+      bassOn,
       this.#bassHits,
       positionSec,
       this.#lastBassIdx,
@@ -329,7 +331,7 @@ class ChordJam {
       stopBass,
     )
     this.#lastArpIdx = this.#fireHits(
-      this.arpOn,
+      arpOn,
       this.#arpHits,
       positionSec,
       this.#lastArpIdx,
@@ -423,6 +425,44 @@ class ChordJam {
   }
 
   /**
+   * Re-read every setting from storage.
+   *
+   * The Chords tab keeps its OWN copy of these knobs and persists to the same
+   * localStorage keys, so a change made there never reaches this singleton —
+   * which read them once, at import. Worse, `syncSettings` then writes this
+   * singleton's page-load values straight back over the tab's edit.
+   *
+   * A host calls this as it mounts, so it starts from what is actually stored
+   * rather than from whatever was true when the page loaded. The real fix is to
+   * have one implementation instead of two; until then this keeps the surfaces
+   * from silently overwriting each other.
+   */
+  reloadFromStorage(): void {
+    this.keysOn = readBool(KEY.keysOn)
+    this.keysVolume = readNum(KEY.keysVol, 0.5, 0, 1)
+    this.keysInstrument = browser
+      ? (localStorage.getItem(KEY.keysInstr) ?? DEFAULT_CHORD_PLAYBACK_INSTRUMENT)
+      : DEFAULT_CHORD_PLAYBACK_INSTRUMENT
+    this.keysOctave = readNum(KEY.keysOct, 0, JAM_OCT_MIN, JAM_OCT_MAX)
+    this.keysPatch = readPatch(KEY.keysPatch, () => getInstrumentPatch(this.keysInstrument))
+
+    this.bassOn = readBool(KEY.bassOn)
+    this.bassPattern = readStr(KEY.bassPattern, ['1/1', '4/4', '8/8', '16/16'] as const, '4/4')
+    this.bassVolume = readNum(KEY.bassVol, 0.6, 0, 1)
+    this.bassOctave = readNum(KEY.bassOct, 0, JAM_OCT_MIN, JAM_OCT_MAX)
+    this.bassPatch = readPatch(KEY.bassPatch, () => structuredClonePatch(BASS_PATCH))
+
+    this.arpOn = readBool(KEY.arpOn)
+    this.arpRate = readStr(KEY.arpRate, ARP_RATES, '1/8')
+    this.arpDirection = readStr(KEY.arpDir, ['up', 'down', 'updown', 'random'] as const, 'up')
+    this.arpVolume = readNum(KEY.arpVol, 0.5, 0, 1)
+    this.arpOctave = readNum(KEY.arpOct, 1, JAM_OCT_MIN, JAM_OCT_MAX)
+    this.arpOctaves = readNum(KEY.arpOctaves, 1, 1, 4)
+    this.arpSwing = readNum(KEY.arpSwing, 0, 0, 1)
+    this.arpPatch = readPatch(KEY.arpPatch, () => structuredClonePatch(ARP_PATCH))
+  }
+
+  /**
    * Push settings into the synths and persist them. Hosts call this from one
    * `$effect`; it is the ONLY place that writes to the non-reactive audio sinks.
    */
@@ -449,6 +489,8 @@ class ChordJam {
     write(KEY.arpDir, this.arpDirection)
     write(KEY.arpVol, String(this.arpVolume))
     write(KEY.arpOct, String(this.arpOctave))
+    write(KEY.arpOctaves, String(this.arpOctaves))
+    write(KEY.arpSwing, String(this.arpSwing))
     write(KEY.arpPatch, JSON.stringify(this.arpPatch))
   }
 

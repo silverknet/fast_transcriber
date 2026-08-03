@@ -4,9 +4,9 @@
  * Pure `SongMap → SongMap` so the mixer's menu stays a thin caller and the
  * behaviour is unit-testable without mounting a 2,600-line component.
  *
- * Adding is idempotent: a song has at most one drum machine and one bass
- * machine, so a second "add" returns the map untouched rather than wiping the
- * settings the user already dialled in.
+ * Adding is idempotent for an already-enabled track. If a machine exists but is
+ * disabled, "add" means "put it back in the mixer", preserving the settings the
+ * user already dialled in.
  */
 import type { SongMap } from './types'
 
@@ -32,10 +32,14 @@ export function hasMachineTrack(sm: SongMap, kind: MachineTrackKind): boolean {
 }
 
 export function withMachineTrack(sm: SongMap, kind: MachineTrackKind): SongMap {
-  if (hasMachineTrack(sm, kind)) return sm
-  return kind === 'drum'
-    ? { ...sm, drumMachine: { ...DEFAULT_DRUM_MACHINE } }
-    : { ...sm, bassMachine: { ...DEFAULT_BASS_MACHINE } }
+  if (kind === 'drum') {
+    if (!sm.drumMachine) return { ...sm, drumMachine: { ...DEFAULT_DRUM_MACHINE } }
+    if (sm.drumMachine.enabled) return sm
+    return { ...sm, drumMachine: { ...sm.drumMachine, enabled: true } }
+  }
+  if (!sm.bassMachine) return { ...sm, bassMachine: { ...DEFAULT_BASS_MACHINE } }
+  if (sm.bassMachine.enabled) return sm
+  return { ...sm, bassMachine: { ...sm.bassMachine, enabled: true } }
 }
 
 export function withoutMachineTrack(sm: SongMap, kind: MachineTrackKind): SongMap {

@@ -204,6 +204,38 @@ describe('generateBassGroove', () => {
     expect(inBar(out, 2).length).toBeGreaterThan(inBar(out, 0).length)
   })
 
+  it('maps a shared boundary bar to the next section instead of stacking patterns', () => {
+    const overlappedBoundary: SongMap = {
+      ...song,
+      sections: [section('v1', 'verse', 0, 2), section('c1', 'chorus', 2, 3)],
+    }
+    const out = generateBassGroove(overlappedBoundary, {
+      style: 'roots',
+      perSection: { c1: { style: 'eighths', complexity: 0.5 } },
+    })
+    const chorusStart = inBar(out, 2)
+    expect(chorusStart.length).toBe(8)
+    expect(new Set(chorusStart.map((e) => e.timeSec)).size).toBe(chorusStart.length)
+  })
+
+  it('uses Bar.index for section ranges instead of assuming array offsets', () => {
+    const shiftedIndexes: SongMap = {
+      ...song,
+      timeline: {
+        ...song.timeline,
+        bars: song.timeline.bars.map((bar) => ({ ...bar, index: bar.index + 10 })),
+      },
+      sections: [section('v1', 'verse', 10, 11), section('c1', 'chorus', 12, 13)],
+    }
+    const out = generateBassGroove(shiftedIndexes, {
+      style: 'roots',
+      perSection: { c1: { style: 'eighths', complexity: 0.5 } },
+    })
+
+    expect(inBar(out, 2).length).toBe(8)
+    expect(inBar(out, 0).length).toBe(1)
+  })
+
   it('mutes a section entirely when asked', () => {
     const out = generateBassGroove(song, { style: 'roots', perSection: { v1: { muted: true } } })
     expect(inBar(out, 0)).toEqual([])

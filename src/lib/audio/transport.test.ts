@@ -20,6 +20,7 @@ import type { SongMap } from '$lib/songmap/types'
 
 class MockAudioParam {
   value = 0
+  cancelScheduledValues = vi.fn()
   setValueAtTime = vi.fn()
   linearRampToValueAtTime = vi.fn()
   exponentialRampToValueAtTime = vi.fn()
@@ -517,8 +518,10 @@ describe('UnifiedTransport volume knobs', () => {
     t.songVolume = 5 // out of range → clamped to 1
     await loadSong(t, makeSong({ barCount: 2 }), 4)
     const ctx = lastCtx!
-    expect(ctx.createdGains[1]!.gain.value).toBeCloseTo(1.7, 4) // click master (no upper cap)
-    expect(ctx.createdGains[2]!.gain.value).toBe(1) // song track, clamped into [0, 1]
+    // By identity, not by creation order: adding an internal node to the engine
+    // must not break volume tests.
+    expect(t.clickMasterForTest!.gain.value).toBeCloseTo(1.7, 4) // no upper cap
+    expect(t.songTrackGainForTest!.gain.value).toBe(1) // clamped into [0, 1]
     t.dispose()
   })
 
@@ -526,7 +529,7 @@ describe('UnifiedTransport volume knobs', () => {
     const t = await freshTransport()
     t.songVolume = -1
     await loadSong(t, makeSong({ barCount: 2 }), 4)
-    expect(lastCtx!.createdGains[2]!.gain.value).toBe(0)
+    expect(t.songTrackGainForTest!.gain.value).toBe(0)
     t.dispose()
   })
 })
@@ -684,6 +687,76 @@ describe('UnifiedTransport — transpose set BEFORE the engine exists (regressio
     await loadSong(t, makeSong({ barCount: 4 }), 8)
     t.play()
     expect(lastCtx!.bufferSources[0]!.playbackRate.value).toBeCloseTo(2, 9)
+    t.dispose()
+  })
+})
+
+
+describe('UnifiedTransport — pausing SILENCES clicks already scheduled (regression)', () => {
+  /**
+   * The count-in hands EVERY click to the audio clock at once, placed against
+   * `playStartCtx` the moment play is pressed — up to sixteen voices spread
+   * over several seconds. Stopping the rAF loop stops scheduling MORE clicks
+   * and does nothing about those.
+   *
+   * So pausing during a count-in left it ringing on with the transport stopped,
+   * and pressing play again laid a second count-in over the first. Reported
+   * from the Grid tab as "it plays after pausing, and blocks the audio".
+   *
+   * Every voice is connected through `clickMaster`, so closing that gain kills
+   * all of them at once — scheduled or not.
+   */
+  it('closes the click gain on pause, so pending count-in clicks cannot ring', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4, countInBeats: 8 }), 16)
+    t.playWithClick = true
+    t.clickVolume = 1.5
+    t.play()
+
+    const master = t.clickMasterForTest!
+    expect(master.gain.value, 'clicks should be audible while playing').toBeGreaterThan(0)
+
+    t.pause()
+    expect(master.gain.value, 'a pending count-in can still ring after pause').toBe(0)
+    t.dispose()
+  })
+
+  it('stop() silences them too, not only pause()', async () => {
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4, countInBeats: 8 }), 16)
+    t.playWithClick = true
+    t.play()
+    t.stop()
+    expect(t.clickMasterForTest!.gain.value).toBe(0)
+    t.dispose()
+  })
+
+  it('re-opens the gain on the NEXT play, or the count-in would be silent', async () => {
+    // The other half of the bug: closing the gate without re-opening it turns
+    // "clicks ring after pause" into "clicks never come back".
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4, countInBeats: 8 }), 16)
+    t.playWithClick = true
+    t.clickVolume = 1.2
+    t.play()
+    t.pause()
+    expect(t.clickMasterForTest!.gain.value).toBe(0)
+    t.play()
+    expect(t.clickMasterForTest!.gain.value).toBeCloseTo(1.2, 4)
+    t.dispose()
+  })
+
+  it('the volume slider does not re-open the gate while paused', async () => {
+    // Moving the click volume during a pause must not let the voices a pause
+    // just killed ring out.
+    const t = await freshTransport()
+    await loadSong(t, makeSong({ barCount: 4, countInBeats: 8 }), 16)
+    t.playWithClick = true
+    t.play()
+    t.pause()
+    t.clickVolume = 2
+    await Promise.resolve()
+    expect(t.clickMasterForTest!.gain.value).toBe(0)
     t.dispose()
   })
 })

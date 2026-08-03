@@ -2,7 +2,9 @@
   import { transport } from '$lib/audio/transport.svelte'
   import { formatTime } from '$lib/audio/formatTime'
   import { audioSession } from '$lib/stores/audioSession'
-  import { Pause, Play, Square } from '@lucide/svelte'
+  import { songMap, patchSongMap } from '$lib/stores/songMap'
+  import { cuePlaybackMuted, withCuePlaybackMuted } from '$lib/songmap/cueTracks'
+  import { Pause, Play, SlidersHorizontal, Square } from '@lucide/svelte'
 
   type EditMode = 'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'
 
@@ -31,6 +33,8 @@
   const canTransport = $derived(onOverview ? !!mixerControls?.canPlay : transport.ready)
   const posSec = $derived(onOverview ? (mixerControls?.positionSec ?? 0) : transport.songTimeSec)
   const durSec = $derived(onOverview ? (mixerControls?.durationSec ?? 0) : transport.durationSec)
+  const clickEnabled = $derived(onOverview ? !!mixerControls?.clickOn : transport.playWithClick)
+  const cuesEnabled = $derived($songMap ? !cuePlaybackMuted($songMap) : false)
   const doPlayPause = () => (onOverview ? mixerControls?.playPause() : transport.togglePlay())
   const doStop = () => (onOverview ? mixerControls?.stop() : transport.stop())
 </script>
@@ -43,15 +47,13 @@
      TODO(M1b-next): fold mixer+live onto the shared transport. -->
 {#if $audioSession.file}
   <div
-    class="flex flex-wrap items-center gap-3 font-mono"
+    class="flex flex-wrap items-center gap-2 font-mono"
     role="group"
     aria-label="Transport"
   >
     <button
       type="button"
-      class="border-foreground inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40 {isPlaying
-        ? 'bg-[var(--studio-orange)] text-background'
-        : 'hover:bg-foreground hover:text-background'}"
+      class="inline-flex size-9 items-center justify-center rounded-full bg-[var(--studio-orange)] text-[var(--studio-ink)] shadow-[0_2px_6px_rgba(0,0,0,0.24)] transition-[transform,filter,opacity] hover:-translate-y-px hover:brightness-105 active:translate-y-0 disabled:opacity-35"
       onclick={doPlayPause}
       disabled={!canTransport}
       aria-label={isPlaying ? 'Pause' : 'Play'}
@@ -65,33 +67,82 @@
     </button>
     <button
       type="button"
-      class="border-foreground hover:bg-foreground hover:text-background inline-flex h-9 w-9 items-center justify-center border-2 transition-colors disabled:opacity-40"
+      class="text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex size-8 items-center justify-center rounded-full transition-colors disabled:opacity-35"
       onclick={doStop}
       disabled={!canTransport}
       aria-label="Stop"
       title="Stop and go to selection start"
     >
-      <Square class="size-4" aria-hidden="true" />
+      <Square class="size-3.5 fill-current" aria-hidden="true" />
     </button>
-    <span class="text-sm font-bold tabular-nums">
+    <span class="min-w-[8.5rem] text-sm font-bold tabular-nums">
       <span class="text-[var(--studio-orange)]">{formatTime(posSec)}</span>
       <span class="text-muted-foreground">/ {formatTime(durSec)}</span>
     </span>
+
+    <span class="bg-foreground/15 mx-1 h-5 w-px" aria-hidden="true"></span>
+
     <label
-      class="border-foreground/40 hover:bg-foreground/5 ml-auto inline-flex cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs"
+      class="text-muted-foreground hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-black uppercase tracking-wide transition-colors"
       title="Play clicks alongside the audio (and count-in if configured)"
     >
       <input
         type="checkbox"
-        checked={onOverview ? !!mixerControls?.clickOn : transport.playWithClick}
+        checked={clickEnabled}
         onchange={(e) =>
           onOverview
             ? mixerControls?.setClick(e.currentTarget.checked)
             : (transport.playWithClick = e.currentTarget.checked)}
         disabled={!canTransport}
-        class="accent-foreground size-3.5"
+        class="sr-only"
       />
-      <span class="font-bold uppercase tracking-wider">Click</span>
+      <span>Click</span>
+      <span
+        class="relative h-4 w-7 rounded-full transition-colors {clickEnabled
+          ? 'bg-[var(--studio-orange)]'
+          : 'bg-foreground/15'}"
+        aria-hidden="true"
+      >
+        <span
+          class="absolute top-0.5 size-3 rounded-full bg-background shadow-sm transition-transform {clickEnabled
+            ? 'translate-x-3'
+            : 'translate-x-0.5'}"
+        ></span>
+      </span>
+    </label>
+    <!--
+      Cues, beside Click — the same per-song switch every surface reads.
+      Unlike the click (whose engine differs per tab), the cue flag is ONE
+      `mixState` field, so this writes the shared helper and the overview
+      mixer / live mode follow reactively.
+    -->
+    <label
+      class="text-muted-foreground hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-black uppercase tracking-wide transition-colors"
+      title="Play the spoken cues (section names, counts) alongside the song"
+    >
+      <input
+        type="checkbox"
+        checked={$songMap ? !cuePlaybackMuted($songMap) : false}
+        onchange={(e) => {
+          const on = e.currentTarget.checked
+          patchSongMap((m) => withCuePlaybackMuted(m, !on))
+        }}
+        disabled={!$songMap}
+        class="sr-only"
+      />
+      <span>Cues</span>
+      <span
+        class="relative h-4 w-7 rounded-full transition-colors {cuesEnabled
+          ? 'bg-[var(--studio-orange)]'
+          : 'bg-foreground/15'}"
+        aria-hidden="true"
+      >
+        <span
+          class="absolute top-0.5 size-3 rounded-full bg-background shadow-sm transition-transform {cuesEnabled
+            ? 'translate-x-3'
+            : 'translate-x-0.5'}"
+        ></span>
+      </span>
     </label>
     <!-- Song / click volume + click-sync calibration. Rebuilt here (was
          duplicated inside the editor WaveformPlayer toolbar) so it binds to the
@@ -101,47 +152,41 @@
       class="relative shrink-0 {editMode === 'overview' ? 'pointer-events-none opacity-40' : ''}"
     >
       <summary
-        class="border-foreground/40 hover:bg-foreground/5 inline-flex cursor-pointer list-none items-center gap-1 border-2 px-2 py-1 text-xs font-bold uppercase tracking-wider marker:content-none [&::-webkit-details-marker]:hidden"
+        class="text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex size-8 cursor-pointer list-none items-center justify-center rounded-full transition-colors marker:content-none [&::-webkit-details-marker]:hidden"
         title="Song / click volume and click-sync calibration"
+        aria-label="Song and click levels"
       >
-        Vol
+        <SlidersHorizontal class="size-4" aria-hidden="true" />
       </summary>
       <div
-        class="border-foreground bg-background absolute right-0 top-9 z-30 flex w-64 flex-col gap-4 border-2 px-4 py-3 shadow-lg"
+        class="border-foreground/15 bg-popover text-popover-foreground absolute right-0 top-10 z-30 flex w-72 flex-col gap-3 rounded-[var(--radius)] border p-3 shadow-lg"
         role="dialog"
         aria-label="Volume and click sync"
       >
-        <div class="flex items-end justify-around gap-4">
-          <div class="flex flex-col items-center gap-1">
-            <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Click</span>
-            <div class="relative h-24 w-6">
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.05"
-                bind:value={transport.clickVolume}
-                class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
-                aria-label="Click volume"
-              />
-            </div>
-            <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{transport.clickVolume.toFixed(1)}×</span>
-          </div>
-          <div class="flex flex-col items-center gap-1">
-            <span class="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">Song</span>
-            <div class="relative h-24 w-6">
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                bind:value={transport.songVolume}
-                class="accent-foreground absolute left-1/2 top-1/2 h-2 w-24 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer"
-                aria-label="Song volume"
-              />
-            </div>
-            <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{Math.round(transport.songVolume * 100)}%</span>
-          </div>
+        <div class="grid grid-cols-[2.75rem_1fr_3rem] items-center gap-x-2 gap-y-2 text-[10px] font-black uppercase tracking-wide">
+          <span class="text-muted-foreground">Click</span>
+          <input
+            type="range"
+            min="0"
+            max="2"
+            step="0.05"
+            bind:value={transport.clickVolume}
+            class="accent-[var(--studio-orange)] w-full cursor-pointer"
+            aria-label="Click volume"
+          />
+          <span class="text-muted-foreground text-right font-mono tabular-nums">{transport.clickVolume.toFixed(1)}×</span>
+
+          <span class="text-muted-foreground">Song</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            bind:value={transport.songVolume}
+            class="accent-[var(--studio-orange)] w-full cursor-pointer"
+            aria-label="Song volume"
+          />
+          <span class="text-muted-foreground text-right font-mono tabular-nums">{Math.round(transport.songVolume * 100)}%</span>
         </div>
         <!-- Click sync calibration: default 0 is correct after routing audio +
              clicks through the same Web Audio context; the slider is a fine-tune
@@ -175,7 +220,7 @@
               type="button"
               onclick={() => (transport.clickOffsetSec = 0)}
               disabled={transport.clickOffsetSec === 0}
-              class="border-foreground/40 hover:bg-foreground/5 disabled:opacity-40 border px-1.5 py-0.5 uppercase tracking-wider"
+              class="text-muted-foreground hover:text-foreground disabled:opacity-40 px-1.5 py-0.5 font-black uppercase tracking-wider"
             >
               Reset
             </button>
@@ -184,16 +229,8 @@
               <span class="text-muted-foreground">Log to console</span>
             </label>
           </div>
-          <p class="text-muted-foreground text-[10px] leading-snug">
-            Leave at 0 — engine targets perfect sync with the waveform. Only
-            nudge if clicks feel off through specific headphones / speakers; the
-            value is saved per device.
-          </p>
         </div>
       </div>
     </details>
-    {#if editMode === 'overview'}
-      <span class="text-muted-foreground w-full text-[11px] sm:w-auto">Mixer controls playback here</span>
-    {/if}
   </div>
 {/if}

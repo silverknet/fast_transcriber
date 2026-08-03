@@ -44,7 +44,9 @@ export async function decodeAudioBlobInfo(
   channels: number
   fingerprint?: AudioFingerprint
 }> {
-  const ctx = new AudioContext()
+  // OFFLINE: this context only decodes, so it must not take one of the
+  // browser's ~6 hardware AudioContext slots. See `audioDevice.ts`.
+  const ctx = new OfflineAudioContext(1, 1, 44100)
   try {
     const buf = await ctx.decodeAudioData(await blob.arrayBuffer())
     // The file is already decoded here, so the recording fingerprint is
@@ -58,7 +60,7 @@ export async function decodeAudioBlobInfo(
       fingerprint: computeAudioFingerprint(channels, buf.sampleRate) ?? undefined,
     }
   } finally {
-    await ctx.close().catch(() => {})
+    // Nothing to close: an OfflineAudioContext holds no hardware slot.
   }
 }
 

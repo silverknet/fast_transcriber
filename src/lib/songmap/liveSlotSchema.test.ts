@@ -25,6 +25,16 @@ describe('mixState.liveSlot — .smap round-trip', () => {
     expect(back.mixState?.tracks[1]?.liveSlot).toBe('drums')
   })
 
+  it('keeps Custom 1/2 links through serialize → parse', () => {
+    const back = roundTrip(
+      withMix([
+        { key: 'arp-machine', volume: 1, liveSlot: 'custom1' },
+        { key: 'chord-machine', volume: 1, liveSlot: 'custom2' },
+      ]),
+    )
+    expect(back.mixState?.tracks.map((track) => track.liveSlot)).toEqual(['custom1', 'custom2'])
+  })
+
   it("keeps an explicit 'none' — it means something different from absent", () => {
     const back = roundTrip(withMix([{ key: 'stem:drums.wav', volume: 1, liveSlot: 'none' }]))
     expect(back.mixState?.tracks[0]?.liveSlot).toBe('none')

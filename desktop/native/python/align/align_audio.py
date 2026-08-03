@@ -64,7 +64,8 @@ import traceback
 
 import numpy as np
 import librosa
-from scipy.signal import correlate
+from fractions import Fraction
+from scipy.signal import correlate, resample_poly
 from scipy.fft import rfft, irfft, next_fast_len
 
 
@@ -83,6 +84,32 @@ DRIFT_WIN_SEC = 8.0             # each local probe span
 DRIFT_SEARCH_SEC = 0.75         # how far a local probe may wander from global
 SAME_REC_MIN_CONF = 0.55        # coarse-XC confidence to call it the same song
 SAME_REC_MAX_DRIFT = 0.040      # >40 ms drift ⇒ not a clean constant offset
+
+# ----- Harmonic (chroma) stage -------------------------------------------
+#
+# Why a second stage exists at all. The onset/GCC-PHAT pair above compares
+# WAVEFORMS, so it only recognises two copies of one master. Two real cases
+# break it while the recordings genuinely are the same performance:
+#
+#   1. KARAOKE / instrumental copies. These are usually made by cancelling the
+#      centre channel, which removes the vocal AND the centred kick, snare and
+#      bass. The onset envelope is mostly kick+snare, so the two envelopes stop
+#      resembling each other and the correlation collapses into noise — the
+#      peak then lands wherever the noise happens to be highest.
+#   2. SPEED-SHIFTED uploads. Video sites are full of copies played ~0.5-1%
+#      fast to dodge content matching. Over three minutes that is a second or
+#      more of progressive slip, which smears every waveform correlation flat.
+#
+# Chroma (pitch-class energy) survives both: it follows the CHORDS, which are
+# identical no matter what was removed from the mix, and a linear time-warp
+# shows up as a straight line through the per-window offsets — measurable, and
+# therefore correctable, instead of being reported as "different recording".
+CHROMA_HOP = 2048
+SPEED_WINDOWS = 9               # probes spread across the target
+SPEED_WIN_SEC = 20.0            # each probe's span
+CHROMA_MIN_DOMINANCE = 1.6      # peak vs best rival: below this it is noise
+MAX_SPEED_DEVIATION = 0.06      # ±6% — beyond this it is a different version
+MAX_WARP_RESIDUAL = 0.25        # s, after removing the linear warp
 
 
 def _load(path: str) -> np.ndarray:
@@ -223,28 +250,196 @@ def _drift(ref, tgt, offset_sec):
     return per, drift
 
 
+def _resample(y: np.ndarray, ratio: float) -> np.ndarray:
+    """Stretch `y` by `ratio` — the exact correction `shift_audio.py` applies,
+    so what the refinement measures is what the import will produce."""
+    frac = Fraction(ratio).limit_denominator(2000)
+    return np.asarray(resample_poly(y, frac.numerator, frac.denominator), dtype=np.float64)
+
+
+def _chroma(y: np.ndarray) -> np.ndarray:
+    return np.asarray(
+        librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=CHROMA_HOP), dtype=np.float64
+    )
+
+
+def _chroma_xcorr(a_ch: np.ndarray, b_ch: np.ndarray):
+    """Cross-correlate two chroma-grams, summed over the 12 pitch classes.
+
+    Returns (lags_sec, corr) where `corr[i]` is the similarity when `b` is
+    placed at `lags_sec[i]` on `a`'s timeline. Normalised so the values are
+    comparable between calls."""
+    a = a_ch - a_ch.mean(axis=1, keepdims=True)
+    b = b_ch - b_ch.mean(axis=1, keepdims=True)
+    n = next_fast_len(a.shape[1] + b.shape[1])
+    corr = np.zeros(n)
+    for k in range(12):
+        corr += irfft(rfft(a[k], n) * np.conj(rfft(b[k], n)), n)
+    corr = np.concatenate((corr[-(b.shape[1] - 1):], corr[: a.shape[1]]))
+    fps = SR / CHROMA_HOP
+    lags = (np.arange(len(corr)) - (b.shape[1] - 1)) / fps
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b)) or 1e-12
+    return lags, corr / denom
+
+
+def _peak_dominance(lags: np.ndarray, corr: np.ndarray, guard_sec: float = 5.0):
+    """(lag_of_peak, peak_value, dominance) — dominance being peak / best rival
+    outside a guard band. A true match towers over its rivals; noise does not."""
+    i = int(np.argmax(corr))
+    peak = float(corr[i])
+    mask = np.abs(lags - lags[i]) > guard_sec
+    rival = float(corr[mask].max()) if mask.any() else 0.0
+    dom = peak / rival if rival > 1e-9 else float("inf")
+    return float(lags[i]), peak, dom
+
+
+def _theil_sen(xs, ys):
+    """Median-of-pairwise-slopes fit — immune to a couple of bad probes, which
+    matters because one window landing on a repeated chorus would otherwise
+    tilt a least-squares line."""
+    slopes = [
+        (ys[j] - ys[i]) / (xs[j] - xs[i])
+        for i in range(len(xs))
+        for j in range(i + 1, len(xs))
+        if xs[j] != xs[i]
+    ]
+    if not slopes:
+        return 0.0, float(np.median(ys)) if len(ys) else 0.0
+    b = float(np.median(slopes))
+    a = float(np.median([y - b * x for x, y in zip(xs, ys)]))
+    return b, a
+
+
+def _harmonic_align(ref: np.ndarray, tgt: np.ndarray) -> dict:
+    """Chord-based alignment that also measures a linear speed difference.
+
+    Model: `t_ref = offsetSec + speedRatio * t_target`, i.e. stretch the target
+    by `speedRatio` and then delay it by `offsetSec`."""
+    ref_ch = _chroma(ref)
+    tgt_ch = _chroma(tgt)
+    fps = SR / CHROMA_HOP
+
+    whole_lag, whole_peak, whole_dom = _peak_dominance(*_chroma_xcorr(ref_ch, tgt_ch))
+
+    n_tgt = tgt_ch.shape[1]
+    win = int(SPEED_WIN_SEC * fps)
+    xs, ys, doms = [], [], []
+    per = []
+    if n_tgt > win:
+        for w in range(SPEED_WINDOWS):
+            start = int(w * (n_tgt - win) / max(1, SPEED_WINDOWS - 1))
+            lags, corr = _chroma_xcorr(ref_ch, tgt_ch[:, start: start + win])
+            lag, peak, dom = _peak_dominance(lags, corr)
+            t_tgt = start / fps
+            xs.append(t_tgt)
+            ys.append(lag - t_tgt)
+            doms.append(dom)
+            per.append({
+                "centerSec": round(t_tgt + SPEED_WIN_SEC / 2, 3),
+                "offsetSec": round(float(lag - t_tgt), 5),
+                "confidence": round(float(min(1.0, dom / 3.0)), 3),
+            })
+
+    slope, intercept = _theil_sen(xs, ys) if len(xs) >= 3 else (0.0, whole_lag)
+    speed_ratio = 1.0 + slope
+    residual = 0.0
+    if xs:
+        residual = float(np.max(np.abs(np.array(ys) - (intercept + slope * np.array(xs)))))
+
+    # REFINE. Chroma finds the speed but its frame is ~93 ms, far too coarse to
+    # place a vocal. Once the speed is matched the waveforms resemble each other
+    # again — measured on a real karaoke/upload pair, onset correlation went
+    # from 0.008 to 0.53 — so hand the corrected pair back to the precise
+    # machinery for the constant offset, and report ITS confidence, which means
+    # something to a person, rather than a peak-dominance ratio.
+    if abs(slope) > 1e-6 and abs(slope) <= MAX_SPEED_DEVIATION:
+        stretched = _resample(tgt, speed_ratio)
+        r_coarse, r_conf = _coarse_offset(ref, stretched)
+        if r_conf > 0.25:  # the refinement itself must be believable
+            r_fine, _sharp = _fine_offset(ref, stretched, r_coarse)
+            r_per, r_drift = _drift(ref, stretched, r_fine)
+            return {
+                "offsetSec": round(float(r_fine), 5),
+                "speedRatio": round(float(speed_ratio), 8),
+                "confidence": round(float(r_conf), 4),
+                "sameRecording": bool(r_conf >= 0.35 and r_drift <= MAX_WARP_RESIDUAL),
+                "driftSec": round(float(r_drift), 5),
+                "perWindow": r_per or per,
+                "method": "harmonic",
+            }
+
+    plausible_speed = abs(slope) <= MAX_SPEED_DEVIATION
+    # The peak must stand out SOMEWHERE: either the whole-song correlation is
+    # dominant, or a majority of the probes agree on a line. Both being weak
+    # means we genuinely cannot tell — and then we must not claim a match.
+    strong_windows = sum(1 for d in doms if d >= CHROMA_MIN_DOMINANCE)
+    convincing = whole_dom >= CHROMA_MIN_DOMINANCE or strong_windows >= max(3, len(doms) // 2)
+    same = bool(convincing and plausible_speed and residual <= MAX_WARP_RESIDUAL)
+
+    return {
+        "offsetSec": round(float(intercept), 5),
+        "speedRatio": round(float(speed_ratio), 8),
+        "confidence": round(float(min(1.0, whole_dom / 3.0)), 4),
+        "sameRecording": same,
+        "driftSec": round(float(residual), 5),
+        "perWindow": per,
+        "method": "harmonic",
+    }
+
+
 def align(ref_path: str, tgt_path: str) -> dict:
     ref = _load(ref_path)
     tgt = _load(tgt_path)
     if len(ref) == 0 or len(tgt) == 0:
         return {"ok": False, "error": "one of the inputs decoded to empty audio"}
 
-    coarse_sec, coarse_conf = _coarse_offset(ref, tgt)
-    offset_sec, _fine_sharp = _fine_offset(ref, tgt, coarse_sec)
-    per_window, drift_sec = _drift(ref, tgt, offset_sec)
-
-    same = bool(coarse_conf >= SAME_REC_MIN_CONF and drift_sec <= SAME_REC_MAX_DRIFT)
-
-    return {
+    common = {
         "ok": True,
-        "offsetSec": round(float(offset_sec), 5),
-        "confidence": round(float(coarse_conf), 4),
-        "sameRecording": same,
-        "driftSec": round(float(drift_sec), 5),
         "durationRefSec": round(_duration(ref), 3),
         "durationTargetSec": round(_duration(tgt), 3),
         "sampleRate": SR,
+    }
+
+    # Stage 1 — WAVEFORM. Two copies of one master align to the sample here,
+    # and that is the common case, so it stays the fast path.
+    coarse_sec, coarse_conf = _coarse_offset(ref, tgt)
+    offset_sec, _fine_sharp = _fine_offset(ref, tgt, coarse_sec)
+    per_window, drift_sec = _drift(ref, tgt, offset_sec)
+    if coarse_conf >= SAME_REC_MIN_CONF and drift_sec <= SAME_REC_MAX_DRIFT:
+        return {
+            **common,
+            "offsetSec": round(float(offset_sec), 5),
+            "speedRatio": 1.0,
+            "confidence": round(float(coarse_conf), 4),
+            "sameRecording": True,
+            "driftSec": round(float(drift_sec), 5),
+            "perWindow": per_window,
+            "method": "waveform",
+        }
+
+    # Stage 2 — HARMONY. The waveforms disagree, which does NOT mean the
+    # recordings differ: a karaoke cut has had its centred drums removed, and a
+    # sped-up upload slips progressively. Both keep the chord progression, so
+    # ask the chords instead — and measure the speed difference rather than
+    # reporting it as unexplained drift.
+    harmonic = _harmonic_align(ref, tgt)
+    if harmonic["sameRecording"]:
+        return {**common, **harmonic}
+
+    # Neither stage is convinced. Return whichever looked stronger, still
+    # flagged as unverified, so the caller can offer "use it anyway" with the
+    # best estimate rather than a nonsense one.
+    if harmonic["confidence"] >= coarse_conf:
+        return {**common, **harmonic}
+    return {
+        **common,
+        "offsetSec": round(float(offset_sec), 5),
+        "speedRatio": 1.0,
+        "confidence": round(float(coarse_conf), 4),
+        "sameRecording": False,
+        "driftSec": round(float(drift_sec), 5),
         "perWindow": per_window,
+        "method": "waveform",
     }
 
 

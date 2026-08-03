@@ -42,5 +42,10 @@ export const load: LayoutServerLoad = async ({ locals, route, url }) => {
       : null,
     accessStatus: locals.accessStatus,
     isAdmin: locals.isAdmin,
+    // Lets the client suppress everything cloud-shaped — the auto-pull
+    // subscription, the debounced cloud push, the sign-in and Share entries.
+    // Those would all fail harmlessly offline, but "harmlessly failing" on
+    // stage still means spinners and error toasts during a set.
+    offline: locals.offline === true,
   }
 }

@@ -20,9 +20,11 @@ import type {
   ProjectFile,
   ProjectMastering,
   ProjectSongEntry,
+  LiveRigConfig,
 } from './types'
 import { AUTO_STEM_NAMES } from './types'
-import { songMapHasCueContent } from '$lib/songmap/cueTracks'
+import { applyProjectCueDefaults, songMapHasCueContent } from '$lib/songmap/cueTracks'
+import { patchSongMap, songMap as songMapStore } from '$lib/stores/songMap'
 import {
   PROJECT_FILE_VERSION,
   PROJECT_SONGS_DIR,
@@ -243,6 +245,8 @@ export function metadataLiteFromSongMap(map: SongMap): ProjectSongMetadataLite {
     out.stemRefs = { ...map.stemRefs }
   }
   if (map.audio?.sha256) out.audioSha256 = map.audio.sha256
+  const sub = map.audio?.originalPath ?? (map.audio?.fileName ? `audio/${map.audio.fileName}` : undefined)
+  if (sub) out.audioSubpath = sub
   if (map.audio?.durationSec !== undefined) out.audioDurationSec = map.audio.durationSec
   if (map.audio?.fileName || map.audio?.originalPath) out.hasAudio = true
   out.hasCueContent = songMapHasCueContent(map)
@@ -274,6 +278,7 @@ function liteFromInfo(info: ProjectSongMetadataInfo, fallbackFolder: string): Pr
   if (info.hasCueTrack) out.hasCueTrack = true
   if (info.hasClickTrack) out.hasClickTrack = true
   if (info.hasAudio) out.hasAudio = true
+  if (typeof info.audioSubpath === 'string' && info.audioSubpath) out.audioSubpath = info.audioSubpath
   if (typeof info.audioDurationSec === 'number' && info.audioDurationSec > 0) {
     out.audioDurationSec = info.audioDurationSec
   }
@@ -1414,6 +1419,29 @@ export async function setProjectDefaults(patch: Partial<ProjectDefaults>): Promi
   setProjectData(next)
 }
 
+/**
+ * The ONLY writer of per-performer monitor mixes.
+ *
+ * Whole-map replace, mirroring `setProjectPerformers`: the dialog edits a
+ * working copy and commits it in one write, so two surfaces can never
+ * interleave partial updates into a half-of-each mix.
+ */
+export async function setProjectPerformerMixes(
+  performerMixes: NonNullable<ProjectFile['performerMixes']>,
+): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    ...(Object.keys(performerMixes).length > 0 ? { performerMixes } : {}),
+    updatedAt: nowIso(),
+  }
+  if (Object.keys(performerMixes).length === 0) delete next.performerMixes
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
 /** The ONLY writer of the shared performer roster. */
 export async function setProjectPerformers(performers: Performer[]): Promise<void> {
   const snap = get(project)
@@ -1421,6 +1449,27 @@ export async function setProjectPerformers(performers: Performer[]): Promise<voi
   const next: ProjectFile = {
     ...snap.data,
     performers,
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/**
+ * The ONLY writer of the shared LIVE RIG config (monitor wiring).
+ *
+ * Project-wide on purpose: which channel carries the click and how much of it
+ * each performer wants is band setup, not one laptop's preference. It used to
+ * live in localStorage, so a second machine — or a replacement one at a venue —
+ * saw none of it.
+ */
+export async function setProjectLiveRig(liveRig: LiveRigConfig): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const next: ProjectFile = {
+    ...snap.data,
+    liveRig,
     updatedAt: nowIso(),
   }
   const w = await writeProjectManifest(snap.osPath, next)
@@ -1491,6 +1540,95 @@ export async function applyDefaultsToAllSongs(): Promise<{ updated: number; erro
     }
   }
   return { updated, errors }
+}
+
+/**
+ * PROJECT-WIDE CUE SETUP: one cue track per performer, in every song, with the
+ * spoken introduction following `defaults.preCountInCue`.
+ *
+ * The same pure function (`applyProjectCueDefaults`) runs here and in the Cue
+ * tab, so the bulk pass and the interactive editor cannot disagree about what
+ * "the standard cue tracks" means. Idempotent by construction — the button will
+ * be pressed more than once.
+ *
+ * The ACTIVELY-OPEN song is patched IN MEMORY (`patchSongMap`) instead of on
+ * disk: the editor owns that `.smap`, and racing its 1.5 s autosave with a
+ * direct file write is how half-written songs happen. Everything else goes
+ * through the same read → decode → apply → encode → write loop as
+ * `applyDefaultsToAllSongs`.
+ */
+export async function generateCueTracksForAllSongs(): Promise<{
+  updated: number
+  skipped: number
+  errors: number
+}> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('No active project')
+  const osPath = snap.osPath
+  const performers = (snap.data.performers ?? []).map((p) => ({ id: p.id, name: p.name }))
+  if (performers.length === 0) {
+    throw new Error('Add performers first — each one gets their own cue track.')
+  }
+
+  let updated = 0
+  let skipped = 0
+  let errors = 0
+  for (const entry of snap.data.songs) {
+    if (entry.hidden) continue
+    const cur = get(project)
+    if (cur.osPath !== osPath) break // project changed under us
+    const isOpenInEditor = cur.editingMode === 'project-song' && cur.activeSongId === entry.id
+    try {
+      if (isOpenInEditor) {
+        // In memory, through the same pure function — the editor autosaves it.
+        // Same render-preserving skip as the file path: an unchanged song must
+        // not lose its cue render or gain a no-op undo entry.
+        const open = get(songMapStore)
+        if (open) {
+          const next = applyProjectCueDefaults(open, { performers })
+          const strip = (m: SongMap) =>
+            JSON.stringify({ ...m, cueTracks: m.cueTracks.map((t) => ({ ...t, renderExport: undefined })) })
+          if (strip(next) === strip(open)) {
+            skipped++
+            continue
+          }
+          patchSongMap(() => next)
+          updated++
+        }
+        continue
+      }
+      const r = await readProjectSong(osPath, entry.folder)
+      if (!r.ok) {
+        errors++
+        continue
+      }
+      const blob = new Blob([r.bytes as BlobPart], { type: 'application/octet-stream' })
+      const data = await decodeSmapFile(blob)
+      const sm = data.project.songMap
+      const nextMap = applyProjectCueDefaults(sm, { performers })
+      // Content-equality skip, ignoring `renderExport`: regeneration clears it
+      // by design, but a song ALREADY in the desired state must keep its
+      // rendered cue WAV — otherwise every press of the button re-renders TTS
+      // for the whole project for no musical change.
+      const stripRenders = (m: SongMap) =>
+        JSON.stringify({ ...m, cueTracks: m.cueTracks.map((t) => ({ ...t, renderExport: undefined })) })
+      if (stripRenders(nextMap) === stripRenders(sm)) {
+        skipped++
+        continue
+      }
+      const enc = await encodeSmapFile({ project: { ...data.project, songMap: nextMap } })
+      const w = await writeProjectSong(osPath, entry.folder, new Uint8Array(await enc.arrayBuffer()))
+      if (!w.ok) {
+        errors++
+        continue
+      }
+      patchMetadataForFolder(entry.folder, metadataLiteFromSongMap(nextMap))
+      updated++
+    } catch {
+      errors++
+    }
+  }
+  return { updated, skipped, errors }
 }
 
 export async function removeSongFromProject(

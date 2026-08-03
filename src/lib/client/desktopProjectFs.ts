@@ -37,6 +37,8 @@ export interface ProjectSongMetadataInfo {
    * `audio` block at all — these report `hasAudio !== true`.
    */
   hasAudio?: boolean
+  /** Project-relative path of the original mix, for prefetch warm-up. */
+  audioSubpath?: string
   audioDurationSec?: number
   stemRefs?: StemRefs
   hasSmap: boolean

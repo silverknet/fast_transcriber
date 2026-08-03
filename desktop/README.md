@@ -1,11 +1,13 @@
-# BarBro Desktop (headless sidecar)
+# BarBro Desktop Service
 
 This folder is **intentionally isolated** from the SvelteKit app at the repo root:
 
 - No imports from `../src`.
 - Own `package.json`, dependencies, and build lifecycle.
 - **Native Python** lives under `native/python/` only (beat detection + Demucs + Piper TTS). See [`native/python/README.md`](native/python/README.md).
-- **No user-facing UI.** All UI lives in the BarBro web app; this process runs in the background and is reachable only over loopback HTTP.
+- Browser features call native capabilities over loopback HTTP. Packaged offline
+  mode can host the built SvelteKit UI, and the service has a small status shell;
+  neither creates a second feature API.
 
 ## Scripts
 
@@ -15,7 +17,9 @@ npm install
 npm run dev
 ```
 
-The process exits to the OS dock/taskbar only (no window). Watch the terminal for startup banner and per-job logs. Quit with `Cmd+Q` (macOS) or by closing the terminal.
+Watch the terminal for startup and per-job logs in development. Packaged builds
+provide a status window/tray lifecycle and can open the offline UI. Quit with
+`Cmd+Q` on macOS or the tray/menu action where available.
 
 `electron` downloads its binary during `npm install`; run that on your machine (normal terminal, not a restricted sandbox) so it can write its cache under your user directory.
 
@@ -135,7 +139,7 @@ For now: ship the Safari warning and revisit this when the Mac user base big eno
 
 | Path | Role |
 |------|------|
-| `electron/main.mjs` | Headless main process: loopback HTTP server + Python spawning. No window. |
+| `electron/main.mjs` | Loopback HTTP service, Python/native job host, hardware control, and status/offline shell. |
 | `electron/nativePython.mjs` | Resolve `native/python` paths (packaged `asar.unpacked`), spawn helpers |
 | `native/python/beats/` | `analyze_downbeats.py` (madmom) — desktop-sidecar beat analyzer |
 | `native/python/stems/` | `demucs_separate.py` — headless Demucs (derived from **frequency_domain** workflow) |
@@ -149,6 +153,9 @@ The main process listens on **`127.0.0.1:47842`** with `Access-Control-Allow-Ori
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/ping` | Health check — returns `{ ok, name: 'barbro-desktop', version }`. Drives the **Monitor** chip in the web header. |
+| `POST` | `/native/pick-folder` | Open the OS folder picker and return an absolute path. |
+| `POST` | `/native/pick-open-file` | Open the OS file picker and return an absolute path. |
+| `POST` | `/native/pick-save-file` | Open the OS save picker and return an absolute path. |
 | `POST` | `/native/analyze-downbeats` | Body = WAV bytes; returns `{ ok, data: { beats: [...] } }`. |
 | `POST` | `/native/separate-stems` | Queue path-based Demucs stem separation; progress streams through `/native/jobs/:jobId/events`. |
 | `GET` | `/native/stems/:jobId/:filename` | Stream one exported stem WAV. |

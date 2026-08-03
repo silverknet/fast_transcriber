@@ -46,13 +46,27 @@ export function resolvedSpokenIntroText(sm: SongMap, track: CueTrack | undefined
  * Length math uses `resolvedSpokenIntroText(sm)` so the override shrinks /
  * grows the prelude just like a different title would.
  */
-export function titleCuePreludeSec(sm: SongMap, track: CueTrack | undefined = getPrimaryCueTrack(sm)): number {
+export function titleCuePreludeSec(
+  sm: SongMap,
+  track: CueTrack | undefined = getPrimaryCueTrack(sm),
+  opts: {
+    /**
+     * The PROJECT-WIDE announcement switch, resolved by the caller from
+     * `defaults.preCountInCue.mode`. When on, the title is spoken whether or
+     * not this song carries an intro EVENT — the event is only ever a text
+     * override ("Winehouse" instead of the full title), never the on/off
+     * switch. That is what makes "all songs announce" a fact you can trust
+     * from the setting alone, including songs added after it was switched on.
+     */
+    announceTitle?: boolean
+  } = {},
+): number {
   if (!track?.enabled) return 0
   // A spoken count-in announces "{intro/title} {N}" before the numbers, so it
   // needs head-room even when there's no explicit intro event.
   const spokenCountIn = !!track.spokenCountIn && effectiveCountInBeats(sm) > 0
   const intro = track.events.find((event) => event.enabled && event.kind === 'intro' && event.text?.trim())
-  if (!intro && !spokenCountIn) return 0
+  if (!intro && !spokenCountIn && !opts.announceTitle) return 0
   let len = Math.min(72, resolvedSpokenIntroText(sm, track).length)
   if (spokenCountIn) len = Math.min(78, len + 4) // room for the spoken count length ("… eight")
   // Conservative headroom for Piper (~13–16 chars/s) + small gap before beat 1 of the grid.
@@ -246,10 +260,27 @@ export function countInSpeechOutputTimes(
 export function buildCueSpeechEvents(
   sm: SongMap,
   track: CueTrack | undefined = getPrimaryCueTrack(sm),
+  opts: { announceTitle?: boolean } = {},
 ): CueSpeechEvent[] {
   const trim = sm.audio?.trim
   if (!trim || !(trim.endSec > trim.startSec)) return []
-  if (!track?.enabled) return []
+  // A song with NO cue track at all still announces when the project says so —
+  // the guarantee is about the SETTING, not about whether the bulk pass has
+  // visited this song yet. A track that exists but is DISABLED is different:
+  // that is a deliberate per-song "this feed is off", and it stays silent.
+  if (!track) {
+    if (!opts.announceTitle) return []
+    const t = resolvedSpokenIntroText(sm, undefined)?.trim()
+    if (!t) return []
+    return [
+      {
+        kind: 'title',
+        tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC,
+        text: sanitizeCueSpeechText(`${t}.`, 72),
+      },
+    ]
+  }
+  if (!track.enabled) return []
 
   let prependSec = 0
   const countInBeats = effectiveCountInBeats(sm)
@@ -258,7 +289,7 @@ export function buildCueSpeechEvents(
     if (ci) prependSec = ci.prependSec
   }
 
-  const preludeSec = titleCuePreludeSec(sm, track)
+  const preludeSec = titleCuePreludeSec(sm, track, opts)
   const events: CueSpeechEvent[] = []
   // Spoken count-in: announce "{intro} {N}", then count the beats in time.
   const spokenCountIn = !!track.spokenCountIn && countInBeats > 0
@@ -278,8 +309,15 @@ export function buildCueSpeechEvents(
     const phrase = kind === 'title' && spokenCountIn ? `${raw} ${countInBeats}` : raw
     const text = sanitizeCueSpeechText(phrase.endsWith('.') ? phrase : `${phrase}.`, maxLen)
     if (kind === 'title') {
+      // The event supplies the WORDS; the project setting supplies the SWITCH.
+      // Under the old model an enabled intro event spoke unconditionally —
+      // which made per-song events the de-facto switch and let the project
+      // setting lie. `hasTitle` is still set so the derived fallback below
+      // never doubles the line.
       hasTitle = true
-      events.push({ kind, tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC, text })
+      if (opts.announceTitle || spokenCountIn) {
+        events.push({ kind, tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC, text })
+      }
       continue
     }
     const originalTime = resolveCueEventOriginalTimeSec(sm, event)
@@ -289,18 +327,21 @@ export function buildCueSpeechEvents(
     events.push({ kind, tSec: Math.max(MIN_SPEECH_ON_CUE_TIMELINE_SEC, tSec), text })
   }
 
-  if (spokenCountIn) {
-    // Fall back to the song title for the announcement if there's no intro cue.
-    if (!hasTitle) {
-      const t = sm.metadata.title?.trim()
-      if (t) {
-        events.push({
-          kind: 'title',
-          tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC,
-          text: sanitizeCueSpeechText(`${t} ${countInBeats}.`, 72),
-        })
-      }
+  // The DERIVED title line: spoken when the project announcement is on, or
+  // when a spoken count-in needs its lead phrase — with no intro EVENT
+  // required. `resolvedSpokenIntroText` keeps the override semantics: an
+  // enabled intro event's text still wins over the title.
+  if ((opts.announceTitle || spokenCountIn) && !hasTitle) {
+    const t = resolvedSpokenIntroText(sm, track)?.trim()
+    if (t) {
+      events.push({
+        kind: 'title',
+        tSec: MIN_SPEECH_ON_CUE_TIMELINE_SEC,
+        text: sanitizeCueSpeechText(spokenCountIn ? `${t} ${countInBeats}.` : `${t}.`, 72),
+      })
     }
+  }
+  if (spokenCountIn) {
     // "one, two, … N" exactly on the count-in beats (the last lands one beat
     // before the song's downbeat).
     const times = countInSpeechOutputTimes(sm, trim, prependSec, countInBeats)

@@ -22,10 +22,39 @@ the short files first and open domain docs only when you touch that area.
 | Desktop sidecar and Python jobs | [`domains/desktop-sidecar.md`](domains/desktop-sidecar.md) |
 | Desktop vs browser — capability split & audio failsafe | [`domains/desktop-vs-browser.md`](domains/desktop-vs-browser.md) |
 | Hardware control / live rig | [`domains/hardware-control.md`](domains/hardware-control.md) |
+| Offline mode — the no-login desktop build and how it syncs back | [`offline-mode.md`](offline-mode.md) |
 | Chord suggestions | [`domains/chord-suggestions.md`](domains/chord-suggestions.md) |
 | AI chord/section pipeline (for agents) | [`domains/ai-chord-pipeline.md`](domains/ai-chord-pipeline.md) |
 | `.smap` file format | [`smap-format.md`](smap-format.md) |
 | Python auto-setup internals | [`python-auto-setup.md`](python-auto-setup.md) |
+
+## Live Audio Authority
+
+Start with the overview, then the independent review and the Phase 0 gate in
+[`goal-plan.md`](goal-plan.md#immediate-priority--live-audio-safety). The safety
+invariants and ADR direction are accepted, but the current target specification
+is **not implementation-ready**: its latest review verdict is **Unsafe to
+implement** until the listed contract and product-decision blockers close.
+
+| Purpose | File |
+|---|---|
+| Entry point, target flow, current audit, current-versus-target map | [`architecture/audio-system-overview.md`](architecture/audio-system-overview.md) |
+| Independent architecture verdict, blockers, and required corrections | [`reviews/live-audio-architecture-independent-review.md`](reviews/live-audio-architecture-independent-review.md) |
+| Ordered correction and implementation gates | [`goal-plan.md`](goal-plan.md#immediate-priority--live-audio-safety) |
+| One primary owner for every audio responsibility | [`architecture/audio-module-ownership.md`](architecture/audio-module-ownership.md) |
+| Implemented pure Live routing shadow, canonical current-state input, and diagnostics boundary | [`architecture/live-audio-shadow-model.md`](architecture/live-audio-shadow-model.md) |
+| Persisted, desired, runtime, and UI state planes | [`architecture/audio-runtime-state.md`](architecture/audio-runtime-state.md) |
+| Observable Live/Editor behavior and safety invariants | [`contracts/live-editor-routing.md`](contracts/live-editor-routing.md) |
+| Exact meaning of output and Live readiness | [`contracts/audio-readiness.md`](contracts/audio-readiness.md) |
+| Enter/load/play/switch/failure/shutdown lifecycle | [`contracts/playback-lifecycle.md`](contracts/playback-lifecycle.md) |
+| Authoritative audio runtime decision | [`decisions/ADR-001-authoritative-audio-runtime.md`](decisions/ADR-001-authoritative-audio-runtime.md) |
+| Fail-closed private audio decision | [`decisions/ADR-002-fail-closed-private-audio.md`](decisions/ADR-002-fail-closed-private-audio.md) |
+| Canonical song scheduling decision | [`decisions/ADR-003-canonical-song-scheduling.md`](decisions/ADR-003-canonical-song-scheduling.md) |
+| Scenario matrix and XR18 verification | [`testing/live-performance-scenarios.md`](testing/live-performance-scenarios.md) |
+
+`audio-architecture-review.md`, `audio-refactor-roadmap.md`,
+`live-rig-plan-review.md`, and `xr18-foh-safety.md` are historical audits/plans,
+not current behavioral or ownership authority.
 
 ## Local README Islands
 

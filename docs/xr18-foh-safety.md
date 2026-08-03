@@ -1,5 +1,10 @@
 # XR18: monitor mixes and the FOH safety invariant
 
+> **Historical design evidence, not current authority.** The normative fail-closed
+> policy is [`contracts/live-editor-routing.md`](contracts/live-editor-routing.md),
+> and the maintained XR18 scenario checklist is
+> [`testing/live-performance-scenarios.md`](testing/live-performance-scenarios.md).
+
 **Status:** design note, no code written here. Findings from an outside session.
 **Audience:** whoever picks up XR18 work next.
 **Date:** 2026-07-30

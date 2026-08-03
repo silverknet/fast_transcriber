@@ -8,6 +8,7 @@
   import TransportBar from '$lib/components/editor/TransportBar.svelte'
   import LyricsEditor from '$lib/components/editor/LyricsEditor.svelte'
   import MixerPanel from '$lib/components/editor/MixerPanel.svelte'
+  import { transposeSettings } from '$lib/stores/transposeSettings.svelte'
   import type { MixerControls } from '$lib/components/editor/TransportBar.svelte'
   import CueEditor from '$lib/components/editor/CueEditor.svelte'
   import EditInspector from '$lib/components/editor/EditInspector.svelte'
@@ -17,6 +18,11 @@
   import RecordingMismatchBanner from '$lib/components/RecordingMismatchBanner.svelte'
   import SongDraftsDialog from '$lib/components/SongDraftsDialog.svelte'
   import { Button } from '$lib/components/ui/button'
+  import {
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
+  } from '$lib/components/ui/popover'
   import { formatSongKeyLabel } from '$lib/chords'
   import {
     clampTransposeSemitones,
@@ -58,16 +64,21 @@
   import { patchSongMap, redoSongMap, songMap, undoSongMap } from '$lib/stores/songMap'
   import {
     ArrowLeft,
+    ArrowUpDown,
+    AudioWaveform,
     Check,
     Cloud,
     Disc3,
     Grid3x3,
     Layers,
     Megaphone,
+    Minus,
     Music,
     Pause,
     Play,
+    Plus,
     RefreshCw,
+    RotateCcw,
     ScrollText,
     SlidersHorizontal,
     Type,
@@ -301,30 +312,15 @@
   // source of truth is the chords AS STORED — what you see at transpose 0 —
   // which everyone shares; edit those (chord picker / select → transpose) to
   // change the song for everyone. The offset is remembered per song locally.
-  let personalTransposeSemitones = $state(0)
-  function personalTransposeStorageKey(): string {
-    return `barbro::xpose::${$projectStore.activeSongId ?? 'standalone'}::${get(songMap)?.metadata.title ?? ''}`
-  }
-  // Load the personal offset when the ACTIVE SONG changes (keyed off songId so
-  // ordinary edits don't reset it). Seed once from any legacy stored transpose
-  // for back-compat, after which the offset lives purely local.
+  // Owned by `transposeSettings`, NOT by this page. It used to live here and be
+  // hand-carried to the mixer by props — which is how Overview and then the live
+  // stage each ended up silently playing at concert pitch.
   $effect(() => {
-    const songId = $projectStore.activeSongId ?? 'standalone'
-    if (!browser) return
-    const title = untrack(() => get(songMap))?.metadata.title ?? ''
-    const key = `barbro::xpose::${songId}::${title}`
-    let val = 0
-    try {
-      const raw = localStorage.getItem(key)
-      val = clampTransposeSemitones(
-        raw != null ? Number(raw) : (untrack(() => get(songMap))?.transpose?.baseSemitones ?? 0),
-      )
-    } catch {
-      /* private mode */
-    }
-    personalTransposeSemitones = val
+    void $projectStore.activeSongId
+    void $songMap
+    transposeSettings.loadForCurrentSong()
   })
-  const transposeSemitones = $derived(clampTransposeSemitones(personalTransposeSemitones))
+  const transposeSemitones = $derived(transposeSettings.semitones)
   const displayedSongKey = $derived.by(() => {
     const kd = $songMap?.metadata.keyDetail
     return kd ? transposeSongKey(kd, transposeSemitones) : null
@@ -341,20 +337,9 @@
   })
 
   function setTransposeBase(semitones: number) {
-    const next = clampTransposeSemitones(semitones)
-    if (next === transposeSemitones) return
-    // Display-only, personal, local: no source-of-truth change, no sync, and no
-    // audio re-render — so it never disturbs playback. Just persist the offset.
-    if (browser) {
-      try {
-        const key = personalTransposeStorageKey()
-        if (next === 0) localStorage.removeItem(key)
-        else localStorage.setItem(key, String(next))
-      } catch {
-        /* private mode */
-      }
-    }
-    personalTransposeSemitones = next
+    // Personal, local, per song: no source-of-truth change and no sync. The
+    // store persists it and every other surface reads the same value.
+    transposeSettings.setSemitones(semitones)
   }
 
   /**
@@ -555,27 +540,14 @@
    *
    * Per-device, like the transpose offset itself.
    */
-  const VARISPEED_KEY = 'barbro:transposeVarispeed'
-  let varispeedAudio = $state(browser && localStorage.getItem(VARISPEED_KEY) === '1')
-  $effect(() => {
-    if (browser) localStorage.setItem(VARISPEED_KEY, varispeedAudio ? '1' : '0')
-  })
+  const varispeedAudio = $derived(transposeSettings.varispeedAudio)
   /**
    * How much of the tempo change to cancel, 0…1. 0 = pure varispeed (perfect
    * audio, song speeds up); 1 = original tempo, with a live stretch worklet
    * doing all the pitch work. In between the worklet only shifts the residual,
    * so artifacts scale with the dial. Per-device.
    */
-  const TEMPO_HOLD_KEY = 'barbro:transposeTempoHold'
-  let tempoHold = $state(readStoredTempoHold())
-  function readStoredTempoHold(): number {
-    if (!browser) return 0
-    const v = Number(localStorage.getItem(TEMPO_HOLD_KEY))
-    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0
-  }
-  $effect(() => {
-    if (browser) localStorage.setItem(TEMPO_HOLD_KEY, String(tempoHold))
-  })
+  const tempoHold = $derived(transposeSettings.tempoHold)
   // Drive the transport. Recomputed from the SEMITONE every time, never by
   // composing rates — that is what keeps the round trip exact.
   $effect(() => {
@@ -1119,7 +1091,7 @@
     <div class="flex min-h-0 w-full flex-1 overflow-hidden bg-background text-foreground">
       <!-- ── LEFT: mode rail ─────────────────────────────────────────────── -->
       <nav
-        class="border-foreground bg-card flex w-[88px] shrink-0 flex-col overflow-y-auto border-r-2"
+        class="edit-shell-shadow bg-card relative z-10 flex w-[88px] shrink-0 flex-col overflow-y-auto"
         aria-label="Editor mode"
       >
         <!-- Rail header: active-draft monogram + label, aligned with the top
@@ -1128,7 +1100,8 @@
         <button
           type="button"
           onclick={() => (draftMenuOpen = true)}
-          class="border-foreground/70 hover:bg-accent flex h-14 shrink-0 flex-col items-center justify-center gap-0.5 border-b-2 px-1 transition-colors"
+          class="edit-rail-toolbar-cell edit-shell-shadow relative z-20 flex h-12 shrink-0 flex-col items-center justify-center gap-0.5 px-1 transition-[filter] hover:brightness-95"
+          style="background: color-mix(in oklch, var(--studio-orange) 6%, var(--muted));"
           aria-label={`Draft: ${activeDraftLabel || 'Main'}. Switch drafts`}
           title={`Draft: ${activeDraftLabel || 'Main'} — switch between this song's drafts`}
         >
@@ -1208,7 +1181,7 @@
       <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
         <!-- TOP STRIP: condensed identity · live metadata · transport · save/sync -->
         <div
-          class="border-foreground flex h-14 shrink-0 items-center gap-3 border-b-2 px-3"
+          class="edit-shell-shadow relative z-10 flex h-12 shrink-0 items-center gap-3 px-3"
           style="background: color-mix(in oklch, var(--studio-orange) 6%, var(--muted));"
         >
           <!-- condensed song identity: title + artist, both click-to-edit -->
@@ -1280,93 +1253,115 @@
               </button>
             </span>
             <span class="text-muted-foreground/40" aria-hidden="true">·</span>
-            <span
-              class="border-foreground/30 bg-background inline-flex items-center overflow-hidden rounded-[var(--radius)] border font-mono text-[11px] font-black"
-              aria-label="Song transpose"
-            >
-              <button
-                type="button"
-                class="hover:bg-foreground hover:text-background px-1.5 py-0.5 transition-colors disabled:opacity-35"
-                onclick={() => setTransposeBase(transposeSemitones - 1)}
-                disabled={transposeSemitones <= -12}
-                aria-label="Transpose down one semitone"
-              >
-                -1
-              </button>
-              <!-- Fixed width so "+1" → "-12" doesn't nudge the +1 button. -->
-              <span class="border-foreground/20 w-10 border-x px-1.5 py-0.5 text-center">
-                {formatTransposeLabel(transposeSemitones)}
-              </span>
-              <button
-                type="button"
-                class="hover:bg-foreground hover:text-background px-1.5 py-0.5 transition-colors disabled:opacity-35"
-                onclick={() => setTransposeBase(transposeSemitones + 1)}
-                disabled={transposeSemitones >= 12}
-                aria-label="Transpose up one semitone"
-              >
-                +1
-              </button>
-              <!-- Always occupies its slot: mounting it only at ≠0 shifted
-                   everything to its right the moment you left zero. `invisible`
-                   also drops it from the tab order while it's inert. -->
-              <button
-                type="button"
-                class="hover:bg-foreground hover:text-background border-foreground/20 border-l px-1.5 py-0.5 transition-colors {transposeSemitones ===
+            <Popover>
+              <PopoverTrigger
+                class="inline-flex h-7 items-center gap-1 rounded-full px-2 font-mono text-[11px] font-black tabular-nums transition-[background,color,box-shadow] {transposeSemitones !==
                 0
-                  ? 'invisible'
-                  : ''}"
-                onclick={() => setTransposeBase(0)}
-                aria-label="Reset transpose"
-                aria-hidden={transposeSemitones === 0}
+                  ? 'bg-[var(--studio-orange)] text-[var(--studio-ink)] shadow-sm'
+                  : 'text-muted-foreground hover:bg-foreground/10 hover:text-foreground'}"
+                aria-label={`Transpose ${formatTransposeLabel(transposeSemitones)}`}
+                title={`Transpose: ${formatTransposeLabel(transposeSemitones)}${keyLabel ? ` · ${keyLabel}` : ''}`}
               >
-                reset
-              </button>
-            </span>
+                <ArrowUpDown class="size-3.5" aria-hidden="true" />
+                <span class="min-w-[2.5ch] text-center">{formatTransposeLabel(transposeSemitones)}</span>
+                {#if varispeedAudio && transposeSemitones !== 0}
+                  <AudioWaveform class="size-3" aria-label="Audio follows transpose" />
+                {/if}
+              </PopoverTrigger>
 
-            <!-- EXPERIMENT: move the audio with the chords, the naive way.
-                 Speeds the song up / slows it down (no tempo preservation) —
-                 the audio itself is never altered, only its playback rate. -->
-            <label
-              class="border-foreground/30 bg-background inline-flex cursor-pointer items-center gap-1.5 rounded-[var(--radius)] border px-1.5 py-0.5 text-[11px] font-bold"
-              title="Transpose the AUDIO too, the simple way: play it faster or slower. The song changes tempo as well as pitch, and the audio file itself is never touched — switching this off restores the original exactly."
-            >
-              <input type="checkbox" bind:checked={varispeedAudio} class="accent-foreground size-3" />
-              Audio
-              {#if varispeedAudio}
-                <!-- Reserved width: "+6%" → "+12% tempo" must not resize the
-                     control you are currently clicking. -->
-                <span
-                  class="text-muted-foreground inline-block min-w-[10ch] font-mono text-[10px] tabular-nums"
-                >
-                  {varispeedTempoLabel}
-                </span>
-              {/if}
-            </label>
-
-            {#if varispeedAudio}
-              <!-- Tempo hold: how much of the speed-up to cancel. 0 = pure
-                   varispeed (perfect audio). 1 = original tempo, at the cost of
-                   a live stretcher. The middle is the useful part — it only has
-                   to shift the residual, so artifacts scale with the dial. -->
-              <label
-                class="border-foreground/30 bg-background inline-flex items-center gap-1.5 rounded-[var(--radius)] border px-1.5 py-0.5 text-[11px] font-bold"
-                title="How much of the tempo change to cancel. Left = fastest, cleanest audio (the song speeds up). Right = keeps the original tempo, using a live time-stretcher — more correction means more artefacts, so the sweet spot is usually part-way."
+              <PopoverContent
+                align="end"
+                sideOffset={10}
+                class="border-foreground/15 w-72 border bg-popover p-3 shadow-lg"
               >
-                <span class="text-muted-foreground text-[10px] uppercase tracking-wider">Hold</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  bind:value={tempoHold}
-                  class="accent-foreground h-1 w-16"
-                  aria-label="Hold tempo through the transpose"
-                />
-                <span class="w-8 text-right font-mono text-[10px] tabular-nums">
-                  {tempoHold === 0 ? 'off' : `${Math.round(tempoHold * 100)}%`}
-                </span>
-              </label>
-            {/if}
+                <div class="mb-3 flex items-center gap-2">
+                  <ArrowUpDown class="size-4" aria-hidden="true" />
+                  <span class="text-xs font-black uppercase tracking-wide">Transpose</span>
+                  {#if keyLabel}
+                    <span class="text-muted-foreground ml-auto text-xs font-bold">{keyLabel}</span>
+                  {/if}
+                </div>
+
+                <div class="flex items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    class="hover:bg-foreground/10 inline-flex size-8 items-center justify-center rounded-full transition-colors disabled:opacity-30"
+                    onclick={() => setTransposeBase(transposeSemitones - 1)}
+                    disabled={transposeSemitones <= -12}
+                    aria-label="Transpose down one semitone"
+                    title="Down one semitone"
+                  >
+                    <Minus class="size-4" aria-hidden="true" />
+                  </button>
+                  <span class="w-16 text-center font-mono text-xl font-black tabular-nums">
+                    {formatTransposeLabel(transposeSemitones)}
+                  </span>
+                  <button
+                    type="button"
+                    class="hover:bg-foreground/10 inline-flex size-8 items-center justify-center rounded-full transition-colors disabled:opacity-30"
+                    onclick={() => setTransposeBase(transposeSemitones + 1)}
+                    disabled={transposeSemitones >= 12}
+                    aria-label="Transpose up one semitone"
+                    title="Up one semitone"
+                  >
+                    <Plus class="size-4" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    class="text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex size-8 items-center justify-center rounded-full transition-colors disabled:opacity-25"
+                    onclick={() => setTransposeBase(0)}
+                    disabled={transposeSemitones === 0}
+                    aria-label="Reset transpose"
+                    title="Reset to zero"
+                  >
+                    <RotateCcw class="size-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+
+                <div class="border-foreground/10 mt-3 border-t pt-3">
+                  <label
+                    class="flex cursor-pointer items-center gap-2 text-xs font-bold"
+                    title="Make the original audio follow the transpose using reversible varispeed playback"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={varispeedAudio}
+                      onchange={(e) => transposeSettings.setVarispeedAudio(e.currentTarget.checked)}
+                      class="accent-[var(--studio-orange)] size-3.5"
+                    />
+                    <AudioWaveform class="size-3.5" aria-hidden="true" />
+                    <span>Audio follows pitch</span>
+                    {#if varispeedAudio && transposeSemitones !== 0}
+                      <span class="text-muted-foreground ml-auto font-mono text-[10px] tabular-nums">
+                        {varispeedTempoLabel}
+                      </span>
+                    {/if}
+                  </label>
+
+                  {#if varispeedAudio}
+                    <label
+                      class="mt-3 grid grid-cols-[4.5rem_1fr_2.5rem] items-center gap-2 text-[10px] font-black uppercase tracking-wide"
+                      title="Move right to preserve more of the original tempo"
+                    >
+                      <span class="text-muted-foreground">Tempo hold</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={tempoHold}
+                        oninput={(e) => transposeSettings.setTempoHold(Number(e.currentTarget.value))}
+                        class="accent-[var(--studio-orange)] w-full"
+                        aria-label="Hold tempo through the transpose"
+                      />
+                      <span class="text-muted-foreground text-right font-mono tabular-nums">
+                        {tempoHold === 0 ? 'off' : `${Math.round(tempoHold * 100)}%`}
+                      </span>
+                    </label>
+                  {/if}
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
 
           <div class="flex-1"></div>
@@ -1397,7 +1392,18 @@
       {/if}
 
       {#if editMode === 'overview'}
-        <MixerPanel {keyLabel} bind:playbackMode bind:controls={mixerControls} />
+        <!-- The transpose is PERSONAL (per-device), so it lives here and has to
+             be handed down: without it the mixer falls back to the song's own
+             `transpose.baseSemitones`, which is 0, and Overview silently
+             ignores whatever you dial in. -->
+        <MixerPanel
+          {keyLabel}
+          {transposeSemitones}
+          {varispeedAudio}
+          {tempoHold}
+          bind:playbackMode
+          bind:controls={mixerControls}
+        />
       {/if}
 
       {#if editMode === 'lyrics'}
@@ -1438,7 +1444,7 @@
                spacing match version-2; the aside drops below `xl` so narrow
                widths hand the workspace the full width. ── -->
           <aside
-            class="edit-inspector-rail border-foreground bg-card hidden w-[320px] shrink-0 flex-col overflow-y-auto border-l-2 xl:flex"
+            class="edit-inspector-rail edit-shell-shadow bg-card relative z-10 hidden w-[320px] shrink-0 flex-col overflow-y-auto xl:flex"
             aria-label="Inspector"
           >
             <EditInspector
@@ -1483,6 +1489,20 @@
 </div>
 
 <style>
+  .edit-shell-shadow {
+    box-shadow: 0 0 8px rgb(0 0 0 / 0.16);
+  }
+
+  .edit-rail-toolbar-cell::after {
+    position: absolute;
+    top: 12px;
+    right: 0;
+    bottom: 12px;
+    width: 1px;
+    background: rgb(0 0 0 / 0.16);
+    content: '';
+  }
+
   /* The header + tab box + transport are now one self-styled command bar
      (`bg-card` applied directly), so the old studio-box overrides for the
      `grid-cols-7` tab box and the removed `.edit-page > header` are gone.

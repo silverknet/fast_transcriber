@@ -41,11 +41,18 @@
   // A compact grid of tone/FX sliders bound to a `SynthPatch`. Mutating the patch
   // in place + reassigning propagates to the parent's `$bindable` state, which
   // pushes it to the live synth.
-  let { patch = $bindable() }: { patch: SynthPatch } = $props()
+  // `onchanged` is optional: the Chords tab watches the patch with its own
+  // effect, but a host that has to re-schedule a mixer lane needs to know the
+  // edit came from a knob rather than from any other reactive tick.
+  let {
+    patch = $bindable(),
+    onchanged,
+  }: { patch: SynthPatch; onchanged?: () => void } = $props()
 
   function onKnob(k: (typeof KNOBS)[number], value: number) {
     k.set(patch, value)
     patch = patch // notify the parent bind
+    onchanged?.()
   }
 </script>
 

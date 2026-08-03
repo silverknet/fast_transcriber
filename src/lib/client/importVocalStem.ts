@@ -33,6 +33,14 @@ import { readProjectSongAsset, writeProjectSongAsset } from './desktopProjectFs'
 export const IMPORT_MIN_CONFIDENCE = 0.55
 /** Offset drift (s) at/below which the offset is "constant" (same master). */
 export const IMPORT_MAX_DRIFT_SEC = 0.04
+/**
+ * The same limit for a CHORD-level match, where the drift number means
+ * something different: it is the leftover after a measured speed difference
+ * has been removed, and it cannot be smaller than the chroma frame the
+ * measurement is made on (~93 ms). Judging that by the waveform threshold
+ * rejected correct alignments for being as accurate as they can possibly be.
+ */
+export const IMPORT_MAX_HARMONIC_DRIFT_SEC = 0.25
 /** The aligned overlap must cover at least this fraction of the song. */
 export const IMPORT_MIN_OVERLAP = 0.85
 
@@ -53,17 +61,22 @@ export function classifyAlignment(a: AudioAlignment, songDurationSec: number): A
   if (a.confidence < IMPORT_MIN_CONFIDENCE) {
     reasons.push(`Low match confidence (${Math.round(a.confidence * 100)}%) — this may be a different recording.`)
   }
-  if (a.driftSec > IMPORT_MAX_DRIFT_SEC) {
+  const maxDrift = a.method === 'harmonic' ? IMPORT_MAX_HARMONIC_DRIFT_SEC : IMPORT_MAX_DRIFT_SEC
+  if (a.driftSec > maxDrift) {
     reasons.push(
       `The timing drifts by ${Math.round(a.driftSec * 1000)} ms across the song — likely a different speed or version, which would misalign the lyrics.`,
     )
   }
   // Overlap: how much of the song the two share once aligned. |offset| eats into
-  // it, as does a shorter target.
+  // it, as does a shorter target. The target's length is measured AFTER the
+  // speed correction — an upload played 0.8% fast covers 0.8% more of the song
+  // than its raw duration suggests, and judging it raw once reported "only
+  // covers 76%" for a file that in fact covers all of it.
   if (songDurationSec > 0) {
+    const effectiveTargetSec = a.durationTargetSec * (a.speedRatio ?? 1)
     const overlap = Math.max(
       0,
-      Math.min(songDurationSec, a.durationTargetSec - Math.max(0, -a.offsetSec)) - Math.max(0, a.offsetSec),
+      Math.min(songDurationSec, effectiveTargetSec - Math.max(0, -a.offsetSec)) - Math.max(0, a.offsetSec),
     )
     if (overlap / songDurationSec < IMPORT_MIN_OVERLAP) {
       reasons.push(
@@ -171,6 +184,8 @@ export async function importVocalStem(opts: ImportVocalStemOptions): Promise<Imp
       dstAbsPath: alignedUploadAbs,
       offsetSec: aligned.data.offsetSec,
       targetDurationSec: songDurationSec,
+      // Without this the vocals start right and end a second-and-a-half late.
+      speedRatio: aligned.data.speedRatio ?? 1,
     })
     if (!shifted.ok) return { status: 'error', error: shifted.error }
 

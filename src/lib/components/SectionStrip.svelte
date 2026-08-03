@@ -11,6 +11,7 @@
    * The caller supplies the per-section display state, because "what does this
    * section play" means something different for drums than for bass.
    */
+  import { buildSectionBlocks } from '$lib/songmap/sectionBlocks'
   import type { Section } from '$lib/songmap/types'
 
   type Props = {
@@ -40,23 +41,12 @@
 
   type StripBlock = { bars: number; section: Section | null }
 
-  const ordered = $derived(
-    [...sections].sort((a, b) => a.barRange.startBarIndex - b.barRange.startBarIndex),
-  )
-
   const strip = $derived.by<StripBlock[]>(() => {
     if (totalBars <= 0) return []
-    const out: StripBlock[] = []
-    let cursor = 0
-    for (const s of ordered) {
-      const start = Math.max(0, s.barRange.startBarIndex)
-      const end = Math.min(totalBars - 1, s.barRange.endBarIndex)
-      if (start > cursor) out.push({ bars: start - cursor, section: null })
-      if (end >= start) out.push({ bars: end - start + 1, section: s })
-      cursor = Math.max(cursor, end + 1)
-    }
-    if (cursor <= totalBars - 1) out.push({ bars: totalBars - cursor, section: null })
-    return out
+    return buildSectionBlocks(sections, totalBars).map((block) => ({
+      bars: block.end - block.start + 1,
+      section: block.section,
+    }))
   })
 
   /** Left/right through the tabs, so the arrangement is keyboard-navigable. */
@@ -93,7 +83,7 @@
   </button>
   {#if strip.length > 0}
     <div class="flex min-w-0 grow items-stretch gap-0.5">
-      {#each strip as block, i (block.section?.id ?? `gap${i}`)}
+      {#each strip as block, i (block.section ? `${block.section.id}:${i}` : `gap${i}`)}
         {#if block.section}
           {@const s = block.section}
           <button

@@ -35,6 +35,8 @@ export const KICK_PATTERN_LABELS: Record<KickPattern, string> = {
 }
 
 /** Accent the bar's first beat — an even kick every time reads as a machine. */
+import { audioDevice } from './audioDevice'
+
 const DOWNBEAT_VELOCITY = 1
 const OFFBEAT_VELOCITY = 0.85
 
@@ -153,12 +155,12 @@ const live = new Set<GainNode>()
 
 function ensureContext(): AudioContext | null {
   if (ctx) return ctx
-  const Ctor: typeof AudioContext | undefined =
-    (globalThis as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
-      .AudioContext ??
-    (globalThis as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-  if (!Ctor) return null
-  ctx = new Ctor()
+  // The shared device — one context for the whole app. See `audioDevice.ts`.
+  try {
+    ctx = audioDevice()
+  } catch {
+    return null // no Web Audio here (SSR / tests)
+  }
 
   master = ctx.createGain()
   master.gain.value = volume

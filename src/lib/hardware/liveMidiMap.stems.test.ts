@@ -13,9 +13,9 @@ import type { ApcKey25Action } from './apcKey25'
 
 const M = DEFAULT_LIVE_MAPPING
 
-/** Simulate MixerView's slotting: lane keys → fixed 8-slot array (null = empty). */
+/** Simulate MixerView's slotting: lane keys → fixed canonical array (null = empty). */
 function slotsFor(laneKeys: string[]): (string | null)[] {
-  const slots: (string | null)[] = Array(8).fill(null)
+  const slots: (string | null)[] = Array(CANONICAL_LIVE_SLOTS.length).fill(null)
   for (const key of laneKeys) {
     const i = laneSlotIndex(key)
     if (i != null) slots[i] = key
@@ -60,8 +60,10 @@ describe('laneSlotIndex — fixed canonical stem slots', () => {
   })
 
   it('slot count matches the canonical layout', () => {
-    expect(CANONICAL_LIVE_SLOTS.length).toBe(8)
+    expect(CANONICAL_LIVE_SLOTS.length).toBe(10)
     expect(CANONICAL_LIVE_SLOTS[0]).toBe('drums')
+    expect(CANONICAL_LIVE_SLOTS[8]).toBe('custom1')
+    expect(CANONICAL_LIVE_SLOTS[9]).toBe('custom2')
   })
 })
 
@@ -69,8 +71,8 @@ describe('resolveLiveCommand — track buttons mirror the stem pads', () => {
   const clipPad = (index: number): ApcKey25Action => ({
     type: 'clip-pad',
     index,
-    row: 0,
-    col: index,
+    row: Math.floor(index / 8),
+    col: index % 8,
     pressed: true,
     velocity: 100,
   })
@@ -81,6 +83,12 @@ describe('resolveLiveCommand — track buttons mirror the stem pads', () => {
       expect(resolveLiveCommand(clipPad(i), M)).toEqual({ type: 'toggle-stem', index: i })
       expect(resolveLiveCommand(trackBtn(i), M)).toEqual({ type: 'toggle-stem', index: i })
     }
+  })
+
+  it('uses row 4 pads 1/2 for Custom 1/2 without inventing track buttons 9/10', () => {
+    expect(resolveLiveCommand(clipPad(8), M)).toEqual({ type: 'toggle-stem', index: 8 })
+    expect(resolveLiveCommand(clipPad(9), M)).toEqual({ type: 'toggle-stem', index: 9 })
+    expect(resolveLiveCommand(clipPad(10), M)).toEqual({ type: 'jump-section', index: 24 })
   })
 
   it('ignores track-button releases', () => {

@@ -87,7 +87,7 @@ export function normalizeWidener(s: Partial<WidenerSettings> | undefined): Widen
 export function createWidenerInsert(
   ctx: BaseAudioContext,
   settings: WidenerSettings = DEFAULT_WIDENER,
-): MixerInsert & { update: (s: WidenerSettings) => void } {
+): MixerInsert & { update: (s: WidenerSettings) => void; dispose: () => void } {
   const s = normalizeWidener(settings)
 
   const input = ctx.createGain()
@@ -206,6 +206,35 @@ export function createWidenerInsert(
       lfoGainL.gain.value = n.depth * MAX_SWEEP
       lfoGainR.gain.value = -n.depth * MAX_SWEEP
       side.gain.value = n.width
+    },
+    /**
+     * Stop the LFOs and let the graph go.
+     *
+     * REQUIRED on teardown, unlike the other effects: a started
+     * `OscillatorNode` is kept alive by the context whether or not anything is
+     * connected to it, so disconnecting alone leaves both LFOs — and the ~20
+     * nodes they modulate — running for the life of the AudioContext. Racks are
+     * rebuilt whenever an effect is added, removed, reordered or bypassed, so
+     * without this a few minutes of tweaking accumulates dozens of orphans.
+     */
+    dispose() {
+      for (const lfo of [lfoL, lfoR]) {
+        try {
+          lfo.stop()
+        } catch {
+          /* never started, or already stopped */
+        }
+        try {
+          lfo.disconnect()
+        } catch {
+          /* already gone */
+        }
+      }
+      try {
+        output.disconnect()
+      } catch {
+        /* already gone */
+      }
     },
   }
 }

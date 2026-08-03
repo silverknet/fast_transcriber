@@ -46,11 +46,22 @@ export async function loadSongStemBlobs(): Promise<StemBlob[]> {
  * cloud copy (already IndexedDB-cached by `fetchCloudAudioBlob`). Returns `[]`
  * for a song with no stems.
  */
-export async function loadSongStemBlobsFor(target: {
-  osPath: string | null
-  folder: string | null
-  songId: string | null
-}): Promise<StemBlob[]> {
+export async function loadSongStemBlobsFor(
+  target: {
+    osPath: string | null
+    folder: string | null
+    songId: string | null
+  },
+  opts: {
+    /**
+     * Also fetch the ORIGINAL full mix (`key: 'original'`). Opt-in: the
+     * prefetcher wants it — a "ready" song used to re-decode its biggest file
+     * on switch because only stems were warmed — but other callers (vocals
+     * import, cloud byte warm-up) genuinely mean stems.
+     */
+    includeOriginal?: boolean
+  } = {},
+): Promise<StemBlob[]> {
   const out: StemBlob[] = []
 
   // ── Studio: highest-quality stem set on disk (via the sidecar) ──
@@ -63,6 +74,12 @@ export async function loadSongStemBlobsFor(target: {
         const r = await readProjectSongAsset(target.osPath, target.folder, subpath).catch(() => null)
         if (r?.ok) out.push({ key: `stem:${filename}`, label: labelForStem(filename), blob: r.blob })
       }
+    }
+    if (opts.includeOriginal && folderMeta?.audioSubpath) {
+      const r = await readProjectSongAsset(target.osPath, target.folder, folderMeta.audioSubpath).catch(
+        () => null,
+      )
+      if (r?.ok) out.push({ key: 'original', label: 'Original', blob: r.blob })
     }
     return out
   }

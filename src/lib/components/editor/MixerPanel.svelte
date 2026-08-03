@@ -11,10 +11,17 @@
   // so it stays owned by the shell and is passed down.
   let {
     keyLabel,
+    transposeSemitones = null,
+    varispeedAudio = false,
+    tempoHold = 0,
     playbackMode = $bindable(false),
     controls = $bindable(null),
   }: {
     keyLabel: string | null
+    transposeSemitones?: number | null
+    /** The editor's per-device varispeed switch and artifacts dial. */
+    varispeedAudio?: boolean
+    tempoHold?: number
     playbackMode?: boolean
     /** Published up so the shell's single transport can drive this engine. */
     controls?: MixerControls | null
@@ -78,7 +85,15 @@
     <!-- The mixer fills the remaining height; its lane list scrolls internally
          only when there are more lanes than fit. -->
     <div class="min-h-0 flex-1 overflow-y-auto">
-      <MixerView reloadSignal={mixerReloadSignal} bind:playbackMode bind:generatorPanel bind:controls />
+      <MixerView
+        reloadSignal={mixerReloadSignal}
+        transposeSemitonesOverride={transposeSemitones}
+        {varispeedAudio}
+        {tempoHold}
+        bind:playbackMode
+        bind:generatorPanel
+        bind:controls
+      />
     </div>
   </section>
 {/if}

@@ -15,6 +15,7 @@
  *
  *  - `audio.originalPath`         — local path (per-machine)
  *  - `stemRefs`                   — local paths (per-machine)
+ *  - `liveStemRefs`               — stable stem id -> local path (per-machine)
  *  - `projectFolder`              — display hint scoped to the local disk
  *  - `cueTracks[].renderExport.relativePath`,
  *    `clickExport.relativePath` — local render outputs (the
@@ -35,6 +36,7 @@ import type { CueTrack, RenderedCueExport, SongMap } from './types'
 const LOCAL_ONLY_TOP_LEVEL = [
   'projectFolder',
   'stemRefs',
+  'liveStemRefs',
   'sectionBorderHints',
   'chordHints',
   'mixState',

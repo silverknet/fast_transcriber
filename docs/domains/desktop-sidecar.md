@@ -1,7 +1,9 @@
-# Desktop Sidecar
+# Desktop Service
 
-The BarBro desktop package is a headless Electron sidecar. It is not a bundled
-desktop UI for the web app.
+The BarBro desktop package is an Electron loopback service for native jobs and
+hardware control. Packaged offline builds also host the built SvelteKit app and
+provide status/offline windows. Browser features still communicate with native
+capabilities through HTTP; the shell is not a second feature API.
 
 Canonical detailed docs:
 
@@ -11,21 +13,22 @@ Canonical detailed docs:
 
 ## Current Contract
 
-- No BrowserWindow.
-- No renderer.
-- No preload script.
-- No IPC API.
-- Loopback HTTP only: `http://127.0.0.1:47842`.
-- The sidecar must not import from `src/`.
-
-Any doc or handover mentioning `desktop/electron/preload.cjs`,
-`desktop/renderer/index.html`, or `native:*` IPC channels is stale.
+- Native/browser feature API: loopback HTTP at `http://127.0.0.1:47842`.
+- The desktop service must not import source modules from `src/`.
+- Native Python and binary assets live under `desktop/native/` and are packaged
+  outside `asar` when executable access is required.
+- `BrowserWindow`, `statusPreload.cjs`, and narrow IPC handlers belong only to
+  the service/offline shell.
+- Do not add Electron IPC as an alternate API for normal SvelteKit features.
 
 ## Main Endpoints
 
 | Method | Path | Use |
 |---|---|---|
 | `GET` | `/ping` | Connectivity + sidecar version. |
+| `POST` | `/native/pick-folder` | OS folder picker. |
+| `POST` | `/native/pick-open-file` | OS file-open picker. |
+| `POST` | `/native/pick-save-file` | OS file-save picker. |
 | `GET` | `/native/health` | Python venv health. |
 | `GET` | `/native/setup/status` | Auto-setup progress. |
 | `POST` | `/native/analyze-downbeats` | WAV bytes -> beat JSON. |

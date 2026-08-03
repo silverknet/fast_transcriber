@@ -80,7 +80,9 @@ export async function mixBackingTrack(
   if (sources.length === 0) throw new Error('No sources selected')
 
   const mastering = opts.mastering?.enabled ? opts.mastering : undefined
-  const ac = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE })
+  // OFFLINE: this decodes and allocates buffers, never plays. It must not
+  // hold a hardware AudioContext slot. See `audioDevice.ts`.
+  const ac = new OfflineAudioContext(1, 1, TARGET_SAMPLE_RATE)
   try {
     type Decoded = { src: BackingMixSource; buf: AudioBuffer }
     const decoded: Decoded[] = []
@@ -163,6 +165,6 @@ export async function mixBackingTrack(
 
     return audioBufferToWavBlob(outBuf)
   } finally {
-    await ac.close().catch(() => {})
+    // Nothing to close: an OfflineAudioContext holds no hardware slot.
   }
 }

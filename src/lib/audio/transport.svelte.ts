@@ -196,11 +196,41 @@ class UnifiedTransport {
   #adapter: PlaybackControllerLike | null = null
 
   constructor() {
+    this.#ensureEffects()
+  }
+
+  /**
+   * (Re)create the reactive plumbing.
+   *
+   * The transport is a module-level SINGLETON, but its effects used to be born
+   * in the constructor and killed in `dispose()` — permanently, because a
+   * constructor runs once. After any dispose the object kept working just well
+   * enough to look alive: `play()` still made sound, but the effects were gone,
+   * so toggling the click mid-song did nothing and the volume slider was dead.
+   * No error anywhere; just a musician in the Grid tab with no click.
+   *
+   * So effect creation is idempotent and re-run from every entry point
+   * (`configure`, `loadFile`, `play`): whichever one is called first after a
+   * dispose brings the plumbing back.
+   */
+  #ensureEffects(): void {
+    if (this.#effectCleanup) return
     this.#effectCleanup = $effect.root(() => {
       // 1. Sync click master gain from `clickVolume` (no upper cap).
       $effect(() => {
+        // Track BOTH deps before any early-return, so the effect re-fires
+        // whichever one changes first.
         const v = Math.max(0, this.clickVolume)
-        if (this.#clickMaster) this.#clickMaster.gain.value = v
+        const playing = this.#playing
+        // Only while playing: opening the gate during a pause would let the
+        // count-in voices `#silenceClicks` just killed ring out.
+        //
+        // Through `#armClicks`, NEVER `gain.value = v`. The gate is driven by
+        // `setValueAtTime` events, and a real AudioParam IGNORES plain value
+        // writes while automation events exist — so after the first pause ever,
+        // a raw write here does nothing and the slider goes dead. Caught by a
+        // real-browser test; invisible to the mocked one.
+        if (this.#clickMaster && playing) this.#armClicks(v)
       })
 
       // 2. Sync the song track gain from `songVolume` (clamped [0, 1]).
@@ -263,6 +293,7 @@ class UnifiedTransport {
    * to call reactively.
    */
   configure(sm: SongMap | null): void {
+    this.#ensureEffects()
     this.#songMap = sm
   }
 
@@ -276,6 +307,7 @@ class UnifiedTransport {
    * called mid-playback, re-seeks in place so the new stem sources join in sync.
    */
   async setStems(entries: { key: string; label: string; blob: Blob }[]): Promise<void> {
+    this.clearAudition()
     const engine = this.#ensureEngine()
     this.#clearStemTracks()
     const stems: { key: string; label: string }[] = []
@@ -305,6 +337,53 @@ class UnifiedTransport {
     if (this.#playing && stems.length > 0) this.seek(this.songTimeSec) // fold sources in
   }
 
+  // ── Audition: hear ONE performer's mix, without touching anything saved ──
+  /**
+   * Per-track volumes as they were before the audition started, restored
+   * exactly on `clearAudition`. A snapshot-and-restore overlay rather than a
+   * second mix state: the transport's volumes are runtime-only (nothing here
+   * persists to `mixState`), so the overlay cannot corrupt a saved mix — but
+   * it MUST put back what it found, or a preview would quietly become the
+   * evening's balance.
+   */
+  #auditionSaved: Map<string, number> | null = null
+  /** Multiplies the click gain while an audition is on (1 = untouched). */
+  #auditionClickFactor = 1
+
+  /**
+   * Apply a performer's monitor levels to the live graph — stems, original,
+   * and the click (as a factor on the user's click volume). Idempotent while
+   * active: slider moves re-apply on top of the SAME snapshot, so toggling the
+   * audition off always restores the pre-audition state, not an intermediate.
+   */
+  auditionMix(levels: Record<string, number>, clickLevel = 1): void {
+    const engine = this.#engine
+    if (!engine) return
+    if (!this.#auditionSaved) {
+      this.#auditionSaved = new Map(engine.listTracks().map((t) => [t.key, t.volume]))
+    }
+    for (const [key, v] of Object.entries(levels)) {
+      engine.setVolume(key, Math.max(0, Math.min(1, v)))
+    }
+    this.#auditionClickFactor = Math.max(0, Math.min(1, clickLevel))
+    if (this.#playing) this.#armClicks()
+  }
+
+  /** End the audition and restore every volume exactly as it was. */
+  clearAudition(): void {
+    const engine = this.#engine
+    if (engine && this.#auditionSaved) {
+      for (const [key, v] of this.#auditionSaved) engine.setVolume(key, v)
+    }
+    this.#auditionSaved = null
+    this.#auditionClickFactor = 1
+    if (this.#playing) this.#armClicks()
+  }
+
+  get auditionActive(): boolean {
+    return this.#auditionSaved !== null
+  }
+
   /** Remove all stem tracks and reset toggle state (e.g. on song change). */
   clearStems(): void {
     this.#clearStemTracks()
@@ -329,6 +408,28 @@ class UnifiedTransport {
    * intent; they disagreed once (engine created after the transpose was set)
    * and the result was a silently untransposed playback. Test-only observer.
    */
+  /**
+   * The metronome's master gain, by identity.
+   *
+   * Tests used to reach this as `createdGains[N]`, which broke every time the
+   * engine grew an internal node — one added `GainNode` cost 68 test repairs and
+   * made refactoring the graph expensive on purpose.
+   */
+  /** Test hook: the engine's tracks with their live volumes. */
+  engineTracksForTest(): { key: string; volume: number }[] {
+    return (this.#engine?.listTracks() ?? []).map((t) => ({ key: t.key, volume: t.volume }))
+  }
+
+  get clickMasterForTest(): GainNode | null {
+    return this.#clickMaster
+  }
+
+  /** The song lane's gain, by track key rather than by construction order. */
+  get songTrackGainForTest(): GainNode | null {
+    const engine = this.#engine as unknown as { trackGains?: Map<string, GainNode> } | null
+    return engine?.trackGains?.get(SONG_TRACK_KEY) ?? null
+  }
+
   engineRateForTest(): number | null {
     return this.#engine?.rate ?? null
   }
@@ -512,6 +613,8 @@ class UnifiedTransport {
    * clears the track.
    */
   async loadFile(file: File | null): Promise<void> {
+    this.#ensureEffects()
+    this.clearAudition()
     if (file === this.#loadedFile) return
     this.#loadedFile = file
     this.decodeError = null
@@ -550,6 +653,7 @@ class UnifiedTransport {
 
   // ── Transport (song-time) ──────────────────────────────────────────
   play(): void {
+    this.#ensureEffects()
     if (this.#playing) return
     const buf = this.audioBuffer
     if (!buf) return
@@ -630,6 +734,10 @@ class UnifiedTransport {
     // sample-aligned with the song's first sample. The WHAT/WHEN is the pure
     // `countInClickTimes`; we only make the sound.
     if (wantsCountIn && plan && this.#clickMaster) {
+      // Re-open the gate first: a previous pause closed it to kill the clicks
+      // that were still pending, and a closed gate would swallow this count-in
+      // entirely.
+      this.#armClicks()
       const fires = countInClickTimes(
         plan,
         ctxStart,
@@ -950,12 +1058,52 @@ class UnifiedTransport {
     // so the downbeat at `timeSec === 0` is correctly still AHEAD of us.
     const planTime = engine.schedulingPositionSec() - this.mediaOffsetSec
     this.#nextClickIdx = initialClickIndex(plan, planTime)
+    this.#armClicks()
     this.#clickRaf = requestAnimationFrame(this.#runClickLoop)
   }
 
   #stopClickLoop(): void {
     if (this.#clickRaf) cancelAnimationFrame(this.#clickRaf)
     this.#clickRaf = 0
+    this.#silenceClicks()
+  }
+
+  /**
+   * SILENCE CLICKS THAT ARE ALREADY SCHEDULED.
+   *
+   * Stopping the rAF stops us scheduling MORE clicks. It does nothing about the
+   * ones already handed to the audio clock, and the count-in hands over ALL of
+   * them at once — up to sixteen voices spread over several seconds, placed
+   * against `playStartCtx` the instant play is pressed.
+   *
+   * So pausing during a count-in left it ringing on for seconds with the
+   * transport stopped, and pressing play again laid a second count-in on top of
+   * the first. `playMetronomeClick` returns nothing, so there are no handles to
+   * cancel — but every voice is connected THROUGH this one gain, and closing it
+   * silences all of them at once, scheduled or not.
+   *
+   * `cancelScheduledValues` first: the gain may itself be mid-ramp.
+   */
+  #silenceClicks(): void {
+    const master = this.#clickMaster
+    const engine = this.#engine
+    if (!master || !engine) return
+    const now = engine.ac.currentTime
+    master.gain.cancelScheduledValues?.(now)
+    master.gain.setValueAtTime(0, now)
+    master.gain.value = 0
+  }
+
+  /** Open the click gain again, at the user's volume. The mirror of the above. */
+  #armClicks(level?: number): void {
+    const master = this.#clickMaster
+    const engine = this.#engine
+    if (!master || !engine) return
+    const now = engine.ac.currentTime
+    const v = (level ?? Math.max(0, this.clickVolume)) * this.#auditionClickFactor
+    master.gain.cancelScheduledValues?.(now)
+    master.gain.setValueAtTime(v, now)
+    master.gain.value = v
   }
 
   #runClickLoop = (): void => {

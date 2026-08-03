@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { get } from 'svelte/store'
 import {
+  PRELOADED_SONG_CAP,
   liveReadySongs,
   liveFetchedSongs,
   getPreloadedStems,
@@ -78,5 +79,40 @@ describe('liveAudioCache', () => {
     const after = get(liveReadySongs)
     expect(after).not.toBe(before) // new reference → Svelte re-renders
     expect(after.has('song-1')).toBe(true)
+  })
+})
+
+describe('THE BOUND — the unbounded version took down a real rig', () => {
+  // Every visited song kept ~0.5 GB decoded until the tab refused allocations
+  // ("createBuffer failed") and stems silently vanished on the longest song.
+  // Instant switches are promised for the neighborhood being played, not the
+  // whole setlist.
+  beforeEach(() => clearLiveAudioCache())
+
+  it(`never holds more than PRELOADED_SONG_CAP songs — oldest evicted, light OFF`, () => {
+    for (let i = 0; i < 8; i++) putPreloadedStems(`song-${i}`, new Map([['stem:d', buf(`${i}`)]]))
+    expect(decodedSongIds().size).toBe(PRELOADED_SONG_CAP)
+    expect(getPreloadedStems('song-0')).toBeUndefined()
+    expect(getPreloadedStems('song-7')).toBeDefined()
+    expect(get(liveReadySongs).has('song-0'), 'no green light over an empty cache').toBe(false)
+    expect(get(liveReadySongs).size).toBe(PRELOADED_SONG_CAP)
+  })
+
+  it('a get() refreshes recency — the song being PLAYED is never the victim', () => {
+    for (let i = 0; i < PRELOADED_SONG_CAP; i++)
+      putPreloadedStems(`song-${i}`, new Map([['stem:d', buf(`${i}`)]]))
+    getPreloadedStems('song-0') // current song, touched
+    putPreloadedStems('song-new', new Map([['stem:d', buf('n')]])) // forces one eviction
+    expect(getPreloadedStems('song-0'), 'the touched song survives').toBeDefined()
+    expect(getPreloadedStems('song-1'), 'the untouched oldest goes').toBeUndefined()
+  })
+
+  it('re-putting an existing song refreshes, never duplicates', () => {
+    for (let i = 0; i < PRELOADED_SONG_CAP; i++)
+      putPreloadedStems(`song-${i}`, new Map([['stem:d', buf(`${i}`)]]))
+    putPreloadedStems('song-0', new Map([['stem:d', buf('again')]]))
+    putPreloadedStems('song-new', new Map([['stem:d', buf('n')]]))
+    expect(getPreloadedStems('song-0')).toBeDefined()
+    expect(decodedSongIds().size).toBe(PRELOADED_SONG_CAP)
   })
 })

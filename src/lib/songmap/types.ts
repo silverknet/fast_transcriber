@@ -493,6 +493,19 @@ export type CueEvent = {
   stale?: boolean
 }
 
+/**
+ * A subset of levels overriding a performer's project-wide mix.
+ * Structurally identical to `PerformerMix` in `$lib/project/performerMix`, kept
+ * here so the SongMap schema does not import from the project layer.
+ */
+export type PerformerMixOverride = {
+  stems: Partial<Record<string, number>>
+  original?: number
+  click?: number
+  cue?: number
+  fallback?: number
+}
+
 export type CueTrack = {
   id: string
   name: string
@@ -503,6 +516,14 @@ export type CueTrack = {
    *  own output channel. */
   performerId?: string
   events: CueEvent[]
+  /**
+   * THIS PERFORMER'S MONITOR MIX, FOR THIS SONG ONLY.
+   *
+   * Absent means "follow my project default" — and keeps following it as the
+   * default changes, rather than taking a copy that silently stops tracking.
+   * Only the levels named here are overridden; see `performerMix.ts`.
+   */
+  mix?: PerformerMixOverride
   suppressedGeneratedKeys: string[]
   renderExport?: RenderedCueExport
   /**
@@ -705,6 +726,70 @@ export interface MixState {
   master?: number
 }
 
+/** Producer identity used by the canonical Live routing configuration. */
+export type LiveProducerReference =
+  | { kind: 'original-audio' }
+  | { kind: 'stem-audio'; stemId: string }
+  | { kind: 'detected-drum-midi' }
+  | { kind: 'drum-machine-midi' }
+  | { kind: 'detected-bass-midi' }
+  | { kind: 'bass-machine-midi' }
+  | { kind: 'chord-machine-keys-midi' }
+  | { kind: 'chord-machine-arp-midi' }
+  | { kind: 'keybed-midi' }
+  | { kind: 'chord-jam-keys-midi' }
+  | { kind: 'chord-jam-bass-midi' }
+  | { kind: 'chord-jam-arp-midi' }
+  | { kind: 'preview-audio' }
+  | { kind: 'test-signal' }
+  | { kind: 'unknown'; producerType: string }
+
+export interface LiveMonitorSendIntent {
+  performerId: string
+  /** Linear send gain. Zero is an explicit silent send, not admission. */
+  gain: number
+}
+
+export interface SongLiveSourceIntent {
+  /** Stable musical source identity. Never derived from a label or filename. */
+  id: string
+  producer: LiveProducerReference
+  admission: 'included' | 'excluded'
+  required: boolean
+  /** Explicit owner in `mixerChannels`. */
+  mixerChannelId: string
+  main: boolean
+  monitorSends: LiveMonitorSendIntent[]
+}
+
+export interface SongLiveMixerChannel {
+  id: string
+  sourceId: string
+  /** Live processing is separate from local editor audition state. */
+  processing: {
+    gain: number
+    eq?: ChannelEq
+  }
+  /** Explicit source lane in the persisted project rig profile. */
+  rigSourceLaneId?: string
+  /** Required when multiple mixer channels intentionally share a rig lane. */
+  sumGroupId?: string
+}
+
+export interface SongLiveSumGroup {
+  id: string
+  rigSourceLaneId: string
+  mixerChannelIds: string[]
+}
+
+/** Shared, persisted Live intent. Runtime device state never lives here. */
+export interface SongLiveRouting {
+  version: 1
+  sources: SongLiveSourceIntent[]
+  mixerChannels: SongLiveMixerChannel[]
+  sumGroups: SongLiveSumGroup[]
+}
+
 /**
  * Cached output of the Python section-border suggester
  * (`desktop/native/python/sections/border_suggest.py`). Persisted so we don't
@@ -813,10 +898,18 @@ export type SongMapV3 = {
   projectFolder?: string
   /** Relative paths within the project folder to each stem audio file. */
   stemRefs?: StemRefs
+  /** Local-only stable stem identity -> relative path mapping for Live. */
+  liveStemRefs?: Record<string, string>
   /** Optional rendered click-only WAV aligned to trim + count-in prepend. */
   clickExport?: RenderedCueExport
   /** Optional saved mixer state for the in-browser DAW view. */
   mixState?: MixState
+  /**
+   * Canonical source admission and source-to-mixer-to-rig-lane mapping.
+   * Optional only at the TypeScript boundary for legacy/in-memory fixtures;
+   * parse and serialize always materialize the v7 field.
+   */
+  liveRouting?: SongLiveRouting
   /**
    * For cloud-linked songs: the server's claim about which audio file
    * belongs here, by content identity. Absent on standalone / local-only
@@ -841,13 +934,13 @@ export type SongMapV3 = {
   effectBusses?: EffectBus[]
 }
 
-/** Current persistent shape (formatVersion 4). Name kept from the v3 era to
+/** Current persistent shape (formatVersion 7). Name kept from the v3 era to
  * avoid churn; the `formatVersion` literal tracks `SONGMAP_FORMAT_VERSION`. */
 export type SongMapV4 = SongMapV3
 
-/** @deprecated Persistent runtime shape is v4; kept for older imports. */
+/** @deprecated Persistent runtime shape is v7; kept for older imports. */
 export type SongMapV1 = SongMapV3
-/** @deprecated Persistent runtime shape is v4; kept for older imports. */
+/** @deprecated Persistent runtime shape is v7; kept for older imports. */
 export type SongMapV2 = SongMapV3
 
 export type SongMap = SongMapV3

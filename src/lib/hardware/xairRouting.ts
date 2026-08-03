@@ -1,3 +1,15 @@
+
+/** The XR18 has SIXTEEN channel strips. 17/18 is the aux return, not a channel. */
+export const XAIR_MAX_CHANNEL = 16
+
+/**
+ * Fader position meaning UNITY on an X-Air (0 dB).
+ *
+ * NOT 1.0, and not the same thing as a linear gain of 0.75. The desk's fader
+ * scale is a four-segment dB curve; `xairFaderFromLinearGain` is the only
+ * correct way to turn a BarBro level into one of these.
+ */
+export const XAIR_UNITY_FADER = 0.75
 export type XAirLaneRoute = {
   laneKey: string
   channels: number[]
@@ -63,11 +75,11 @@ export function parseXAirChannelList(input: string): number[] {
     const trimmed = part.trim()
     if (!trimmed) continue
     if (!/^\d+$/.test(trimmed)) {
-      throw new Error('XR18 channels must be numbers 1..18')
+      throw new Error(`XR18 channels must be numbers 1..${XAIR_MAX_CHANNEL}`)
     }
     const channel = Number.parseInt(trimmed, 10)
-    if (!Number.isInteger(channel) || channel < 1 || channel > 18) {
-      throw new Error('XR18 channels must be numbers 1..18')
+    if (!Number.isInteger(channel) || channel < 1 || channel > XAIR_MAX_CHANNEL) {
+      throw new Error(`XR18 channels must be numbers 1..${XAIR_MAX_CHANNEL}`)
     }
     if (!seen.has(channel)) {
       seen.add(channel)
@@ -94,13 +106,28 @@ function stemPairForLaneKey(laneKey: string): number[] | null {
 
 /**
  * Default XR18 channels per BarBro lane, per the live-rig channel contract:
- * click → ch 17, cue → ch 18 (the two MONITOR-ONLY channels that must never hit
+ * click → ch 15, cue → ch 16 (the two MONITOR-ONLY channels that must never hit
  * the house), stems on 9-16 stereo pairs, and the full mix as the 9/10 fallback.
  * All configurable in the UI; these are just safe starting points.
  */
+/**
+ * The XR18 has SIXTEEN channels. `/ch/17` and `/ch/18` DO NOT EXIST — verified
+ * against a real XR18V2 (fw 1.19), which answers `/ch/16/mix/fader` and stays
+ * silent for 17 and 18.
+ *
+ * Click and cue used to be routed to 17 and 18, so every write went to an
+ * address the desk does not have. X-AIR ignores unknown addresses with no reply
+ * and no error, so this failed completely silently — the FOH-safety check only
+ * appeared to pass because a channel missing from the read-back counts as
+ * unsafe rather than as absent.
+ *
+ * They now sit on real channels: 15 and 16, the top of the strip and the least
+ * likely to be wanted for a microphone.
+ */
+
 export function defaultXAirChannelsForLane(laneKey: string): number[] {
-  if (laneKey === 'click') return [17]
-  if (laneKey === 'cue') return [18]
+  if (laneKey === 'click') return [15]
+  if (laneKey === 'cue') return [16]
   if (laneKey === 'original') return [9, 10]
   return stemPairForLaneKey(laneKey) ?? []
 }
@@ -240,20 +267,60 @@ export function xairFohSafetyPlan(routes: readonly XAirLaneRoute[]): XAirMainAss
  * CRITICAL: an unread channel (missing from the map) is treated as UNSAFE — we
  * never claim "house safe" without proof from the console.
  */
+export type FohVerdict = {
+  safe: boolean
+  unsafeChannels: number[]
+  /** The monitor-only channels this verdict actually examined. */
+  checkedChannels: number[]
+  /** Why it is not safe. Empty when it is. */
+  reason: string
+}
+
 export function verifyFohSafe(
   routes: readonly XAirLaneRoute[],
   mainAssignByChannel: ReadonlyMap<number, boolean>,
-): { safe: boolean; unsafeChannels: number[] } {
+): FohVerdict {
   const monitorOnly = new Set<number>()
   for (const route of routes) {
     if (!isMonitorOnlyLane(route.laneKey)) continue
     for (const channel of sanitizeXAirChannels(route.channels)) monitorOnly.add(channel)
   }
+  const checkedChannels = [...monitorOnly].sort((a, b) => a - b)
+
+  // NOTHING TO CHECK IS NOT SAFE.
+  //
+  // This returned `{safe: true}` when no lane carried click or cues, and that
+  // was the single most dangerous line in the live rig: click is not absent in
+  // that situation, it is travelling INSIDE the song's own stereo pair — which
+  // is assigned to the house by design. So the check reported "click is off the
+  // house" precisely when click was in the PA, and had examined nothing to say
+  // so. Every analysed song has a click track, so zero monitor-only channels
+  // means the rig is mis-wired, never that there is no click.
+  if (checkedChannels.length === 0) {
+    return {
+      safe: false,
+      unsafeChannels: [],
+      checkedChannels: [],
+      reason:
+        'No channel is carrying the click or the cues, so nothing was checked. They are most likely travelling inside the song channels — which go to the house.',
+    }
+  }
+
   const unsafeChannels: number[] = []
-  for (const channel of [...monitorOnly].sort((a, b) => a - b)) {
+  for (const channel of checkedChannels) {
+    // `!== false` on purpose: a channel MISSING from the read-back is unsafe.
+    // We never claim house-safe without the desk having said so.
     if (mainAssignByChannel.get(channel) !== false) unsafeChannels.push(channel)
   }
-  return { safe: unsafeChannels.length === 0, unsafeChannels }
+  return {
+    safe: unsafeChannels.length === 0,
+    unsafeChannels,
+    checkedChannels,
+    reason:
+      unsafeChannels.length === 0
+        ? ''
+        : `Still going to the house: channel ${unsafeChannels.join(', ')}.`,
+  }
 }
 
 // ── Monitor mixes: per-performer aux-bus sends (the in-ear mixes) ─────────────
@@ -319,7 +386,7 @@ function sanitizeXAirChannels(channels: readonly number[]): number[] {
   const out: number[] = []
   const seen = new Set<number>()
   for (const channel of channels) {
-    if (!Number.isInteger(channel) || channel < 1 || channel > 18 || seen.has(channel)) continue
+    if (!Number.isInteger(channel) || channel < 1 || channel > XAIR_MAX_CHANNEL || seen.has(channel)) continue
     seen.add(channel)
     out.push(channel)
   }
