@@ -271,18 +271,21 @@
   <span class="text-muted-foreground w-9 shrink-0 text-right font-mono text-[10px] tabular-nums">
     {Math.round(volume * 100)}%
   </span>
-  {#if Math.abs(matchGainDb) >= 0.1}
-    <span
-      class="w-14 shrink-0 text-right font-mono text-[10px] tabular-nums {matchGainDb > 0
+  <!-- ALWAYS rendered, fixed width: a column that appears only on some rows
+       makes every row a different width and the strip stops lining up. -->
+  <span
+    class="w-10 shrink-0 text-right font-mono text-[10px] tabular-nums {Math.abs(matchGainDb) < 0.1
+      ? 'opacity-0'
+      : matchGainDb > 0
         ? 'text-emerald-600 dark:text-emerald-400'
         : 'text-amber-600 dark:text-amber-400'}"
-      title="Loudness matching is {matchGainDb > 0 ? 'lifting' : 'lowering'} this stem by {Math.abs(
-        matchGainDb,
-      ).toFixed(1)} dB before your fader, so every song sits at the same level. Turn it off in Project settings → Project sound."
-    >
-      match {matchGainDb > 0 ? '+' : ''}{matchGainDb.toFixed(1)}
-    </span>
-  {/if}
+    title={Math.abs(matchGainDb) < 0.1
+      ? ''
+      : `Loudness matching is ${matchGainDb > 0 ? 'lifting' : 'lowering'} this stem by ${Math.abs(matchGainDb).toFixed(1)} dB before your fader. Turn it off in Project settings → Project sound.`}
+    aria-hidden={Math.abs(matchGainDb) < 0.1}
+  >
+    {matchGainDb > 0 ? '+' : ''}{matchGainDb.toFixed(1)}
+  </span>
 
   <!-- A MIDI lane has no buffer BY DESIGN — it is played live, not decoded — so
        it must not sit on the canvas's "loading..." state, which reads as broken. -->
