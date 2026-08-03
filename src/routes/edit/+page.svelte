@@ -12,6 +12,7 @@
   import type { MixerControls } from '$lib/components/editor/TransportBar.svelte'
   import CueEditor from '$lib/components/editor/CueEditor.svelte'
   import EditInspector from '$lib/components/editor/EditInspector.svelte'
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open'
   import HelpHint from '$lib/components/HelpHint.svelte'
   import { cueRender } from '$lib/audio/cueRender.svelte'
   import RelinkAudioBanner from '$lib/components/RelinkAudioBanner.svelte'
@@ -394,6 +395,7 @@
   /** Main workspace mode. */
   type EditMode = 'overview' | 'grid' | 'sections' | 'chords' | 'cue' | 'lyrics' | 'leadsheet'
   let editMode = $state<EditMode>('overview')
+  let inspectorOpen = $state(true)
   /** The mixer's minimal band view. Lives here because it's a RAIL tab now,
    *  not a toggle inside the mixer's transport bar. */
   let playbackMode = $state(false)
@@ -1172,7 +1174,7 @@
         <div class="mt-auto px-1.5 py-2">
           <HelpHint
             label="Editor layout help"
-            text="Pick a mode on this rail. The centre workspace changes to match; the right inspector always shows details for the current mode. Grid, Sections and Chords keep their own waveform inside the workspace."
+            text="Pick a mode on this rail. The centre workspace changes to match; the right inspector shows details for the current mode and can be closed when you need more room. Grid, Sections and Chords keep their own waveform inside the workspace."
           />
         </div>
       </nav>
@@ -1371,6 +1373,17 @@
           <div class="min-w-0 shrink-0">
             <TransportBar {editMode} {mixerControls} />
           </div>
+          {#if !inspectorOpen}
+            <button
+              type="button"
+              class="text-muted-foreground hover:bg-foreground/10 hover:text-foreground hidden size-8 shrink-0 items-center justify-center rounded-full transition-colors xl:inline-flex"
+              onclick={() => (inspectorOpen = true)}
+              aria-label="Open inspector"
+              title="Open right panel"
+            >
+              <PanelRightOpen class="size-4" aria-hidden="true" />
+            </button>
+          {/if}
         </div>
 
         <!-- ── WORKSPACE + INSPECTOR ──────────────────────────────────────── -->
@@ -1443,18 +1456,21 @@
                editing controls left to the mode's editor component. Its header +
                spacing match version-2; the aside drops below `xl` so narrow
                widths hand the workspace the full width. ── -->
-          <aside
-            class="edit-inspector-rail edit-shell-shadow bg-card relative z-10 hidden w-[320px] shrink-0 flex-col overflow-y-auto xl:flex"
-            aria-label="Inspector"
-          >
-            <EditInspector
-              {editMode}
-              {keyLabel}
-              {transposeSemitones}
-              {activeDraftLabel}
-              {chordChromaStatus}
-            />
-          </aside>
+          {#if inspectorOpen}
+            <aside
+              class="edit-inspector-rail edit-shell-shadow bg-card relative z-10 hidden w-[320px] shrink-0 flex-col overflow-y-auto xl:flex"
+              aria-label="Inspector"
+            >
+              <EditInspector
+                {editMode}
+                {keyLabel}
+                {transposeSemitones}
+                {activeDraftLabel}
+                {chordChromaStatus}
+                onClose={() => (inspectorOpen = false)}
+              />
+            </aside>
+          {/if}
         </div>
 
         <!-- Docked stems strip: a real bottom bar of the content column (sibling

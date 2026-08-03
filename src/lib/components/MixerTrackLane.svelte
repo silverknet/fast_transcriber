@@ -264,27 +264,24 @@
     step="0.01"
     value={volume}
     oninput={(e) => onVolumeChange(parseFloat((e.currentTarget as HTMLInputElement).value))}
-    class="w-28 shrink-0 accent-foreground"
+    class="w-16 shrink-0 accent-foreground"
     aria-label="{label} volume"
     title="Volume {Math.round(volume * 100)}%"
   />
-  <span class="text-muted-foreground w-9 shrink-0 text-right font-mono text-[10px] tabular-nums">
-    {Math.round(volume * 100)}%
-  </span>
-  <!-- ALWAYS rendered, fixed width: a column that appears only on some rows
-       makes every row a different width and the strip stops lining up. -->
+  <!-- The loudness-match gain rides on THIS number rather than a column of its
+       own: the strip is mostly waveform and every fixed column steals from it.
+       Colour says matching is acting on the lane, the tooltip says how much. -->
   <span
-    class="w-10 shrink-0 text-right font-mono text-[10px] tabular-nums {Math.abs(matchGainDb) < 0.1
-      ? 'opacity-0'
+    class="w-9 shrink-0 text-right font-mono text-[10px] tabular-nums {Math.abs(matchGainDb) < 0.1
+      ? 'text-muted-foreground'
       : matchGainDb > 0
         ? 'text-emerald-600 dark:text-emerald-400'
         : 'text-amber-600 dark:text-amber-400'}"
     title={Math.abs(matchGainDb) < 0.1
-      ? ''
-      : `Loudness matching is ${matchGainDb > 0 ? 'lifting' : 'lowering'} this stem by ${Math.abs(matchGainDb).toFixed(1)} dB before your fader. Turn it off in Project settings → Project sound.`}
-    aria-hidden={Math.abs(matchGainDb) < 0.1}
+      ? `Volume ${Math.round(volume * 100)}%`
+      : `Volume ${Math.round(volume * 100)}% · loudness matching is ${matchGainDb > 0 ? 'lifting' : 'lowering'} this stem ${Math.abs(matchGainDb).toFixed(1)} dB before your fader`}
   >
-    {matchGainDb > 0 ? '+' : ''}{matchGainDb.toFixed(1)}
+    {Math.round(volume * 100)}%
   </span>
 
   <!-- A MIDI lane has no buffer BY DESIGN — it is played live, not decoded — so

@@ -21,6 +21,7 @@
   import { sectionKindColor } from '$lib/songmap/sectionColors'
   import { formatTime } from '$lib/audio/formatTime'
   import { formatTransposeLabel } from '$lib/songmap/transposition'
+  import X from '@lucide/svelte/icons/x'
   import {
     SlidersHorizontal,
     Grid3x3,
@@ -55,12 +56,14 @@
     transposeSemitones = 0,
     activeDraftLabel = '',
     chordChromaStatus = 'idle',
+    onClose,
   }: {
     editMode: EditMode
     keyLabel?: string | null
     transposeSemitones?: number
     activeDraftLabel?: string
     chordChromaStatus?: ChromaStatus
+    onClose?: () => void
   } = $props()
 
   const MODE_ICON: Record<EditMode, typeof Grid3x3> = {
@@ -228,6 +231,17 @@
     <HeadIcon class="size-4 shrink-0" aria-hidden="true" />
     <span class="text-xs font-black uppercase tracking-widest">{MODE_LABEL[editMode]}</span>
     <span class="text-muted-foreground ml-auto font-mono text-[10px] uppercase">Inspector</span>
+    {#if onClose}
+      <button
+        type="button"
+        class="text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex size-7 shrink-0 items-center justify-center rounded-full transition-colors"
+        onclick={onClose}
+        aria-label="Close inspector"
+        title="Close right panel"
+      >
+        <X class="size-4" aria-hidden="true" />
+      </button>
+    {/if}
   </div>
 
   <div class="min-h-0 flex-1 overflow-y-auto">
