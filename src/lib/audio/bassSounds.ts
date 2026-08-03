@@ -117,6 +117,27 @@ const SYNTH_SOUNDS: BassSound[] = [
 /** Multisampled instruments. `roots` must match the files on disk. */
 const SAMPLE_SOUNDS: BassSound[] = [
   {
+    /**
+     * A real fingered electric bass — the one that makes a track sound like a
+     * record rather than a demo. 19 roots across E1–E4 from Logic's
+     * Fingerstyle Electric Bass, one take throughout so neighbouring notes do
+     * not sound like different instruments.
+     *
+     * Almost no post-shaping on purpose: a recorded bass already has the
+     * midrange definition that makes it audible on a phone speaker, which is
+     * exactly what the synth voice has to fake and what makes it sound thick.
+     * The high cutoff keeps the string and finger noise that reads as "air".
+     */
+    id: 'electric',
+    label: 'Electric finger (Logic)',
+    group: 'Sampled',
+    kind: 'sample',
+    dir: 'electric',
+    roots: [28, 29, 31, 33, 35, 36, 38, 40, 43, 45, 47, 48, 50, 52, 55, 57, 59, 62, 64],
+    cutoffHz: 6500,
+    drive: 0.05,
+  },
+  {
     id: 'upright',
     label: 'Upright (Logic)',
     group: 'Sampled',
