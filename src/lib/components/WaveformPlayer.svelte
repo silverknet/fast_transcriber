@@ -15,6 +15,7 @@
     ZoomOut,
   } from '@lucide/svelte'
   import { PlaybackController } from '$lib/audio/playbackController.svelte'
+  import type { PlaybackControllerLike } from '$lib/audio/transport.svelte'
   import { timelineDurationForUi } from '$lib/audio/durationResolve'
   import { formatTime } from '$lib/audio/formatTime'
   import {
@@ -24,6 +25,7 @@
   } from '$lib/audio/timeGeometry'
   import type { BlockWaveformData } from '$lib/audio/waveformBlocks'
   import { drawPeaksToCanvas } from '$lib/audio/waveformDraw'
+  import { themeTick } from '$lib/stores/theme'
   import {
     hitTestSelectionTarget,
     hitTestViewportTarget,
@@ -52,7 +54,7 @@
   } from '$lib/components/TimelineBeatGrid.svelte'
   import { triggerBeatPulse } from '$lib/stores/beatPulse'
   import { sortBeatsByTime } from '$lib/songmap/normalize'
-  import { SECTION_KIND_OPTIONS } from '$lib/songmap/sectionEdit'
+  import SectionKindPills from '$lib/components/editor/SectionKindPills.svelte'
   import type { BarGridAction } from '$lib/songmap/timelineEdit'
   import type { Bar, Beat, Section, SectionKind } from '$lib/songmap/types'
 
@@ -74,6 +76,15 @@
     onSelectionCommit = undefined as ((start: number, end: number) => void) | undefined,
     ready = $bindable(false),
     variant = 'trim',
+    /**
+     * When true, hide the transport chrome that the shell's `TransportBar`
+     * already provides — Play/Pause + Stop, the Click toggle, the
+     * volume/calibration popover, and the time/selection readout — so the
+     * `TransportBar` is the single source of those controls. The
+     * waveform-editing toolbars (zoom/pan, bar-add, selected-bar edit) always
+     * stay regardless.
+     */
+    hideTransportButtons = false,
     beatGrid = null as BeatGridModel | null,
     /** When set with `onBarGridAction`, the bar strip edits SongMap bars (equal spacing). */
     beatGridEditable = false,
@@ -181,7 +192,7 @@
      * is passed (the trim variant on the home page), we instantiate a
      * local fallback so the binding still has a target.
      */
-    controller: passedController = null as PlaybackController | null,
+    controller: passedController = null as PlaybackControllerLike | null,
     /**
      * Optional playback-only buffer override. `undefined` means use the decoded
      * source buffer; `null` means playback is intentionally unavailable
@@ -219,8 +230,18 @@
    * behavior matches the pre-controller days for that surface.
    */
   const fallbackController = new PlaybackController()
-  const controller = $derived(passedController ?? fallbackController)
+  const controller: PlaybackControllerLike = $derived(passedController ?? fallbackController)
   onDestroy(() => fallbackController.destroy())
+
+  /**
+   * When the controller owns the ONE decode (the Song Edit `UnifiedTransport`),
+   * reuse its `audioBuffer` for peaks/timeline instead of decoding the file a
+   * second time — the whole editor shares a single decode. The real
+   * `PlaybackController` (home trim variant) has no `ownsDecode`, so that surface
+   * keeps decoding locally, exactly as before.
+   */
+  let usesExternalDecode = $derived(controller.ownsDecode === true)
+  let externalBuffer = $derived(usesExternalDecode ? (controller.audioBuffer ?? null) : null)
 
   let isEditorVariant = $derived(variant === 'editor')
   let beatGridEditing = $derived(
@@ -234,10 +255,6 @@
 
   /** Selected bar in the strip (grid mode). */
   let selectedBarId = $state<string | null>(null)
-
-  let sectionTagChoice = $state<SectionKind>('verse')
-  /** Free-text label, only consulted when sectionTagChoice === 'custom'. */
-  let customSectionLabel = $state('')
 
   $effect(() => {
     const ids = new Set(beatGrid?.bars.map((b) => b.id) ?? [])
@@ -444,15 +461,43 @@
   let minimapHoverTarget = $state('outside')
   let pendingMainPeaksRecompute = false
 
-  /** Grid mode: seek to selected bar start when selection changes (same as before). */
+  /**
+   * WHICH bar a grid selection wants the playhead at — derived, and a plain
+   * STRING on purpose.
+   *
+   * The seek below used to read `beatGrid` directly, which made every edit to
+   * the grid a reason to seek: resize a bar → new grid object → effect runs →
+   * `seek()` → the transport emits an update → re-render → new grid object →
+   * seek again, until Svelte killed it with `effect_update_depth_exceeded`.
+   * Merging a bar appeared to work only because it happened to settle first.
+   *
+   * Deriving a string breaks that loop at the root: the id is unchanged by
+   * resizing, merging or splitting bars, so a derived that recomputes to the
+   * same value notifies nobody. Only actually SELECTING a different bar can
+   * move the playhead — which was always the intent.
+   */
+  const gridSeekBarId = $derived(
+    mediaReady &&
+      timelineStripMode === 'grid' &&
+      beatGridEditing &&
+      selectedBarId &&
+      beatGrid?.bars.some((x) => x.id === selectedBarId)
+      ? selectedBarId
+      : null,
+  )
+
+  /** Grid mode: seek to the selected bar's start when the SELECTION changes. */
   $effect(() => {
-    if (timelineStripMode !== 'grid' || !beatGridEditing || !selectedBarId || !beatGrid) return
-    const bar = beatGrid.bars.find((x) => x.id === selectedBarId)
-    if (!bar) return
-    const d = timelineSec
-    if (!(d > 0) || !mediaReady) return
-    const t = Math.min(Math.max(0, bar.startSec), d)
-    controller.seek(t)
+    const barId = gridSeekBarId
+    if (!barId) return
+    // Everything else is read untracked: the geometry and the transport's own
+    // timeline are inputs to the seek, never reasons to perform one.
+    untrack(() => {
+      const bar = beatGrid?.bars.find((x) => x.id === barId)
+      const d = timelineSec
+      if (!bar || !(d > 0)) return
+      controller.seek(Math.min(Math.max(0, bar.startSec), d))
+    })
   })
 
   /** Sections mode: seek after pointer-up (selection commit), not on every drag frame. */
@@ -521,6 +566,7 @@
     peaks
     waveWidth
     canvas
+    void $themeTick // redraw on light/dark flip (canvas colour is baked in)
     redrawCanvas()
   })
 
@@ -786,6 +832,36 @@
     return out
   })
 
+  /**
+   * The existing section that the current sections-selection exactly covers.
+   * Clicking a section band selects its whole bar range, so an exact bar-range
+   * match means "this section is selected" → the pill switcher highlights its
+   * kind and offers Rename. A fresh (non-matching) range → `null` = create mode.
+   */
+  let selectedSection = $derived.by((): Section | null => {
+    if (timelineStripMode !== 'sections' || sectionsSelectionBarIds.length === 0 || !beatGrid) {
+      return null
+    }
+    const byId = new Map(beatGrid.bars.map((b) => [b.id, b]))
+    let start = Number.POSITIVE_INFINITY
+    let end = Number.NEGATIVE_INFINITY
+    let count = 0
+    for (const id of sectionsSelectionBarIds) {
+      const b = byId.get(id)
+      if (!b) continue
+      count++
+      if (b.index < start) start = b.index
+      if (b.index > end) end = b.index
+    }
+    // Only an exact, contiguous match of an existing section counts as "selected".
+    if (count === 0 || end - start + 1 !== count) return null
+    return (
+      mapSections.find(
+        (s) => s.barRange.startBarIndex === start && s.barRange.endBarIndex === end,
+      ) ?? null
+    )
+  })
+
   /** Chords mode: clickable section jump-list so you can flip between parts
    * (e.g. verse 1 ↔ verse 2) without scrubbing. */
   type SectionNavItem = {
@@ -821,6 +897,9 @@
         active: now >= t0 && now < t1,
       })
     }
+    // Chronological (song order), so the nav strip + the "fill chords from…"
+    // menu read like a timeline rather than storage order.
+    out.sort((a, b) => a.startSec - b.startSec)
     return out
   })
 
@@ -835,8 +914,14 @@
   let sectionFillMenu = $state<{ targetId: string; x: number; y: number } | null>(null)
   const sectionFillSources = $derived.by(() => {
     if (!sectionFillMenu) return [] as typeof chordSectionNav
-    return chordSectionNav.filter((s) => s.id !== sectionFillMenu!.targetId)
+    // The full timeline in song order (chordSectionNav is sorted), INCLUDING the
+    // right-clicked section itself — shown read-only as a "you are here" anchor
+    // so choosing a source is oriented by position, not an unordered list.
+    return chordSectionNav
   })
+  const sectionFillHasSources = $derived(
+    sectionFillSources.some((s) => s.id !== sectionFillMenu?.targetId),
+  )
   function openSectionFillMenu(e: MouseEvent, sectionId: string) {
     e.preventDefault()
     e.stopPropagation()
@@ -1122,10 +1207,9 @@
     commitMediaTiming()
   }
 
-  async function loadFile() {
-    if (!file) return
-    const gen = ++loadGeneration
-    loading = true
+  /** Clear the visual/timeline state ahead of a (re)load. Shared by the local
+   *  decode path and the shared-decode path. */
+  function resetForLoad() {
     ready = false
     mediaReady = false
     error = ''
@@ -1147,6 +1231,72 @@
       audioEl.pause()
       controller.seek(0)
     }
+  }
+
+  /**
+   * Publish a decoded `AudioBuffer` as the timeline: duration-guard, commit
+   * `timelineSec` / selection / view, then compute peaks after paint. Shared by
+   * the local decode (home trim) and the transport's shared decode (editor), so
+   * the two paths differ ONLY in where the buffer comes from.
+   */
+  async function applyLoadedBuffer(buf: AudioBuffer, gen: number) {
+    if (gen !== loadGeneration) return
+
+    if (buf.duration > MAX_AUDIO_DURATION_SEC) {
+      const m = Math.floor(MAX_AUDIO_DURATION_SEC / 60)
+      error = `Audio must be ${m} minutes or shorter (this file is ${formatTime(buf.duration)}).`
+      loading = false
+      return
+    }
+
+    decodedDuration = buf.duration
+    timelineSec = buf.duration
+    decodedAudioBuffer = buf
+    viewStart = 0
+
+    // Hand the decoded PCM to the host (see `onAudioDecoded`) — the editor
+    // uses it to backfill the recording fingerprint for songs imported
+    // before v6, or via the sidecar path that skips decoding.
+    onAudioDecoded?.(buf)
+    viewEnd = buf.duration
+
+    // The <audio> element is no longer on the play path (buffer-based), but the
+    // bar-only preview tool still uses it, so keep a blob URL alive.
+    if (file && !objectUrl) objectUrl = URL.createObjectURL(file)
+
+    // If rangeStart/rangeEnd are already set to a valid sub-range (e.g. seeded from saved trim),
+    // keep them. Otherwise default to full file.
+    const hasValidRange =
+      rangeStart >= 0 &&
+      rangeEnd > rangeStart &&
+      rangeEnd <= buf.duration + 0.1
+    const initStart = hasValidRange ? rangeStart : 0
+    const initEnd = hasValidRange ? Math.min(rangeEnd, buf.duration) : buf.duration
+    const full = clampSelectionToTimeline(buf.duration, initStart, initEnd, MIN_SELECTION_SPAN_SEC)
+    setSelection(full.start, full.end)
+
+    loading = false
+
+    await tick()
+    await tick()
+    if (gen !== loadGeneration) return
+    markMediaReadyAfterDecode()
+    /** `loading` just became false — layout may not have `detailEl`/canvas yet; refresh peaks after paint. */
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve())
+      })
+    })
+    if (gen !== loadGeneration) return
+    flushMainPeaksUpdate()
+  }
+
+  /** Local decode path (home trim variant, no shared transport). */
+  async function loadFile() {
+    if (!file) return
+    const gen = ++loadGeneration
+    loading = true
+    resetForLoad()
 
     const ac = new AudioContext()
     try {
@@ -1156,51 +1306,7 @@
       const buf = await ac.decodeAudioData(ab.slice(0))
       if (gen !== loadGeneration) return
 
-      if (buf.duration > MAX_AUDIO_DURATION_SEC) {
-        const m = Math.floor(MAX_AUDIO_DURATION_SEC / 60)
-        error = `Audio must be ${m} minutes or shorter (this file is ${formatTime(buf.duration)}).`
-        loading = false
-        return
-      }
-
-      decodedDuration = buf.duration
-      timelineSec = buf.duration
-      decodedAudioBuffer = buf
-      viewStart = 0
-
-      // Hand the decoded PCM to the host (see `onAudioDecoded`) — the editor
-      // uses it to backfill the recording fingerprint for songs imported
-      // before v6, or via the sidecar path that skips decoding.
-      onAudioDecoded?.(buf)
-      viewEnd = buf.duration
-
-      objectUrl = URL.createObjectURL(file)
-
-      // If rangeStart/rangeEnd are already set to a valid sub-range (e.g. seeded from saved trim),
-      // keep them. Otherwise default to full file.
-      const hasValidRange =
-        rangeStart >= 0 &&
-        rangeEnd > rangeStart &&
-        rangeEnd <= buf.duration + 0.1
-      const initStart = hasValidRange ? rangeStart : 0
-      const initEnd = hasValidRange ? Math.min(rangeEnd, buf.duration) : buf.duration
-      const full = clampSelectionToTimeline(buf.duration, initStart, initEnd, MIN_SELECTION_SPAN_SEC)
-      setSelection(full.start, full.end)
-
-      loading = false
-
-      await tick()
-      await tick()
-      if (gen !== loadGeneration) return
-      markMediaReadyAfterDecode()
-      /** `loading` just became false — layout may not have `detailEl`/canvas yet; refresh peaks after paint. */
-      await new Promise<void>((resolve) => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => resolve())
-        })
-      })
-      if (gen !== loadGeneration) return
-      flushMainPeaksUpdate()
+      await applyLoadedBuffer(buf, gen)
     } catch {
       if (gen !== loadGeneration) return
       error = 'Could not decode this audio file.'
@@ -1209,6 +1315,34 @@
       await ac.close().catch(() => {})
     }
   }
+
+  /**
+   * Shared-decode path. When the controller owns the decode, this single effect
+   * both resets on a file change AND adopts the transport's buffer the moment
+   * it's ready (or immediately, if it already is) — so the editor decodes the
+   * uploaded file exactly once, shared with live playback and the mixer.
+   */
+  let externalLoadedFile: File | null = null
+  let adoptedBuffer: AudioBuffer | null = null
+  $effect(() => {
+    if (!usesExternalDecode) return
+    const f = file
+    const buf = externalBuffer
+    untrack(() => {
+      // New file → clear the old view and wait for its buffer.
+      if (f !== externalLoadedFile) {
+        externalLoadedFile = f
+        adoptedBuffer = null
+        resetForLoad()
+        loading = !!f
+      }
+      if (!f || !buf || adoptedBuffer === buf) return
+      adoptedBuffer = buf
+      loading = true
+      const gen = ++loadGeneration
+      void applyLoadedBuffer(buf, gen)
+    })
+  })
 
   $effect(() => {
     if (!file) {
@@ -1235,6 +1369,9 @@
       }
       return
     }
+    // Shared-decode path (editor): the `usesExternalDecode` $effect owns
+    // reset + buffer adoption; don't also decode locally here.
+    if (usesExternalDecode) return
     if (file === lastScheduledFileRef) return
     lastScheduledFileRef = file
     /** Defer past this effect flush — sync `loadFile()` re-enters the runtime and can hit `effect_update_depth_exceeded`. */
@@ -1289,6 +1426,7 @@
     objectUrl
     minimapEl
     overviewCanvas
+    void $themeTick // repaint the overview when light/dark flips too
     if (!minimapEl || !decodedAudioBuffer || !objectUrl) return
 
     const buf = decodedAudioBuffer
@@ -1779,37 +1917,41 @@
 
   <div class="flex w-full min-w-0 flex-col gap-3">
     <div class="flex flex-wrap items-center justify-center gap-3">
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        class="gap-2"
-        disabled={!mediaReady}
-        onclick={togglePlay}
-      >
-        {#if isPlaying}
-          <Pause class="size-4" aria-hidden="true" />
-          Pause
-        {:else}
-          <Play class="size-4" aria-hidden="true" />
-          Play
-        {/if}
-      </Button>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        class="gap-2"
-        disabled={!mediaReady}
-        onclick={stopPlayback}
-        title="Stop and go to selection start"
-      >
-        <Square class="size-4" aria-hidden="true" />
-        Stop
-      </Button>
-      {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0}
-        <!-- Toolbar-level click toggle + volume popover. State is
-             $bindable, parent owns the click-loop logic. -->
+      {#if !hideTransportButtons}
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          class="gap-2"
+          disabled={!mediaReady}
+          onclick={togglePlay}
+        >
+          {#if isPlaying}
+            <Pause class="size-4" aria-hidden="true" />
+            Pause
+          {:else}
+            <Play class="size-4" aria-hidden="true" />
+            Play
+          {/if}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="gap-2"
+          disabled={!mediaReady}
+          onclick={stopPlayback}
+          title="Stop and go to selection start"
+        >
+          <Square class="size-4" aria-hidden="true" />
+          Stop
+        </Button>
+      {/if}
+      {#if isEditorVariant && beatGrid && beatGrid.beats.length > 0 && !hideTransportButtons}
+        <!-- Toolbar-level click toggle + volume popover. Hidden in the editor
+             (timeline) usage, where the shell's `TransportBar` already owns the
+             click toggle + volume/calibration. State is $bindable, parent owns
+             the click-loop logic. -->
         <label
           class="border-foreground/40 hover:bg-foreground/5 ml-1 flex shrink-0 cursor-pointer items-center gap-1.5 border-2 px-2 py-1 text-xs"
           title="Play clicks alongside the audio (and count-in if configured)"
@@ -1922,12 +2064,14 @@
           </div>
         </details>
       {/if}
-      <span class="text-muted-foreground font-mono text-xs tabular-nums">
-        {formatTime(currentTime)} / {formatTime(timelineSec)}
-      </span>
-      <span class="text-muted-foreground text-xs">
-        Selection: {formatTime(rangeStart)} – {formatTime(rangeEnd)}
-      </span>
+      {#if !hideTransportButtons}
+        <span class="text-muted-foreground font-mono text-xs tabular-nums">
+          {formatTime(currentTime)} / {formatTime(timelineSec)}
+        </span>
+        <span class="text-muted-foreground text-xs">
+          Selection: {formatTime(rangeStart)} – {formatTime(rangeEnd)}
+        </span>
+      {/if}
     </div>
 
     <div
@@ -2051,7 +2195,6 @@
           audioBorderTicks={audioBorderTicks}
           countInTicks={countInTicks}
           songStartBarIndex={songStartBarIndex}
-          onSetStartBar={onSetStartBar}
         />
         {#if beatGridEditing && timelineStripMode === 'grid' && onBarGridAction}
           <div
@@ -2149,54 +2292,54 @@
             >
               + Beat
             </Button>
+            <!-- Type the number instead of nudging to it. The wheel/stepper is
+                 fine for ±1 but miserable for "this bar is 7" — and worse, a
+                 stray scroll over the strip changes the bar. -->
+            <label class="text-muted-foreground inline-flex items-center gap-1 text-[11px] font-bold">
+              Beats
+              <input
+                type="number"
+                min="1"
+                max="32"
+                class="border-foreground/25 bg-background h-8 w-14 rounded-[var(--radius)] border px-1.5 text-center text-xs font-bold tabular-nums"
+                value={beatGrid.bars.find((b) => b.id === selectedBarId)?.beatCount ?? ''}
+                onchange={(e) => {
+                  const n = Math.round(Number((e.currentTarget as HTMLInputElement).value))
+                  if (!Number.isFinite(n) || n < 1 || n > 32) return
+                  onBarGridAction?.({ type: 'setBarBeatCount', barId: selectedBarId!, count: n })
+                }}
+                title="Beats in the selected bar"
+              />
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-8 text-xs"
+              disabled={songStartBarIndex === beatGrid.bars.find((b) => b.id === selectedBarId)?.index}
+              onclick={() => {
+                const bar = beatGrid.bars.find((b) => b.id === selectedBarId)
+                if (bar) onSetStartBar?.(bar.index)
+              }}
+              title="The count-in and every click begin at this bar"
+            >
+              ▼ Song starts here
+            </Button>
           </div>
         {/if}
         {#if beatGridEditing && timelineStripMode === 'sections' && onApplySectionTag}
-          <div
-            class="border-foreground/10 bg-muted/20 flex flex-wrap items-center gap-2 border-b px-2 py-1.5"
-            role="toolbar"
-            aria-label="Section tags"
+          <SectionKindPills
+            selectedKind={selectedSection?.kind ?? null}
+            hasSelection={sectionsSelectionBarIds.length > 0}
+            currentLabel={selectedSection?.label ?? ''}
+            sectionName={selectedSection?.label ?? ''}
+            onPick={(kind, customLabel) => onApplySectionTag?.(kind, customLabel)}
+          />
+          <p
+            class="border-foreground/10 bg-muted/10 text-muted-foreground flex flex-wrap items-center gap-2 border-b px-2 py-1 text-[11px]"
           >
-            <label class="text-muted-foreground flex items-center gap-2 text-xs">
-              Section
-              <select
-                class="border-input bg-background ring-offset-background focus-visible:ring-ring h-8 rounded-md border px-2 text-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-                bind:value={sectionTagChoice}
-              >
-                {#each SECTION_KIND_OPTIONS as opt (opt.kind)}
-                  <option value={opt.kind}>{opt.label}</option>
-                {/each}
-              </select>
-            </label>
-            {#if sectionTagChoice === 'custom'}
-              <input
-                type="text"
-                placeholder="Label (e.g. Drop, Hook)"
-                bind:value={customSectionLabel}
-                class="border-input bg-background ring-offset-background focus-visible:ring-ring h-8 w-40 rounded-md border px-2 text-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-                aria-label="Custom section label"
-                maxlength="40"
-              />
-            {/if}
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              class="h-8 text-xs"
-              disabled={sectionsSelectionBarIds.length === 0 ||
-                (sectionTagChoice === 'custom' && customSectionLabel.trim().length === 0)}
-              onclick={() =>
-                onApplySectionTag?.(
-                  sectionTagChoice,
-                  sectionTagChoice === 'custom' ? customSectionLabel : undefined,
-                )}
-            >
-              Tag selection
-            </Button>
-            <span class="text-muted-foreground text-[11px]">
-              Drag to select · Shift+drag adds · Shift+click range · ⌘/Ctrl+click toggle · Esc clears
-            </span>
-          </div>
+            Click a section to select it · drag to select a range · Shift+click extends · ⌘/Ctrl+click toggles · Esc clears
+          </p>
           <div
             class="border-foreground/10 bg-muted/10 flex flex-wrap items-center gap-2 border-b px-2 py-1.5 text-xs"
             role="toolbar"
@@ -2392,22 +2535,40 @@
             onpointerdown={(e) => e.stopPropagation()}
           >
             <div class="text-muted-foreground px-2 py-1 font-bold uppercase tracking-wide">Fill chords from…</div>
-            {#if sectionFillSources.length === 0}
-              <div class="text-muted-foreground px-2 py-1.5">No earlier section</div>
+            {#if !sectionFillHasSources}
+              <div class="text-muted-foreground px-2 py-1.5">No other section to copy from</div>
             {:else}
               {#each sectionFillSources as src (src.id)}
-                <button
-                  type="button"
-                  class="hover:bg-muted flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left"
-                  role="menuitem"
-                  onclick={() => chooseSectionFillSource(src.id)}
-                >
-                  <span
-                    class="size-2.5 shrink-0 rounded-[2px]"
-                    style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
-                  ></span>
-                  <span class="truncate">{src.label}</span>
-                </button>
+                {@const isCurrent = src.id === sectionFillMenu.targetId}
+                {#if isCurrent}
+                  <div
+                    class="flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left opacity-55"
+                    role="menuitem"
+                    aria-current="true"
+                    aria-disabled="true"
+                    title="The section you right-clicked (shown for position)"
+                  >
+                    <span
+                      class="size-2.5 shrink-0 rounded-[2px]"
+                      style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
+                    ></span>
+                    <span class="truncate">{src.label}</span>
+                    <span class="text-muted-foreground ml-auto text-[10px] font-bold uppercase tracking-wide">current</span>
+                  </div>
+                {:else}
+                  <button
+                    type="button"
+                    class="hover:bg-muted flex w-full items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left"
+                    role="menuitem"
+                    onclick={() => chooseSectionFillSource(src.id)}
+                  >
+                    <span
+                      class="size-2.5 shrink-0 rounded-[2px]"
+                      style="background-color: {SECTION_FILL_RGBA[src.kind] ?? 'var(--muted)'}"
+                    ></span>
+                    <span class="truncate">{src.label}</span>
+                  </button>
+                {/if}
               {/each}
             {/if}
           </div>

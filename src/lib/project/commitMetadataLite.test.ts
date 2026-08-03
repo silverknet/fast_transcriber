@@ -40,3 +40,39 @@ describe('metadataLiteFromSongMap', () => {
     expect(metadataLiteFromSongMap(sm).title).toBe('Untitled song')
   })
 })
+
+describe('audioSubpath — the prefetcher needs to know WHERE the original lives', () => {
+  /**
+   * Without this field, a "ready" green dot in live mode still re-decoded the
+   * song's biggest file on switch: only stems were warm because only stems had
+   * a known path. Same resolution the editor uses: v2 `originalPath` first,
+   * else the conventional `audio/<fileName>`.
+   */
+  it('prefers the v2 disk path', () => {
+    const sm = createEmptySongMap()
+    sm.audio = {
+      ...(sm.audio ?? {}),
+      fileName: 'song.wav',
+      originalPath: 'audio/yt-import-song.wav',
+      trim: { startSec: 0, endSec: 10 },
+    } as SongMap['audio']
+    expect(metadataLiteFromSongMap(sm).audioSubpath).toBe('audio/yt-import-song.wav')
+  })
+
+  it('falls back to audio/<fileName> for v1 songs', () => {
+    const sm = createEmptySongMap()
+    sm.audio = {
+      ...(sm.audio ?? {}),
+      fileName: 'song.wav',
+      trim: { startSec: 0, endSec: 10 },
+    } as SongMap['audio']
+    delete (sm.audio as { originalPath?: string }).originalPath
+    expect(metadataLiteFromSongMap(sm).audioSubpath).toBe('audio/song.wav')
+  })
+
+  it('a stub song with no audio reports none — the prefetcher must skip, not guess', () => {
+    const sm = createEmptySongMap()
+    delete (sm as { audio?: unknown }).audio
+    expect(metadataLiteFromSongMap(sm).audioSubpath).toBeUndefined()
+  })
+})

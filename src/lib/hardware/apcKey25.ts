@@ -40,6 +40,29 @@ export function isLikelyApcKey25Mk2Name(name: string | null | undefined): boolea
   return APC_KEY_25_MK2_NAME_RE.test(name ?? '')
 }
 
+/**
+ * True ONLY for the APC Key 25's CONTROL port (pads / scene / transport / knobs).
+ *
+ * The mk2 exposes its 25-key piano keybed as a SEPARATE input port named
+ * "APC Key 25 mk2 Keys" — playing it must not drive live commands. Returns false
+ * for that keybed port and for any non-APC device; a bare "APC Key 25" (a
+ * single-port setup) still counts as control.
+ */
+export function isApcKey25ControlPortName(name: string | null | undefined): boolean {
+  const n = name ?? ''
+  return isLikelyApcKey25Mk2Name(n) && !/\bkeys\b/i.test(n)
+}
+
+/**
+ * True for the APC Key 25's piano-KEYBED port ("APC Key 25 mk2 Keys"). The
+ * inverse concern of {@link isApcKey25ControlPortName}: the in-app synth listens
+ * to THIS port (note on/off + velocity), never the control surface.
+ */
+export function isApcKey25KeysPortName(name: string | null | undefined): boolean {
+  const n = name ?? ''
+  return isLikelyApcKey25Mk2Name(n) && /\bkeys\b/i.test(n)
+}
+
 export function parseApcKey25Message(dataLike: ArrayLike<number>): ApcKey25Action | null {
   if (dataLike.length < 3) return null
   const status = dataLike[0]! & 0xff
@@ -62,18 +85,39 @@ export function parseApcKey25Message(dataLike: ArrayLike<number>): ApcKey25Actio
   const isNoteOn = kind === 0x90 && data2 > 0
   const isNoteOff = kind === 0x80 || (kind === 0x90 && data2 === 0)
   if (!isNoteOn && !isNoteOff) return null
+
+  // APC UI buttons are not velocity-sensitive: a physical press arrives at
+  // full/normal button velocity, while host -> device single-LED commands use
+  // velocity 1 (on) or 2 (blink). Some MIDI paths echo those outbound LED
+  // messages back to the input. Treating 90 5B 01 as a second physical Play
+  // press immediately pauses playback after it starts.
+  const uiButtonPressed = isNoteOn && data2 >= 0x40
   const pressed = isNoteOn
 
   if (data1 >= APC_TRACK_BUTTON_BASE && data1 < APC_TRACK_BUTTON_BASE + 8) {
-    return { type: 'track-button', index: data1 - APC_TRACK_BUTTON_BASE, pressed }
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'track-button', index: data1 - APC_TRACK_BUTTON_BASE, pressed: uiButtonPressed }
   }
   if (data1 >= APC_SCENE_LAUNCH_BASE && data1 < APC_SCENE_LAUNCH_BASE + 5) {
-    return { type: 'scene-launch', index: data1 - APC_SCENE_LAUNCH_BASE, pressed }
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'scene-launch', index: data1 - APC_SCENE_LAUNCH_BASE, pressed: uiButtonPressed }
   }
-  if (data1 === APC_STOP_ALL_CLIPS_NOTE) return { type: 'stop-all-clips', pressed }
-  if (data1 === APC_PLAY_NOTE) return { type: 'play', pressed }
-  if (data1 === APC_RECORD_NOTE) return { type: 'record', pressed }
-  if (data1 === APC_SHIFT_NOTE) return { type: 'shift', pressed }
+  if (data1 === APC_STOP_ALL_CLIPS_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'stop-all-clips', pressed: uiButtonPressed }
+  }
+  if (data1 === APC_PLAY_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'play', pressed: uiButtonPressed }
+  }
+  if (data1 === APC_RECORD_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'record', pressed: uiButtonPressed }
+  }
+  if (data1 === APC_SHIFT_NOTE) {
+    if (isNoteOn && !uiButtonPressed) return null
+    return { type: 'shift', pressed: uiButtonPressed }
+  }
   if (data1 >= 0x00 && data1 < APC_CLIP_PAD_COUNT) {
     return {
       type: 'clip-pad',

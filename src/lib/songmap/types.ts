@@ -5,6 +5,9 @@
 
 import { SONGMAP_FORMAT_VERSION } from './version'
 import type { AudioFingerprint } from '$lib/audio/audioFingerprint'
+import type { BassTone } from '$lib/audio/bassTone'
+import type { EffectBus } from './effectBusses'
+import type { ChannelEq } from '$lib/audio/channelEq'
 
 export type NoteName = 'C' | 'D' | 'E' | 'F' | 'G' | 'A' | 'B'
 
@@ -36,6 +39,16 @@ export type ChordSymbol = {
   alterations?: string[]
   bass?: NoteName
   bassAccidental?: Accidental
+  /**
+   * True = **N.C.** ("no chord"), a PLACED harmony event that renders as
+   * `N.C.` and stretches to the next chord exactly like any other chord —
+   * so placing it STOPS the previous chord's span. This is deliberately
+   * distinct from CLEARING a chord (removing the event so the previous
+   * chord stretches over the spot). When set, `root` is a valid placeholder
+   * (`'C'`) that satisfies validation but is never read — every consumer
+   * checks `noChord` first (see `NO_CHORD_SYMBOL` in `$lib/chords/noChord`).
+   */
+  noChord?: boolean
   /** Original symbol string for display / round-trip UI */
   displayRaw: string
 }
@@ -241,7 +254,14 @@ export type CueTrackExport = RenderedCueExport
 
 // ── Drum track (drum stem → detected hits → rendered BarBro kit) ─────────────
 
-export type DrumClass = 'kick' | 'snare' | 'hihat' | 'tom' | 'cymbal'
+/**
+ * `cymbal` is the crash (accents, section starts); `ride` is the sustained
+ * pulse cymbal. They're separate voices because a ride-driven groove and a
+ * crash are different jobs — the drum machine can move its pulse layer
+ * between `hihat` and `ride`. Stem detection only ever emits the first five;
+ * `ride` is currently programmed-only.
+ */
+export type DrumClass = 'kick' | 'snare' | 'hihat' | 'tom' | 'cymbal' | 'ride'
 
 export type DrumMidiEvent = {
   /** ORIGINAL audio time — same base as `Beat.timeSec` (stems are untrimmed). */
@@ -278,6 +298,108 @@ export type DrumMidi = {
    */
   style?: 'steady' | 'detected'
   /** Saved render of the drum track, when written into the project. */
+  renderExport?: RenderedCueExport
+}
+
+// ── Drum machine (programmed MIDI drum track — no audio source) ──────────────
+
+/** Pattern style ids; the library itself lives in `songmap/drumPatterns.ts`. */
+export type DrumStyleId = 'rock' | 'pop' | 'funk' | 'disco' | 'ballad' | 'halfTime'
+
+/**
+ * Per-section overrides, keyed by `Section.id`. Every field is optional and
+ * inherits the song-wide value when absent — Logic's per-region Drummer
+ * settings work the same way.
+ */
+/**
+ * Which voice carries the steady pulse. Patterns are authored on the hi-hat;
+ * `ride` moves that layer to the ride cymbal (the classic chorus/solo lift),
+ * and `none` strips it for a kick-and-snare-only groove.
+ */
+export type DrumPulseVoice = 'hihat' | 'ride' | 'none'
+
+/** Kit pieces switched off. Absent or true = the piece plays. */
+export type DrumVoiceToggles = Partial<Record<DrumClass, boolean>>
+
+export type DrumMachineSection = {
+  style?: DrumStyleId
+  /** 0..1, Simple ↔ Complex. */
+  complexity?: number
+  /** 0..1, Soft ↔ Loud. */
+  loudness?: number
+  /** 0..1, fill busyness leaving this section. 0 = no fill. */
+  fills?: number
+  pulse?: DrumPulseVoice
+  voices?: DrumVoiceToggles
+  muted?: boolean
+}
+
+/**
+ * A programmed drum track. Unlike `DrumMidi` there is no source stem, no
+ * analysis and no stored events — the part is DERIVED from these settings
+ * plus the timeline and sections by `generateDrumGroove`, so it stays correct
+ * when bars, beats or section boundaries are edited.
+ */
+export type DrumMachine = {
+  /** Off keeps the settings but silences the track. */
+  enabled: boolean
+  style: DrumStyleId
+  /** Song-wide complexity; absent = each section follows its KIND's default. */
+  complexity?: number
+  loudness?: number
+  fills?: number
+  /** Song-wide pulse voice; sections inherit unless they override. */
+  pulse?: DrumPulseVoice
+  /** Song-wide kit-piece switches; a section's own switches replace these. */
+  voices?: DrumVoiceToggles
+  crashOnSectionStart?: boolean
+  perSection?: Record<string, DrumMachineSection>
+  /** Drum kit id (see `$lib/audio/drumKits`); absent = default kit. */
+  kit?: string
+  /** Saved render of the track, when written into the project. */
+  renderExport?: RenderedCueExport
+}
+
+// ── Bass machine (programmed bass line — played from the chords) ─────────────
+
+/** Pattern style ids; the library lives in `songmap/bassPatterns.ts`. */
+export type BassStyleId = 'roots' | 'rootFifth' | 'octaves' | 'eighths' | 'walking' | 'pedal'
+
+export type BassMachineSection = {
+  style?: BassStyleId
+  /** 0..1, Simple ↔ Complex. */
+  complexity?: number
+  /** 0..1, Soft ↔ Loud. */
+  loudness?: number
+  /** Whole-octave transpose of the line, −2..+2. */
+  octave?: number
+  muted?: boolean
+}
+
+/**
+ * A programmed bass track. Like `DrumMachine` it stores only settings — the
+ * notes are DERIVED from these plus the chords, timeline and sections by
+ * `generateBassGroove`, so editing a chord immediately changes the bass.
+ * Independent of `bassMidi`: a song can carry a detected bass part and a
+ * programmed one at once.
+ */
+export type BassMachine = {
+  enabled: boolean
+  style: BassStyleId
+  /** Song-wide complexity; absent = each section follows its KIND's default. */
+  complexity?: number
+  loudness?: number
+  octave?: number
+  /**
+   * The VOICE. Absent = the chords view's bass sound (see
+   * `audio/bassTone.ts`). Stored as plain parameters, not a KeysSynth patch,
+   * because the track renders offline.
+   */
+  /** Id from `audio/bassSounds.ts` — a synth patch or a sampled instrument. */
+  sound?: string
+  tone?: BassTone
+  perSection?: Record<string, BassMachineSection>
+  /** Saved render of the track, when written into the project. */
   renderExport?: RenderedCueExport
 }
 
@@ -371,6 +493,19 @@ export type CueEvent = {
   stale?: boolean
 }
 
+/**
+ * A subset of levels overriding a performer's project-wide mix.
+ * Structurally identical to `PerformerMix` in `$lib/project/performerMix`, kept
+ * here so the SongMap schema does not import from the project layer.
+ */
+export type PerformerMixOverride = {
+  stems: Partial<Record<string, number>>
+  original?: number
+  click?: number
+  cue?: number
+  fallback?: number
+}
+
 export type CueTrack = {
   id: string
   name: string
@@ -381,6 +516,14 @@ export type CueTrack = {
    *  own output channel. */
   performerId?: string
   events: CueEvent[]
+  /**
+   * THIS PERFORMER'S MONITOR MIX, FOR THIS SONG ONLY.
+   *
+   * Absent means "follow my project default" — and keeps following it as the
+   * default changes, rather than taking a copy that silently stops tracking.
+   * Only the levels named here are overridden; see `performerMix.ts`.
+   */
+  mix?: PerformerMixOverride
   suppressedGeneratedKeys: string[]
   renderExport?: RenderedCueExport
   /**
@@ -558,12 +701,93 @@ export interface MixTrackState {
   volume: number
   muted?: boolean
   soloed?: boolean
+  /**
+   * Which live BUTTON this track is on — one of the 8 canonical slot names
+   * (`'drums'`, `'bass'`, …) or `'none'` to keep it off the buttons entirely.
+   * Several tracks may name the same slot, so one press moves them together
+   * (e.g. a percussion track linked to `'drums'`).
+   *
+   * Absent = decide from the track name, which is what every song did before
+   * this field existed. See `$lib/hardware/liveSlotLinks`.
+   */
+  liveSlot?: string
+  /**
+   * This channel's EQ — a four-band strip plus a high-pass, applied as an
+   * INSERT on this lane only (not a bus). Absent / flat = no filters are built
+   * at all. Playback processing; the audio file is never rewritten.
+   * See `$lib/audio/channelEq`.
+   */
+  eq?: ChannelEq
 }
 
 export interface MixState {
   tracks: MixTrackState[]
   /** Master gain 0..1.5. Defaults to 1 when absent. */
   master?: number
+}
+
+/** Producer identity used by the canonical Live routing configuration. */
+export type LiveProducerReference =
+  | { kind: 'original-audio' }
+  | { kind: 'stem-audio'; stemId: string }
+  | { kind: 'detected-drum-midi' }
+  | { kind: 'drum-machine-midi' }
+  | { kind: 'detected-bass-midi' }
+  | { kind: 'bass-machine-midi' }
+  | { kind: 'chord-machine-keys-midi' }
+  | { kind: 'chord-machine-arp-midi' }
+  | { kind: 'keybed-midi' }
+  | { kind: 'chord-jam-keys-midi' }
+  | { kind: 'chord-jam-bass-midi' }
+  | { kind: 'chord-jam-arp-midi' }
+  | { kind: 'preview-audio' }
+  | { kind: 'test-signal' }
+  | { kind: 'unknown'; producerType: string }
+
+export interface LiveMonitorSendIntent {
+  performerId: string
+  /** Linear send gain. Zero is an explicit silent send, not admission. */
+  gain: number
+}
+
+export interface SongLiveSourceIntent {
+  /** Stable musical source identity. Never derived from a label or filename. */
+  id: string
+  producer: LiveProducerReference
+  admission: 'included' | 'excluded'
+  required: boolean
+  /** Explicit owner in `mixerChannels`. */
+  mixerChannelId: string
+  main: boolean
+  monitorSends: LiveMonitorSendIntent[]
+}
+
+export interface SongLiveMixerChannel {
+  id: string
+  sourceId: string
+  /** Live processing is separate from local editor audition state. */
+  processing: {
+    gain: number
+    eq?: ChannelEq
+  }
+  /** Explicit source lane in the persisted project rig profile. */
+  rigSourceLaneId?: string
+  /** Required when multiple mixer channels intentionally share a rig lane. */
+  sumGroupId?: string
+}
+
+export interface SongLiveSumGroup {
+  id: string
+  rigSourceLaneId: string
+  mixerChannelIds: string[]
+}
+
+/** Shared, persisted Live intent. Runtime device state never lives here. */
+export interface SongLiveRouting {
+  version: 1
+  sources: SongLiveSourceIntent[]
+  mixerChannels: SongLiveMixerChannel[]
+  sumGroups: SongLiveSumGroup[]
 }
 
 /**
@@ -674,10 +898,18 @@ export type SongMapV3 = {
   projectFolder?: string
   /** Relative paths within the project folder to each stem audio file. */
   stemRefs?: StemRefs
+  /** Local-only stable stem identity -> relative path mapping for Live. */
+  liveStemRefs?: Record<string, string>
   /** Optional rendered click-only WAV aligned to trim + count-in prepend. */
   clickExport?: RenderedCueExport
   /** Optional saved mixer state for the in-browser DAW view. */
   mixState?: MixState
+  /**
+   * Canonical source admission and source-to-mixer-to-rig-lane mapping.
+   * Optional only at the TypeScript boundary for legacy/in-memory fixtures;
+   * parse and serialize always materialize the v7 field.
+   */
+  liveRouting?: SongLiveRouting
   /**
    * For cloud-linked songs: the server's claim about which audio file
    * belongs here, by content identity. Absent on standalone / local-only
@@ -693,15 +925,22 @@ export type SongMapV3 = {
   drumMidi?: DrumMidi
   /** Detected bass notes + BarBro's rendered bass-track settings. */
   bassMidi?: BassMidi
+  /** A programmed MIDI drum track. Independent of `drumMidi` — a song can
+   *  have a detected drum part AND a machine one, like tracks in a DAW. */
+  drumMachine?: DrumMachine
+  /** A programmed bass line, played from the chords. Independent of `bassMidi`. */
+  bassMachine?: BassMachine
+  /** User-created effect busses (aux sends) + which channels feed them. */
+  effectBusses?: EffectBus[]
 }
 
-/** Current persistent shape (formatVersion 4). Name kept from the v3 era to
+/** Current persistent shape (formatVersion 7). Name kept from the v3 era to
  * avoid churn; the `formatVersion` literal tracks `SONGMAP_FORMAT_VERSION`. */
 export type SongMapV4 = SongMapV3
 
-/** @deprecated Persistent runtime shape is v4; kept for older imports. */
+/** @deprecated Persistent runtime shape is v7; kept for older imports. */
 export type SongMapV1 = SongMapV3
-/** @deprecated Persistent runtime shape is v4; kept for older imports. */
+/** @deprecated Persistent runtime shape is v7; kept for older imports. */
 export type SongMapV2 = SongMapV3
 
 export type SongMap = SongMapV3

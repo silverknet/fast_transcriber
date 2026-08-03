@@ -21,7 +21,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, shell } from 'electron'
 import {
   beatsScriptPath,
   getNativePythonRoot,
@@ -82,6 +82,14 @@ import {
 } from './nativePython.mjs'
 import { createAutoStemsDaemon, isStemWavHealthy } from './autoStems.mjs'
 import {
+  isSidecarRoute,
+  loadOfflineUiHandler,
+  prepareOfflineEnv,
+  hasOfflineUiBundle,
+  offlineBuildState,
+  shouldAutoOpenOfflineUi,
+} from './offlineUi.mjs'
+import {
   RUBBERBAND_RENDER_TIMEOUT_MS,
   RUBBERBAND_TRANSPOSE_ALGO_VERSION,
   buildRubberBandArgs,
@@ -89,7 +97,16 @@ import {
   normalizeTransposeSemitones,
   transposeCacheSubpath,
 } from './transposeCache.mjs'
-import { createXAirClient } from './xairOsc.mjs'
+import { createXAirClient, discoverXAirConsoles } from './xairOsc.mjs'
+import { serveFileFromDisk } from './serveFile.mjs'
+import {
+  atomicWriteFile,
+  ensureAbsolutePath,
+  slugifyName,
+  validateAssetSubpath,
+  validateRelSongFolder,
+} from './projectPaths.mjs'
+import { createProjectAssetRoutes } from './projectAssetRoutes.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -98,6 +115,15 @@ let beaconServer = null
 
 /** Keep aligned with web client `BARBRO_DESKTOP_BEACON_PORT`. */
 const BARBRO_DESKTOP_BEACON_PORT = 47842
+
+/**
+ * The bundled web UI, when this build ships one (the OFFLINE BUILD).
+ *
+ * Null in the ordinary headless sidecar, which keeps behaving exactly as
+ * before. When present, anything that is not a sidecar route is handed to
+ * SvelteKit — so the app and the API share one origin and one port.
+ */
+let offlineUiHandler = null
 
 const LOG_PREFIX = '[barbro-desktop]'
 const logInfo = (...args) => console.info(LOG_PREFIX, ...args)
@@ -109,6 +135,8 @@ let xairClient = null
 let xairLastMessageAt = null
 let xairLastMessage = null
 let xairLastError = null
+/** What the desk said about itself on the last successful connect. */
+let xairInfo = null
 
 // Resilience net: this is a HEADLESS background sidecar. A crash takes down
 // the user's desktop client for every feature (analyze, stems, cloud FS), so
@@ -484,6 +512,9 @@ function publicXAirStatus() {
   return {
     kind: 'behringer-xair',
     ...status,
+    // The desk's own words. A green dot proves nothing; "XR18 · fw 1.21" proves
+    // something answered and that it was an X-Air console.
+    info: xairInfo,
     lastMessageAt: xairLastMessageAt,
     lastMessage: xairLastMessage,
     lastError: xairLastError,
@@ -526,6 +557,9 @@ function attachXAirEventLogging(client) {
 }
 
 function closeXAirClient() {
+  // Cleared unconditionally: a stale identity outliving the connection would let
+  // the page keep showing "XR18 · fw 1.21" after the desk was gone.
+  xairInfo = null
   if (!xairClient) return
   try {
     xairClient.close()
@@ -546,6 +580,32 @@ function sendHardwareError(res, cors, e, status = 400) {
     },
     cors,
   )
+}
+
+/**
+ * The hardware-control routes drive a LIVE console over the network, so — unlike
+ * the rest of the loopback sidecar (`Access-Control-Allow-Origin: *`) — they must
+ * NOT be reachable from any random page the user has open. Server-side origin
+ * gate (independent of CORS, which only governs response readability): allow
+ * same-origin/non-browser (no Origin), localhost dev, BarBro's Netlify prod, and
+ * anything in `BARBRO_HARDWARE_ORIGINS`. Everything else is refused BEFORE it can
+ * touch a fader. Deliberately permissive enough to never break the real rig.
+ */
+function isHardwareOriginAllowed(origin) {
+  if (!origin || typeof origin !== 'string') return true // curl / Electron / same-origin
+  try {
+    const u = new URL(origin)
+    const host = u.hostname
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
+    if (u.protocol === 'https:' && host.endsWith('.netlify.app')) return true // BarBro prod
+    const extra = String(process.env.BARBRO_HARDWARE_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    return extra.includes(origin)
+  } catch {
+    return false
+  }
 }
 
 /** `GET /native/hardware/status` — current sidecar hardware bridge state. */
@@ -586,10 +646,34 @@ async function handleXAirConnect(req, res, cors) {
     xairLastMessageAt = null
     xairLastMessage = null
     xairLastError = null
+    xairInfo = null
     await nextClient.open()
+    // PROVE IT. `open()` only binds a local UDP socket, which succeeds for any
+    // address that parses — so without this, a typo reported "Connected" and you
+    // found out at the venue when a fader did nothing. `identify()` waits for the
+    // desk's own `/xinfo` reply.
+    const info = await nextClient.identify()
+    if (!info) {
+      try {
+        nextClient.close()
+      } catch {
+        /* nothing to clean up */
+      }
+      xairInfo = null
+      logError(`xair: no /xinfo reply from ${host}:${nextClient.port}`)
+      return sendHardwareError(
+        res,
+        cors,
+        new Error(
+          `No reply from ${host}:${nextClient.port}. Check the IP, and that this Mac is on the desk's network — the USB cable carries audio only.`,
+        ),
+      )
+    }
     xairClient = nextClient
-    nextClient.requestInfo()
-    logInfo(`xair: requested /xinfo from ${host}:${nextClient.port}`)
+    xairInfo = info
+    logInfo(
+      `xair: identified ${info.model ?? 'desk'} "${info.name ?? '?'}" fw ${info.firmware ?? '?'} at ${host}:${nextClient.port}`,
+    )
     sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
   } catch (e) {
     try {
@@ -667,6 +751,175 @@ async function handleXAirBusSend(req, res, cors) {
   }
 }
 
+/** `POST /native/hardware/xair/channel-main-assign` — body `{ channel, on }`. The
+ *  FOH-safety control: `on:false` takes a channel OFF the main/LR (house) bus. */
+async function handleXAirChannelMainAssign(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object' || typeof body.on !== 'boolean') {
+      throw new Error('Expected JSON body `{ channel, on }`')
+    }
+    client.setChannelMainAssign(body.channel, body.on)
+    logInfo(`xair write: channel ${body.channel} main-assign ${body.on ? 'ON' : 'OFF (house-safe)'}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/bus-fader` — body `{ bus, value }`, clamped 0..1. */
+async function handleXAirBusFader(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const client = requireXAirClient()
+    if (!body || typeof body !== 'object') throw new Error('Expected JSON body `{ bus, value }`')
+    client.setBusFader(body.bus, body.value)
+    logInfo(`xair write: bus ${body.bus} master ${body.value}`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus() }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/** `POST /native/hardware/xair/refresh` — query the desk + return per-channel
+ *  state (lr/on/fader). Powers the "prove it" FOH-safety read-back. */
+/**
+ * `POST /native/hardware/xair/query` — body `{ addresses: string[], waitMs? }`.
+ *
+ * READ-ONLY. Sends each address with no arguments, which on OSC is a question,
+ * and returns whatever the desk said. Deliberately generic on the READ side:
+ * discovering what a desk actually reports is how BarBro avoids guessing at a
+ * firmware's vocabulary. The WRITE side stays narrow and typed — see below.
+ */
+async function handleXAirQuery(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const addresses = Array.isArray(body?.addresses) ? body.addresses : null
+    if (!addresses || addresses.length === 0) {
+      throw new Error('Expected JSON body `{ addresses: string[] }`')
+    }
+    if (addresses.length > 64) throw new Error('Too many addresses in one query')
+    const client = requireXAirClient()
+    const waitMs = Number.isFinite(body?.waitMs) ? Math.min(2000, Math.max(50, body.waitMs)) : 300
+    const replies = await client.queryPaths(addresses, { waitMs })
+    logInfo(`xair query: ${addresses.length} asked, ${Object.keys(replies).length} answered`)
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus(), replies }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/**
+ * `POST /native/hardware/xair/osc-int` — body `{ address, value }`.
+ *
+ * Writes ONE integer to ONE whitelisted address, then reads it back and returns
+ * before/after. The read-back is the point: X-AIR ignores addresses it does not
+ * have, silently, so "the command was sent" is not evidence that anything
+ * happened. That is how a whole afternoon went into a routing model the desk
+ * had never implemented.
+ *
+ * The whitelist is deliberately tiny. This server is reachable by any page in
+ * any browser on the machine, and a generic "write any OSC" endpoint would let
+ * a random website reconfigure a mixer. Only the two USB-input settings are
+ * allowed, and neither can make a sound on its own — they choose a SOURCE, not
+ * a level.
+ */
+const XAIR_WRITABLE_INT_ADDRESSES = [
+  /^\/ch\/(0[1-9]|1[0-6])\/preamp\/rtnsw$/, // socket (0) or USB (1)
+  /^\/ch\/(0[1-9]|1[0-6])\/config\/rtnsrc$/, // which USB channel, zero-based
+]
+
+async function handleXAirOscInt(req, res, cors) {
+  try {
+    const body = await readRequestJson(req)
+    const address = typeof body?.address === 'string' ? body.address.trim() : ''
+    if (!XAIR_WRITABLE_INT_ADDRESSES.some((re) => re.test(address))) {
+      throw new Error(`Address not writable through this endpoint: ${address || '(empty)'}`)
+    }
+    if (!Number.isInteger(body?.value) || body.value < 0 || body.value > 63) {
+      throw new Error('value must be an integer 0..63')
+    }
+    const client = requireXAirClient()
+
+    const before = await client.queryPaths([address], { waitMs: 250 })
+    client.send(address, [{ type: 'i', value: body.value }])
+    const after = await client.queryPaths([address], { waitMs: 350 })
+
+    logInfo(`xair write ${address} = ${body.value} (was ${JSON.stringify(before[address] ?? null)}, now ${JSON.stringify(after[address] ?? null)})`)
+    sendJson(
+      res,
+      200,
+      { ok: true, xair: publicXAirStatus(), address, before: before[address] ?? null, after: after[address] ?? null },
+      cors,
+    )
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/**
+ * `POST /native/hardware/xair/discover` — find every X-Air on the network.
+ *
+ * READ-ONLY and connectionless: it broadcasts `/xinfo`, which is a question.
+ * Nothing is connected to and nothing is changed.
+ *
+ * Exists because the desk has no screen. Typing an IP at load-in is how you end
+ * up connected to nothing, and a wrong address looks exactly like a desk that is
+ * switched off — UDP reports neither.
+ */
+async function handleXAirDiscover(req, res, cors) {
+  try {
+    await readRequestJson(req).catch(() => null)
+    const consoles = await discoverXAirConsoles({ waitMs: 1500 })
+    logInfo(`xair discover: ${consoles.length} console(s) — ${consoles.map((c) => `${c.ip} (${c.model ?? '?'})`).join(', ') || 'none'}`)
+    sendJson(res, 200, { ok: true, consoles }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+async function handleXAirRefresh(req, res, cors) {
+  try {
+    await readRequestJson(req).catch(() => null)
+    const client = requireXAirClient()
+    const state = await client.refreshChannelState()
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus(), channels: state.channels }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
+/**
+ * `POST /native/hardware/xair/meters` — what the desk is HEARING, right now.
+ *
+ * READ-ONLY, and the only evidence that BarBro's audio actually ARRIVED. A
+ * successful write proves nothing (X-Air ignores unknown addresses in silence),
+ * and a meter on our own output proves only what we sent. This is the desk's own
+ * report, which is why a monitor can be called working rather than assumed to be.
+ *
+ * The first call starts the subscription and there is nothing to return yet, so
+ * it waits briefly for the first frame rather than answering "no signal" for a
+ * rig that is fine. `ageMs` is returned with every reply: stale meters must be
+ * distinguishable from silence, because a false red costs nearly as much as a
+ * false green.
+ */
+async function handleXAirMeters(req, res, cors) {
+  try {
+    await readRequestJson(req).catch(() => null)
+    const client = requireXAirClient()
+    client.subscribeMeters()
+    let m = client.getMeters()
+    if (m.levels === null) {
+      await new Promise((r) => setTimeout(r, 400))
+      m = client.getMeters()
+    }
+    sendJson(res, 200, { ok: true, xair: publicXAirStatus(), ...m }, cors)
+  } catch (e) {
+    sendHardwareError(res, cors, e)
+  }
+}
+
 /**
  * Slice the audio chunk out of a `.smap` container straight to a WAV file.
  *
@@ -701,55 +954,9 @@ async function extractAudioFromSmap(smapPath, destPath) {
 
 /** Project manifest filename, must match `src/lib/project/types.ts` PROJECT_FILENAME. */
 const PROJECT_FILENAME = 'barbro.project.json'
-const PROJECT_SONGS_DIR = 'songs'
 const PROJECT_FILE_VERSION = 1
 const SONG_SMAP_FILENAME = 'song.smap'
 const SONG_ALS_FILENAME = 'song.als'
-
-/** Mirrors `safeExportBasename()` in src/lib/songmap/persist.ts. */
-function slugifyName(s) {
-  const t = String(s).trim() || 'project'
-  const out = t.replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').slice(0, 80)
-  return out || 'project'
-}
-
-/**
- * Validate `songs/<leaf>` style relative path. Throws on violation.
- * Mirrors `validateProjectFolderPath` in src/lib/project/types.ts.
- */
-function validateRelSongFolder(p, label = 'songFolder') {
-  if (typeof p !== 'string' || p.length === 0) {
-    throw new Error(`Invalid ${label}: must be a non-empty string`)
-  }
-  if (p.startsWith('/')) throw new Error(`Invalid ${label}: must not start with "/"`)
-  if (p.includes('\\')) throw new Error(`Invalid ${label}: must use forward slashes`)
-  if (p.endsWith('/')) throw new Error(`Invalid ${label}: must not end with "/"`)
-  if (p.includes('//')) throw new Error(`Invalid ${label}: must not contain "//"`)
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.' || seg === '..') {
-      throw new Error(`Invalid ${label}: must not contain "." or ".." segments`)
-    }
-  }
-  if (!p.startsWith(`${PROJECT_SONGS_DIR}/`)) {
-    throw new Error(`Invalid ${label}: must start with "${PROJECT_SONGS_DIR}/"`)
-  }
-  return p
-}
-
-/** Atomic file write: write a sibling temp file then rename over the target. */
-async function atomicWriteFile(targetPath, bytes) {
-  const dir = path.dirname(targetPath)
-  await mkdir(dir, { recursive: true })
-  const tmp = path.join(dir, `.${path.basename(targetPath)}.${randomUUID().slice(0, 8)}.tmp`)
-  await writeFile(tmp, bytes)
-  try {
-    const { rename } = await import('node:fs/promises')
-    await rename(tmp, targetPath)
-  } catch (e) {
-    await rm(tmp, { force: true }).catch(() => {})
-    throw e
-  }
-}
 
 /** Recursively sort object keys (mirrors web-side `sortKeysDeep`). */
 function sortKeysDeep(x) {
@@ -868,6 +1075,9 @@ function parseManifestObject(raw) {
   const cloud = parseManifestCloud(raw.cloud)
   const defaults = parseManifestDefaults(raw.defaults)
   const mastering = parseManifestMastering(raw.mastering)
+  const performers = parseManifestPerformers(raw.performers)
+  const performerMixes = parseManifestPerformerMixes(raw.performerMixes)
+  const liveRig = parseManifestLiveRig(raw.liveRig)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -879,7 +1089,142 @@ function parseManifestObject(raw) {
     ...(cloud ? { cloud } : {}),
     ...(defaults ? { defaults } : {}),
     ...(mastering ? { mastering } : {}),
+    ...(performers ? { performers } : {}),
+    ...(performerMixes ? { performerMixes } : {}),
+    ...(liveRig ? { liveRig } : {}),
   }
+}
+
+/**
+ * The band roster.
+ *
+ * ADDING A TOP-LEVEL FIELD TO `ProjectFile` IS NOT ENOUGH — it must be listed
+ * here too, or every manifest write through the sidecar silently deletes it.
+ * `performers` was added to the web app and never added here, so performers
+ * could be created, saved, and were gone the moment anything wrote the
+ * manifest. On desktop that is every save. It looked like the save button did
+ * nothing, ten times over.
+ *
+ * `desktop/electron/manifestRoundTrip.test.mjs` now fails if this list falls
+ * behind the type again.
+ */
+/**
+ * Per-performer monitor mixes. Same defensive rules as the web parser: a level
+ * that is not a finite number is DROPPED (it falls back to the default at
+ * resolve time), never coerced to 0 — a parser must not mute anyone's monitor.
+ * This object literal is a whitelist: a field missing here is deleted on every
+ * sidecar round-trip, which is exactly how `performers` was silently eaten.
+ */
+function parseManifestPerformerMixes(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const clamp = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : undefined)
+  const out = {}
+  for (const [performerId, rawMix] of Object.entries(raw)) {
+    if (!rawMix || typeof rawMix !== 'object') continue
+    const stems = {}
+    if (rawMix.stems && typeof rawMix.stems === 'object') {
+      for (const [name, v] of Object.entries(rawMix.stems)) {
+        const lv = clamp(v)
+        if (lv !== undefined) stems[name] = lv
+      }
+    }
+    const mix = { stems }
+    for (const key of ['original', 'click', 'cue', 'fallback']) {
+      const lv = clamp(rawMix[key])
+      if (lv !== undefined) mix[key] = lv
+    }
+    out[performerId] = mix
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseManifestPerformers(raw) {
+  if (!Array.isArray(raw)) return undefined
+  const out = []
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue
+    if (typeof r.id !== 'string' || !r.id) continue
+    if (typeof r.name !== 'string') continue
+    const p = { id: r.id, name: r.name }
+    if (typeof r.role === 'string' && r.role.trim()) p.role = r.role
+    if (typeof r.userId === 'string' && r.userId) p.userId = r.userId
+    // 1..6 — the XR18's six aux buses, one per in-ear pack.
+    if (typeof r.monitorBus === 'number' && r.monitorBus >= 1 && r.monitorBus <= 6) {
+      p.monitorBus = Math.round(r.monitorBus)
+    }
+    // Desk inputs (the band's patch plan) — mirrors src/lib/project/parse.ts
+    // parsePerformerInputs. 1 channel = mono, 2 = stereo pair; junk dropped.
+    if (Array.isArray(r.inputs)) {
+      const inputs = []
+      for (const i of r.inputs) {
+        if (!i || typeof i !== 'object') continue
+        if (typeof i.id !== 'string' || !i.id) continue
+        if (typeof i.label !== 'string') continue
+        if (!Array.isArray(i.channels)) continue
+        const channels = i.channels
+          .filter((c) => typeof c === 'number' && Number.isInteger(c) && c >= 1 && c <= 16)
+          .slice(0, 2)
+        if (channels.length < 1 || new Set(channels).size !== channels.length) continue
+        inputs.push({ id: i.id, label: i.label, channels })
+      }
+      if (inputs.length > 0) p.inputs = inputs
+    }
+    out.push(p)
+  }
+  return out.length > 0 ? out : undefined
+}
+
+/** The live rig: desk routes, per-performer monitor sends, bus masters. */
+function parseManifestLiveRig(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const out = {}
+
+  if (Array.isArray(raw.routes)) {
+    const routes = []
+    for (const r of raw.routes) {
+      if (!r || typeof r !== 'object' || typeof r.laneKey !== 'string' || !r.laneKey) continue
+      const channels = Array.isArray(r.channels)
+        ? [...new Set(r.channels.filter((n) => Number.isInteger(n) && n >= 1 && n <= 16))].sort(
+            (a, b) => a - b,
+          )
+        : []
+      const entry = { laneKey: r.laneKey, channels }
+      if (typeof r.followVolume === 'boolean') entry.followVolume = r.followVolume
+      if (typeof r.followMute === 'boolean') entry.followMute = r.followMute
+      routes.push(entry)
+    }
+    if (routes.length > 0) out.routes = routes
+  }
+
+  const level = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : null)
+
+  if (raw.monitorSends && typeof raw.monitorSends === 'object') {
+    const sends = {}
+    for (const [busKey, lanes] of Object.entries(raw.monitorSends)) {
+      const bus = Number(busKey)
+      if (!Number.isInteger(bus) || bus < 1 || bus > 6) continue
+      if (!lanes || typeof lanes !== 'object') continue
+      const perLane = {}
+      for (const [laneKey, v] of Object.entries(lanes)) {
+        const lv = level(v)
+        if (laneKey && lv !== null) perLane[laneKey] = lv
+      }
+      if (Object.keys(perLane).length > 0) sends[bus] = perLane
+    }
+    if (Object.keys(sends).length > 0) out.monitorSends = sends
+  }
+
+  if (raw.busMaster && typeof raw.busMaster === 'object') {
+    const masters = {}
+    for (const [busKey, v] of Object.entries(raw.busMaster)) {
+      const bus = Number(busKey)
+      const lv = level(v)
+      if (Number.isInteger(bus) && bus >= 1 && bus <= 6 && lv !== null) masters[bus] = lv
+    }
+    if (Object.keys(masters).length > 0) out.busMaster = masters
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /**
@@ -1041,6 +1386,13 @@ function extractSongMetadataLite(songProject) {
   const a = map.audio
   if (a && typeof a === 'object' && (typeof a.fileName === 'string' || typeof a.originalPath === 'string')) {
     out.hasAudio = true
+    // WHERE the original lives, so the live prefetcher can warm it. Same
+    // resolution the editor uses: v2 disk path first, else the conventional
+    // audio/<fileName> location.
+    const sub = typeof a.originalPath === 'string' && a.originalPath
+      ? a.originalPath
+      : (typeof a.fileName === 'string' && a.fileName ? `audio/${a.fileName}` : undefined)
+    if (sub) out.audioSubpath = sub
     if (typeof a.durationSec === 'number' && Number.isFinite(a.durationSec) && a.durationSec > 0) {
       out.audioDurationSec = a.durationSec
     }
@@ -1205,15 +1557,6 @@ function dedupeStemsByLowerCase(names) {
 
 function nowIso() {
   return new Date().toISOString()
-}
-
-function ensureAbsolutePath(p, label) {
-  if (typeof p !== 'string' || !p.trim()) {
-    throw new Error(`${label} is required`)
-  }
-  if (!path.isAbsolute(p)) {
-    throw new Error(`${label} must be an absolute path`)
-  }
 }
 
 /**
@@ -1387,26 +1730,8 @@ function handleProjectSongRead(req, res, cors, url) {
       sendJson(res, 404, { ok: false, error: `${SONG_SMAP_FILENAME} not found` }, cors)
       return
     }
-    let size = 0
-    try {
-      size = statSync(smapPath).size
-    } catch {
-      /* ignore */
-    }
-    res.writeHead(200, {
-      ...cors,
-      'Content-Type': 'application/octet-stream',
-      ...(size > 0 ? { 'Content-Length': String(size) } : {}),
-    })
-    const stream = createReadStream(smapPath)
-    stream.on('error', () => {
-      try {
-        res.end()
-      } catch {
-        /* ignore */
-      }
-    })
-    stream.pipe(res)
+    // Range-aware, fails cleanly on a mid-stream read error (see serveFile.mjs).
+    serveFileFromDisk(req, res, smapPath, { contentType: 'application/octet-stream', cors })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     sendJson(res, 400, { ok: false, error: msg }, cors)
@@ -1442,29 +1767,6 @@ async function handleProjectSongWrite(req, res, cors) {
     const msg = e instanceof Error ? e.message : String(e)
     sendJson(res, 400, { ok: false, error: msg }, cors)
   }
-}
-
-/**
- * `POST /native/project/song/asset/write` — body
- * `{ projectPath, songFolder, subpath, contentBase64 }`. Writes a single
- * file under the song folder (e.g. `cue/tracks/main/cue-track.wav`). `subpath` is
- * validated like `songFolder` — no `..`, no leading `/`, no `\\`.
- * Intermediate directories are created on demand.
- */
-function validateAssetSubpath(p, label = 'subpath') {
-  if (typeof p !== 'string' || p.length === 0) {
-    throw new Error(`Invalid ${label}: must be a non-empty string`)
-  }
-  if (p.startsWith('/')) throw new Error(`Invalid ${label}: must not start with "/"`)
-  if (p.includes('\\')) throw new Error(`Invalid ${label}: must use forward slashes`)
-  if (p.endsWith('/')) throw new Error(`Invalid ${label}: must not end with "/"`)
-  if (p.includes('//')) throw new Error(`Invalid ${label}: must not contain "//"`)
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.' || seg === '..') {
-      throw new Error(`Invalid ${label}: must not contain "." or ".." segments`)
-    }
-  }
-  return p
 }
 
 function safeYoutubeTitleFragment(title) {
@@ -1549,103 +1851,10 @@ function normalizeYoutubeVideoUrl(rawUrl) {
   return { ok: true, url: `https://www.youtube.com/watch?v=${videoId}`, videoId }
 }
 
-/**
- * `GET /native/project/song/asset/read?projectPath=...&songFolder=...&subpath=...`
- * — stream a single file from under the song folder. Path traversal blocked
- * via the same validator as the write endpoint.
- */
-function handleProjectSongAssetRead(req, res, cors, url) {
-  try {
-    const projectPath = url.searchParams.get('projectPath') ?? ''
-    const songFolder = url.searchParams.get('songFolder') ?? ''
-    const subpath = url.searchParams.get('subpath') ?? ''
-    ensureAbsolutePath(projectPath, 'projectPath')
-    validateRelSongFolder(songFolder)
-    validateAssetSubpath(subpath)
-    const filePath = path.join(projectPath, songFolder, subpath)
-    if (!existsSync(filePath)) {
-      sendJson(res, 404, { ok: false, error: 'File not found' }, cors)
-      return
-    }
-    let size = 0
-    try {
-      size = statSync(filePath).size
-    } catch {
-      /* ignore */
-    }
-    const isWav = subpath.toLowerCase().endsWith('.wav')
-    res.writeHead(200, {
-      ...cors,
-      'Content-Type': isWav ? 'audio/wav' : 'application/octet-stream',
-      ...(size > 0 ? { 'Content-Length': String(size) } : {}),
-    })
-    const stream = createReadStream(filePath)
-    stream.on('error', () => {
-      try {
-        res.end()
-      } catch {
-        /* ignore */
-      }
-    })
-    stream.pipe(res)
-  } catch (e) {
-    sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }, cors)
-  }
-}
-
-async function handleProjectSongAssetWrite(req, res, cors) {
-  try {
-    const body = await readRequestJson(req)
-    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
-    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
-    ensureAbsolutePath(projectPath, 'projectPath')
-    if (!existsSync(projectPath)) {
-      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
-    }
-    const songFolder = validateRelSongFolder(body.songFolder)
-    const subpath = validateAssetSubpath(body.subpath)
-    if (typeof body.contentBase64 !== 'string') {
-      return sendJson(res, 400, { ok: false, error: 'contentBase64 is required' }, cors)
-    }
-    const targetAbs = path.join(projectPath, songFolder, subpath)
-    const bytes = Buffer.from(body.contentBase64, 'base64')
-    await atomicWriteFile(targetAbs, bytes)
-    sendJson(res, 200, { ok: true }, cors)
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendJson(res, 400, { ok: false, error: msg }, cors)
-  }
-}
-
-/**
- * `POST /native/project/song/asset/remove` — body
- *   `{ projectPath, songFolder, subpath }`.
- *
- * Delete a file OR directory under a song folder (recursive, force). Used by
- * "Replace audio" to wipe stale derived artifacts (`stems/`, `cue/`, the old
- * audio file) so they don't get re-discovered for the new audio. No-op if the
- * target doesn't exist. Same `subpath` validation as asset-write — confined
- * to the song folder, no `..` traversal.
- */
-async function handleProjectSongAssetRemove(req, res, cors) {
-  try {
-    const body = await readRequestJson(req)
-    if (!body) return sendJson(res, 400, { ok: false, error: 'Body must be JSON' }, cors)
-    const projectPath = typeof body.projectPath === 'string' ? body.projectPath.trim() : ''
-    ensureAbsolutePath(projectPath, 'projectPath')
-    if (!existsSync(projectPath)) {
-      return sendJson(res, 404, { ok: false, error: `projectPath not found: ${projectPath}` }, cors)
-    }
-    const songFolder = validateRelSongFolder(body.songFolder)
-    const subpath = validateAssetSubpath(body.subpath)
-    const targetAbs = path.join(projectPath, songFolder, subpath)
-    await rm(targetAbs, { recursive: true, force: true })
-    sendJson(res, 200, { ok: true }, cors)
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendJson(res, 400, { ok: false, error: msg }, cors)
-  }
-}
+// The asset read/write/remove endpoints live in projectAssetRoutes.mjs so they
+// can be booted over a real HTTP server in tests (projectAssetRoutes.test.mjs).
+// HTTP plumbing is injected; path safety + atomic write come from projectPaths.
+const projectAssetRoutes = createProjectAssetRoutes({ sendJson, readRequestJson })
 
 /**
  * `POST /native/project/song/audio/relink` — open an OS file picker, copy
@@ -3793,6 +4002,14 @@ async function handleShiftAudio(req, res, cors) {
     await mkdir(path.dirname(dstPath), { recursive: true })
     const args = [srcPath, dstPath, String(offsetSec)]
     if (targetDurationSec != null && Number.isFinite(targetDurationSec)) args.push(String(targetDurationSec))
+    // speedRatio is POSITIONAL after targetDurationSec — pass an explicit
+    // "null" placeholder when the duration is absent so the ratio still lands
+    // in the right slot.
+    const speedRatio = Number(body?.speedRatio)
+    if (Number.isFinite(speedRatio) && Math.abs(speedRatio - 1) > 1e-6) {
+      if (args.length === 3) args.push('null')
+      args.push(String(speedRatio))
+    }
     const { code, signal, stdout, stderr } = await runPythonCapture(
       pythonSectionsExe(),
       script,
@@ -4307,7 +4524,15 @@ function checkPythonImports(name, exe, modules, script) {
       try { proc?.kill() } catch { /* ignore */ }
       resolve(result)
     }
-    const timer = setTimeout(() => finish({ name, ok: false, error: 'timeout (5s)' }), 5_000)
+    // 20s, not 5: a COLD import of numpy+scipy+madmom on a busy machine
+    // (autosaves running, audio playing) legitimately takes >5s, and the 5s
+    // verdict was indistinguishable from "modules missing" — it told a user
+    // mid-edit to REINSTALL over a disk-cache warmup. Checks run once a
+    // minute and in parallel, so the longer ceiling costs nothing.
+    const timer = setTimeout(
+      () => finish({ name, ok: false, timedOut: true, error: 'no answer in 20s — the computer may just be busy; press Check again' }),
+      20_000,
+    )
     proc.stderr?.on('data', (b) => {
       stderr += b.toString('utf-8')
     })
@@ -4362,7 +4587,12 @@ async function getHealthStatus() {
   // beats / sections being broken triggers the "deps broken" lock.
   const ok = checks.filter((c) => c.name !== 'piper-tts').every((c) => c.ok)
   const result = { ok, installing: false, checks }
-  healthCache = { result, expiresAt: now + HEALTH_CACHE_TTL_MS }
+  // A TIMEOUT verdict must not be pinned for a whole minute: it usually means
+  // "the machine was busy right then", and caching it kept the reinstall page
+  // up for 60s after the machine recovered. Real failures (import errors)
+  // cache normally; timeouts retry on the next poll.
+  const anyTimeout = checks.some((c) => c.timedOut === true)
+  healthCache = { result, expiresAt: now + (anyTimeout ? 5_000 : HEALTH_CACHE_TTL_MS) }
   return result
 }
 
@@ -5553,7 +5783,18 @@ async function runQueuedLyricsJob(job) {
   })
   job.child = child
   try {
-    child.stdin.write(JSON.stringify({ modelDir: getLyricsModelDir(), model: 'small' }))
+    child.stdin.write(
+      JSON.stringify({
+        modelDir: getLyricsModelDir(),
+        // Larger model by default — recognition (not matching) is the fit
+        // bottleneck; measured 54%→65% word-anchor over the library. Downloads
+        // on first use (transcribe.py streams progress). Callers may override.
+        model: job.options?.model || 'mobiuslabsgmbh/faster-whisper-large-v3-turbo',
+        // Language hint derived from the imported lyrics — avoids Whisper
+        // mis-detecting sung audio (e.g. Swedish → Norwegian). Omitted when unset.
+        language: job.options?.language,
+      }),
+    )
     child.stdin.end()
   } catch {
     /* child gone already — close handler settles the job */
@@ -5715,7 +5956,7 @@ async function handleTranscribeLyrics(req, res, cors) {
       inputPath: audioAbsPath,
       outDir: tempRoot,
       files: [],
-      options: { audioAbsPath },
+      options: { audioAbsPath, model: body.model, language: body.language },
       artifact: null,
       createdAt: Date.now(),
       startedAt: null,
@@ -6476,9 +6717,228 @@ async function handleDeleteStems(res, cors, jobId) {
   sendJson(res, 200, { ok: true }, cors)
 }
 
+/**
+ * Load the bundled web app, if this build has one.
+ *
+ * Best-effort by design: a failure here must leave a working sidecar rather
+ * than a dead app. The normal desktop build ships no bundle and takes the
+ * early return.
+ */
+/**
+ * Mount the bundled web app, ON DEMAND.
+ *
+ * Called when the user switches to offline mode — not at launch. Until then
+ * this process is the sidecar and nothing about the app is loaded, which keeps
+ * the two modes genuinely separate rather than merely differently rendered.
+ *
+ * Idempotent: switching back and forth reuses the mounted handler, so only the
+ * first switch pays the import.
+ */
+async function initOfflineUi() {
+  if (offlineUiHandler) return true
+  // Order matters: the environment is put into its offline shape BEFORE the
+  // SvelteKit handler is imported, because the handler reads `process.env` as
+  // it initialises. Preparing afterwards would leave a module that had already
+  // seen a configured cloud.
+  const info = prepareOfflineEnv()
+  const handler = await loadOfflineUiHandler()
+  if (!handler) return false
+  offlineUiHandler = handler
+  logInfo(
+    `Offline app mounted. No sign-in; cloud config ${info.removed.length ? `removed (${info.removed.join(', ')})` : 'absent'}.`,
+  )
+  if (info.cloudConfigured) {
+    // Should be unreachable — `prepareOfflineEnv` deletes these. If it ever
+    // fires, the build can present a sign-in it cannot complete.
+    logError('Offline app: cloud config survived into the environment. Sign-in may appear.')
+  }
+  return true
+}
+
+/** The window onto the locally-served app. Absent in plain sidecar mode. */
+let offlineWindow = null
+
+function openOfflineWindow() {
+  if (!offlineUiHandler || offlineWindow) return
+  offlineWindow = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    title: 'BarBro',
+    backgroundColor: '#ffffff',
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  })
+  offlineWindow.on('closed', () => {
+    offlineWindow = null
+    broadcastStatus()
+  })
+  void offlineWindow.loadURL(`http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}/`)
+}
+
+// ── The status window: which mode am I in, and the switch ──────────────────
+//
+// BarBro Desktop is a SIDECAR — the thing you download from barbro.app so the
+// website can analyse, split stems and reach your files. It is also, since the
+// offline work, able to serve the app to itself for a gig.
+//
+// Two modes in one process needs a face, or it is guesswork. Before this, the
+// sidecar had no window and no tray on macOS: the only way to know it was alive
+// was to load the website and see whether it complained. Then a second mode
+// appeared and a window started opening with nothing to explain which thing you
+// were looking at.
+//
+// So: one small window, always, naming the mode and offering the switch.
+
+/** True once the loopback server is actually accepting connections. */
+let beaconListening = false
+
+/**
+ * When a BROWSER last talked to us, as opposed to our own offline window.
+ *
+ * Used to warn before opening offline mode on a project a browser is already
+ * editing. The website polls `/ping` every 12 s, so a live tab keeps this fresh
+ * without any extra traffic; the window is set wider than that poll so a tab
+ * that is merely idle still counts as present.
+ */
+let lastForeignOriginAt = 0
+const FOREIGN_ORIGIN_WINDOW_MS = 30_000
+const OWN_ORIGINS = new Set([
+  `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`,
+  `http://localhost:${BARBRO_DESKTOP_BEACON_PORT}`,
+])
+
+function noteForeignOrigin(origin) {
+  if (!origin || OWN_ORIGINS.has(origin)) return
+  lastForeignOriginAt = Date.now()
+}
+
+function webActiveRecently() {
+  return lastForeignOriginAt > 0 && Date.now() - lastForeignOriginAt < FOREIGN_ORIGIN_WINDOW_MS
+}
+
+let statusWindow = null
+/** Surfaced in the status window rather than only in a terminal nobody reads. */
+let offlineError = null
+/** See `offlineBuildState` — cached because it walks `src/`. */
+let offlineBuildCache = { available: false, builtAt: null, unstamped: false, stale: false }
+
+function refreshOfflineBuildState() {
+  try {
+    offlineBuildCache = offlineBuildState()
+  } catch {
+    /* unreadable tree — leave the last known state rather than crash the app */
+  }
+  return offlineBuildCache
+}
+
+function statusState() {
+  return {
+    version: readDesktopVersion(),
+    port: BARBRO_DESKTOP_BEACON_PORT,
+    sidecarReady: beaconListening,
+    offlineAvailable: hasOfflineUiBundle(),
+    // Is the bundle we would serve actually current? Recomputed only when the
+    // status window opens and when Open is clicked — walking `src/` on the 5 s
+    // broadcast would be thousands of stats for a value that rarely changes.
+    build: offlineBuildCache,
+    offlineOpen: offlineWindow !== null,
+    // A browser has been talking to us in the last 30 s. Opening offline mode
+    // now would put two editors on one project folder.
+    webActive: webActiveRecently(),
+    offlineError,
+  }
+}
+
+function broadcastStatus() {
+  if (!statusWindow || statusWindow.isDestroyed()) return
+  try {
+    statusWindow.webContents.send('barbro:state', statusState())
+  } catch {
+    /* window went away mid-send — nothing to do */
+  }
+}
+
+function createStatusWindow() {
+  if (statusWindow && !statusWindow.isDestroyed()) {
+    statusWindow.show()
+    statusWindow.focus()
+    return
+  }
+  statusWindow = new BrowserWindow({
+    width: 420,
+    height: 340,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    title: 'BarBro Desktop',
+    // `titleBarStyle: hidden` + the CSS drag region gives a clean panel rather
+    // than a chrome-heavy window for six lines of text.
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    backgroundColor: '#fdfcf7',
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'statusPreload.cjs'),
+    },
+  })
+  refreshOfflineBuildState()
+  statusWindow.once('ready-to-show', () => statusWindow?.show())
+  // `webActive` decays with time rather than with an event, so nothing would
+  // ever clear the warning without a tick. Cheap: one small IPC message every
+  // 5 s, only while the window is actually open.
+  const poll = setInterval(broadcastStatus, 5000)
+  statusWindow.on('closed', () => clearInterval(poll))
+  statusWindow.on('closed', () => {
+    statusWindow = null
+  })
+  void statusWindow.loadFile(path.join(__dirname, 'status.html'))
+}
+
+ipcMain.handle('barbro:state', () => statusState())
+
+ipcMain.handle('barbro:open-offline', async () => {
+  offlineError = null
+  // Right before serving it is exactly when "is this bundle current?" matters.
+  refreshOfflineBuildState()
+  try {
+    const mounted = await initOfflineUi()
+    if (!mounted) {
+      offlineError = 'No offline app is bundled with this build.'
+    } else {
+      openOfflineWindow()
+    }
+  } catch (err) {
+    // Never let this take the sidecar down with it — someone may be mid-render
+    // on the website when they click.
+    offlineError = err?.message ?? String(err)
+    logError(`Offline app failed to open: ${offlineError}`)
+  }
+  broadcastStatus()
+  return statusState()
+})
+
+ipcMain.handle('barbro:close-offline', () => {
+  // Only the window closes. The handler stays mounted so re-opening is instant,
+  // and the sidecar is untouched throughout — someone could be working on the
+  // website in a browser right now.
+  offlineWindow?.close()
+  offlineWindow = null
+  broadcastStatus()
+  return statusState()
+})
+
 function startBeaconServer() {
   const version = readDesktopVersion()
   beaconServer = http.createServer((req, res) => {
+    // The other half of ONE BARBRO AT A TIME. The website standing down when the
+    // offline app opens protects the gig; this protects the other direction —
+    // opening the offline app on a project a browser is already editing.
+    //
+    // A same-origin GET sends no `Origin` header and a same-origin POST sends
+    // our own loopback origin, so anything else is a browser somewhere: the
+    // deployed site, or `localhost:5173` in development.
+    noteForeignOrigin(req.headers?.origin)
+
     const cors = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
@@ -6507,6 +6967,12 @@ function startBeaconServer() {
         // Semantic capability flags — the web gates UI on these, so a future
         // Windows suspend implementation flips one boolean, no web release.
         capabilities: { pauseResume: process.platform !== 'win32' },
+        // ONE BARBRO AT A TIME. The website stands down while the offline app is
+        // open, because both are editors writing the same `song.smap` from their
+        // own copy in memory and the loser's edits vanish with no dialog. This
+        // process is the only thing that knows both facts, so it arbitrates.
+        // See src/lib/client/editingLock.ts.
+        offlineAppOpen: offlineWindow !== null,
       })
       res.writeHead(200, {
         ...cors,
@@ -6662,6 +7128,14 @@ function startBeaconServer() {
       return
     }
 
+    // Live-console control is origin-gated (see isHardwareOriginAllowed) — a
+    // random page must never be able to move the desk's faders.
+    if (req.url?.startsWith('/native/hardware/') && !isHardwareOriginAllowed(req.headers.origin)) {
+      logWarn(`xair: refused hardware request from origin ${req.headers.origin}`)
+      sendJson(res, 403, { ok: false, error: 'Origin not allowed for hardware control' }, cors)
+      return
+    }
+
     if (req.method === 'GET' && req.url === '/native/hardware/status') {
       handleHardwareStatus(res, cors)
       return
@@ -6688,6 +7162,34 @@ function startBeaconServer() {
     }
     if (req.method === 'POST' && req.url === '/native/hardware/xair/bus-send') {
       void handleXAirBusSend(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/channel-main-assign') {
+      void handleXAirChannelMainAssign(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/bus-fader') {
+      void handleXAirBusFader(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/refresh') {
+      void handleXAirRefresh(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/query') {
+      void handleXAirQuery(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/meters') {
+      void handleXAirMeters(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/discover') {
+      void handleXAirDiscover(req, res, cors)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/hardware/xair/osc-int') {
+      void handleXAirOscInt(req, res, cors)
       return
     }
 
@@ -6744,16 +7246,16 @@ function startBeaconServer() {
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/asset/write') {
-      void handleProjectSongAssetWrite(req, res, cors)
+      void projectAssetRoutes.write(req, res, cors)
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/asset/remove') {
-      void handleProjectSongAssetRemove(req, res, cors)
+      void projectAssetRoutes.remove(req, res, cors)
       return
     }
     if (req.method === 'GET' && req.url?.startsWith('/native/project/song/asset/read')) {
       const u = new URL(req.url, `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
-      handleProjectSongAssetRead(req, res, cors, u)
+      projectAssetRoutes.read(req, res, cors, u)
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/audio/relink') {
@@ -6762,6 +7264,15 @@ function startBeaconServer() {
     }
     if (req.method === 'POST' && req.url === '/native/project/asset/write') {
       void handleProjectAssetWrite(req, res, cors)
+      return
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/native/project/asset/read')) {
+      const u = new URL(req.url, `http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
+      projectAssetRoutes.readRoot(req, res, cors, u)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/native/project/asset/remove') {
+      void projectAssetRoutes.removeRoot(req, res, cors)
       return
     }
     if (req.method === 'POST' && req.url === '/native/project/song/audio/scan') {
@@ -6855,23 +7366,50 @@ function startBeaconServer() {
       }
     }
 
+    // Not a sidecar route. In the gig build the bundled app answers it; the
+    // headless sidecar has nothing to serve and still 404s.
+    if (offlineUiHandler && !isSidecarRoute(req.url ?? '/')) {
+      // No `cors` here on purpose: this is same-origin, and SvelteKit sets its
+      // own headers.
+      offlineUiHandler(req, res, () => {
+        res.writeHead(404, cors)
+        res.end()
+      })
+      return
+    }
+
     res.writeHead(404, cors)
     res.end()
   })
 
-  beaconServer.on('error', (err) => {
-    logError(`Beacon server error: ${err.message}`)
-  })
-
+  // ONE error handler. There were two — one logging, one quitting — which meant
+  // a port conflict produced two different messages and it was never obvious
+  // which behaviour won.
   beaconServer.on('error', (e) => {
     if (e && e.code === 'EADDRINUSE') {
       logError(`Port ${BARBRO_DESKTOP_BEACON_PORT} is already in use — another copy is running. Quitting.`)
+      // SAY SO before disappearing. Quitting silently is how this turns into
+      // "I launched BarBro Desktop and a window flashed up saying the desktop
+      // app wasn't connected" — the window had loaded from the OTHER copy, and
+      // this one vanished without ever explaining itself.
+      try {
+        dialog.showErrorBox(
+          'BarBro Desktop is already running',
+          `Another copy is using port ${BARBRO_DESKTOP_BEACON_PORT}.\n\n` +
+            'Quit the other one first — check your Dock, and any terminal running ' +
+            '`npm run dev --prefix desktop`.',
+        )
+      } catch {
+        /* no display available — the log line above is the fallback */
+      }
       app.quit()
       return
     }
     logError(`Beacon server error: ${e instanceof Error ? e.message : String(e)}`)
   })
   beaconServer.listen(BARBRO_DESKTOP_BEACON_PORT, '127.0.0.1', () => {
+    beaconListening = true
+    broadcastStatus()
     logInfo(`Beacon listening on 127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}`)
     // Kick off auto-setup right after the loopback is reachable. It
     // hits its own setup endpoints via fetch, so the listener must be
@@ -6892,10 +7430,26 @@ function stopBeaconServer() {
   beaconServer = null
 }
 
-// Headless: never create a BrowserWindow. The dock icon (macOS) /
-// taskbar entry stays so the user can quit normally via Cmd+Q / right-click.
-// `window-all-closed` is intentionally NOT handled — there are no windows
-// to close, so it never fires; the process keeps running indefinitely.
+// ── Window lifecycle: closing a window must NEVER stop the sidecar ─────────
+//
+// Electron's default is to quit when the last window closes. That default is
+// actively dangerous here: somebody can be mid-session on barbro.app in their
+// browser, close the little status window because it is in the way, and the
+// analysis/stems/file endpoints the website depends on would vanish under them.
+// The website would then say "BarBro Desktop isn't running" with no clue why.
+//
+// So the app outlives its windows, and quitting is an explicit act: Cmd+Q or
+// the dock menu on macOS, the tray on Windows.
+app.on('window-all-closed', () => {
+  // Deliberately empty. Do not call app.quit().
+})
+
+// macOS: clicking the dock icon with no windows open brings the status window
+// back. Without this the window would be gone for good once closed, and there
+// would be no way to reach the offline-mode switch again.
+app.on('activate', () => {
+  createStatusWindow()
+})
 
 // ── Auto stem-separation daemon ─────────────────────────────────────────────
 //
@@ -7140,6 +7694,11 @@ function createTrayIfNeeded() {
       Menu.buildFromTemplate([
         { label: `BarBro Desktop v${version}`, enabled: false },
         { type: 'separator' },
+        // Windows has no dock to click, so the tray is the only way back to the
+        // status window — and therefore to the offline-mode switch — once it
+        // has been closed.
+        { label: 'Show BarBro Desktop', click: () => createStatusWindow() },
+        { type: 'separator' },
         { label: 'Quit BarBro Desktop', click: () => app.quit() },
       ]),
     )
@@ -7148,7 +7707,7 @@ function createTrayIfNeeded() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Existing installs: surface the bundled audio converter under its
   // canonical name (pure fs copy; no-op when absent or already done).
   void ensureManagedFfmpegBinary().catch(() => null)
@@ -7158,8 +7717,22 @@ app.whenReady().then(() => {
   const version = readDesktopVersion()
   logInfo(`BarBro desktop sidecar v${version} starting`)
   logInfo(`PID ${process.pid} · Node ${process.versions.node} · Electron ${process.versions.electron}`)
+
+  // ALWAYS start as the sidecar. That is what BarBro Desktop is: the thing you
+  // download from barbro.app so the website can analyse, split stems and reach
+  // your files. Offline mode is a switch in the status window, never a decision
+  // the app makes on your behalf.
   startBeaconServer()
-  logInfo(`Headless. Reachable at http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}/`)
+  logInfo(`Sidecar. Reachable at http://127.0.0.1:${BARBRO_DESKTOP_BEACON_PORT}/`)
+  createStatusWindow()
+
+  // The one exception, for developing offline mode: `npm run offline:desktop`
+  // sets BARBRO_OFFLINE_UI=1 so it goes straight in instead of needing a click.
+  if (shouldAutoOpenOfflineUi()) {
+    if (await initOfflineUi()) openOfflineWindow()
+    broadcastStatus()
+  }
+
   logInfo(`Endpoints:`)
   logInfo(`  GET    /ping`)
   logInfo(`  POST   /native/analyze-downbeats`)
@@ -7191,6 +7764,8 @@ app.whenReady().then(() => {
   logInfo(`  GET    /native/project/song/asset/read  (stream a single file under song folder)`)
   logInfo(`  POST   /native/project/song/audio/relink (OS file picker → copy into <song>/audio + SHA)`)
   logInfo(`  POST   /native/project/asset/write     (write file at project root, e.g. setlist .als)`)
+  logInfo(`  GET    /native/project/asset/read      (stream a file at project root, e.g. offline-session.json)`)
+  logInfo(`  POST   /native/project/asset/remove    (delete a file at project root)`)
   logInfo(`  POST   /native/project/wav-info/batch  (batched WAV header info — duration/sr/channels)`)
   logInfo(`  POST   /native/project/transcode-to-wav (ffmpeg: MP3→WAV for setlist export)`)
   logInfo(`  POST   /native/project/transcode-to-aac (ffmpeg: mix/stem WAV→AAC for cloud audio)`)
@@ -7203,6 +7778,9 @@ app.whenReady().then(() => {
   logInfo(`  POST   /native/hardware/xair/channel-fader`)
   logInfo(`  POST   /native/hardware/xair/channel-on`)
   logInfo(`  POST   /native/hardware/xair/bus-send`)
+  logInfo(`  POST   /native/hardware/xair/channel-main-assign (FOH-safety: off the house bus)`)
+  logInfo(`  POST   /native/hardware/xair/bus-fader`)
+  logInfo(`  POST   /native/hardware/xair/refresh   (read desk state back — proves FOH safety)`)
   logInfo(`  GET    /native/setup/youtube-import/status`)
   logInfo(`  POST   /native/setup/youtube-import (prepare YouTube audio import)`)
   logInfo(`  POST   /native/import/youtube       (queued YouTube audio import)`)

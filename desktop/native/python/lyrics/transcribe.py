@@ -35,7 +35,10 @@ import threading
 #     segments with randomness — on singing, many segments fail thresholds,
 #     making every run produce different words (user saw fit quality swing
 #     17→30→17 rows on identical audio). Determinism beats marginal quality.
-TRANSCRIBER_VERSION = 3
+# v4: default model = large-v3-turbo + a language hint passed from the caller
+#     (derived from the imported lyrics). Recognition — not word matching — was
+#     the fit bottleneck; measured 54%→65% word-anchor across the library.
+TRANSCRIBER_VERSION = 4
 
 DEFAULT_MODEL = "small"
 

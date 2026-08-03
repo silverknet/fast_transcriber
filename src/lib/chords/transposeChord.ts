@@ -4,6 +4,8 @@ import { formatChordSymbol } from './formatChordSymbol'
 
 /** Transpose chord by semitones (+ up, − down). Bass moves with chord (typical slash usage). */
 export function transposeChord(chord: ChordSymbol, semitones: number, preferFlats?: boolean): ChordSymbol {
+  // N.C. ("no chord") has no pitch to move — it never transposes.
+  if (chord.noChord) return chord
   const pf = preferFlats ?? false
   const rootPc = chordRootToPitchClass(chord.root, chord.accidental)
   const nr = pitchClassToRootAcc(transposePitchClass(rootPc, semitones), pf)

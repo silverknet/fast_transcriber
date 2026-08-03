@@ -23,7 +23,7 @@ import type { DrumClass } from '$lib/songmap/types'
 
 export const DRUM_KIT_SAMPLE_RATE = 44100
 
-export type DrumKitId = 'synth' | 'acoustic' | 'custom'
+export type DrumKitId = 'synth' | 'acoustic' | 'tr707' | 'custom'
 
 export type DrumKit = {
   id: DrumKitId
@@ -34,8 +34,19 @@ export type DrumKit = {
 export const DRUM_KITS: { id: DrumKitId; label: string }[] = [
   { id: 'synth', label: 'Electronic kit' },
   { id: 'acoustic', label: 'Acoustic kit' },
+  { id: 'tr707', label: 'Modern 707' },
   { id: 'custom', label: 'Your kit' },
 ]
+
+/**
+ * Kits whose voices are WAV one-shots under `static/drums/<dir>/`.
+ * Any voice whose file is missing falls back to the synthesized variant in
+ * `SAMPLE_KIT_FALLBACK`, so a partial (or absent) folder still plays.
+ */
+const SAMPLE_KIT_DIRS: Partial<Record<DrumKitId, string>> = {
+  acoustic: 'acoustic',
+  tr707: 'tr707',
+}
 
 // ── Deterministic noise ──────────────────────────────────────────────────────
 
@@ -189,6 +200,18 @@ function synthCymbal(): Float32Array {
   return normalizeTo(highpass(noiseBurst(1.2, 0.3, 505), 4000, 1), 0.95)
 }
 
+/**
+ * A ride is a defined PING sitting on a low wash — not a crash's
+ * undifferentiated spray. Short bright transient plus a moderate tail, so
+ * repeated 8ths stay articulate instead of smearing into each other.
+ */
+function synthRide(): Float32Array {
+  const out = new Float32Array(seconds(0.6))
+  mixInto(out, highpass(noiseBurst(0.6, 0.16, 1111), 5200, 1), 0.5)
+  mixInto(out, highpass(noiseBurst(0.05, 0.012, 1212), 8000, 2), 1)
+  return normalizeTo(out, 0.95)
+}
+
 // ── Acoustic-leaning synthesized fallback voices ─────────────────────────────
 // Warmer, rounder variants used for any acoustic-kit voice without a sample
 // on disk: lower click, longer decays, band-passed (not razor-HP) metals.
@@ -226,6 +249,13 @@ function acousticCymbalFallback(): Float32Array {
   return normalizeTo(lowpass(highpass(noiseBurst(1.6, 0.45, 1010), 3000, 1), 9500, 1), 0.95)
 }
 
+function acousticRideFallback(): Float32Array {
+  const out = new Float32Array(seconds(0.8))
+  mixInto(out, lowpass(highpass(noiseBurst(0.8, 0.24, 1313), 3800, 1), 11000, 1), 0.55)
+  mixInto(out, lowpass(highpass(noiseBurst(0.06, 0.016, 1414), 6500, 2), 12000, 1), 1)
+  return normalizeTo(out, 0.95)
+}
+
 /** Per-voice level trims applied after peak normalization (kit balance). */
 const VOICE_MIX_GAIN: Record<DrumClass, number> = {
   kick: 1.0,
@@ -233,6 +263,9 @@ const VOICE_MIX_GAIN: Record<DrumClass, number> = {
   hihat: 0.32,
   tom: 0.8,
   cymbal: 0.45,
+  // The ride carries the pulse, so it plays as often as a hat — but it rings
+  // far longer, so it needs to sit lower than the crash to avoid washing out.
+  ride: 0.34,
 }
 
 function withMixGains(voices: Record<DrumClass, Float32Array>): Record<DrumClass, Float32Array> {
@@ -253,6 +286,7 @@ export function buildSynthKit(): Record<DrumClass, Float32Array> {
     hihat: synthHihat(),
     tom: synthTom(),
     cymbal: synthCymbal(),
+    ride: synthRide(),
   })
 }
 
@@ -263,6 +297,7 @@ export function buildAcousticFallbackVoices(): Record<DrumClass, Float32Array> {
     hihat: acousticHihatFallback(),
     tom: acousticTomFallback(),
     cymbal: acousticCymbalFallback(),
+    ride: acousticRideFallback(),
   })
 }
 
@@ -277,7 +312,9 @@ const kitCache = new Map<DrumKitId, Promise<DrumKit>>()
 export async function decodeToKitVoice(bytes: ArrayBuffer): Promise<Float32Array | null> {
   if (typeof AudioContext === 'undefined') return null
   try {
-    const ac = new AudioContext({ sampleRate: DRUM_KIT_SAMPLE_RATE })
+    // OFFLINE: decoding only, so it must not consume one of the browser's
+    // ~6 hardware AudioContext slots. See `audioDevice.ts`.
+    const ac = new OfflineAudioContext(1, 1, DRUM_KIT_SAMPLE_RATE)
     try {
       const buf = await ac.decodeAudioData(bytes)
       // Downmix to mono + resample to the kit rate.
@@ -293,7 +330,7 @@ export async function decodeToKitVoice(bytes: ArrayBuffer): Promise<Float32Array
           : linearResampleMono(mono, buf.sampleRate, destLen, DRUM_KIT_SAMPLE_RATE)
       return normalizeTo(resampled, 0.95)
     } finally {
-      await ac.close().catch(() => {})
+      // Nothing to close: an OfflineAudioContext holds no hardware slot.
     }
   } catch {
     return null
@@ -320,15 +357,24 @@ export function buildCustomKit(samples: Partial<Record<DrumClass, Float32Array>>
   return { id: 'custom', label: 'Your kit', voices }
 }
 
-async function fetchAcousticSample(cls: DrumClass): Promise<Float32Array | null> {
+async function fetchKitSample(dir: string, cls: DrumClass): Promise<Float32Array | null> {
   if (typeof fetch !== 'function') return null
   try {
-    const res = await fetch(`/drums/acoustic/${cls}.wav`)
+    const res = await fetch(`/drums/${dir}/${cls}.wav`)
     if (!res.ok) return null
     return await decodeToKitVoice(await res.arrayBuffer())
   } catch {
     return null
   }
+}
+
+/**
+ * Per-kit fallback voices, used for any one-shot that isn't on disk. The 707
+ * is a drum machine, so it falls back to the synthesized electronic kit —
+ * the acoustic fallbacks would be wildly out of character.
+ */
+function sampleKitFallback(id: DrumKitId): Record<DrumClass, Float32Array> {
+  return id === 'tr707' ? buildSynthKit() : buildAcousticFallbackVoices()
 }
 
 export function loadDrumKit(id: DrumKitId): Promise<DrumKit> {
@@ -343,12 +389,14 @@ export function loadDrumKit(id: DrumKitId): Promise<DrumKit> {
       // path is the no-samples fallback so callers always get a playable kit.
       return buildCustomKit({})
     }
-    const fallback = buildAcousticFallbackVoices()
-    const voices = { ...fallback }
-    const classes: DrumClass[] = ['kick', 'snare', 'hihat', 'tom', 'cymbal']
+    const label = DRUM_KITS.find((k) => k.id === id)?.label ?? id
+    const dir = SAMPLE_KIT_DIRS[id]
+    const voices = { ...sampleKitFallback(id) }
+    if (!dir) return { id, label, voices }
+    const classes: DrumClass[] = ['kick', 'snare', 'hihat', 'tom', 'cymbal', 'ride']
     await Promise.all(
       classes.map(async (cls) => {
-        const sample = await fetchAcousticSample(cls)
+        const sample = await fetchKitSample(dir, cls)
         if (sample) {
           const scaled = new Float32Array(sample.length)
           const g = VOICE_MIX_GAIN[cls]
@@ -357,7 +405,7 @@ export function loadDrumKit(id: DrumKitId): Promise<DrumKit> {
         }
       }),
     )
-    return { id, label: 'Acoustic kit', voices }
+    return { id, label, voices }
   })()
   kitCache.set(id, p)
   return p

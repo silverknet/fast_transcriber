@@ -16,7 +16,7 @@ import type { DrumClass } from '$lib/songmap/types'
 
 export const PROJECT_DRUM_KIT_DIR = 'kits/drums'
 
-const CLASSES: DrumClass[] = ['kick', 'snare', 'hihat', 'tom', 'cymbal']
+const CLASSES: DrumClass[] = ['kick', 'snare', 'hihat', 'tom', 'cymbal', 'ride']
 
 export type ProjectDrumKit = {
   kit: DrumKit

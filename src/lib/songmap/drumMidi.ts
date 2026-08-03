@@ -30,7 +30,7 @@ export function hasFreshDrumMidi(sm: SongMap): boolean {
 
 /** Per-class hit counts for the honesty summary. */
 export function drumClassCounts(events: DrumMidiEvent[]): Record<DrumClass, number> {
-  const out: Record<DrumClass, number> = { kick: 0, snare: 0, hihat: 0, tom: 0, cymbal: 0 }
+  const out: Record<DrumClass, number> = { kick: 0, snare: 0, hihat: 0, tom: 0, cymbal: 0, ride: 0 }
   for (const e of events) out[e.cls]++
   return out
 }

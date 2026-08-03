@@ -72,6 +72,14 @@ export interface ProjectFile {
    * channel. Only ever written via `setProjectPerformers`.
    */
   performers?: Performer[]
+  /** Performer id → their project-wide monitor mix. Written ONLY via
+   *  `setProjectPerformerMixes`. */
+  performerMixes?: Record<string, ProjectPerformerMix>
+  /**
+   * Monitor wiring for the whole band — see {@link LiveRigConfig}. Shared,
+   * because who hears what is band setup rather than one laptop's preference.
+   */
+  liveRig?: LiveRigConfig
 }
 
 /** How firmly a stem's levels are evened out (compression preset intensity). */
@@ -103,6 +111,13 @@ export interface ProjectMastering {
   stems?: Partial<Record<AutoStemName, StemSound>>
   /** Gentle glue compression + a safety limiter on the summed master bus. */
   masterGlue?: boolean
+  /**
+   * How hard the KICK inside the drums stem hits, 0…1 (absent/0 = untouched).
+   * Drums-only: it works by compressing the sub-110 Hz band — which in a drums
+   * stem is the kick and nothing else — in parallel with the dry lane. Playback
+   * processing only; the stem file is never rewritten.
+   */
+  kickPunch?: number
 }
 
 /**
@@ -111,6 +126,22 @@ export interface ProjectMastering {
  * Custom cues can target a performer, and in live mode a performer maps to an
  * output channel (both built on top of this).
  */
+/**
+ * One thing a performer plugs into the desk: a mic, a DI, one keyboard's
+ * stereo pair. `channels` are XR18 analog inputs (1-16), in order — one
+ * channel is mono, two is a stereo pair (stereo is DERIVED from the length,
+ * never a flag that can drift). A keyboardist with three keyboards simply has
+ * three inputs. Validation and availability live in `performerInputs.ts`.
+ */
+export interface PerformerInput {
+  /** crypto.randomUUID() — stable identity. */
+  id: string
+  /** "Nord", "Sång", "Guitar DI" — what gets plugged, in the band's words. */
+  label: string
+  /** XR18 input channels this occupies. [3] mono; [1, 2] stereo. */
+  channels: number[]
+}
+
 export interface Performer {
   /** crypto.randomUUID() — stable identity. */
   id: string
@@ -120,6 +151,87 @@ export interface Performer {
   role?: string
   /** Optional link to a signed-in user's account id. Not compulsory. */
   userId?: string
+  /**
+   * XR18 aux bus (1-6) driving this performer's in-ear monitor mix. Which
+   * performer is on which bus is band setup, so it's shared/synced; the exact
+   * send levels live in the per-device live-rig config.
+   */
+  monitorBus?: number
+  /**
+   * What this performer plugs into the desk — the band's patch plan ("where
+   * do we plug in?"), project-wide like the rest of the roster.
+   */
+  inputs?: PerformerInput[]
+}
+
+/**
+ * THE LIVE RIG — how the band's monitors are wired, for the whole project.
+ *
+ * This is BAND SETUP, not a preference of one laptop: which desk channel carries
+ * the click, how much click the drummer wants versus the singer, which bus feeds
+ * whose pack. It survives on the project so a bandmate opening it sees the same
+ * rig, and so a replacement laptop at a venue is not a rebuild from memory.
+ *
+ * It used to live in `localStorage` under `barbro:liveHardware:xair:<projectId>`,
+ * which meant exactly one machine knew the monitor mixes. Set them up, open the
+ * project anywhere else, and they were gone with nothing to say so.
+ *
+ * DELIBERATELY NOT HERE: the desk's IP address and port. Those describe the room
+ * you are standing in, not the band, and they change between the rehearsal
+ * space and the venue. They stay per-device in `rigSetupStore.ts` — and
+ * "Find my desk" means they rarely need typing at all.
+ */
+export interface LiveRigConfig {
+  /**
+   * Canonical audio routing profile. Unlike the legacy `routes`, this retains
+   * the complete Web Audio -> USB -> XR18 mapping and private-lane policy.
+   */
+  routingProfile?: LiveRigRoutingProfile
+  /**
+   * Which XR18 channels carry each lane (`click`, `cue`, `original`, stems…).
+   *
+   * Monitor-only lanes are additionally forced OFF the main bus whenever this is
+   * applied — see `xairFohSafetyPlan`. A click in the house ends the show, so it
+   * is not left to whoever configured the desk last.
+   */
+  routes?: Array<{
+    laneKey: string
+    channels: number[]
+    followVolume?: boolean
+    followMute?: boolean
+  }>
+  /**
+   * bus (1–6) → laneKey → send level (linear, 1.0 = unity).
+   *
+   * One performer's in-ear blend. Keyed by BUS rather than by performer id so a
+   * performer can be renamed or replaced without the mix that a pair of ears is
+   * already happy with being lost.
+   */
+  monitorSends?: Record<number, Record<string, number>>
+  /** bus (1–6) → overall level for that performer's pack. */
+  busMaster?: Record<number, number>
+}
+
+export interface LiveRigSourceLane {
+  id: string
+  role: 'program' | 'click' | 'cue'
+  performerId?: string
+  /** Web Audio and USB channels are zero-based; XR18 strips are one-based. */
+  webAudioChannels: number[]
+  usbReturnChannels: number[]
+  xr18InputStrips: number[]
+  mainPolicy: 'on' | 'off'
+}
+
+export interface LiveRigRoutingProfile {
+  id: string
+  version: number
+  mainPhysicalOutputId: string
+  sourceLanes: LiveRigSourceLane[]
+  monitorOutputs: Array<{
+    monitorBus: number
+    physicalOutputId: string
+  }>
 }
 
 export interface ProjectDefaults {
@@ -127,6 +239,15 @@ export interface ProjectDefaults {
   countInBeats?: number
   /** Default pre-count-in spoken cue (Phase B). */
   preCountInCue?: PreCountInCueConfig
+  /**
+   * Which Demucs stems are AUDIBLE by default in live/playback mode. Applied to
+   * every song on load, overriding each song's saved mute/solo — so the whole
+   * set starts from one backing-track configuration (e.g. a gig with no live
+   * drummer/bassist → `['drums', 'bass']`). `undefined` = the legacy default
+   * (every stem audible except vocals). A song lacking the selected stems falls
+   * back to its full original mix so it is never silent on stage.
+   */
+  liveStems?: AutoStemName[]
 }
 
 /**
@@ -147,6 +268,21 @@ export interface PreCountInCueConfig {
 
 /** Demucs stem slots the auto-splitter can target. Matches `StemName` in desktopBridge. */
 export type AutoStemName = 'vocals' | 'drums' | 'bass' | 'other'
+
+/**
+ * One performer's default monitor balance for the whole set — linear gains,
+ * 0 = silent, 1 = unity. Canonical semantics and helpers live in
+ * `performerMix.ts`; the shape is declared here so the manifest schema does not
+ * import from the logic layer. Per-song overrides live on that performer's cue
+ * track in each `.smap` (`CueTrack.mix`), NOT here.
+ */
+export interface ProjectPerformerMix {
+  stems: Partial<Record<AutoStemName, number>>
+  original?: number
+  click?: number
+  cue?: number
+  fallback?: number
+}
 
 /** Quality preset slugs. Matches the `slug` field of `STEM_QUALITY_PRESETS`. */
 export type AutoStemQuality = 'best' | 'balanced' | 'preview'

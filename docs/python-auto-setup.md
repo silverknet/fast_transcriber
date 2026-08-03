@@ -175,8 +175,8 @@ forces them:
 - **Pause/resume of stem jobs is unavailable** (POSIX signals); the sidecar
   answers 501 and advertises `capabilities.pauseResume: false` on `/ping`, so
   the web hides those buttons.
-- The app is headless; on Windows a tray icon (with Quit) is the lifecycle
-  affordance.
+- On Windows the tray icon provides the service lifecycle; packaged builds may
+  also open the status/offline UI.
 
 ## Path A (bundling) — roadmap
 

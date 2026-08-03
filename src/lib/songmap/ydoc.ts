@@ -10,7 +10,7 @@
  * ## What is in the document
  *
  * Collaborative state ONLY. The local-only fields (`projectFolder`,
- * `stemRefs`, `sectionBorderHints`, `chordHints`, `mixState`,
+ * `stemRefs`, `liveStemRefs`, `sectionBorderHints`, `chordHints`, `mixState`,
  * `audio.originalPath`, every `renderExport.relativePath`) are stripped by
  * `toCollabSongMap()` before seeding — that function stays the single
  * authority on the local/shared boundary, so the knowledge is not duplicated

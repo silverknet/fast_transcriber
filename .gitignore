@@ -63,3 +63,10 @@ src/**/__screenshots__/
 
 # Agent worktrees (transient; created by parallel agent runs)
 .claude/worktrees/
+
+# Modern 707 kit — Apple Logic sample content, local only (see static/drums/tr707/README.md)
+static/drums/tr707/*.wav
+
+# Logic bass multisamples — Apple sample content, local only (see static/bass/README.md)
+static/bass/*/*.wav
+build-node/

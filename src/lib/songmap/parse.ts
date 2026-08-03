@@ -1,11 +1,14 @@
 import {
   SONGMAP_CHORD_LAYERS_FORMAT_VERSION,
   SONGMAP_CUE_TRACK_FORMAT_VERSION,
+  SONGMAP_DRAFTS_FORMAT_VERSION,
   SONGMAP_FORMAT_VERSION,
   SONGMAP_LEGACY_FORMAT_VERSION,
   SONGMAP_LYRICS_FORMAT_VERSION,
   SONGMAP_TRANSPOSE_FORMAT_VERSION,
 } from './version'
+import { isLiveSlotLink } from '$lib/hardware/liveSlotLinks'
+import { clampChannelEq } from '$lib/audio/channelEq'
 import type {
   AudioReference,
   Bar,
@@ -29,6 +32,11 @@ import type {
   SongMapAppInfo,
   SongMetadata,
   SongMapTimeline,
+  SongLiveRouting,
+  SongLiveSourceIntent,
+  SongLiveMixerChannel,
+  SongLiveSumGroup,
+  LiveProducerReference,
   SongTranspose,
 } from './types'
 import { defaultCueSettings } from './defaults'
@@ -41,6 +49,12 @@ import {
   type AudioFingerprint,
 } from '$lib/audio/audioFingerprint'
 import { validateSongMap } from './validate'
+import { normalizeBassTone } from '$lib/audio/bassTone'
+import { normalizeEffectBusses } from './effectBusses'
+import {
+  migrateLegacyLiveRouting,
+  migrateLegacyLiveStemRefs,
+} from './liveRouting'
 
 export class SongMapParseError extends Error {
   constructor(
@@ -59,6 +73,13 @@ export type ParseSongMapOptions = {
    * Forward-compatible clients can log stripped keys in dev.
    */
   stripUnknown?: boolean
+  /**
+   * When false, skip the `validateSongMap` gate and return the map even if it
+   * is structurally inconsistent. For DIAGNOSTICS ONLY (the project health
+   * check wants the FULL error list, not the first error as a thrown parse
+   * failure). Every load path keeps the default.
+   */
+  validate?: boolean
 }
 
 function expectObject(v: unknown, path: string): Record<string, unknown> {
@@ -405,11 +426,170 @@ function parseMixState(raw: unknown, path: string): import('./types').MixState |
     const entry: import('./types').MixTrackState = { key, volume }
     if (typeof t.muted === 'boolean' && t.muted) entry.muted = true
     if (typeof t.soloed === 'boolean' && t.soloed) entry.soloed = true
+    // Unknown slot names are dropped rather than rejected: a song written by a
+    // newer build must still open here, falling back to the name-based guess.
+    if (isLiveSlotLink(t.liveSlot)) entry.liveSlot = t.liveSlot
+    // Coerced, never thrown on: a malformed band flattens instead of taking
+    // the whole song down.
+    const eq = clampChannelEq(t.eq)
+    if (eq) entry.eq = eq
     tracks.push(entry)
   }
   const out: import('./types').MixState = { tracks }
   if (typeof o.master === 'number' && o.master >= 0) out.master = o.master
   return out
+}
+
+function parseLiveProducer(raw: unknown, path: string): LiveProducerReference {
+  const o = expectObject(raw, path)
+  const kind = reqString(o.kind, `${path}.kind`)
+  switch (kind) {
+    case 'original-audio':
+    case 'detected-drum-midi':
+    case 'drum-machine-midi':
+    case 'detected-bass-midi':
+    case 'bass-machine-midi':
+    case 'chord-machine-keys-midi':
+    case 'chord-machine-arp-midi':
+    case 'keybed-midi':
+    case 'chord-jam-keys-midi':
+    case 'chord-jam-bass-midi':
+    case 'chord-jam-arp-midi':
+    case 'preview-audio':
+    case 'test-signal':
+      return { kind }
+    case 'stem-audio':
+      return {
+        kind,
+        stemId: reqString(o.stemId, `${path}.stemId`),
+      }
+    case 'unknown':
+      return {
+        kind,
+        producerType: reqString(o.producerType, `${path}.producerType`),
+      }
+    default:
+      return { kind: 'unknown', producerType: kind }
+  }
+}
+
+function parseLiveRouting(raw: unknown, path: string): SongLiveRouting {
+  const o = expectObject(raw, path)
+  if (o.version !== 1) {
+    throw new SongMapParseError('Unsupported liveRouting version', `${path}.version`)
+  }
+  if (!Array.isArray(o.sources)) {
+    throw new SongMapParseError('liveRouting.sources must be an array', `${path}.sources`)
+  }
+  if (!Array.isArray(o.mixerChannels)) {
+    throw new SongMapParseError(
+      'liveRouting.mixerChannels must be an array',
+      `${path}.mixerChannels`,
+    )
+  }
+  if (!Array.isArray(o.sumGroups)) {
+    throw new SongMapParseError('liveRouting.sumGroups must be an array', `${path}.sumGroups`)
+  }
+
+  const sources: SongLiveSourceIntent[] = o.sources.map((rawSource, index) => {
+    const sourcePath = `${path}.sources[${index}]`
+    const source = expectObject(rawSource, sourcePath)
+    if (source.admission !== 'included' && source.admission !== 'excluded') {
+      throw new SongMapParseError(
+        'admission must be included or excluded',
+        `${sourcePath}.admission`,
+      )
+    }
+    if (typeof source.required !== 'boolean' || typeof source.main !== 'boolean') {
+      throw new SongMapParseError(
+        'required and main must be booleans',
+        sourcePath,
+      )
+    }
+    if (!Array.isArray(source.monitorSends)) {
+      throw new SongMapParseError(
+        'monitorSends must be an array',
+        `${sourcePath}.monitorSends`,
+      )
+    }
+    return {
+      id: reqString(source.id, `${sourcePath}.id`),
+      producer: parseLiveProducer(source.producer, `${sourcePath}.producer`),
+      admission: source.admission,
+      required: source.required,
+      mixerChannelId: reqString(
+        source.mixerChannelId,
+        `${sourcePath}.mixerChannelId`,
+      ),
+      main: source.main,
+      monitorSends: source.monitorSends.map((rawSend, sendIndex) => {
+        const sendPath = `${sourcePath}.monitorSends[${sendIndex}]`
+        const send = expectObject(rawSend, sendPath)
+        const gain = reqNum(send.gain, `${sendPath}.gain`)
+        if (gain < 0) {
+          throw new SongMapParseError('gain must be >= 0', `${sendPath}.gain`)
+        }
+        return {
+          performerId: reqString(send.performerId, `${sendPath}.performerId`),
+          gain,
+        }
+      }),
+    }
+  })
+
+  const mixerChannels: SongLiveMixerChannel[] = o.mixerChannels.map(
+    (rawChannel, index) => {
+      const channelPath = `${path}.mixerChannels[${index}]`
+      const channel = expectObject(rawChannel, channelPath)
+      const processing = expectObject(
+        channel.processing,
+        `${channelPath}.processing`,
+      )
+      const gain = reqNum(processing.gain, `${channelPath}.processing.gain`)
+      if (gain < 0) {
+        throw new SongMapParseError(
+          'gain must be >= 0',
+          `${channelPath}.processing.gain`,
+        )
+      }
+      const parsed: SongLiveMixerChannel = {
+        id: reqString(channel.id, `${channelPath}.id`),
+        sourceId: reqString(channel.sourceId, `${channelPath}.sourceId`),
+        processing: { gain },
+      }
+      if (processing.eq !== undefined) {
+        parsed.processing.eq = clampChannelEq(processing.eq)
+      }
+      const rigSourceLaneId = optString(channel.rigSourceLaneId)
+      if (rigSourceLaneId !== undefined) parsed.rigSourceLaneId = rigSourceLaneId
+      const sumGroupId = optString(channel.sumGroupId)
+      if (sumGroupId !== undefined) parsed.sumGroupId = sumGroupId
+      return parsed
+    },
+  )
+
+  const sumGroups: SongLiveSumGroup[] = o.sumGroups.map((rawGroup, index) => {
+    const groupPath = `${path}.sumGroups[${index}]`
+    const group = expectObject(rawGroup, groupPath)
+    if (!Array.isArray(group.mixerChannelIds)) {
+      throw new SongMapParseError(
+        'mixerChannelIds must be an array',
+        `${groupPath}.mixerChannelIds`,
+      )
+    }
+    return {
+      id: reqString(group.id, `${groupPath}.id`),
+      rigSourceLaneId: reqString(
+        group.rigSourceLaneId,
+        `${groupPath}.rigSourceLaneId`,
+      ),
+      mixerChannelIds: group.mixerChannelIds.map((value, memberIndex) =>
+        reqString(value, `${groupPath}.mixerChannelIds[${memberIndex}]`),
+      ),
+    }
+  })
+
+  return { version: 1, sources, mixerChannels, sumGroups }
 }
 
 function parseCueTrackExport(raw: unknown, path: string): RenderedCueExport | undefined {
@@ -505,6 +685,33 @@ function parseCueEvent(raw: unknown, path: string): CueEvent {
   return event
 }
 
+/**
+ * A performer's per-song monitor mix override.
+ *
+ * Defensive by design: an unreadable level is treated as NOT SET, so it falls
+ * back to the performer's project default rather than to silence. A parser that
+ * turns rubbish into zero would silently mute someone mid-set.
+ */
+function parsePerformerMixOverride(raw: unknown): CueTrack['mix'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const clamp = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : undefined
+  const stems: Record<string, number> = {}
+  if (o.stems && typeof o.stems === 'object') {
+    for (const [name, value] of Object.entries(o.stems as Record<string, unknown>)) {
+      const v = clamp(value)
+      if (v !== undefined) stems[name] = v
+    }
+  }
+  const out: NonNullable<CueTrack['mix']> = { stems }
+  for (const key of ['original', 'click', 'cue', 'fallback'] as const) {
+    const v = clamp(o[key])
+    if (v !== undefined) out[key] = v
+  }
+  return out
+}
+
 function parseCueTrack(raw: unknown, path: string): CueTrack {
   const o = expectObject(raw, path)
   return {
@@ -512,6 +719,23 @@ function parseCueTrack(raw: unknown, path: string): CueTrack {
     name: reqString(o.name, `${path}.name`),
     enabled: typeof o.enabled === 'boolean' ? o.enabled : true,
     voiceId: optString(o.voiceId),
+    // WHICH PERFORMER THIS TRACK BELONGS TO, and whether it speaks the count.
+    //
+    // Both were missing here. Serialization writes the whole track object, so
+    // they reached disk perfectly — and were then dropped on the very next
+    // load. A field that saves and does not load is worse than one that does
+    // neither: the app shows the link working right up until you reopen the
+    // project, and then it is simply gone with nothing to point at.
+    //
+    // This is the same defect that silently ate the performer roster through
+    // the sidecar's manifest whitelist. An explicit object literal is a
+    // whitelist whether or not it is called one, and every field added to the
+    // type has to be added here too. Locked by a round-trip test.
+    performerId: optString(o.performerId),
+    // The per-song monitor mix. Read here or it saves and never loads — the
+    // same trap that ate `performerId`. Locked by a round-trip test.
+    mix: parsePerformerMixOverride(o.mix),
+    spokenCountIn: typeof o.spokenCountIn === 'boolean' ? o.spokenCountIn : undefined,
     events: Array.isArray(o.events) ? o.events.map((event, i) => parseCueEvent(event, `${path}.events[${i}]`)) : [],
     suppressedGeneratedKeys: Array.isArray(o.suppressedGeneratedKeys)
       ? o.suppressedGeneratedKeys.flatMap((key) => (typeof key === 'string' ? [key] : []))
@@ -555,7 +779,7 @@ function migrateLegacyCueTracks(opts: {
   ]
 }
 
-const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal'])
+const DRUM_CLASSES = new Set(['kick', 'snare', 'hihat', 'tom', 'cymbal', 'ride'])
 const DRUM_QUANTIZE = new Set(['off', '1/8', '1/16', '1/16T'])
 
 /**
@@ -563,6 +787,145 @@ const DRUM_QUANTIZE = new Set(['off', '1/8', '1/16', '1/16T'])
  * failing the whole song; velocity clamps to [0,1]; unknown kit ids pass
  * through (forward compat with future kits).
  */
+const DRUM_STYLE_IDS = new Set(['rock', 'pop', 'funk', 'disco', 'ballad', 'halfTime'])
+
+/** 0..1 knob, or undefined when absent/garbage (caller falls back). */
+function optUnit(v: unknown): number | undefined {
+  const n = optNum(v)
+  return n === undefined ? undefined : Math.max(0, Math.min(1, n))
+}
+
+const DRUM_PULSE_VOICES = new Set(['hihat', 'ride', 'none'])
+
+/** Kit-piece switches. Only `false` is meaningful — absent means "plays". */
+function parseVoiceToggles(raw: unknown): import('./types').DrumVoiceToggles | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: import('./types').DrumVoiceToggles = {}
+  for (const [cls, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (DRUM_CLASSES.has(cls) && typeof v === 'boolean') {
+      out[cls as import('./types').DrumClass] = v
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseDrumMachineSection(raw: unknown): import('./types').DrumMachineSection | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: import('./types').DrumMachineSection = {}
+  if (typeof o.style === 'string' && DRUM_STYLE_IDS.has(o.style)) {
+    out.style = o.style as import('./types').DrumStyleId
+  }
+  if (typeof o.pulse === 'string' && DRUM_PULSE_VOICES.has(o.pulse)) {
+    out.pulse = o.pulse as import('./types').DrumPulseVoice
+  }
+  const secVoices = parseVoiceToggles(o.voices)
+  if (secVoices) out.voices = secVoices
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const fills = optUnit(o.fills)
+  if (fills !== undefined) out.fills = fills
+  if (typeof o.muted === 'boolean') out.muted = o.muted
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * The programmed drum track. Events are DERIVED, never stored, so this only
+ * carries settings — an unreadable style falls back to 'rock' rather than
+ * dropping the whole track and losing the user's arrangement.
+ */
+function parseDrumMachine(raw: unknown): import('./types').DrumMachine | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const style =
+    typeof o.style === 'string' && DRUM_STYLE_IDS.has(o.style)
+      ? (o.style as import('./types').DrumStyleId)
+      : 'rock'
+  const out: import('./types').DrumMachine = {
+    enabled: o.enabled !== false,
+    style,
+  }
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const fills = optUnit(o.fills)
+  if (fills !== undefined) out.fills = fills
+  if (typeof o.crashOnSectionStart === 'boolean') out.crashOnSectionStart = o.crashOnSectionStart
+  if (typeof o.pulse === 'string' && DRUM_PULSE_VOICES.has(o.pulse)) {
+    out.pulse = o.pulse as import('./types').DrumPulseVoice
+  }
+  const voices = parseVoiceToggles(o.voices)
+  if (voices) out.voices = voices
+  const kit = optString(o.kit)
+  if (kit !== undefined) out.kit = kit
+  if (o.perSection && typeof o.perSection === 'object' && !Array.isArray(o.perSection)) {
+    const perSection: Record<string, import('./types').DrumMachineSection> = {}
+    for (const [id, v] of Object.entries(o.perSection as Record<string, unknown>)) {
+      const parsed = parseDrumMachineSection(v)
+      if (parsed) perSection[id] = parsed
+    }
+    if (Object.keys(perSection).length > 0) out.perSection = perSection
+  }
+  return out
+}
+
+const BASS_STYLE_IDS = new Set(['roots', 'rootFifth', 'octaves', 'eighths', 'walking', 'pedal'])
+
+function parseBassMachineSection(raw: unknown): import('./types').BassMachineSection | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const out: import('./types').BassMachineSection = {}
+  if (typeof o.style === 'string' && BASS_STYLE_IDS.has(o.style)) {
+    out.style = o.style as import('./types').BassStyleId
+  }
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const octave = optNum(o.octave)
+  if (octave !== undefined) out.octave = Math.max(-2, Math.min(2, Math.round(octave)))
+  if (typeof o.muted === 'boolean') out.muted = o.muted
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** The programmed bass track — settings only; notes are derived from chords. */
+function parseBassMachine(raw: unknown): import('./types').BassMachine | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const style =
+    typeof o.style === 'string' && BASS_STYLE_IDS.has(o.style)
+      ? (o.style as import('./types').BassStyleId)
+      : 'roots'
+  const out: import('./types').BassMachine = { enabled: o.enabled !== false, style }
+  const complexity = optUnit(o.complexity)
+  if (complexity !== undefined) out.complexity = complexity
+  const loudness = optUnit(o.loudness)
+  if (loudness !== undefined) out.loudness = loudness
+  const octave = optNum(o.octave)
+  if (octave !== undefined) out.octave = Math.max(-2, Math.min(2, Math.round(octave)))
+  // The voice. Normalized on read, so a partial or hand-edited tone still
+  // renders instead of failing.
+  const sound = optString(o.sound)
+  if (sound !== undefined) out.sound = sound
+  if (o.tone && typeof o.tone === 'object' && !Array.isArray(o.tone)) {
+    out.tone = normalizeBassTone(o.tone as Partial<import('$lib/audio/bassTone').BassTone>)
+  }
+  if (o.perSection && typeof o.perSection === 'object' && !Array.isArray(o.perSection)) {
+    const perSection: Record<string, import('./types').BassMachineSection> = {}
+    for (const [id, v] of Object.entries(o.perSection as Record<string, unknown>)) {
+      const parsed = parseBassMachineSection(v)
+      if (parsed) perSection[id] = parsed
+    }
+    if (Object.keys(perSection).length > 0) out.perSection = perSection
+  }
+  return out
+}
+
 function parseDrumMidi(raw: unknown, path: string): import('./types').DrumMidi | undefined {
   if (raw === undefined || raw === null) return undefined
   if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
@@ -749,7 +1112,21 @@ function parseTimeline(raw: unknown, path: string): SongMapTimeline {
   const beatsRaw = o.beats
   const bars = Array.isArray(barsRaw) ? barsRaw.map((b, i) => parseBar(b, `${path}.bars[${i}]`)) : []
   const beats = Array.isArray(beatsRaw) ? beatsRaw.map((b, i) => parseBeat(b, `${path}.beats[${i}]`)) : []
-  return { bars, beats }
+  const timeline: SongMapTimeline = { bars, beats }
+  // The "Reset grid" baseline snapshot persists in the `.smap` (types.ts) — it
+  // MUST round-trip, or every save→load silently drops it (and the collab
+  // fingerprint then sees a phantom change and pushes the stripped map).
+  if (o.original !== undefined && o.original !== null) {
+    const orig = expectObject(o.original, `${path}.original`)
+    const origBars = Array.isArray(orig.bars)
+      ? orig.bars.map((b, i) => parseBar(b, `${path}.original.bars[${i}]`))
+      : []
+    const origBeats = Array.isArray(orig.beats)
+      ? orig.beats.map((b, i) => parseBeat(b, `${path}.original.beats[${i}]`))
+      : []
+    timeline.original = { bars: origBars, beats: origBeats }
+  }
+  return timeline
 }
 
 function extractSongMap(raw: Record<string, unknown>): SongMap {
@@ -759,6 +1136,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
   const isLegacyV3 = formatVersion === SONGMAP_TRANSPOSE_FORMAT_VERSION
   const isLegacyV4 = formatVersion === SONGMAP_LYRICS_FORMAT_VERSION
   const isLegacyV5 = formatVersion === SONGMAP_CHORD_LAYERS_FORMAT_VERSION
+  const isLegacyV6 = formatVersion === SONGMAP_DRAFTS_FORMAT_VERSION
   if (
     formatVersion !== SONGMAP_FORMAT_VERSION &&
     !isLegacyV1 &&
@@ -766,6 +1144,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     !isLegacyV3 &&
     !isLegacyV4 &&
     !isLegacyV5
+    && !isLegacyV6
   ) {
     // A file from a NEWER build (formatVersion above what we understand) gets a
     // user-facing "update BarBro" message wherever this error surfaces, instead
@@ -800,6 +1179,14 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     : []
   const harmony = parseHarmonyArray(raw.harmony, 'harmony')
   const lyrics = parseLyrics(raw.lyrics, 'lyrics')
+  const needsLiveRoutingMigration =
+    isLegacyV1 ||
+    isLegacyV2 ||
+    isLegacyV3 ||
+    isLegacyV4 ||
+    isLegacyV5 ||
+    isLegacyV6 ||
+    raw.liveRouting === undefined
 
   // v6 drafts. Anything older (v1–v5) is folded up from the v5 layer stacks —
   // for v1–v4 those are simply absent, which yields no stored drafts and just
@@ -822,7 +1209,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
           activeSectionLayerName: optString(raw.activeSectionLayerName),
         })
 
-  return {
+  const map: SongMap = {
     formatVersion: SONGMAP_FORMAT_VERSION,
     app: parseApp(raw.app, 'app'),
     metadata,
@@ -843,6 +1230,7 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
     startBeatId: optString(raw.startBeatId),
     projectFolder: typeof raw.projectFolder === 'string' ? raw.projectFolder : undefined,
     stemRefs: parseStemRefs(raw.stemRefs),
+    liveStemRefs: parseStemRefs(raw.liveStemRefs),
     clickExport: isLegacyV1
       ? raw.clickTrackExport !== undefined && raw.clickTrackExport !== null
         ? parseCueTrackExport(raw.clickTrackExport, 'clickTrackExport')
@@ -851,21 +1239,33 @@ function extractSongMap(raw: Record<string, unknown>): SongMap {
         ? parseCueTrackExport(raw.clickExport, 'clickExport')
         : undefined,
     mixState: parseMixState(raw.mixState, 'mixState'),
+    liveRouting:
+      needsLiveRoutingMigration
+        ? { version: 1, sources: [], mixerChannels: [], sumGroups: [] }
+        : parseLiveRouting(raw.liveRouting, 'liveRouting'),
     expectedAudio: parseExpectedAudio(raw.expectedAudio, 'expectedAudio'),
     chordHints:
       raw.chordHints !== undefined && raw.chordHints !== null
         ? parseChordHints(raw.chordHints, 'chordHints')
         : undefined,
     drumMidi: parseDrumMidi(raw.drumMidi, 'drumMidi'),
+    drumMachine: parseDrumMachine(raw.drumMachine),
+    bassMachine: parseBassMachine(raw.bassMachine),
+    effectBusses: normalizeEffectBusses(raw.effectBusses),
     bassMidi: parseBassMidi(raw.bassMidi, 'bassMidi'),
   }
+  if (needsLiveRoutingMigration) {
+    map.liveRouting = migrateLegacyLiveRouting(map)
+    map.liveStemRefs = migrateLegacyLiveStemRefs(map)
+  }
+  return map
 }
 
 /**
  * Parse JSON string into `SongMap`. Unknown keys are ignored when `stripUnknown` is true (default).
  */
 export function parseSongMap(json: string, options: ParseSongMapOptions = {}): SongMap {
-  const { stripUnknown = true } = options
+  const { stripUnknown = true, validate = true } = options
   let parsed: unknown
   try {
     parsed = JSON.parse(json)
@@ -877,9 +1277,11 @@ export function parseSongMap(json: string, options: ParseSongMapOptions = {}): S
     throw new SongMapParseError('Unknown top-level keys present (stripUnknown is false)', '')
   }
   const map = extractSongMap(root)
-  const v = validateSongMap(map)
-  if (!v.ok) {
-    throw new SongMapParseError(v.errors[0] ?? 'Validation failed')
+  if (validate) {
+    const v = validateSongMap(map)
+    if (!v.ok) {
+      throw new SongMapParseError(v.errors[0] ?? 'Validation failed')
+    }
   }
   return map
 }
@@ -909,13 +1311,18 @@ const KNOWN_TOP_KEYS = new Set([
   'startBeatId',
   'projectFolder',
   'stemRefs',
+  'liveStemRefs',
   'clickExport',
   'cueTrackExport',
   'clickTrackExport',
   'mixState',
+  'liveRouting',
   'expectedAudio',
   'sectionBorderHints',
   'chordHints',
   'drumMidi',
   'bassMidi',
+  'drumMachine',
+  'bassMachine',
+  'effectBusses',
 ])

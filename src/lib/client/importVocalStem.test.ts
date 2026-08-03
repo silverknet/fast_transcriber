@@ -63,3 +63,55 @@ describe('classifyAlignment', () => {
     expect(v.reasons.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+describe('speed-shifted uploads — the "(Kom så ska vi) Leva livet" case', () => {
+  /**
+   * Real numbers, measured from the actual files: a karaoke cut of the song in
+   * the project, and a with-vocals copy from a video site playing 0.769% fast.
+   * The old waveform-only aligner reported 12% confidence, a 717 ms drift and
+   * "only covers 76%" — three scary numbers about a file that is genuinely the
+   * same recording. The chord-level stage measures the speed instead.
+   */
+  const LEVA: AudioAlignment = {
+    offsetSec: 0,
+    speedRatio: 1.00769231,
+    method: 'harmonic',
+    confidence: 1,
+    sameRecording: true,
+    driftSec: 0.093, // one chroma frame — the measurement floor, not an error
+    durationRefSec: 212.375,
+    durationTargetSec: 213.093,
+    sampleRate: 22050,
+    perWindow: [],
+  }
+
+  it('accepts it — no warning dialog for a correct match', () => {
+    const v = classifyAlignment(LEVA, 212.375)
+    expect(v.reasons).toEqual([])
+    expect(v.ok).toBe(true)
+  })
+
+  it('coverage is judged AFTER the speed correction, not on the raw duration', () => {
+    // Judged raw this once said "only covers 76% of the song".
+    const v = classifyAlignment(LEVA, 212.375)
+    expect(v.reasons.some((r) => /covers/.test(r))).toBe(false)
+  })
+
+  it('a chord-level match is still rejected when the leftover drift is real', () => {
+    // Beyond the chroma measurement floor ⇒ genuinely a different performance.
+    const v = classifyAlignment({ ...LEVA, driftSec: 0.9 }, 212.375)
+    expect(v.ok).toBe(false)
+    expect(v.reasons.some((r) => /drifts/.test(r))).toBe(true)
+  })
+
+  it('the WAVEFORM path keeps its strict 40 ms drift limit', () => {
+    // A same-master pair must still align to the sample; the looser limit is
+    // only licensed by the chord method's coarser resolution.
+    const v = classifyAlignment(
+      { ...LEVA, method: 'waveform', speedRatio: 1, driftSec: 0.093 },
+      212.375,
+    )
+    expect(v.ok).toBe(false)
+    expect(v.reasons.some((r) => /drifts/.test(r))).toBe(true)
+  })
+})

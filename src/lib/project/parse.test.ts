@@ -73,3 +73,124 @@ describe('parseProjectJson — autoStems', () => {
     expect(reparsed.autoStems).toEqual(project.autoStems)
   })
 })
+
+describe('parseProjectJson — mastering kickPunch', () => {
+  const withMastering = (extra: Record<string, unknown>) =>
+    parseProjectJson(manifest({ mastering: { enabled: true, ...extra } })).mastering
+
+  it('is undefined when absent (existing projects are untouched)', () => {
+    expect(withMastering({})?.kickPunch).toBeUndefined()
+  })
+
+  it('keeps a valid amount', () => {
+    expect(withMastering({ kickPunch: 0.4 })?.kickPunch).toBe(0.4)
+  })
+
+  it('clamps out-of-range amounts to 0…1', () => {
+    expect(withMastering({ kickPunch: 7 })?.kickPunch).toBe(1)
+    expect(withMastering({ kickPunch: -3 })?.kickPunch).toBe(0)
+  })
+
+  it('ignores junk rather than corrupting the config', () => {
+    expect(withMastering({ kickPunch: 'loud' })?.kickPunch).toBeUndefined()
+    expect(withMastering({ kickPunch: NaN })?.kickPunch).toBeUndefined()
+  })
+
+  it('survives a serialize → parse round-trip', () => {
+    const project: ProjectFile = {
+      formatVersion: 1,
+      id: 'proj-1',
+      name: 'My Set',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      songs: [],
+      mastering: { enabled: true, kickPunch: 0.45, stems: { drums: { intensity: 'light' } } },
+    }
+    const reparsed = parseProjectJson(serializeProject(project))
+    expect(reparsed.mastering?.kickPunch).toBe(0.45)
+  })
+})
+
+describe('parseProjectJson — canonical Live rig profile', () => {
+  it('round-trips explicit Web, USB, XR18, Main, and monitor mappings', () => {
+    const routingProfile = {
+      id: 'xr18-profile-a',
+      version: 1,
+      mainPhysicalOutputId: 'xr18-main-lr',
+      sourceLanes: [
+        {
+          id: 'lane:bass',
+          role: 'program' as const,
+          webAudioChannels: [0],
+          usbReturnChannels: [0],
+          xr18InputStrips: [1],
+          mainPolicy: 'on' as const,
+        },
+      ],
+      monitorOutputs: [
+        { monitorBus: 1, physicalOutputId: 'xr18-aux-1' },
+      ],
+    }
+    const project = parseProjectJson(manifest({ liveRig: { routingProfile } }))
+
+    expect(project.liveRig?.routingProfile).toEqual(routingProfile)
+    expect(
+      parseProjectJson(serializeProject(project)).liveRig?.routingProfile,
+    ).toEqual(routingProfile)
+  })
+})
+
+describe('performers round-trip — the field-by-field whitelist is guarded here', () => {
+  /**
+   * The whitelist class in its natural habitat: `parsePerformers` reads each
+   * field BY NAME, so a field added to the type but not the parser is created,
+   * saved, and gone on the next load. The sidecar's copy has had this guard
+   * since the day it ate the roster; the web copy went without one until the
+   * project-health work exposed the gap. `FULL_PERFORMER` must carry EVERY
+   * field of `Performer` — the keys-walk fails when the type grows past it.
+   */
+  const FULL_PERFORMER = {
+    id: 'p1',
+    name: 'Martin',
+    role: 'Keys',
+    userId: 'user-123',
+    monitorBus: 1,
+    inputs: [
+      { id: 'i1', label: 'Piano', channels: [1, 2] },
+      { id: 'i2', label: 'Moog', channels: [5] },
+    ],
+  }
+
+  it('every field of a full performer survives parse → serialize → parse', () => {
+    const once = parseProjectJson(manifest({ performers: [FULL_PERFORMER] }))
+    const twice = parseProjectJson(serializeProject(once))
+    expect(twice.performers?.[0]).toEqual(FULL_PERFORMER)
+    // The walk that catches the NEXT field: nothing in the fixture may vanish.
+    for (const key of Object.keys(FULL_PERFORMER)) {
+      expect(
+        (twice.performers?.[0] as unknown as Record<string, unknown>)[key],
+        `Performer.${key} was eaten by a parser whitelist`,
+      ).toEqual((FULL_PERFORMER as Record<string, unknown>)[key])
+    }
+  })
+
+  it('junk inputs are dropped; valid ones survive alongside', () => {
+    const project = parseProjectJson(
+      manifest({
+        performers: [
+          {
+            id: 'p1',
+            name: 'M',
+            inputs: [
+              { id: 'ok', label: 'Sång', channels: [3] },
+              { id: 'bad', label: 'off desk', channels: [17] },
+              { id: 'bad2', label: 'dup', channels: [4, 4] },
+              { label: 'no id', channels: [5] },
+            ],
+          },
+        ],
+      }),
+    )
+    expect(project.performers?.[0]?.inputs).toEqual([{ id: 'ok', label: 'Sång', channels: [3] }])
+  })
+})

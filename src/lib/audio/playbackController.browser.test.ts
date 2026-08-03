@@ -196,7 +196,11 @@ function spyOnScheduledStarts(): { clickStarts: number[]; songStarts: number[] }
     const node = origSrc.call(this)
     const start = node.start.bind(node)
     node.start = (when?: number, offset?: number, duration?: number) => {
-      songStarts.push(when ?? this.currentTime)
+      // Hybrid clicks layer a reusable 120 ms noise buffer under their tonal
+      // oscillator. Only long buffers are the actual song source here.
+      if (!node.buffer || node.buffer.duration > 0.2) {
+        songStarts.push(when ?? this.currentTime)
+      }
       start(when, offset, duration)
     }
     return node

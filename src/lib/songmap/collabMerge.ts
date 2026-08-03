@@ -405,6 +405,26 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const bmCloud = cloud.bassMidi ? { ...cloud.bassMidi, renderExport: undefined } : undefined
   const bmC = classifyScalar(bmLocal, bmCloud, 'bassMidi', 'Bass track')
   if (bmC) conflicts.push(bmC)
+  // Drum machine: settings only (events are derived), so whole-field LWW is
+  // right — same renderExport-stripped comparison as the tracks above.
+  const machLocal = local.drumMachine
+    ? { ...local.drumMachine, renderExport: undefined }
+    : undefined
+  const machCloud = cloud.drumMachine
+    ? { ...cloud.drumMachine, renderExport: undefined }
+    : undefined
+  const machC = classifyScalar(machLocal, machCloud, 'drumMachine', 'Drum machine')
+  if (machC) conflicts.push(machC)
+  const bMachLocal = local.bassMachine
+    ? { ...local.bassMachine, renderExport: undefined }
+    : undefined
+  const bMachCloud = cloud.bassMachine
+    ? { ...cloud.bassMachine, renderExport: undefined }
+    : undefined
+  const bMachC = classifyScalar(bMachLocal, bMachCloud, 'bassMachine', 'Bass machine')
+  if (bMachC) conflicts.push(bMachC)
+  const busC = classifyScalar(local.effectBusses, cloud.effectBusses, 'effectBusses', 'Effect busses')
+  if (busC) conflicts.push(busC)
   // Stored drafts merge BY ID, not last-write-wins: two collaborators can each
   // create a draft between syncs, and whole-field LWW would drop one of them.
   const storedDrafts = mergeByIdList<SongDraft>(local.drafts, cloud.drafts, 'drafts', 'Draft')
@@ -476,6 +496,13 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
   const activeId = cloud.activeDraftId ?? local.activeDraftId
   mergedDrafts = mergedDrafts.filter((d) => d.id !== activeId)
 
+  // `timeline.original` is the analyzed baseline snapshot ("Reset grid").
+  // It's captured once at analysis and never hand-edited, so it's the same on
+  // both sides — but it must survive the merge (rebuilding `timeline` as just
+  // `{ bars, beats }` silently dropped it, losing the reset affordance after
+  // any collab/cloud conflict resolve).
+  const mergedOriginal = cloud.timeline?.original ?? local.timeline?.original
+
   const merged: SongMap = {
     ...cloud,
     harmony: harmony.merged,
@@ -485,6 +512,7 @@ export function mergeForConflict(local: SongMap, cloud: SongMap): MergeReport {
     timeline: {
       bars: bars.merged,
       beats: beats.merged,
+      ...(mergedOriginal ? { original: mergedOriginal } : {}),
     },
   }
 
@@ -668,6 +696,13 @@ export function applyConflictDecisions(
     else if (c.path === 'lyrics') result = { ...result, lyrics: c.mine as SongMap['lyrics'] }
     else if (c.path === 'drumMidi') result = { ...result, drumMidi: c.mine as SongMap['drumMidi'] }
     else if (c.path === 'bassMidi') result = { ...result, bassMidi: c.mine as SongMap['bassMidi'] }
+    else if (c.path === 'drumMachine') {
+      result = { ...result, drumMachine: c.mine as SongMap['drumMachine'] }
+    } else if (c.path === 'bassMachine') {
+      result = { ...result, bassMachine: c.mine as SongMap['bassMachine'] }
+    } else if (c.path === 'effectBusses') {
+      result = { ...result, effectBusses: c.mine as SongMap['effectBusses'] }
+    }
     else if (c.path === 'harmony') result = { ...result, harmony: c.mine as SongMap['harmony'] }
     else if (c.path === 'activeDraftName') {
       result = { ...result, activeDraftName: c.mine as string | undefined }

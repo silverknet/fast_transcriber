@@ -1,6 +1,36 @@
 <script lang="ts">
   const pages = [
     {
+      href: '/debug/click-sounds',
+      title: 'Click Sound Lab',
+      kicker: 'Monitoring · audio',
+      body: 'Compare eight click timbres over a real project song using its analyzed beat grid.',
+    },
+    {
+      href: '/debug/edit-style',
+      title: 'Edit Style Lab',
+      kicker: 'Editor · styles',
+      body: 'Five edit-mode looks rendered directly under the real navbar — base, brutalist, editorial, pro-tool, soft. Floating switcher to compare.',
+    },
+    {
+      href: '/debug/edit-layout',
+      title: 'Edit Layout',
+      kicker: 'Editor · early',
+      body: 'A calmer, more uniform /edit: one hero shadow, inline help, fills over borders. Toggle old vs new headers.',
+    },
+    {
+      href: '/debug/lyrics',
+      title: 'Lyric Confidence',
+      kicker: 'Live lyrics',
+      body: 'Highlight styles that reflect timing confidence — heard vs guessed words. Halo / running line / block.',
+    },
+    {
+      href: '/debug/synth',
+      title: 'Keys Synth',
+      kicker: 'Instrument',
+      body: 'Play a low-latency in-app synth with the APC Key 25 keybed or the on-screen keyboard.',
+    },
+    {
       href: '/debug/project-style',
       title: 'Project Style Lab',
       kicker: 'Color identity',

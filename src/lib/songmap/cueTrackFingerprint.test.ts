@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { createDefaultCueTrack } from '$lib/songmap/cueTracks'
-import { fingerprintCueTrackInputs, cueTrackFingerprintPayload } from '$lib/songmap/cueTrackFingerprint'
+import {
+  CLICK_TRACK_RENDER_VERSION,
+  clickTrackFingerprintPayload,
+  fingerprintClickTrackInputs,
+  fingerprintCueTrackInputs,
+  cueTrackFingerprintPayload,
+} from '$lib/songmap/cueTrackFingerprint'
 import type { CueTrack, SongMap } from '$lib/songmap/types'
 import { SONGMAP_FORMAT_VERSION } from '$lib/songmap/version'
 
@@ -91,7 +97,7 @@ describe('fingerprintCueTrackInputs', () => {
   it('payload is JSON-stable for bar order', () => {
     const m = minimalMap()
     const p = cueTrackFingerprintPayload(m)
-    expect(JSON.stringify(p)).toContain('"v":7')
+    expect(JSON.stringify(p)).toContain('"v":8')
   })
 
   it('changes when intro cue text changes', () => {
@@ -126,5 +132,14 @@ describe('fingerprintCueTrackInputs', () => {
       cueTracks: [{ ...introTrack('Valerie'), spokenCountIn: true }],
     })
     expect(fingerprintCueTrackInputs(a)).not.toBe(fingerprintCueTrackInputs(b))
+  })
+})
+
+describe('fingerprintClickTrackInputs', () => {
+  it('includes the click renderer version without changing cue fingerprints', () => {
+    const m = minimalMap()
+    expect(JSON.stringify(clickTrackFingerprintPayload(m))).toContain(CLICK_TRACK_RENDER_VERSION)
+    expect(fingerprintClickTrackInputs(m)).not.toBe(fingerprintCueTrackInputs(m))
+    expect(fingerprintClickTrackInputs(m)).toBe(fingerprintClickTrackInputs(m))
   })
 })

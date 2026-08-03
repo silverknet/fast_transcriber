@@ -3,7 +3,7 @@
 **Status:** v4 — stable
 **Container version (binary header `version`):** `2` — [`SMAP_FILE_VERSION`](../src/lib/songmap/smapFile.ts)
 **JSON envelope version (`projectFormatVersion`):** `1` — [`SONG_PROJECT_FORMAT_VERSION`](../src/lib/songmap/smapFile.ts)
-**SongMap schema version (`formatVersion`):** `6` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
+**SongMap schema version (`formatVersion`):** `7` — [`SONGMAP_FORMAT_VERSION`](../src/lib/songmap/version.ts)
 **MIME type:** `application/vnd.barbro.smap` — [`SMAP_BLOB_TYPE`](../src/lib/songmap/smapFile.ts)
 **Extension:** `.smap`
 
@@ -69,13 +69,13 @@ Defined in [`smapFile.ts`](../src/lib/songmap/smapFile.ts). The envelope exists 
 
 ---
 
-## 3. `SongMap` v3 schema
+## 3. `SongMap` v7 schema
 
 Source of truth: [`SongMapV3`](../src/lib/songmap/types.ts). Runtime validator: [`validate.ts`](../src/lib/songmap/validate.ts).
 
 ```ts
-type SongMapV5 = {
-  formatVersion: 6
+type SongMap = {
+  formatVersion: 7
   app?: { name: 'BarBro'; appVersion?: string }
   metadata: SongMetadata             // required
   transpose?: { baseSemitones: number } // shared reversible transpose, -12..12
@@ -92,8 +92,10 @@ type SongMapV5 = {
   startBeatId?: string               // optional song-start beat override
   projectFolder?: string             // display hint for the project folder name
   stemRefs?: Record<string, string>  // stem-name → project-relative path
+  liveStemRefs?: Record<string, string> // local stable stemId → relative path
   clickExport?: RenderedCueExport    // last rendered click WAV metadata
   mixState?: MixState                // mixer volume / mute / solo
+  liveRouting?: SongLiveRouting      // canonical Live source/mixer/rig-lane intent (v7)
   sectionBorderHints?: SectionBorderHints // cached Python analyzer output
   chordHints?: ChordHints                 // cached Python analyzer output
 }
@@ -364,17 +366,60 @@ type MixState = { tracks: MixTrackState[]; master?: number }
 
 Track keys: `"original"`, `"cue"`, `"stem:<filename>"` (e.g. `"stem:drums.wav"`). Unknown keys are tolerated (graceful when stems change on disk).
 
-### 3.11 `sectionBorderHints`, `chordHints` — cached analyzer output
+### 3.11 `liveRouting` — canonical Live source intent (v7)
+
+`liveRouting` is shared musical/routing data. It is deliberately separate from
+local Editor `mixState`.
+
+```ts
+type SongLiveRouting = {
+  version: 1
+  sources: Array<{
+    id: string
+    producer: LiveProducerReference
+    admission: 'included' | 'excluded'
+    required: boolean
+    mixerChannelId: string
+    main: boolean
+    monitorSends: Array<{ performerId: string; gain: number }>
+  }>
+  mixerChannels: Array<{
+    id: string
+    sourceId: string
+    processing: { gain: number; eq?: ChannelEq }
+    rigSourceLaneId?: string
+    sumGroupId?: string
+  }>
+  sumGroups: Array<{
+    id: string
+    rigSourceLaneId: string
+    mixerChannelIds: string[]
+  }>
+}
+```
+
+Source and mixer IDs are stable identities. A stem producer references only its
+stable `stemId`; local `liveStemRefs[stemId]` resolves that identity to a path and
+is stripped from collaboration data. `stemRefs` keys, paths, filenames,
+labels, ordering, `mixState` mute/solo, and `liveSlot` cannot identify or admit a
+Live source. Several channels may share a rig source lane only through one exact
+explicit sum group.
+
+V1-v6 files migrate every persisted original/stem/detected or machine producer
+into `admission: 'excluded'` records with no rig lane. A legacy stem ID is
+derived once during migration and then persisted. Saving always emits v7.
+
+### 3.12 `sectionBorderHints`, `chordHints` — cached analyzer output
 
 Persisted outputs from the Python sidecar's analyzers. Each carries an `audioFingerprint` (`sha256` or `<name>:<size>`), `generatedAt`, and `analyzerVersion` (bumped to force re-analysis on algorithm change). When inputs change or the version bumps, the hints are treated as stale.
 
-### 3.12 `app` — provenance
+### 3.13 `app` — provenance
 
 ```ts
 type SongMapAppInfo = { name: 'BarBro'; appVersion?: string }
 ```
 
-### 3.13 `projectFolder`
+### 3.14 `projectFolder`
 
 Display hint string (e.g. `"DangerousSong"`). Not a full path — used to render "song not found on this machine" UI when porting a `.smap` between projects.
 
@@ -391,6 +436,9 @@ Enforced by [`validate.ts`](../src/lib/songmap/validate.ts):
 - For every `HarmonyEvent`: `barId` references a `Bar`, `chord.root` ∈ note names, `chord.bass` ∈ note names if present, `displayRaw` is a string.
 - For `cueTracks[]`: valid ids/names, known event kinds, valid anchors, and structurally well-formed `renderExport` when present.
 - For `clickExport` (when present): `preludeOffsetSec >= 0` and structurally well-formed.
+- For `liveRouting`: unique source/channel/sum-group IDs, explicit admission,
+  valid non-negative gains, stable stem identity fields, and sum groups with at
+  least two mixer-channel members.
 
 `parseSongMap` runs the validator and throws [`SongMapParseError`](../src/lib/songmap/parse.ts) on the first violation in strict mode.
 
@@ -416,7 +464,8 @@ Consequence: `decode(encode(x)) ≡ x` modulo dropped `undefined`s, and `encode(
 - **Legacy SongMap `formatVersion: 1` cue fields** (`cues`, `cueTrackExport`, `clickTrackExport`): parsed by the v1 migrator into `cueTracks[]`, top-level `countInBeats`, and `clickExport`.
 - **Legacy SongMap `formatVersion: 1` or `2` transpose:** absent transpose becomes untransposed.
 - **Legacy SongMap `formatVersion: 1`–`3` lyrics:** absent lyrics stay absent. New saves emit v4 only; builds older than v4 refuse newer files ("saved by a newer version of BarBro") instead of stripping lyrics on save.
-- **Legacy SongMap `formatVersion: 1`–`5` → v6 drafts:** v5's `chordLayers`/`sectionLayers` fold into `drafts[]` at the read boundary ([`draftsMigrate.ts`](../src/lib/songmap/draftsMigrate.ts)). Matching names pair; an unmatched layer still becomes a draft with its missing side copied from the active draft. v5's single shared `lyrics` is copied into every draft. v1–v4 have no layers, so they migrate to a single `My draft`. The migration is **deterministic** (fixed ids, no invented timestamps) because cloud rows are migrated on every device and `collabContentFingerprint()` hashes the result — random ids would make two devices disagree and push each other in a loop. New saves emit v6 only; builds older than v6 refuse newer files instead of stripping stored drafts on save.
+- **Legacy SongMap `formatVersion: 1`–`5` → v6 draft shape:** v5's `chordLayers`/`sectionLayers` fold into `drafts[]` at the read boundary ([`draftsMigrate.ts`](../src/lib/songmap/draftsMigrate.ts)). Matching names pair; an unmatched layer still becomes a draft with its missing side copied from the active draft. v5's single shared `lyrics` is copied into every draft. V1-v4 have no layers, so they migrate to a single `My draft`. The migration is **deterministic** (fixed ids, no invented timestamps) because cloud rows are migrated on every device and `collabContentFingerprint()` hashes the result; current saves then emit v7.
+- **Legacy SongMap `formatVersion: 1`–`6` → v7 Live routing:** persisted audio, stems, detected drum/bass tracks, and drum/bass machines become deterministic, explicitly excluded Live source and mixer records. No label, filename, old mute/solo, or `liveSlot` value can admit them. New saves emit v7 only.
 - **Legacy `cueTrackExport` / `clickTrackExport` without `preludeOffsetSec`**: treated as stale; the entry is dropped on parse so the next render produces a fresh, fully-populated record.
 
 Unknown top-level JSON keys are stripped by default during parse. (See [`parse.ts`](../src/lib/songmap/parse.ts).)

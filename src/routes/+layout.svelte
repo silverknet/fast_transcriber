@@ -16,7 +16,11 @@
     probeDesktopPythonHealth,
     probeDesktopSetupStatus,
   } from '$lib/client/desktopBeacon'
-  import { startProjectAutosave, stopProjectAutosave } from '$lib/client/projectAutosave'
+  import {
+    startProjectAutosave,
+    stopProjectAutosave,
+    flushProjectAutosave,
+  } from '$lib/client/projectAutosave'
   import { startCloudAutoPull, stopCloudAutoPull } from '$lib/client/cloudAutoPull'
   import CloudChangeToast from '$lib/components/CloudChangeToast.svelte'
   import {
@@ -35,6 +39,7 @@
     hasBrowserCloudSong,
   } from '$lib/client/browserCloudProject'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { continueWithoutDesktop } from '$lib/stores/desktopGate'
   import { autoConnectMidiIfGranted } from '$lib/hardware/midiService'
   import { classifySidecarVersion } from '$lib/desktop/minSidecarVersion'
   import { songMap } from '$lib/stores/songMap'
@@ -42,6 +47,12 @@
   import { userStore } from '$lib/stores/user'
   import { getSupabaseBrowserClient } from '$lib/client/supabase/browserClient'
   import { invalidateAll } from '$app/navigation'
+  import { setOfflineBuild, isOfflineClient } from '$lib/stores/offlineBuild'
+  import OfflineChangesDialog from '$lib/components/OfflineChangesDialog.svelte'
+  import OneBarBroBanner from '$lib/components/OneBarBroBanner.svelte'
+  import { checkForOfflineChanges } from '$lib/client/offlineReconcile'
+  import { offlineChanges } from '$lib/stores/offlineChanges'
+  import type { ProjectFile } from '$lib/project/types'
 
   // Server-resolved layout data (includes `user` from +layout.server.ts).
   // Using `<slot />` below for parent-content rendering — Svelte 5 still
@@ -49,8 +60,17 @@
   let { data } = $props<{
     data: {
       user: { id: string; email: string | null; name: string | null; avatarUrl: string | null } | null
+      offline?: boolean
     }
   }>()
+
+  // Set during component init, BEFORE onMount — `startProjectAutosave` and
+  // `startCloudAutoPull` both read it, and a flag that arrives after they start
+  // is a flag that does nothing. Reading the initial value is CORRECT here and
+  // not the usual staleness bug: this describes how the app was launched, not
+  // the current network, so it cannot change within a running process.
+  // svelte-ignore state_referenced_locally
+  setOfflineBuild(data.offline === true)
 
   // Mirror the server-resolved user into the global store on every nav.
   // SvelteKit re-runs `+layout.server.ts` on every navigation, so this
@@ -62,6 +82,36 @@
   let companionPollId: ReturnType<typeof setInterval> | null = null
   let activeSongUnsub: (() => void) | null = null
   let authUnsub: (() => void) | null = null
+  let offlineCheckUnsub: (() => void) | null = null
+
+  /**
+   * Ask, once per project, whether anything was edited offline.
+   *
+   * Runs when a project with a local folder is opened while ONLINE — the
+   * offline build itself has nothing to reconcile to, and browser mode has no
+   * disk to have edited. Once per path because the project store emits on every
+   * song change; re-checking on each would re-read the whole set from disk.
+   */
+  const offlineCheckedPaths = new Set<string>()
+
+  async function checkOfflineChangesForProject(osPath: string, data: ProjectFile) {
+    if (offlineCheckedPaths.has(osPath)) return
+    offlineCheckedPaths.add(osPath)
+    try {
+      const found = await checkForOfflineChanges(osPath, data)
+      if (!found) return
+      offlineChanges.set({
+        osPath,
+        data,
+        session: found.session,
+        changes: found.scan.changes,
+        unchangedCount: found.scan.unchangedSongIds.length,
+      })
+    } catch {
+      // Never block opening a project on this. The marker stays on disk, so the
+      // offer comes back next time rather than being lost.
+    }
+  }
 
   async function pollDesktopCompanion() {
     const r = await probeDesktopCompanion()
@@ -104,7 +154,8 @@
       reachable: r.ok,
       version: r.version,
       capabilities: r.capabilities,
-      versionStatus: classifySidecarVersion(r.version),
+      versionStatus: classifySidecarVersion(r.version, { servedBySidecar: isOfflineClient() }),
+      offlineAppOpen: r.offlineAppOpen,
       lastCheckedAt: new Date().toISOString(),
       lastError: r.error,
       pythonHealth,
@@ -240,7 +291,9 @@
     companionPollId = setInterval(() => void pollDesktopCompanion(), 12_000)
     startProjectAutosave()
     // Remote changes must reach the app on every route, not just /project.
-    startCloudAutoPull()
+    // Offline there is no realtime socket to open and no revision to catch up
+    // to; starting it would only produce a retry loop behind the scenes.
+    if (!isOfflineClient()) startCloudAutoPull()
     // App-wide MIDI: reconnect + relight the controller if already permitted,
     // so it confirms "connected" the moment BarBro opens (no prompt on load).
     void autoConnectMidiIfGranted()
@@ -249,14 +302,18 @@
     // callback, sign-out, token refresh) and re-run the server load so
     // `data.user` reflects the new state without a full page reload.
     // The `$effect` above will then mirror the new user into `userStore`.
-    try {
-      const sb = getSupabaseBrowserClient()
-      const { data: { subscription } } = sb.auth.onAuthStateChange(() => {
-        void invalidateAll()
-      })
-      authUnsub = () => subscription.unsubscribe()
-    } catch {
-      // Supabase env not configured — fine, app keeps working signed-out.
+    // Offline there is no auth to change, and the client constructor throws
+    // without env — caught below, but skipping is honest rather than incidental.
+    if (!isOfflineClient()) {
+      try {
+        const sb = getSupabaseBrowserClient()
+        const { data: { subscription } } = sb.auth.onAuthStateChange(() => {
+          void invalidateAll()
+        })
+        authUnsub = () => subscription.unsubscribe()
+      } catch {
+        // Supabase env not configured — fine, app keeps working signed-out.
+      }
     }
 
     // Read pending active-song id BEFORE attaching the subscriber so its
@@ -268,6 +325,16 @@
       pendingActiveSongId = null
     }
     void restoreLastProjectIfAny(pendingActiveSongId)
+
+    // Offline edits made on the desktop build reach the cloud only through this
+    // check — there is no background queue that would eventually send them.
+    if (!isOfflineClient()) {
+      offlineCheckUnsub = projectStore.subscribe((state) => {
+        if (state.osPath && state.data) {
+          void checkOfflineChangesForProject(state.osPath, state.data)
+        }
+      })
+    }
 
     let firstEmit = true
     activeSongUnsub = projectStore.subscribe((state) => {
@@ -296,6 +363,8 @@
       }
       activeSongUnsub?.()
       activeSongUnsub = null
+      offlineCheckUnsub?.()
+      offlineCheckUnsub = null
       authUnsub?.()
       authUnsub = null
       stopProjectAutosave()
@@ -304,6 +373,13 @@
   })
 
   beforeNavigate((nav) => {
+    // Persist any debounced-but-unsent edit BEFORE the route changes. SPA
+    // navigation fires no visibilitychange/pagehide, so this is the only signal
+    // that catches "edit the artist, click back to the project within 7s" —
+    // without it that edit is lost (in browser mode, permanently). Runs while
+    // $page is still /edit; the flush forces past the /edit push guard anyway.
+    flushProjectAutosave()
+
     if (!nav.to) return
     const dest = nav.to.url.pathname
     if (dest !== '/') return
@@ -344,6 +420,12 @@
    */
   $effect(() => {
     if (!browser) return
+    // NOTHING sends the offline app to /download. It is what you are standing in
+    // front of at a venue with no internet, and every reason below is a reason
+    // to install or repair something — which needs a network you do not have.
+    // Python deps are for analysis and stems, not for PLAYING a set, so a broken
+    // venv must never take you off the stage mid-show either.
+    if (isOfflineClient()) return
     const status = $desktopCompanionStatus
     if (status.lastCheckedAt === null) return // no probe yet
     const here = $page.route?.id
@@ -366,6 +448,9 @@
     // (browser-only) — the user opens cloud projects and plays/edits on cloud
     // audio. Studio-only actions are gated individually, and /download stays
     // reachable via the navbar badge for anyone who wants the desktop app.
+    // The user explicitly chose to keep going in Collab (browser) mode despite
+    // the sidecar needing attention — don't yank them back to /download.
+    if ($continueWithoutDesktop) return
     if (
       status.versionStatus === 'outdated' ||
       status.pythonHealth === 'broken' ||
@@ -395,6 +480,7 @@
   {#if showChrome}
     <div class="relative z-20 shrink-0">
       <AppMenuBar />
+      <OneBarBroBanner />
       <DesktopUpdateBanner />
       <StudioLinkBanner />
       <ProjectContextBar />
@@ -404,6 +490,7 @@
     <slot />
   </div>
   <ConflictResolutionDialog />
+  <OfflineChangesDialog />
   <CloudChangeToast />
 </div>
 

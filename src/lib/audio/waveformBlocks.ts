@@ -2,8 +2,26 @@ export const WAVEFORM_BLOCK_PITCH_PX = 4
 export const WAVEFORM_BLOCK_GAP_PX = 1
 
 const WAVEFORM_BLOCK_HEIGHT_STEP_PX = 2
-const MAX_SAMPLES_PER_BLOCK = 192
-const QUANTILE_BINS = 24
+const MAX_SAMPLES_PER_BLOCK = 512
+
+// ── How a block becomes a bar height ─────────────────────────────────────────
+// The waveform is a LOUDNESS envelope: each block's level is its RMS. RMS tracks
+// perceived loudness, so the bar follows the song's real dynamics (loud chorus
+// tall, quiet verse short) instead of collapsing to a flat mean as blocks grow,
+// and a single-sample click can't blow a whole block full-height.
+//
+// This CORE stays ABSOLUTE and stable — the editor relies on steady bar heights
+// while panning, and the unit tests pin this per-block shape (spike robustness,
+// sustained-vs-quiet, narrow-range). Auto-normalisation (fill-the-height, per
+// song) is a SEPARATE step — `normalizeBlockPeaks` — applied only by the
+// read-only/live waveform, where the whole clip is always in view so scaling to
+// its own robust peak is well-defined and stable.
+//
+// Chosen empirically: rms → normalise → gamma won a variability-vs-fidelity
+// sweep against peak, percentile, dB and local-adaptive methods. It shapes drawn
+// pixels only — audio buffers and playback are never touched.
+export const WAVEFORM_NORM_PERCENTILE = 0.97 // robust "loudest block" reference
+export const WAVEFORM_DYNAMICS_GAMMA = 1.4 // perceptual contrast after normalising
 
 export type BlockWaveformData = {
   peaks: Float32Array
@@ -28,50 +46,36 @@ function sampleMagnitude(ch0: Float32Array, ch1: Float32Array | null, frame: num
   return Math.max(a, b)
 }
 
-function blockAmplitude(
+// RMS loudness of one block. Takes the louder channel per frame so opposite-
+// polarity stereo can't cancel to silence. Strided for very large blocks — RMS
+// is an average, so subsampling barely moves it.
+function blockRms(
   ch0: Float32Array,
   ch1: Float32Array | null,
   frameStart: number,
   frameEnd: number,
-  bins: Uint16Array,
 ): number {
   const start = Math.max(0, Math.min(ch0.length, Math.floor(frameStart)))
   const end = Math.max(start + 1, Math.min(ch0.length, Math.ceil(frameEnd)))
   const stride = Math.max(1, Math.floor((end - start) / MAX_SAMPLES_PER_BLOCK))
 
-  bins.fill(0)
   let sumSq = 0
   let count = 0
-  let peak = 0
-
   for (let frame = start; frame < end; frame += stride) {
     const magnitude = Math.min(1, sampleMagnitude(ch0, ch1, frame))
     sumSq += magnitude * magnitude
-    peak = Math.max(peak, magnitude)
-    bins[Math.min(QUANTILE_BINS - 1, Math.floor(magnitude * QUANTILE_BINS))]++
     count++
   }
 
-  if (count <= 0) return 0
-
-  const targetRank = Math.max(1, Math.ceil(count * 0.78))
-  let seen = 0
-  let quantileBin = 0
-  for (let i = 0; i < QUANTILE_BINS; i++) {
-    seen += bins[i]
-    if (seen >= targetRank) {
-      quantileBin = i
-      break
-    }
-  }
-
-  const rms = Math.sqrt(sumSq / count)
-  const quantile = (quantileBin + 0.5) / QUANTILE_BINS
-  const representative = rms * 0.72 + quantile * 0.22 + peak * 0.06
-
-  return clamp01(Math.pow(representative, 1.12))
+  return count > 0 ? Math.sqrt(sumSq / count) : 0
 }
 
+/**
+ * Raw, absolute `[min,max,…]` block peaks (symmetric ±RMS per block, lightly
+ * de-jittered). Stable and untouched by any gain — the editor draws these
+ * directly. For the read-only/live waveform, pass the result through
+ * {@link normalizeBlockPeaks} to fill the height per song.
+ */
 export function computeVisualBlockPeaksFromChannels(
   ch0: Float32Array,
   ch1: Float32Array | null,
@@ -84,24 +88,66 @@ export function computeVisualBlockPeaksFromChannels(
   const start = Math.max(0, Math.min(ch0.length, Math.floor(frameStart)))
   const end = Math.max(start + 1, Math.min(ch0.length, Math.ceil(frameEnd)))
   const frames = end - start
-  const bins = new Uint16Array(QUANTILE_BINS)
   const raw = new Float32Array(buckets)
 
   for (let i = 0; i < buckets; i++) {
     const a = start + (i / buckets) * frames
     const b = start + ((i + 1) / buckets) * frames
-    raw[i] = blockAmplitude(ch0, ch1, a, b, bins)
+    raw[i] = blockRms(ch0, ch1, a, b)
   }
 
   for (let i = 0; i < buckets; i++) {
     const prev = raw[Math.max(0, i - 1)] ?? 0
     const cur = raw[i] ?? 0
     const next = raw[Math.min(buckets - 1, i + 1)] ?? 0
-    const amp = clamp01(prev * 0.06 + cur * 0.88 + next * 0.06)
+    // Very light neighbour smoothing (de-jitter) — kept small so real detail
+    // isn't averaged away. No gain here; that's normalizeBlockPeaks' job.
+    const amp = clamp01(prev * 0.04 + cur * 0.92 + next * 0.04)
     out[i * 2] = -amp
     out[i * 2 + 1] = amp
   }
 
+  return out
+}
+
+/**
+ * Auto-normalise a `[min,max,…]` peak array to the lane's own robust peak
+ * (the {@link WAVEFORM_NORM_PERCENTILE}th percentile of block heights) and apply
+ * a perceptual gamma. This is what makes a quiet OR a hot master fill the height
+ * and show its true dynamic range with no manual gain — the empirically-chosen
+ * rms→normalise→gamma pipeline.
+ *
+ * Use only where the whole clip is in view (the read-only/live waveform). The
+ * editor keeps the absolute core so bar heights stay steady while panning.
+ * Shapes drawn pixels only — the AudioBuffer and playback are never touched, so
+ * this is safe regardless of local-HD vs cloud audio source.
+ */
+export function normalizeBlockPeaks(
+  peaks: Float32Array,
+  percentile = WAVEFORM_NORM_PERCENTILE,
+  gamma = WAVEFORM_DYNAMICS_GAMMA,
+): Float32Array {
+  const buckets = Math.floor(peaks.length / 2)
+  if (buckets <= 0) return peaks
+
+  const amps = new Float32Array(buckets)
+  for (let i = 0; i < buckets; i++) amps[i] = Math.abs(peaks[i * 2 + 1] ?? 0)
+
+  const sorted = Float32Array.from(amps).sort()
+  const refIdx = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.round((sorted.length - 1) * clamp01(percentile))),
+  )
+  const ref = sorted[refIdx] ?? 0
+  if (ref <= 1e-4) return peaks // silent lane — nothing meaningful to scale
+
+  const norm = 1 / ref
+  const out = new Float32Array(peaks.length)
+  for (let i = 0; i < buckets; i++) {
+    const amp = clamp01(Math.pow(clamp01((peaks[i * 2 + 1] ?? 0) * norm), gamma))
+    out[i * 2] = -amp
+    out[i * 2 + 1] = amp
+  }
   return out
 }
 

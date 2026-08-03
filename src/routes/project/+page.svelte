@@ -23,6 +23,7 @@
   import AutoStemsStatusPanel from '$lib/components/AutoStemsStatusPanel.svelte'
   import { refreshAutoStemsStatuses } from '$lib/client/autoStemsStatus'
   import { runKeyBackfill } from '$lib/client/keyBackfill'
+  import { reanalyseAllLyrics } from '$lib/client/reanalyseLyrics'
   import { page } from '$app/stores'
   import { projectRole, loadProjectRole } from '$lib/stores/projectRole'
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte'
@@ -226,6 +227,11 @@
   let refreshMsg = $state('')
   let refreshMsgTitle = $state('')
 
+  let reanalysing = $state(false)
+  let reanalyseMsg = $state('')
+  let reanalyseMsgTitle = $state('')
+  let reanalyseCancel = false // plain flag polled by the batch between songs
+
   /** Setlist .als export state. */
   let setlistExportStatus = $state<'idle' | 'preflight' | 'generating' | 'done' | 'error'>('idle')
   let setlistExportMsg = $state('')
@@ -296,6 +302,51 @@
       refreshing = false
     }
     void runKeyBackfill()
+  }
+
+  /**
+   * Re-fit every song's imported lyrics to its audio with the current voice
+   * model. A second click while running cancels after the current song.
+   */
+  async function onReanalyseAllLyrics() {
+    if (reanalysing) {
+      reanalyseCancel = true
+      reanalyseMsg = 'Stopping…'
+      return
+    }
+    reanalyseCancel = false
+    reanalysing = true
+    reanalyseMsg = 'Preparing…'
+    reanalyseMsgTitle = ''
+    try {
+      const final = await reanalyseAllLyrics(
+        (p) => {
+          if (p.phase === 'preparing') reanalyseMsg = 'Preparing…'
+          else if (p.phase === 'running')
+            reanalyseMsg = `Reanalysing ${p.done}/${p.total}${p.current ? ' · ' + p.current : ''}`
+        },
+        () => reanalyseCancel,
+      )
+      if (final.phase === 'error') {
+        reanalyseMsg = 'Couldn’t reanalyse'
+        reanalyseMsgTitle = final.error ?? ''
+      } else {
+        const ok = final.results.filter((r) => r.status === 'ok').length
+        const skipped = final.results.filter((r) => r.status === 'skipped').length
+        const failed = final.results.filter((r) => r.status === 'failed').length
+        const stopped = final.phase === 'cancelled' ? 'Stopped · ' : ''
+        reanalyseMsg =
+          `${stopped}Refit ${ok} song${ok === 1 ? '' : 's'}` +
+          (skipped ? ` · ${skipped} skipped` : '') +
+          (failed ? ` · ${failed} failed` : '')
+        reanalyseMsgTitle = final.results
+          .map((r) => `${r.title}: ${r.status}${r.synced === false ? ' (local)' : ''} — ${r.detail}`)
+          .join('\n')
+      }
+    } finally {
+      reanalysing = false
+      reanalyseCancel = false
+    }
   }
 
   $effect(() => {
@@ -1030,6 +1081,13 @@
         {#if refreshMsg}
           <span class="truncate" role="status" title={refreshMsgTitle || refreshMsg}>· {refreshMsg}</span>
         {/if}
+        {#if reanalyseMsg}
+          <span
+            class="text-foreground truncate font-medium"
+            role="status"
+            title={reanalyseMsgTitle || reanalyseMsg}>· {reanalyseMsg}</span
+          >
+        {/if}
       </div>
     </div>
 
@@ -1128,7 +1186,13 @@
       onImported={replaceTargetId ? onReplaceImportedAudio : onAttachImportedAudio}
     />
 
-    <ProjectSettingsDialog bind:open={settingsDialogOpen} onOpenSetlistExport={openSetlistExport} />
+    <ProjectSettingsDialog
+      bind:open={settingsDialogOpen}
+      onOpenSetlistExport={openSetlistExport}
+      onReanalyseLyrics={() => void onReanalyseAllLyrics()}
+      reanalyseBusy={reanalysing}
+      reanalyseMsg={reanalyseMsg}
+    />
   {/if}
 </main>
 

@@ -204,6 +204,113 @@ function buildToneEq(ctx: BaseAudioContext, kind: AutoStemName): AudioChain | nu
   return input && prev ? { input, output: prev } : null
 }
 
+// ── Kick punch (drums lane only) ───────────────────────────────────────────
+
+/**
+ * Make the KICK inside the separated drums stem hit harder — without a separate
+ * kick track and without touching the stem file, which is never rewritten.
+ *
+ * In a drums stem the kick is effectively the only thing with real energy below
+ * ~110 Hz, so that band IS the kick. We split it off, compress it with a
+ * DELIBERATELY SLOW attack, and blend it back in parallel with the untouched
+ * lane:
+ *
+ *   in ─┬────────────────────────────────────────────► sum
+ *       └─► hp 35 → lp 110 (×2) → comp (slow attack) → wet ─┘
+ *
+ * The slow attack is the whole trick. For the first ~25 ms the compressor has
+ * not clamped down yet, so the kick's transient passes at full level; only the
+ * body that follows gets squashed. Summed back against the dry lane, that lifts
+ * the attack relative to the sustain — which is what "punch" is. A FAST attack
+ * would do the exact opposite (clamp the transient, pass the body) and make the
+ * kick rounder and more sustained.
+ *
+ * Because it is a parallel band, the snare, hats and cymbals are untouched: it
+ * gets louder where the kick is, not everywhere.
+ *
+ * The band is then SATURATED, which is what makes the punch audible at all on
+ * the speakers people actually use. A 50 Hz kick fundamental is reproduced by
+ * essentially no laptop or phone speaker, so adding more energy down there is
+ * inaudible on anything but a PA. tanh saturation generates harmonics at 100,
+ * 150, 200 Hz — which small speakers DO reproduce, and from which the ear
+ * reconstructs the missing fundamental. Without this stage the effect measures
+ * correctly and still sounds like almost nothing on a laptop.
+ */
+const KICK_BAND_HZ = 110
+/** Nothing below this is drum — just rumble and separation artefacts. */
+const KICK_SUBSONIC_HZ = 35
+const KICK_COMP: CompressorPreset = {
+  thresholdDb: -30,
+  ratio: 4,
+  attackSec: 0.025, // slow ON PURPOSE — see above
+  releaseSec: 0.12,
+  kneeDb: 3,
+  makeupDb: 0,
+}
+/** Wet blend at amount = 1. */
+const KICK_MAX_WET = 1.1
+/** Saturation drive on the kick band — harmonics, not distortion. */
+const KICK_DRIVE = 2.2
+
+/** tanh transfer curve: soft clipping that adds low-order harmonics. */
+function tanhCurve(drive: number): Float32Array<ArrayBuffer> {
+  const n = 1024
+  const curve = new Float32Array(new ArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT))
+  const norm = Math.tanh(drive)
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1
+    curve[i] = Math.tanh(x * drive) / norm
+  }
+  return curve
+}
+
+/** The configured kick-punch amount (0…1). Absent/invalid = 0 = not built. */
+export function kickPunchAmount(cfg: ProjectMastering): number {
+  const v = cfg.kickPunch
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0
+  return Math.max(0, Math.min(1, v))
+}
+
+/**
+ * Dry lane + a compressed, saturated low band in parallel. `amount` must be > 0.
+ *
+ * Exported because the EDITOR needs this stage on its own: the edit-page
+ * transport plays stems without the full per-stem mastering chain, so it wires
+ * just this one insert onto the drums lane.
+ */
+export function buildKickPunchChain(ctx: BaseAudioContext, amount: number): AudioChain {
+  const input = ctx.createGain()
+  const sum = ctx.createGain()
+  input.connect(sum) // dry, unchanged
+
+  const hp = ctx.createBiquadFilter()
+  hp.type = 'highpass'
+  hp.frequency.value = KICK_SUBSONIC_HZ
+  const lp1 = ctx.createBiquadFilter()
+  lp1.type = 'lowpass'
+  lp1.frequency.value = KICK_BAND_HZ
+  const lp2 = ctx.createBiquadFilter()
+  lp2.type = 'lowpass'
+  lp2.frequency.value = KICK_BAND_HZ // second pass = steeper skirt, less snare bleed
+  const comp = compressorNode(ctx, KICK_COMP)
+  // Harmonics so the kick reads on speakers that cannot reproduce 50 Hz.
+  const sat = ctx.createWaveShaper()
+  sat.curve = tanhCurve(KICK_DRIVE)
+  sat.oversample = '2x'
+  const wet = ctx.createGain()
+  wet.gain.value = amount * KICK_MAX_WET
+
+  input.connect(hp)
+  hp.connect(lp1)
+  lp1.connect(lp2)
+  lp2.connect(comp)
+  comp.connect(sat)
+  sat.connect(wet)
+  wet.connect(sum)
+
+  return { input, output: sum }
+}
+
 /** Per-stem trim clamp (dB). */
 const TRIM_CLAMP_DB = 9
 
@@ -257,12 +364,15 @@ export function buildStemChain(
   const preset = stemCompressorPreset(kind, sound.intensity)
   const eq = sound.tone === 'shaped' ? buildToneEq(ctx, kind) : null
   const totalGainDb = stemTotalGainDb(kind, cfg, measuredRmsDb)
-  if (!preset && !eq && totalGainDb === 0) return null
+  // Kick punch is a drums-only stage — no other stem has a kick in it.
+  const kick = kind === 'drums' ? kickPunchAmount(cfg) : 0
+  if (!preset && !eq && totalGainDb === 0 && kick === 0) return null
 
   const gain = ctx.createGain()
   gain.gain.value = dbToGain(totalGainDb)
 
-  // Wire back-to-front: … → comp? → gain, then eq? in front of that.
+  // Wire back-to-front: … → comp? → gain, then eq? in front of that, then the
+  // kick stage at the very front so the tone EQ and the glue both see it.
   let input: AudioNode = gain
   if (preset) {
     const comp = compressorNode(ctx, preset)
@@ -272,6 +382,11 @@ export function buildStemChain(
   if (eq) {
     eq.output.connect(input)
     input = eq.input
+  }
+  if (kick > 0) {
+    const punch = buildKickPunchChain(ctx, kick)
+    punch.output.connect(input)
+    input = punch.input
   }
   return { input, output: gain }
 }

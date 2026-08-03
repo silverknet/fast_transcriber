@@ -53,7 +53,9 @@ export function audioBufferToWavBlob(buffer: AudioBuffer) {
 }
 
 export async function trimAudioFileToWav(inputFile: File, startSec: number, endSec: number) {
-  const ac = new AudioContext()
+  // OFFLINE: this context only decodes, so it must not take one of the
+  // browser's ~6 hardware AudioContext slots. See `audioDevice.ts`.
+  const ac = new OfflineAudioContext(1, 1, 44100)
   try {
     const ab = await inputFile.arrayBuffer()
     const src = await ac.decodeAudioData(ab.slice(0))
@@ -74,6 +76,6 @@ export async function trimAudioFileToWav(inputFile: File, startSec: number, endS
     const file = new File([blob], `${base}_selected.wav`, { type: 'audio/wav' })
     return { file, durationSec: frames / src.sampleRate }
   } finally {
-    await ac.close().catch(() => {})
+    // Nothing to close: an OfflineAudioContext holds no hardware slot.
   }
 }

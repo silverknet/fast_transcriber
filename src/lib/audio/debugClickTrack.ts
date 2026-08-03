@@ -1,10 +1,13 @@
-/**
- * One-shot metronome click for the PlaybackController and any future
- * Web-Audio-scheduled cue paths. Accent = downbeat (bar 1), softer =
- * other beats.
- */
-export function playMetronomeClick(
-  ctx: AudioContext,
+import {
+  createClickSoundResources,
+  PROJECT_CLICK_SOUND,
+  scheduleClickSound,
+  type ClickSoundResources,
+} from './clickSounds'
+
+/** Previous BarBro sine beep, retained as an explicit fallback/reference. */
+export function playLegacyMetronomeClick(
+  ctx: BaseAudioContext,
   destination: AudioNode,
   startTime: number,
   downbeat: boolean,
@@ -25,4 +28,46 @@ export function playMetronomeClick(
   g.connect(destination)
   osc.start(startTime)
   osc.stop(startTime + dur + 0.012)
+}
+
+const resourcesByContext = new WeakMap<BaseAudioContext, ClickSoundResources>()
+
+function hybridResources(ctx: BaseAudioContext): ClickSoundResources | null {
+  // Small unit-test contexts intentionally implement only the legacy graph.
+  // Real browser contexts always provide these methods.
+  if (
+    typeof ctx.createBuffer !== 'function' ||
+    typeof ctx.createBufferSource !== 'function' ||
+    !Number.isFinite(ctx.sampleRate)
+  ) {
+    return null
+  }
+  let resources = resourcesByContext.get(ctx)
+  if (!resources) {
+    resources = createClickSoundResources(ctx)
+    resourcesByContext.set(ctx, resources)
+  }
+  return resources
+}
+
+/** Project-wide realtime metronome voice. Accent = downbeat. */
+export function playMetronomeClick(
+  ctx: BaseAudioContext,
+  destination: AudioNode,
+  startTime: number,
+  downbeat: boolean,
+): void {
+  const resources = hybridResources(ctx)
+  if (!resources) {
+    playLegacyMetronomeClick(ctx, destination, startTime, downbeat)
+    return
+  }
+  scheduleClickSound({
+    ctx,
+    destination,
+    resources,
+    sound: PROJECT_CLICK_SOUND,
+    startTime,
+    downbeat,
+  })
 }

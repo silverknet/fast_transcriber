@@ -19,6 +19,19 @@ class MockGain {
 
 const createdGains: MockGain[] = []
 
+/**
+ * The gain node for a track, by key.
+ *
+ * Deliberately NOT `createdGains[1]`: that assumed the engine creates exactly
+ * one gain before the first track's, and broke the moment an internal sub-bus
+ * was added. Looking it up by key survives any amount of internal plumbing.
+ */
+function trackGain(engine: MixerEngine, key: string): MockGain {
+  const g = (engine as unknown as { trackGains: Map<string, MockGain> }).trackGains.get(key)
+  if (!g) throw new Error(`no gain node for track '${key}'`)
+  return g
+}
+
 class MockAudioContext {
   currentTime = 0
   state = 'running'
@@ -63,8 +76,7 @@ describe('MixerEngine.setTrackSuppressed', () => {
   it('forces the track gain to 0 and restores it, preserving mute/volume', () => {
     const eng = new MixerEngine()
     eng.setTrack(makeTrack())
-    // createdGains[0] = masterGain, createdGains[1] = the cue track gain.
-    const cueGain = createdGains[1]!
+    const cueGain = trackGain(eng, 'cue')
     expect(cueGain.gain.value).toBe(0.8)
 
     eng.setTrackSuppressed('cue', true)
@@ -80,7 +92,7 @@ describe('MixerEngine.setTrackSuppressed', () => {
   it('keeps a suppressed track silent even after its volume changes', () => {
     const eng = new MixerEngine()
     eng.setTrack(makeTrack())
-    const cueGain = createdGains[1]!
+    const cueGain = trackGain(eng, 'cue')
     eng.setTrackSuppressed('cue', true)
     eng.setVolume('cue', 1.2)
     expect(cueGain.gain.value).toBe(0)
@@ -91,7 +103,7 @@ describe('MixerEngine.setTrackSuppressed', () => {
   it('a muted track that is then unsuppressed stays silent (mute still wins)', () => {
     const eng = new MixerEngine()
     eng.setTrack(makeTrack({ muted: true }))
-    const cueGain = createdGains[1]!
+    const cueGain = trackGain(eng, 'cue')
     expect(cueGain.gain.value).toBe(0)
     eng.setTrackSuppressed('cue', true)
     expect(cueGain.gain.value).toBe(0)
@@ -102,7 +114,7 @@ describe('MixerEngine.setTrackSuppressed', () => {
   it('suppressing an unknown key is a harmless no-op', () => {
     const eng = new MixerEngine()
     eng.setTrack(makeTrack())
-    const cueGain = createdGains[1]!
+    const cueGain = trackGain(eng, 'cue')
     expect(() => eng.setTrackSuppressed('nope', true)).not.toThrow()
     expect(cueGain.gain.value).toBe(0.8)
   })

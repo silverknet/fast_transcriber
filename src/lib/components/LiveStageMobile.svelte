@@ -9,6 +9,7 @@
    * karaoke lyrics (the only flexible/centered area) · play-pause + stop.
    */
   import MixerStageWaveform from './MixerStageWaveform.svelte'
+  import LyricConfidenceLine from './LyricConfidenceLine.svelte'
   import Play from '@lucide/svelte/icons/play'
   import Pause from '@lucide/svelte/icons/pause'
   import Square from '@lucide/svelte/icons/square'
@@ -45,21 +46,9 @@
     onStop: () => void
   }>()
 
-  // Sticky active word: the last word of the current line that has started
-  // (mirrors the mixer's karaoke highlight, kept local so this stays decoupled).
-  function activeWordIdx(line: LyricLine, t: number): number {
-    let idx = -1
-    for (let i = 0; i < line.words.length; i++) {
-      if (line.words[i]!.startSec <= t) idx = i
-      else break
-    }
-    return idx
-  }
-
   const prevLine = $derived(currentLyricIdx > 0 ? lyricLines[currentLyricIdx - 1] : null)
   const curLine = $derived(currentLyricIdx >= 0 ? (lyricLines[currentLyricIdx] ?? null) : null)
   const nextLine = $derived(lyricLines[currentLyricIdx + 1] ?? null)
-  const activeIdx = $derived(curLine ? activeWordIdx(curLine, lyricsSongTime) : -1)
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="live-stage-mobile">
@@ -101,15 +90,7 @@
       </div>
       <div class="text-3xl font-black leading-snug">
         {#if curLine}
-          {#each curLine.words as w, wi (wi)}<span
-              class={wi === activeIdx
-                ? 'bg-primary text-primary-foreground rounded px-1'
-                : wi < activeIdx
-                  ? 'text-foreground/50'
-                  : activeIdx === -1
-                    ? 'text-foreground/70'
-                    : 'text-foreground'}>{w.text}</span
-            >{#if wi < curLine.words.length - 1}{' '}{/if}{/each}
+          <LyricConfidenceLine words={curLine.words} songTime={lyricsSongTime} />
         {:else if nextLine}
           <span class="text-muted-foreground">{nextLine.words.map((w) => w.text).join(' ')}</span>
         {/if}

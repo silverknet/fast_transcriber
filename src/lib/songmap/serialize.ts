@@ -1,5 +1,9 @@
 import type { SongMap } from './types'
 import { SONGMAP_FORMAT_VERSION } from './version'
+import {
+  migrateLegacyLiveRouting,
+  migrateLegacyLiveStemRefs,
+} from './liveRouting'
 
 export type SerializeSongMapOptions = {
   /** Default true — JSON with 2-space indent for `.smap` diffs */
@@ -27,11 +31,39 @@ export function canonicalizeSongMapForSerialize(map: SongMap): SongMap {
     ...(map as SongMap & Record<string, unknown>),
     formatVersion: SONGMAP_FORMAT_VERSION,
     cueTracks: Array.isArray(map.cueTracks) ? map.cueTracks : [],
+    liveRouting: map.liveRouting ?? migrateLegacyLiveRouting(map),
+    liveStemRefs: map.liveStemRefs ?? migrateLegacyLiveStemRefs(map),
   } as SongMap & Record<string, unknown>
   delete out.cues
   delete out.cueTrackExport
   delete out.clickTrackExport
+  if (Array.isArray(map.effectBusses)) out.effectBusses = map.effectBusses.map(withLegacyBusMirror)
   return out as SongMap
+}
+
+/**
+ * Write a bus's FIRST effect back into the pre-chain `{ kind, <settings> }`
+ * fields as well as `chain`.
+ *
+ * Purely for older clients. A build that predates effect chains reads `kind`
+ * and ignores `chain`; without a mirror it sees no `kind`, falls back to its
+ * default ('reverb'), and if that user then saves, the whole chain is gone. In
+ * a collab project one un-reloaded tab could quietly flatten everyone's racks.
+ * With the mirror, an old client degrades to the first effect — wrong-ish, but
+ * recognisably the user's bus rather than a stray default reverb.
+ *
+ * Current builds always prefer `chain` when present (see `normalizeEffectBus`),
+ * so this is write-only compatibility and never feeds back in.
+ */
+function withLegacyBusMirror(bus: SongMap['effectBusses'] extends (infer B)[] | undefined ? B : never) {
+  const first = bus.chain?.find((u) => !u.bypassed) ?? bus.chain?.[0]
+  if (!first) return bus
+  const settings = (first as Record<string, unknown>)[first.kind]
+  return {
+    ...bus,
+    kind: first.kind,
+    ...(settings ? { [first.kind]: settings } : {}),
+  }
 }
 
 /**

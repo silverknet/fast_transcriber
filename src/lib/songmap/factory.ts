@@ -3,6 +3,7 @@ import { emptySongMetadata } from './defaults'
 import { DEFAULT_DRAFT_NAME } from './drafts'
 import { MIGRATED_ACTIVE_DRAFT_ID } from './draftsMigrate'
 import { SONGMAP_FORMAT_VERSION } from './version'
+import { emptyLiveRouting } from './liveRouting'
 import type { SongMap } from './types'
 
 export type IdFactory = () => string
@@ -25,6 +26,7 @@ export function createEmptySongMap(options: CreateEmptySongMapOptions = {}): Son
     sections: [],
     harmony: [],
     cueTracks: [],
+    liveRouting: emptyLiveRouting(),
     // A new song starts on one draft. Stamping the identity here (rather than
     // letting the parser fill it in on first load) is what keeps
     // save → load → save byte-identical.

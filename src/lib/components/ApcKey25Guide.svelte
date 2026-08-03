@@ -14,29 +14,54 @@
     { n: 4, label: '—' },
     { n: 5, label: '—' },
   ]
-  const stems = [1, 2, 3, 4, 5, 6, 7, 8]
+  // Fixed canonical stem order — same button every song (see liveMidiMap.ts).
+  const STEM_LABELS = ['Drums', 'Bass', 'Vocals', 'Other', 'Guitar', 'FX', 'Click', 'Cue']
+  const CUSTOM_LABELS = ['Custom 1', 'Custom 2']
 </script>
 
 <div class="flex flex-col gap-3 {compact ? 'text-[11px]' : 'text-xs'}">
   <div class="flex gap-2">
-    <!-- Clip-pad grid (unused live) + track-button row beneath -->
+    <!-- Pad grid: 30 sections + 10 live slots; track buttons mirror slots 1-8. -->
     <div class="flex flex-1 flex-col gap-2">
       <div class="grid grid-cols-8 gap-1">
-        {#each Array(40) as _, i (i)}
-          <div class="bg-foreground/10 aspect-square rounded-[3px]"></div>
+        {#each Array(24) as _, i (i)}
+          <div class="bg-foreground/15 aspect-square rounded-[3px]" title="Section pad · tap to jump"></div>
+        {/each}
+        {#each CUSTOM_LABELS as label, i (label)}
+          <div
+            class="border-foreground/40 bg-foreground text-background flex aspect-square items-center justify-center rounded-[3px] border p-0.5 text-center text-[8px] font-black leading-none"
+            title={`Row 4 pad ${i + 1} → ${label}`}
+          >
+            {label}
+          </div>
+        {/each}
+        {#each Array(6) as _, i (i)}
+          <div class="bg-foreground/15 aspect-square rounded-[3px]" title="Section pad · tap to jump"></div>
         {/each}
       </div>
+      <p class="text-muted-foreground text-center text-[10px]">30 section pads · Custom 1/2 start row 4</p>
       <div class="grid grid-cols-8 gap-1">
-        {#each stems as s (s)}
+        {#each STEM_LABELS as label, i (label)}
           <div
-            class="border-foreground/40 bg-foreground text-background flex aspect-[2/1] items-center justify-center rounded-[3px] border text-[9px] font-black"
-            title={`Track button ${s} → toggle stem ${s}`}
+            class="border-foreground/40 bg-foreground text-background flex aspect-square items-center justify-center rounded-[3px] border p-0.5 text-center text-[8px] font-black leading-none"
+            title={`Pad ${i + 1} → ${label}`}
           >
-            {s}
+            {label}
           </div>
         {/each}
       </div>
-      <p class="text-muted-foreground text-center text-[10px]">Track buttons 1–8 · toggle stems (lit = on)</p>
+      <p class="text-muted-foreground text-center text-[10px]">Bottom pad row · slots 1–8 (fixed order)</p>
+      <div class="grid grid-cols-8 gap-1">
+        {#each STEM_LABELS as label, i (label)}
+          <div
+            class="border-foreground/40 flex aspect-[2/1] items-center justify-center rounded-[3px] border p-0.5 text-center text-[8px] font-black leading-none"
+            title={`Track button ${i + 1} → ${label} (mirrors the pad)`}
+          >
+            {label}
+          </div>
+        {/each}
+      </div>
+      <p class="text-muted-foreground text-center text-[10px]">Track buttons · same stems (mirror) · lit = on</p>
     </div>
 
     <!-- Scene launch column -->

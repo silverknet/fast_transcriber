@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte'
-  import { chordWithoutBass, rankChordSuggestions, withSlashBass } from '$lib/chords'
+  import { chordWithoutBass, NO_CHORD_SYMBOL, rankChordSuggestions, withSlashBass } from '$lib/chords'
   import { diatonicDegreeRomanLabel, diatonicTriadsInKey, songKeyPreferFlats } from '$lib/chords/diatonic'
   import { formatChordSymbol } from '$lib/chords/formatChordSymbol'
   import {
@@ -8,6 +8,7 @@
     type RelatedChordItem,
   } from '$lib/chords/markingMenuTree'
   import { pitchClassToRootAcc } from '$lib/chords/pitchClass'
+  import { auditionChord, stopChordAudition, primeChordAudition } from '$lib/audio/chordAudition'
   import type { Accidental, ChordSymbol, NoteName, SongKey } from '$lib/songmap/types'
 
   const HOLD_FOR_SLASH_MS = 700
@@ -103,12 +104,19 @@
   })
 
   type HomeSlot =
+    | { kind: 'noChord'; label: string; subtitle: string }
     | { kind: 'clear'; label: string; subtitle: string }
     | { kind: 'search'; label: string; subtitle: string }
     | { kind: 'degree'; degreeIndex: number; label: string; subtitle: string; chord: ChordSymbol }
 
   const homeSlots = $derived.by(() => {
-    const slots: HomeSlot[] = [{ kind: 'clear', label: 'No chord', subtitle: 'remove' }]
+    // N.C. PLACES a "no chord" event (stops the previous chord's stretch);
+    // Clear REMOVES the event (previous chord stretches over the spot). Two
+    // musically-different actions, two slots.
+    const slots: HomeSlot[] = [
+      { kind: 'noChord', label: 'N.C.', subtitle: 'no chord' },
+      { kind: 'clear', label: 'Clear', subtitle: 'remove' },
+    ]
     for (let i = 0; i < 7; i++) {
       const chord = diatonicTriads[i]
       if (!chord) continue
@@ -141,10 +149,14 @@
     longPressTimer = null
   }
 
-  onDestroy(() => clearLongPressTimer())
+  onDestroy(() => {
+    clearLongPressTimer()
+    stopChordAudition()
+  })
 
   $effect(() => {
     if (!open) return
+    void primeChordAudition() // warm the synth so the first press is audible
     drilledDegreeIndex = null
     stagedChord = null
     // type-to-search: if an initial query was supplied, open straight into
@@ -180,6 +192,7 @@
   })
 
   function closeMenu() {
+    stopChordAudition()
     open = false
   }
 
@@ -231,6 +244,7 @@
     if (e.button !== 0) return
     clearLongPressTimer()
     longPressDidFire = false
+    auditionChord(chord) // press to HEAR the chord; released on pointer up/leave
     try {
       ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     } catch {
@@ -252,6 +266,7 @@
       /* ignore */
     }
     clearLongPressTimer()
+    stopChordAudition() // release on lift — press = hear, release = silence
     if (longPressDidFire) {
       longPressDidFire = false
       return
@@ -261,6 +276,7 @@
 
   function onCommitPointerLeave() {
     clearLongPressTimer()
+    stopChordAudition()
   }
 
   function onSearchResultPointerDown(e: PointerEvent, chord: ChordSymbol) {
@@ -509,6 +525,18 @@
                   +
                 </button>
               </div>
+            {:else if slot.kind === 'noChord'}
+              <!-- Places a real N.C. event (commit path) — NOT a clear. -->
+              <button
+                type="button"
+                class="brutalist-shadow-sm bg-background text-foreground border-foreground absolute left-1/2 top-1/2 flex cursor-pointer flex-col items-center justify-center border-2 px-1 text-center"
+                style={polarStyle(i, homeSlots.length, ITEM_RING_RADIUS)}
+                onclick={() => commitChord(NO_CHORD_SYMBOL)}
+                title={`${slot.label} — place a "no chord" marker`}
+              >
+                <span class="font-mono text-[10px] font-semibold leading-tight">{slot.label}</span>
+                <span class="text-muted-foreground text-[8px] leading-tight">{slot.subtitle}</span>
+              </button>
             {:else if slot.kind === 'clear'}
               <button
                 type="button"
@@ -518,7 +546,7 @@
                   onClearChord?.()
                   closeMenu()
                 }}
-                title={slot.label}
+                title={`${slot.label} — remove the chord here`}
               >
                 <span class="text-[10px] font-semibold leading-tight">{slot.label}</span>
                 <span class="text-muted-foreground text-[8px] leading-tight">{slot.subtitle}</span>

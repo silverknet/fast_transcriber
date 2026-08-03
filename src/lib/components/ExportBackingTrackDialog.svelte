@@ -25,6 +25,7 @@
   import { renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
   import { selectBestStemSet } from '$lib/project/commit'
   import { getPrimaryCueTrack } from '$lib/songmap/cueTracks'
+  import { fingerprintClickTrackInputs } from '$lib/songmap/cueTrackFingerprint'
   import { downloadBlob, safeExportBasename } from '$lib/songmap/persist'
   import type { SongMap } from '$lib/songmap'
   import type { ProjectSongMetadataLite } from '$lib/stores/project'
@@ -127,7 +128,10 @@
    */
   let clickOpt = $derived.by<SourceOpt | null>(() => {
     if (!songMap || songMap.timeline.beats.length === 0) return null
-    if (metadata?.hasClickTrack) {
+    const primaryTrack = getPrimaryCueTrack(songMap)
+    const cachedClickIsFresh =
+      songMap.clickExport?.fingerprint === fingerprintClickTrackInputs(songMap, primaryTrack)
+    if (metadata?.hasClickTrack && cachedClickIsFresh) {
       return {
         key: 'click',
         label: 'Click track',
@@ -142,9 +146,10 @@
       fetch: async () => {
         try {
           const r = await renderCueTrackWavBlob(songMap, {
+            announceTitle: ($projectStore.data?.defaults?.preCountInCue?.mode ?? 'off') !== 'off',
             includeSpeech: false,
             includeClicks: true,
-            cueTrack: getPrimaryCueTrack(songMap),
+            cueTrack: primaryTrack,
           })
           return r.blob
         } catch {

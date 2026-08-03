@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptySongMap } from './factory'
 import { reanalyzeShape, reanalyzeWithHarmony } from './reanalyze'
+import { validateSongMap } from './validate'
 import type { Bar, Beat, HarmonyEvent, Section, SongMap } from './types'
 
 function map4x4(opts: { harmony?: HarmonyEvent[]; sections?: Section[] } = {}): SongMap {
@@ -154,5 +155,79 @@ describe('reanalyzeWithHarmony — shape MISMATCH path', () => {
     const r = reanalyzeWithHarmony(cur, bars, beats.slice(0, -1))
     expect(r.map.timeline.original).toBeDefined()
     expect(r.map.timeline.original!.beats.length).toBe(beats.length - 1)
+  })
+})
+
+describe('re-analysis re-anchors chords to the NEW bars (regression)', () => {
+  /**
+   * A `HarmonyEvent` stores `barId` AND `beatId`, and the beat already knows its
+   * bar — so the two can disagree, and they did. Re-analysis updated `beatId`
+   * and let the old `barId` through untouched, naming a bar from the previous
+   * analysis that no longer existed.
+   *
+   * Every chord then failed validation with "barId does not match beat's bar",
+   * and the editor showed a wall of errors instead of a grid. Re-analysis is
+   * precisely when bar ids change, so this fired on every re-analysis of every
+   * song that had chords — reported on a real song with 87 of them.
+   *
+   * The existing tests could not catch it: they asserted the new `beatId` and
+   * never looked at `barId`, even though the fixture already gave the new bars
+   * different ids.
+   */
+  const chordAt = (beatId: string, barId: string, startSec: number): HarmonyEvent => ({
+    id: `h_${beatId}`,
+    barId,
+    beatId,
+    startSec,
+    endSec: startSec + 0.5,
+    chord: { root: 'C', quality: 'maj', displayRaw: 'C' } as HarmonyEvent['chord'],
+    beatAnchor: { indexInBar: 0 },
+  })
+
+  it('gives every kept chord the bar its NEW beat belongs to', () => {
+    const current = map4x4({
+      harmony: [chordAt('b0_0', 'bar0', 0), chordAt('b1_0', 'bar1', 2)],
+    })
+    const fresh = freshBeatsMatching()
+    const r = reanalyzeWithHarmony(current, fresh.bars, fresh.beats)
+
+    const beatById = new Map(r.map.timeline.beats.map((b) => [b.id, b]))
+    expect(r.map.harmony).toHaveLength(2)
+    for (const h of r.map.harmony) {
+      const beat = beatById.get(h.beatId!)
+      expect(beat, 'chord points at a beat that does not exist').toBeDefined()
+      expect(h.barId, 'chord kept a bar id from the OLD analysis').toBe(beat!.barId)
+    }
+  })
+
+  it('the re-analysed map VALIDATES — the check the user actually hit', () => {
+    // The end-to-end assertion. Ids matching is the mechanism; validating is
+    // the promise, and it is the promise that broke.
+    const current = map4x4({
+      harmony: [chordAt('b0_0', 'bar0', 0), chordAt('b0_2', 'bar0', 1), chordAt('b1_1', 'bar1', 2.5)],
+    })
+    const fresh = freshBeatsMatching()
+    const r = reanalyzeWithHarmony(current, fresh.bars, fresh.beats)
+    const { errors } = validateSongMap(r.map)
+    expect(errors.filter((e) => /barId does not match/.test(e))).toEqual([])
+    expect(errors).toEqual([])
+  })
+
+  it('moves the cached position-in-bar with the beat', () => {
+    // Otherwise every chord warns instead of erroring — quieter, same cause.
+    const current = map4x4({ harmony: [chordAt('b0_2', 'bar0', 1)] })
+    const fresh = freshBeatsMatching()
+    const r = reanalyzeWithHarmony(current, fresh.bars, fresh.beats)
+    const beat = r.map.timeline.beats.find((b) => b.id === r.map.harmony[0]!.beatId)!
+    expect(r.map.harmony[0]!.beatAnchor?.indexInBar).toBe(beat.indexInBar)
+  })
+
+  it('leaves a chord with no beatAnchor without inventing one', () => {
+    const current = map4x4({
+      harmony: [{ ...chordAt('b0_0', 'bar0', 0), beatAnchor: undefined }],
+    })
+    const fresh = freshBeatsMatching()
+    const r = reanalyzeWithHarmony(current, fresh.bars, fresh.beats)
+    expect(r.map.harmony[0]!.beatAnchor).toBeUndefined()
   })
 })

@@ -1,4 +1,5 @@
 import { SONGMAP_FORMAT_VERSION } from './version'
+import { isLiveSlotLink } from '$lib/hardware/liveSlotLinks'
 import type {
   Bar,
   Beat,
@@ -209,8 +210,17 @@ function validateCueTrack(track: CueTrack, path: string, errors: string[]) {
   if (typeof track.name !== 'string' || !track.name.trim()) errors.push(`${path}.name required`)
   if (typeof track.enabled !== 'boolean') errors.push(`${path}.enabled must be boolean`)
   if (track.voiceId !== undefined && typeof track.voiceId !== 'string') errors.push(`${path}.voiceId invalid`)
+  if (track.performerId !== undefined && typeof track.performerId !== 'string') {
+    errors.push(`${path}.performerId invalid`)
+  }
+  if (track.spokenCountIn !== undefined && typeof track.spokenCountIn !== 'boolean') {
+    errors.push(`${path}.spokenCountIn invalid`)
+  }
   if (!Array.isArray(track.events)) errors.push(`${path}.events must be array`)
-  else track.events.forEach((event, i) => validateCueEvent(event, `${path}.events[${i}]`, errors))
+  else {
+    track.events.forEach((event, i) => validateCueEvent(event, `${path}.events[${i}]`, errors))
+    pushDuplicateIdErrors(track.events, `${path}.events`, errors)
+  }
   if (!Array.isArray(track.suppressedGeneratedKeys)) {
     errors.push(`${path}.suppressedGeneratedKeys must be array`)
   } else {
@@ -218,6 +228,23 @@ function validateCueTrack(track: CueTrack, path: string, errors: string[]) {
       if (typeof key !== 'string') errors.push(`${path}.suppressedGeneratedKeys[${i}] invalid`)
     })
   }
+}
+
+/**
+ * Flags repeated `.id` values in an id-keyed list. These lists are merged by id
+ * (`mergeByIdList` in collabMerge), so a duplicate id silently collapses two
+ * distinct items into one on the next sync — real data loss. Bars, beats and
+ * drafts have their own bespoke checks; this covers harmony, sections,
+ * cueTracks and cue events.
+ */
+function pushDuplicateIdErrors(items: readonly { id?: unknown }[], label: string, errors: string[]) {
+  const seen = new Set<string>()
+  items.forEach((it, i) => {
+    const id = it?.id
+    if (typeof id !== 'string') return
+    if (seen.has(id)) errors.push(`${label}[${i}]: duplicate id ${id}`)
+    seen.add(id)
+  })
 }
 
 export function validateSongMap(map: SongMap): ValidationResult {
@@ -306,7 +333,10 @@ export function validateSongMap(map: SongMap): ValidationResult {
   }
 
   if (!Array.isArray(map.cueTracks)) errors.push('cueTracks must be array')
-  else map.cueTracks.forEach((track, i) => validateCueTrack(track, `cueTracks[${i}]`, errors))
+  else {
+    map.cueTracks.forEach((track, i) => validateCueTrack(track, `cueTracks[${i}]`, errors))
+    pushDuplicateIdErrors(map.cueTracks, 'cueTracks', errors)
+  }
 
   if (map.countInBeats !== undefined) {
     if (!Number.isInteger(map.countInBeats) || map.countInBeats < 0) {
@@ -353,7 +383,10 @@ export function validateSongMap(map: SongMap): ValidationResult {
   if (map.clickExport !== undefined) validateRenderedExport(map.clickExport, 'clickExport')
 
   if (!Array.isArray(map.sections)) errors.push('sections must be array')
-  else map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
+  else {
+    map.sections.forEach((s, i) => validateSection(s, `sections[${i}]`, errors))
+    pushDuplicateIdErrors(map.sections, 'sections', errors)
+  }
 
   if (map.drumMidi !== undefined) {
     const dm = map.drumMidi
@@ -435,6 +468,7 @@ export function validateSongMap(map: SongMap): ValidationResult {
   if (!Array.isArray(map.harmony)) errors.push('harmony must be array')
   else {
     map.harmony.forEach((h, i) => validateHarmony(h, `harmony[${i}]`, errors))
+    pushDuplicateIdErrors(map.harmony, 'harmony', errors)
     if (Array.isArray(beats) && Array.isArray(bars)) {
       const beatById = new Map(beats.map((b) => [b.id, b]))
       const seenBeat = new Set<string>()
@@ -494,8 +528,64 @@ export function validateSongMap(map: SongMap): ValidationResult {
           else {
             if (typeof t.key !== 'string' || !t.key) errors.push(`mixState.tracks[${i}].key invalid`)
             if (!Number.isFinite(t.volume) || t.volume < 0) errors.push(`mixState.tracks[${i}].volume invalid`)
+            if (t.liveSlot !== undefined && !isLiveSlotLink(t.liveSlot)) {
+              errors.push(`mixState.tracks[${i}].liveSlot invalid`)
+            }
           }
         }
+      }
+    }
+  }
+
+  // Legacy/in-memory maps may not have reached the v7 parse boundary yet.
+  // Parse/serialize materialize an excluded-only compatibility block; absence
+  // here is therefore legacy state, not permission to route anything.
+  if (map.liveRouting === undefined) {
+    // Accepted for compatibility. Live input construction still fails closed.
+  } else if (map.liveRouting.version !== 1) {
+    errors.push('liveRouting.version must be 1')
+  } else {
+    const sourceIds = new Set<string>()
+    const channelIds = new Set<string>()
+    const sumGroupIds = new Set<string>()
+    for (const [index, source] of map.liveRouting.sources.entries()) {
+      const path = `liveRouting.sources[${index}]`
+      if (!source.id || sourceIds.has(source.id)) errors.push(`${path}.id invalid or duplicate`)
+      sourceIds.add(source.id)
+      if (!source.mixerChannelId) errors.push(`${path}.mixerChannelId invalid`)
+      if (source.admission !== 'included' && source.admission !== 'excluded') {
+        errors.push(`${path}.admission invalid`)
+      }
+      if (!Array.isArray(source.monitorSends)) errors.push(`${path}.monitorSends invalid`)
+      else {
+        for (const [sendIndex, send] of source.monitorSends.entries()) {
+          if (!send.performerId || !isFiniteNumber(send.gain) || send.gain < 0) {
+            errors.push(`${path}.monitorSends[${sendIndex}] invalid`)
+          }
+        }
+      }
+      if (source.producer.kind === 'stem-audio') {
+        if (!source.producer.stemId) {
+          errors.push(`${path}.producer stem identity invalid`)
+        }
+      }
+    }
+    for (const [index, channel] of map.liveRouting.mixerChannels.entries()) {
+      const path = `liveRouting.mixerChannels[${index}]`
+      if (!channel.id || channelIds.has(channel.id)) errors.push(`${path}.id invalid or duplicate`)
+      channelIds.add(channel.id)
+      if (!channel.sourceId) errors.push(`${path}.sourceId invalid`)
+      if (!isFiniteNumber(channel.processing.gain) || channel.processing.gain < 0) {
+        errors.push(`${path}.processing.gain invalid`)
+      }
+    }
+    for (const [index, group] of map.liveRouting.sumGroups.entries()) {
+      const path = `liveRouting.sumGroups[${index}]`
+      if (!group.id || sumGroupIds.has(group.id)) errors.push(`${path}.id invalid or duplicate`)
+      sumGroupIds.add(group.id)
+      if (!group.rigSourceLaneId) errors.push(`${path}.rigSourceLaneId invalid`)
+      if (!Array.isArray(group.mixerChannelIds) || group.mixerChannelIds.length < 2) {
+        errors.push(`${path}.mixerChannelIds must contain at least two channels`)
       }
     }
   }

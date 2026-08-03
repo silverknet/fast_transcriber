@@ -13,6 +13,7 @@
     probeDesktopSetupStatus,
   } from '$lib/client/desktopBeacon'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
+  import { continueWithoutDesktop } from '$lib/stores/desktopGate'
   import { classifySidecarVersion } from '$lib/desktop/minSidecarVersion'
   import { ArrowRight, Check, RefreshCw, AlertTriangle, Loader2, Download } from '@lucide/svelte'
 
@@ -114,6 +115,7 @@
         version: r.version,
         capabilities: r.capabilities,
         versionStatus: classifySidecarVersion(r.version),
+        offlineAppOpen: r.offlineAppOpen,
         lastCheckedAt: new Date().toISOString(),
         lastError: r.error,
         pythonHealth,
@@ -255,6 +257,20 @@
         {checking ? 'Checking…' : "I've updated — check again"}
       </button>
     </div>
+
+    <!-- Escape hatch: an outdated sidecar shouldn't lock you out any harder than
+         no sidecar does. Let the user keep going in browser/Collab mode. -->
+    <button
+      type="button"
+      onclick={() => {
+        continueWithoutDesktop.set(true)
+        void goto('/project')
+      }}
+      class="text-muted-foreground hover:text-foreground mt-6 inline-flex items-center gap-2 text-sm font-bold underline underline-offset-4"
+    >
+      Continue without BarBro Desktop
+      <ArrowRight class="size-3.5" aria-hidden="true" />
+    </button>
   {:else if reachable && pythonHealth === 'broken'}
     <!--
       Sidecar is up but its Python deps are missing/broken (typical

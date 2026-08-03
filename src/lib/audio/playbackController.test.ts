@@ -43,6 +43,8 @@ class MockOscillatorNode {
 
 class MockBufferSourceNode {
   buffer: { duration: number } | null = null
+  /** Real AudioBufferSourceNodes always expose this AudioParam (varispeed). */
+  playbackRate = { value: 1 }
   connect = vi.fn()
   disconnect = vi.fn()
   /** Each `start` call records `[ctxTime, offset]`. */
@@ -385,7 +387,13 @@ describe('PlaybackController volume sync (derived clamps)', () => {
 })
 
 describe('PlaybackController destroy', () => {
-  it('closes the AudioContext if one was created', () => {
+  it('does NOT close the AudioContext — it is the app-wide shared device', () => {
+    // This test asserted the OPPOSITE and encoded a real bug. `#ensureGraph`
+    // ADOPTS `audioDevice()`, the one context every surface shares, so closing
+    // it on destroy silenced the whole app: the mixer, the machines, and the
+    // rig test tone at a venue. A closed AudioContext throws nothing, accepts
+    // every call and freezes currentTime at 0, so it failed completely
+    // invisibly. See `sharedDeviceLifetime.browser.test.ts`.
     const c = new PlaybackController()
     c.setSongMap(makeSong({ barCount: 2 }))
     c.setAudioBuffer(makeBuffer(4))
@@ -393,7 +401,7 @@ describe('PlaybackController destroy', () => {
     c.play()
     expect(lastCtx).not.toBeNull()
     c.destroy()
-    expect(lastCtx?.close).toHaveBeenCalled()
+    expect(lastCtx?.close).not.toHaveBeenCalled()
   })
 
   it('is safe to call without prior play()', () => {

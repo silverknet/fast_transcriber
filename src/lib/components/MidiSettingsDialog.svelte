@@ -224,7 +224,7 @@
           </tbody>
         </table>
         <p class="text-muted-foreground text-xs">
-          Pads are fixed: bottom row = stems (green on / red muted), the 4 rows above = the song's sections (tap to jump).
+          Pads are fixed: bottom row = slots 1–8, row 4 pads 1–2 = Custom 1–2, and the remaining pads launch sections.
         </p>
       </section>
 

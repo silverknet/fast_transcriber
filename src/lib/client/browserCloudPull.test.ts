@@ -158,4 +158,38 @@ describe('pullCloudChangesBrowser', () => {
     // The OPEN song (S1) in the editor is untouched.
     expect(get(songMap)!.metadata.title).toBe('S1')
   })
+
+  it('CHARACTERIZATION: a skipped (unmigratable) song does NOT hold back the project watermark', async () => {
+    // A song whose payload can't be parsed/migrated is skipped (returns null),
+    // but the PROJECT watermark still advances to the manifest revision. This is
+    // deliberate: the delta fetch is gated by `lastSyncedRevision`, so pinning it
+    // to the bad song's revision would re-fetch the ENTIRE project on every pull,
+    // forever, because the song can never migrate. The accepted cost is that a
+    // *permanently* unreadable song is not retried. (A song with an in-flight
+    // conflict is different — it self-heals through the push-409 path — and a
+    // transient read failure is the one narrow gap, noted in TESTING_AUDIT.md.)
+    await openTwoSongProject() // S1, S2 @ song rev 5, project @ 5
+    openS1InEditor()
+
+    // Project jumps to 8. S1 has a clean rev-8 edit; S2's rev-7 payload is
+    // corrupt (parseSongMap throws → normalizeCloudSongMap → null → skipped).
+    const badRow = { id: ID2, song_map: { not: 'a song map' }, revision: 7, hidden: false, expected_audio: null, cloud_audio: null }
+    vi.mocked(getCloudProjectManifest).mockResolvedValue({ project: { name: 'Set', revision: 8 } } as never)
+    vi.mocked(fetchCloudSongs).mockResolvedValue([songRow(ID1, 'S1 EDITED', 8), badRow] as never)
+
+    const r = await pullCloudChangesBrowser()
+    expect(r.ok).toBe(true)
+
+    const songs = get(project).data!.songs
+    // S1 applied + stamped at 8.
+    const s1 = songs.find((s) => s.id === ID1)!
+    expect(getBrowserCloudSongMap(ID1)!.metadata.title).toBe('S1 EDITED')
+    expect(s1.lastSyncedRevision).toBe(8)
+    // S2 skipped: its per-song watermark stays at 5, content unchanged.
+    const s2 = songs.find((s) => s.id === ID2)!
+    expect(getBrowserCloudSongMap(ID2)!.metadata.title).toBe('S2')
+    expect(s2.lastSyncedRevision).toBe(5)
+    // …yet the PROJECT watermark advanced past S2's rev-7 to the manifest's 8.
+    expect(get(project).data!.cloud!.lastSyncedRevision).toBe(8)
+  })
 })

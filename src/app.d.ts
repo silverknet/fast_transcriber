@@ -15,6 +15,12 @@ declare global {
       accessStatus: AccessStatus
       /** Whether the user is an admin (env-driven ADMIN_USER_IDS). */
       isAdmin: boolean
+      /**
+       * True in the desktop build that serves the app to itself with no cloud
+       * and no sign-in. When set, `supabase` is null and `user` is synthetic —
+       * see `src/lib/server/offlineMode.ts`.
+       */
+      offline: boolean
     }
     // interface PageData {}
     // interface Platform {}

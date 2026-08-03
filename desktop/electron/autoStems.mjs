@@ -190,15 +190,14 @@ export function createAutoStemsDaemon(deps) {
 
   /** Clear attempt budget + status for keys under `projectPath` (or all). */
   function clearBudgets(projectPath) {
-    for (const key of [...attempts.keys()]) {
-      if (!projectPath || key.startsWith(projectPath)) attempts.delete(key)
-    }
-    for (const key of [...statuses.keys()]) {
-      if (!projectPath || key.startsWith(projectPath)) statuses.delete(key)
-    }
-    for (const key of [...lastErrorByKey.keys()]) {
-      if (!projectPath || key.startsWith(projectPath)) lastErrorByKey.delete(key)
-    }
+    // Keys are absolute song folders (path.join(projectPath, folder)). Match on
+    // a path BOUNDARY, not a bare prefix — otherwise clearing "/m/Album" also
+    // wipes the sibling "/m/Album2" (its abandoned songs get silently re-queued
+    // and their status entries vanish). Mirrors the guard at main.mjs:3045.
+    const underProject = (key) => !projectPath || key === projectPath || key.startsWith(projectPath + path.sep)
+    for (const key of [...attempts.keys()]) if (underProject(key)) attempts.delete(key)
+    for (const key of [...statuses.keys()]) if (underProject(key)) statuses.delete(key)
+    for (const key of [...lastErrorByKey.keys()]) if (underProject(key)) lastErrorByKey.delete(key)
   }
   /** @type {NodeJS.Timeout | null} */
   let timer = null

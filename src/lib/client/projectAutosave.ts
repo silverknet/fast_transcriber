@@ -40,6 +40,11 @@ import { restorableSongState } from '$lib/songmap/session'
 import { audioSession } from '$lib/stores/audioSession'
 import { patchMetadataForFolder, project, setProjectData } from '$lib/stores/project'
 import { patchSongMap, songMap } from '$lib/stores/songMap'
+import { reportCloudPush, reportDiskSave, reportEditPending } from '$lib/stores/persistStatus'
+import { isOfflineClient } from '$lib/stores/offlineBuild'
+import { isEditingPaused } from '$lib/client/editingLock'
+import { readOfflineSession, writeOfflineSession } from '$lib/client/offlineSessionIo'
+import { newOfflineSession, withTouchedSong, type OfflineSession } from '$lib/project/offlineSession'
 import type { ProjectFile } from '$lib/project/types'
 
 const DEBOUNCE_MS = 1500
@@ -59,7 +64,43 @@ let pendingWhileWriting = false
 let cloudPushing = false
 let cloudPendingWhilePushing = false
 
-async function tryWriteOnce(): Promise<void> {
+/**
+ * The offline session marker, cached in memory and keyed by project path.
+ *
+ * Cached because this is consulted on every disk save — once per 1.5 s while
+ * you work — and re-reading a small file that only changes when a NEW song is
+ * first touched would be pointless traffic through the sidecar.
+ */
+let offlineSession: OfflineSession | null = null
+let offlineSessionPath: string | null = null
+
+/**
+ * Note that this song was edited offline.
+ *
+ * Runs after the disk write succeeds, so the marker can never claim an edit
+ * that was not actually saved. Best-effort: the marker makes offline edits
+ * VISIBLE later, it is not what preserves them — the `.smap` on disk is.
+ */
+async function recordOfflineTouch(osPath: string, songId: string): Promise<void> {
+  if (!isOfflineClient()) return
+  if (offlineSessionPath !== osPath) {
+    offlineSessionPath = osPath
+    offlineSession = await readOfflineSession(osPath)
+  }
+  const existing = offlineSession
+  // No marker means "Prepare for offline" was never run. Start one anyway: the
+  // edits are real, and they must not be invisible on the way home just because
+  // the pre-flight was skipped. Such a session has no base revisions, so
+  // reconcile falls back to the manifest's watermarks — which is what it would
+  // have used regardless.
+  const base = existing ?? newOfflineSession(new Date().toISOString())
+  const next = withTouchedSong(base, songId)
+  if (existing && next === existing) return // already recorded — no write
+  offlineSession = next
+  await writeOfflineSession(osPath, next)
+}
+
+async function tryWriteOnce(force = false): Promise<void> {
   const snap = get(project)
   const sm = get(songMap)
   if (!sm) return
@@ -69,9 +110,11 @@ async function tryWriteOnce(): Promise<void> {
   if (!snap.activeSongFolder || !snap.activeSongId) return
   if (snap.editingMode !== 'project-song') return
 
-  // Guard 5: route
+  // Guard 5: route. `force` (a navigation/teardown flush) bypasses this: the
+  // pending edit is real and about to be lost, and the remaining guards still
+  // confine the write to the active project song.
   const p = get(page)
-  if (p?.route?.id !== '/edit') return
+  if (!force && p?.route?.id !== '/edit') return
 
   // Guard 7: manifest invariant (id + folder match)
   const entry = snap.data.songs.find(
@@ -80,7 +123,22 @@ async function tryWriteOnce(): Promise<void> {
   if (!entry) return
 
   // Guard 6: sidecar reachable
-  if (!get(desktopCompanionStatus).reachable) return
+  const companion = get(desktopCompanionStatus)
+  if (!companion.reachable) return
+
+  // Guard 6b: ONE BARBRO AT A TIME. The offline app is editing this same folder
+  // right now, and both of us writing `song.smap` from our own copy in memory
+  // means whoever writes last erases the other. Standing down is not a lost
+  // edit — it is the only way to avoid one. See `editingLock.ts`.
+  if (
+    isEditingPaused({
+      offlineAppOpen: companion.offlineAppOpen,
+      isOfflineApp: isOfflineClient(),
+      hasLocalProject: snap.osPath !== null,
+    })
+  ) {
+    return
+  }
 
   const sess = get(audioSession)
   const state = restorableSongState(sm, sess.file ?? null)
@@ -94,9 +152,16 @@ async function tryWriteOnce(): Promise<void> {
 
   const bytes = new Uint8Array(await blob.arrayBuffer())
   const r = await writeProjectSong(snap.osPath, snap.activeSongFolder, bytes)
+  reportDiskSave(r.ok, r.ok ? undefined : r.error)
   if (!r.ok) return
 
   patchMetadataForFolder(snap.activeSongFolder, metadataLiteFromSongMap(sm))
+
+  // Offline only: leave a trace so the browser can offer these edits for sync
+  // when you are back. Deliberately after the write and deliberately awaited-
+  // but-swallowed — a failed marker is a worse experience later, not a lost
+  // edit now.
+  await recordOfflineTouch(snap.osPath, snap.activeSongId).catch(() => {})
 }
 
 function schedule(): void {
@@ -129,14 +194,44 @@ function schedule(): void {
  * 409, increments pendingChanges, and a later pull will resolve).
  * Phase 8 wires the actual merge UI.
  */
-async function tryCloudPushOnce(): Promise<void> {
+async function tryCloudPushOnce(force = false): Promise<void> {
+  // The offline build has no cloud to push to — not "no connection right now",
+  // but no configured client at all, so every attempt would throw. The edits are
+  // not lost: they are on disk, and the session marker written above is what
+  // makes the browser offer to send them when you are back.
+  if (isOfflineClient()) return
   const snap = get(project)
   const sm = get(songMap)
   if (!sm || !snap.data || !snap.data.cloud) return
+  // Same interlock as the disk write. Pushing a copy we are not allowed to save
+  // locally would put the stale side in the cloud and make it authoritative.
+  if (
+    isEditingPaused({
+      offlineAppOpen: get(desktopCompanionStatus).offlineAppOpen,
+      isOfflineApp: isOfflineClient(),
+      hasLocalProject: snap.osPath !== null,
+    })
+  ) {
+    // The pause is CORRECT (two writers would clobber each other) — but it
+    // silently ate half an hour of chord edits once: the browser session kept
+    // accepting edits while every push returned here, unsaid. Never unsaid
+    // again — the badge turns red with these exact words.
+    reportCloudPush(
+      false,
+      undefined,
+      'Saving is PAUSED — the desktop app has this project open. Edit there, or close it; edits made here are NOT being saved.',
+    )
+    return
+  }
   if (!snap.activeSongId) return
   if (snap.editingMode !== 'project-song') return
-  // Only push when actively editing in /edit, mirroring the disk-write guard.
-  if (get(page)?.route?.id !== '/edit') return
+  // Only push when actively editing in /edit, mirroring the disk-write guard —
+  // EXCEPT a `force` flush (navigation away / tab hide), which must send the
+  // pending edit even though the user has already left /edit. Without this,
+  // browser mode (no disk fallback) silently loses any edit made in the
+  // trailing 7s debounce window before navigating back to the project. The
+  // dirty-check below still prevents a no-op push, so forcing is safe.
+  if (!force && get(page)?.route?.id !== '/edit') return
   // Don't keep firing pushes that will 409 while a conflict is awaiting
   // resolution. The dialog's Apply re-merges with the current songMap
   // and pushes once with the fresh base revision; until then, edits
@@ -164,6 +259,7 @@ async function tryCloudPushOnce(): Promise<void> {
   // Mark the active song + project synced through `revision`/`hash`. Re-reads
   // the store because an await may have elapsed since the snapshot.
   function markSynced(revision: number, hash: string): void {
+    reportCloudPush(true, revision)
     const cur = get(project)
     if (!cur.data || !cur.data.cloud) return
     const next: ProjectFile = {
@@ -343,7 +439,7 @@ function flushPendingCloudPush(): void {
     return
   }
   cloudPushing = true
-  tryCloudPushOnce()
+  tryCloudPushOnce(true)
     .catch(() => {})
     .finally(() => {
       cloudPushing = false
@@ -352,6 +448,43 @@ function flushPendingCloudPush(): void {
         scheduleCloudPush()
       }
     })
+}
+
+/** Disk-write twin of {@link flushPendingCloudPush} — fires the trailing 1.5s
+ *  disk debounce immediately so a desktop edit isn't lost on the same
+ *  navigate-away race. No-op in browser mode (the write guards on `osPath`). */
+function flushPendingDiskWrite(): void {
+  if (!debounceTimer) return
+  clearTimeout(debounceTimer)
+  debounceTimer = null
+  if (writing) {
+    pendingWhileWriting = true
+    return
+  }
+  writing = true
+  tryWriteOnce(true)
+    .catch(() => {})
+    .finally(() => {
+      writing = false
+      if (pendingWhileWriting) {
+        pendingWhileWriting = false
+        schedule()
+      }
+    })
+}
+
+/**
+ * Flush ANY pending disk write + cloud push right now, bypassing the `/edit`
+ * route guard. Call this the instant the user leaves the editor — SPA
+ * navigation (`beforeNavigate`) fires none of the tab-hide events, so without
+ * this an edit made in the trailing debounce window is dropped (in browser
+ * mode, permanently — there is no disk copy to fall back to). Idempotent and
+ * cheap: each half no-ops when its timer isn't pending.
+ */
+export function flushProjectAutosave(): void {
+  if (!browser || !started) return
+  flushPendingDiskWrite()
+  flushPendingCloudPush()
 }
 
 /**
@@ -375,6 +508,7 @@ export function startProjectAutosave(): void {
   started = true
   unsubs.push(
     songMap.subscribe(() => {
+      reportEditPending()
       schedule()
       // Independent timer — cloud push runs in parallel with disk write,
       // not chained after it. Disk failure must not block cloud, and
@@ -395,9 +529,9 @@ export function startProjectAutosave(): void {
   // flushPendingCloudPush). visibilitychange→hidden is the reliable signal on
   // both desktop tab-close and mobile; pagehide is the belt-and-suspenders.
   const onHide = () => {
-    if (document.visibilityState === 'hidden') flushPendingCloudPush()
+    if (document.visibilityState === 'hidden') flushProjectAutosave()
   }
-  const onPageHide = () => flushPendingCloudPush()
+  const onPageHide = () => flushProjectAutosave()
   document.addEventListener('visibilitychange', onHide)
   window.addEventListener('pagehide', onPageHide)
   unsubs.push(() => document.removeEventListener('visibilitychange', onHide))
@@ -415,5 +549,7 @@ export function stopProjectAutosave(): void {
     clearTimeout(cloudDebounceTimer)
     cloudDebounceTimer = null
   }
+  offlineSession = null
+  offlineSessionPath = null
   started = false
 }

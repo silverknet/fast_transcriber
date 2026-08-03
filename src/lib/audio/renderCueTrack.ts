@@ -3,6 +3,11 @@
  * Optional spoken cues (title + count-in numbers + section callouts) via desktop Piper when reachable.
  */
 import { buildCueSpeechEvents } from '$lib/audio/cueTrackSpeechSchedule'
+import {
+  createClickSoundResources,
+  PROJECT_CLICK_SOUND,
+  scheduleClickSound,
+} from '$lib/audio/clickSounds'
 import { audioBufferToWavBlob } from '$lib/audio/trimAudio'
 import { fetchTtsWavCached } from '$lib/client/ttsCache'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
@@ -29,7 +34,8 @@ export function resampleMonoSpeedup(src: Float32Array, speed: number): Float32Ar
   return out
 }
 
-function mixClickKernel(
+/** Previous sine-click renderer, retained for reference and rollback. */
+export function mixLegacyClickKernel(
   samples: Float32Array,
   sampleRate: number,
   tSec: number,
@@ -130,7 +136,7 @@ export type RenderCueTrackResult = {
 }
 
 /**
- * Render a mono 44.1 kHz WAV: silence for prepend, sine clicks on beats, optional Piper speech
+ * Render a mono 44.1 kHz WAV: silence for prepend, project clicks on beats, optional Piper speech
  * (desktop sidecar). Both layers are independently controllable so callers
  * can build the four useful variants:
  *
@@ -142,9 +148,131 @@ export type RenderCueTrackResult = {
  * Same prelude/prepend math regardless of layers, so all variants are
  * sample-aligned with each other.
  */
+/**
+ * A context for DECODING and buffer allocation — never for playback.
+ *
+ * Deliberately offline: a browser caps hardware `AudioContext`s at roughly six
+ * per page, and this app already holds several long-lived ones (the editor
+ * transport, the mixer engine, and one per chord-jam voice). Taking another for
+ * work that makes no sound would push it over the limit, and the constructor
+ * throws when it does.
+ */
+function makeDecodeContext(sampleRate: number): OfflineAudioContext {
+  return new OfflineAudioContext(1, 1, sampleRate)
+}
+
+/**
+ * The click track as RAW SAMPLES, for playing inside the app.
+ *
+ * `renderCueTrackWavBlob` exists to write a FILE — Ableton export, the disk
+ * cache. The mixer and live mode were loading the click through it too, which
+ * meant: render the clicks, encode ~20 MB of WAV, hand the blob to
+ * `decodeAudioData` to get the samples back out, and resample 44.1 → 48 kHz on
+ * the way. Seconds of work to arrive at data we already had — and in live mode
+ * those seconds sit between "load the song" and "the band has a click".
+ *
+ * This renders once, at the DESTINATION context's own rate (no resample), and
+ * returns the samples. The caller wraps them in an `AudioBuffer` directly.
+ * Same plan, same click voice, same layout maths as the WAV path — the timeline
+ * placement is shared, so the two cannot drift.
+ */
+
+/**
+ * The click VOICE, rendered once per (rate, accent) as a short kernel.
+ *
+ * The full-length click used to be produced by scheduling every click as its
+ * own node graph in one song-length `OfflineAudioContext` — ~460 voices across
+ * four minutes, measured at ~13-16 SECONDS to render. That render was the
+ * entire "Loading Click…" wait; the WAV round-trip everyone suspected was only
+ * ~1 s of it.
+ *
+ * A click is the same waveform every time it fires. So: render the voice ONCE
+ * into a ~quarter-second kernel (one tiny offline render per accent), then mix
+ * that kernel into the output at each click time with plain adds. Same sound,
+ * same placement, milliseconds instead of seconds.
+ */
+const CLICK_KERNEL_SEC = 0.25
+const clickKernelCache = new Map<string, Promise<Float32Array>>()
+
+function renderClickKernel(sampleRate: number, downbeat: boolean): Promise<Float32Array> {
+  const key = `${sampleRate}:${downbeat ? 'down' : 'off'}`
+  let hit = clickKernelCache.get(key)
+  if (!hit) {
+    hit = (async () => {
+      const frames = Math.ceil(CLICK_KERNEL_SEC * sampleRate)
+      const ctx = new OfflineAudioContext(1, frames, sampleRate)
+      scheduleClickSound({
+        ctx,
+        destination: ctx.destination,
+        resources: createClickSoundResources(ctx),
+        sound: PROJECT_CLICK_SOUND,
+        startTime: 0,
+        downbeat,
+      })
+      const rendered = await ctx.startRendering()
+      return new Float32Array(rendered.getChannelData(0))
+    })()
+    clickKernelCache.set(key, hit)
+  }
+  return hit
+}
+
+/** Mix `kernel` into `data` starting at `atSec`, clipped to the buffer. */
+function stampKernel(data: Float32Array, sampleRate: number, atSec: number, kernel: Float32Array): void {
+  const start = Math.round(atSec * sampleRate)
+  const from = Math.max(0, start)
+  const to = Math.min(data.length, start + kernel.length)
+  for (let i = from; i < to; i++) data[i] += kernel[i - start]!
+}
+
+export async function renderClickTrackData(
+  sm: SongMap,
+  opts: { cueTrack?: CueTrack; sampleRate: number },
+): Promise<{ data: Float32Array; sampleRate: number; preludeOffsetSec: number }> {
+  const trim = sm.audio?.trim
+  if (!trim || !(trim.endSec > trim.startSec)) {
+    throw new Error('Click track needs audio.trim with end > start')
+  }
+  if (sm.timeline.beats.length === 0) throw new Error('Click track needs at least one beat')
+  const plan = songPlaybackPlan(sm)
+  if (!plan) throw new Error('Click track needs audio.trim with end > start')
+
+  // Identical layout derivation to the WAV path — one timeline, two consumers.
+  // Clicks only — DELIBERATELY the no-announce layout. In live mode the
+  // announcement is spoken dynamically and the START is delayed instead, so a
+  // baked announcement prelude here would double the gap.
+  const preludeSec = titleCuePreludeSec(sm, opts.cueTrack)
+  const prependSec = plan.prependSec
+  const totalSec = preludeSec + prependSec + plan.songDurationSec
+  if (!(totalSec > 0)) throw new Error('Click track duration is zero')
+
+  const sampleRate = opts.sampleRate
+  const frames = Math.max(1, Math.ceil(totalSec * sampleRate))
+  const data = new Float32Array(frames)
+  const [down, off] = await Promise.all([
+    renderClickKernel(sampleRate, true),
+    renderClickKernel(sampleRate, false),
+  ])
+  const shift = preludeSec + prependSec
+  for (const c of plan.clickPoints) {
+    const tClick = c.timeSec + shift
+    if (tClick < 0 || tClick >= totalSec - 1e-6) continue
+    stampKernel(data, sampleRate, tClick, c.downbeat ? down : off)
+  }
+  return { data, sampleRate, preludeOffsetSec: shift }
+}
+
 export async function renderCueTrackWavBlob(
   sm: SongMap,
-  opts: { includeSpeech?: boolean; includeClicks?: boolean; cueTrack?: CueTrack } = {},
+  opts: {
+    includeSpeech?: boolean
+    includeClicks?: boolean
+    cueTrack?: CueTrack
+    /** Speak the song title from the PROJECT setting — no intro event needed.
+     *  Explicit per consumer: baked cue WAVs pass the setting; the in-app
+     *  click lane passes nothing (live speaks dynamically instead). */
+    announceTitle?: boolean
+  } = {},
 ): Promise<RenderCueTrackResult> {
   const includeSpeech = opts.includeSpeech !== false
   const includeClicks = opts.includeClicks !== false
@@ -158,7 +286,7 @@ export async function renderCueTrackWavBlob(
   const plan = songPlaybackPlan(sm)
   if (!plan) throw new Error('Cue track needs audio.trim with end > start')
 
-  const preludeSec = titleCuePreludeSec(sm, opts.cueTrack)
+  const preludeSec = titleCuePreludeSec(sm, opts.cueTrack, { announceTitle: opts.announceTitle })
   const prependSec = plan.prependSec
   const trimLen = plan.songDurationSec
   const totalSec = preludeSec + prependSec + trimLen
@@ -174,23 +302,37 @@ export async function renderCueTrackWavBlob(
     // shifting by `preludeSec + prependSec` puts them on the cue-WAV
     // timeline. The relationship "N count-in clicks end exactly one
     // beat before the song starts" is enforced inside `songPlaybackPlan`.
+    //
+    // Kernel-stamped, exactly like `renderClickTrackData`: rendering every
+    // click as its own node graph across a song-length OfflineAudioContext
+    // measured at ~13 s for a four-minute song, and this path feeds the disk
+    // cache and the Ableton export — the same wait, just moved.
+    const [down, off] = await Promise.all([
+      renderClickKernel(sampleRate, true),
+      renderClickKernel(sampleRate, false),
+    ])
     const shift = preludeSec + prependSec
     for (const c of plan.clickPoints) {
       const tClick = c.timeSec + shift
       if (tClick < 0 || tClick >= totalSec - 1e-6) continue
-      mixClickKernel(data, sampleRate, tClick, c.downbeat)
+      stampKernel(data, sampleRate, tClick, c.downbeat ? down : off)
     }
   }
 
   let speechOk = true
   let speechFail: string | null = null
 
-  const ac = new AudioContext({ sampleRate })
-  try {
+  // OFFLINE, not a hardware AudioContext. This one only decodes; it never
+  // plays. A browser allows about six hardware contexts per page and the app
+  // already holds several (the transport, the mixer, and one per chord voice),
+  // so taking another just to decode would throw — which is what "paused in
+  // debugger" on this line was.
+  const ac = makeDecodeContext(sampleRate)
+  {
     if (!includeSpeech) {
       // Click-only mode — skip the TTS round-trips entirely.
     } else {
-      const events = buildCueSpeechEvents(sm, opts.cueTrack)
+      const events = buildCueSpeechEvents(sm, opts.cueTrack, { announceTitle: opts.announceTitle })
       type SpeechMixRow = { t: number; text: string; speedup?: number; order: number }
       const speechRows: SpeechMixRow[] = []
       let mixOrder = 0
@@ -239,8 +381,6 @@ export async function renderCueTrackWavBlob(
         await mixSpeechAt(t, row.text, row.speedup ? { speedup: row.speedup } : undefined)
       }
     }
-  } finally {
-    await ac.close().catch(() => {})
   }
 
   let peak = 0
@@ -253,8 +393,10 @@ export async function renderCueTrackWavBlob(
     for (let i = 0; i < data.length; i++) data[i] *= s
   }
 
-  const ctx2 = new AudioContext({ sampleRate })
-  try {
+  // Offline as well — this exists purely to allocate the buffer the WAV is
+  // written from.
+  const ctx2 = makeDecodeContext(sampleRate)
+  {
     const buf = ctx2.createBuffer(1, frames, sampleRate)
     buf.copyToChannel(data, 0, 0)
     const blob = await audioBufferToWavBlob(buf)
@@ -265,7 +407,5 @@ export async function renderCueTrackWavBlob(
         ? undefined
         : `No voice in this file — ${speechFail ?? 'desktop unreachable'}. Run BarBro desktop and set up Piper (TTS debug page).`,
     }
-  } finally {
-    await ctx2.close().catch(() => {})
   }
 }

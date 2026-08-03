@@ -1,5 +1,6 @@
 import type { Accidental, ChordSymbol, NoteName } from '$lib/songmap/types'
 import { formatChordSymbol } from './formatChordSymbol'
+import { NO_CHORD_SYMBOL } from './noChord'
 
 export type ParseChordResult = { ok: true; chord: ChordSymbol } | { ok: false; error: string }
 
@@ -60,10 +61,22 @@ function parseQuality(rest: string): QualityParse {
     { pattern: /^maj7/i, quality: 'maj7' },
     { pattern: /^ma7/i, quality: 'maj7' },
     { pattern: /^M7(?![a-z])/, quality: 'maj7' },
-    { pattern: /^m7(?![a-z0-9])/, quality: 'min7' },
+    // Extended MAJOR-seventh chords: maj9/maj11/maj13 keep the maj7 character
+    // and add the extension (without these, `Cmaj9` mis-parsed to `Cadd9`).
+    { pattern: /^maj13/i, quality: 'maj7', ext: ['13'] },
+    { pattern: /^maj11/i, quality: 'maj7', ext: ['11'] },
+    { pattern: /^maj9/i, quality: 'maj7', ext: ['9'] },
+    // Minor seventh — allow trailing colour tones (b5/#5/b9…) and extensions so
+    // half-diminished `m7b5` parses as min7 + b5 (not the old `Cb5` mangle).
+    { pattern: /^m7/, quality: 'min7' },
     { pattern: /^min7/i, quality: 'min7' },
     { pattern: /^mi7/i, quality: 'min7' },
     { pattern: /^\-7/i, quality: 'min7' },
+    // Extended MINOR chords: m9/m11/m13 imply the b7 → min7 + extension
+    // (without these, `Am9` mis-parsed to A major).
+    { pattern: /^m13/, quality: 'min7', ext: ['13'] },
+    { pattern: /^m11/, quality: 'min7', ext: ['11'] },
+    { pattern: /^m9/, quality: 'min7', ext: ['9'] },
     { pattern: /^maj(?!or)/i, quality: 'major' },
     { pattern: /^major/i, quality: 'major' },
     { pattern: /^min(?![or])/i, quality: 'minor' },
@@ -108,6 +121,9 @@ function parseQuality(rest: string): QualityParse {
 export function parseChordText(raw: string): ParseChordResult {
   const s0 = normalizeUnicode(raw)
   if (!s0.length) return { ok: false, error: 'Empty chord' }
+
+  // N.C. ("no chord"): `N.C.`, `NC`, `n.c.` etc. → the placed no-chord marker.
+  if (/^n\.?c\.?$/i.test(s0)) return { ok: true, chord: { ...NO_CHORD_SYMBOL } }
 
   const slashIdx = s0.indexOf('/')
   const mainPart = slashIdx >= 0 ? s0.slice(0, slashIdx) : s0

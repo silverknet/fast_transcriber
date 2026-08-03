@@ -16,14 +16,15 @@ import { titleCuePreludeSec } from '$lib/audio/cueTrackSpeechSchedule'
 import { songPlaybackPlan } from '$lib/songmap/playbackPlan'
 import { sortBeatsByTime } from '$lib/songmap/normalize'
 import { quantizeTimesToGrid, dedupeDrumEvents } from '$lib/songmap/quantizeToGrid'
+import { generateDrumGroove } from '$lib/songmap/generateDrumGroove'
 import { inferDrumGroove } from '$lib/songmap/drumGroove'
-import { DRUM_KIT_SAMPLE_RATE, loadDrumKit } from './drumKits'
+import { DRUM_KITS, DRUM_KIT_SAMPLE_RATE, loadDrumKit } from './drumKits'
 import type { DrumKit, DrumKitId } from './drumKits'
 import { applyBusCompression, applyReverb, applySaturation, voicePanGains } from './drumBus'
 import type { DrumMidiEvent, DrumQuantize, SongMap } from '$lib/songmap/types'
 
 /** Matches the mixer's drums loudness target (see mastering.ts). */
-const DRUM_TRACK_TARGET_RMS_DB = -16
+export const DRUM_TRACK_TARGET_RMS_DB = -16
 const PEAK_CEILING = 0.95
 
 /** Fixed velocity curve — quiet hits stay audible, loud hits stay dynamic. */
@@ -95,12 +96,18 @@ export type RenderDrumTrackResult = {
   sampleRate: number
 }
 
-export async function renderDrumTrackWavBlob(
+/**
+ * Render a finished event list to a WAV blob. Shared by the DETECTED drum
+ * track and the programmed drum machine — everything above this point differs
+ * (where the events come from), everything below is identical (kit, mix bus,
+ * normalization), and the two must not drift.
+ */
+async function renderDrumEventsToWav(
   sm: SongMap,
-  opts: { kitId?: DrumKitId; quantize?: DrumQuantize; customKit?: DrumKit } = {},
+  events: DrumMidiEvent[],
+  kitId: DrumKitId,
+  opts: { customKit?: DrumKit } = {},
 ): Promise<RenderDrumTrackResult> {
-  const dm = sm.drumMidi
-  if (!dm || dm.events.length === 0) throw new Error('Detect drums first.')
   const trim = sm.audio?.trim
   if (!trim || !(trim.endSec > trim.startSec)) {
     throw new Error('Drum track needs audio.trim with end > start')
@@ -112,21 +119,6 @@ export async function renderDrumTrackWavBlob(
   const prependSec = plan.prependSec
   const totalSec = preludeSec + prependSec + plan.songDurationSec
   if (!(totalSec > 0)) throw new Error('Drum track duration is zero')
-
-  const kitId =
-    opts.kitId ?? (dm.kit === 'acoustic' || dm.kit === 'custom' ? (dm.kit as DrumKitId) : 'synth')
-  const quantize = opts.quantize ?? dm.quantize ?? 'off'
-  const style = dm.style ?? 'steady'
-
-  let events: DrumMidiEvent[] = dm.events
-  if (style === 'steady') {
-    // The groove engine outputs grid-locked events already — no quantize.
-    events = inferDrumGroove(sm, events)
-  } else if (quantize !== 'off') {
-    const beatsSorted = sortBeatsByTime(sm.timeline.beats)
-    const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
-    events = dedupeDrumEvents(quantizeTimesToGrid(events, beatsSorted, barsById, quantize))
-  }
 
   // The caller resolves "Your kit" (project files) and passes it in;
   // without it, loadDrumKit('custom') degrades to the built-in fallbacks.
@@ -154,4 +146,48 @@ export async function renderDrumTrackWavBlob(
     durationSec: totalSec,
     sampleRate,
   }
+}
+
+/** The DETECTED drum track — hits analyzed from a drum stem. */
+export async function renderDrumTrackWavBlob(
+  sm: SongMap,
+  opts: { kitId?: DrumKitId; quantize?: DrumQuantize; customKit?: DrumKit } = {},
+): Promise<RenderDrumTrackResult> {
+  const dm = sm.drumMidi
+  if (!dm || dm.events.length === 0) throw new Error('Detect drums first.')
+
+  const kitId =
+    opts.kitId ?? (DRUM_KITS.some((k) => k.id === dm.kit) ? (dm.kit as DrumKitId) : 'synth')
+  const quantize = opts.quantize ?? dm.quantize ?? 'off'
+  const style = dm.style ?? 'steady'
+
+  let events: DrumMidiEvent[] = dm.events
+  if (style === 'steady') {
+    // The groove engine outputs grid-locked events already — no quantize.
+    events = inferDrumGroove(sm, events)
+  } else if (quantize !== 'off') {
+    const beatsSorted = sortBeatsByTime(sm.timeline.beats)
+    const barsById = new Map(sm.timeline.bars.map((b) => [b.id, b]))
+    events = dedupeDrumEvents(quantizeTimesToGrid(events, beatsSorted, barsById, quantize))
+  }
+  return renderDrumEventsToWav(sm, events, kitId, opts)
+}
+
+/**
+ * The PROGRAMMED drum track — generated from `sm.drumMachine` plus the
+ * timeline and sections. Needs no drum stem, and coexists with the detected
+ * track rather than replacing it.
+ */
+export async function renderDrumMachineWavBlob(
+  sm: SongMap,
+  opts: { kitId?: DrumKitId; customKit?: DrumKit } = {},
+): Promise<RenderDrumTrackResult> {
+  const machine = sm.drumMachine
+  if (!machine || !machine.enabled) throw new Error('No drum machine track on this song.')
+
+  const kitId =
+    opts.kitId ?? (DRUM_KITS.some((k) => k.id === machine.kit) ? (machine.kit as DrumKitId) : 'synth')
+  const events = generateDrumGroove(sm, machine)
+  if (events.length === 0) throw new Error('Drum machine produced no events — is the grid analyzed?')
+  return renderDrumEventsToWav(sm, events, kitId, opts)
 }

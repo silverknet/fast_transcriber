@@ -18,7 +18,8 @@
  * Pure and unit-testable: events + timeline + sections in, events out.
  */
 import { sortBeatsByTime } from './normalize'
-import type { Bar, Beat, DrumClass, DrumMidiEvent, Section, SongMap } from './types'
+import { buildSectionRangesForBars } from './sectionBlocks'
+import type { Bar, Beat, DrumClass, DrumMidiEvent, SongMap } from './types'
 
 const SLOTS_PER_BEAT = 4 // 16ths
 
@@ -29,6 +30,7 @@ const PATTERN_MIN_FREQ: Record<DrumClass, number> = {
   tom: 0.75, // toms are the least reliable class — demand near-unanimity
   hihat: 0.5, // only used when the pulse-layer heuristic doesn't kick in
   cymbal: 2, // cymbals never form a per-bar pattern; handled at boundaries
+  ride: 2, // programmed-only; stem detection never emits a ride
 }
 
 /** Hat pulse selection by median detected hats per active bar. */
@@ -43,14 +45,15 @@ const SNARE_BACKBEAT_VEL_RATIO = 0.72
 /** A groove's snare pattern lives on at most this many bar positions. */
 const SNARE_MAX_PATTERN_SLOTS = 2
 
-type BarSlots = {
+export type BarSlots = {
   bar: Bar
   beats: Beat[]
   /** slot index → time */
   slotTimes: number[]
 }
 
-function buildBarSlots(sm: SongMap): BarSlots[] {
+/** Shared with the drum machine (`generateDrumGroove`) — same 16th grid. */
+export function buildBarSlots(sm: SongMap): BarSlots[] {
   const beatsSorted = sortBeatsByTime(sm.timeline.beats)
   const beatsByBar = new Map<string, Beat[]>()
   for (const b of beatsSorted) {
@@ -75,21 +78,9 @@ function buildBarSlots(sm: SongMap): BarSlots[] {
 }
 
 /** Sections covering every bar; uncovered bars form implicit blocks. */
-function sectionBlocks(sm: SongMap, barCount: number): { start: number; end: number }[] {
-  const blocks: { start: number; end: number }[] = []
-  const sections = [...sm.sections].sort(
-    (a: Section, b: Section) => a.barRange.startBarIndex - b.barRange.startBarIndex,
-  )
-  let cursor = 0
-  for (const s of sections) {
-    const start = Math.max(0, s.barRange.startBarIndex)
-    const end = Math.min(barCount - 1, s.barRange.endBarIndex)
-    if (start > cursor) blocks.push({ start: cursor, end: start - 1 })
-    if (end >= start) blocks.push({ start, end })
-    cursor = Math.max(cursor, end + 1)
-  }
-  if (cursor <= barCount - 1) blocks.push({ start: cursor, end: barCount - 1 })
-  return blocks.length > 0 ? blocks : [{ start: 0, end: barCount - 1 }]
+export function sectionBlocks(sm: SongMap, barCount: number): { start: number; end: number }[] {
+  const bars = [...sm.timeline.bars].sort((a, b) => a.index - b.index).slice(0, barCount)
+  return buildSectionRangesForBars(sm.sections, bars)
 }
 
 function median(xs: number[]): number {

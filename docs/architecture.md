@@ -9,7 +9,7 @@ Supabase for cloud projects.
 | Piece | Path | Responsibility |
 |---|---|---|
 | SvelteKit web app | [`../src/`](../src/) | UI, auth routes, project editing, export orchestration, Supabase server endpoints. |
-| Desktop sidecar | [`../desktop/`](../desktop/) | Headless Electron process exposing loopback HTTP for native/Python jobs. |
+| Desktop service | [`../desktop/`](../desktop/) | Electron loopback service for native/Python jobs and hardware control; packaged builds also host the offline app and status shell. |
 | Python analyzers | [`../desktop/native/python/`](../desktop/native/python/) | Beats, sections/chroma, Demucs stems, Piper TTS wrappers. |
 | Database migrations | [`../db/migrations/`](../db/migrations/) | Supabase/Postgres schema, RLS, RPC helpers, access grants. |
 
@@ -25,17 +25,17 @@ Supabase for cloud projects.
 
 ## Frontend Conventions
 
-The app is SvelteKit 2 + Svelte 5. New Svelte code should use runes:
+The app is SvelteKit 2 + Svelte 5. New Svelte code uses runes:
 
 - `$state` for local mutable state.
-- `$derived` / `$derived.by` for computed state.
-- Prefer explicit events, load functions, stores, and helper functions over
-  `$effect`.
-- Avoid `{@const}` in new markup. If a value is reused in markup, derive it in
-  the script block or pre-shape the array/object you iterate over.
+- Always use `$derived` / `$derived.by` for computed state.
+- `$effect` is only for external side effects that cannot be expressed through
+  derived state, declarative markup, or an explicit user command.
+- Do not add `{@const}` in markup. Derive or pre-shape view data in the script
+  block.
 
-Existing legacy markup still has some `{@const}`. Treat it as debt, not as the
-style to copy.
+Existing effects and `{@const}` are debt, not style to copy. See
+[`../AGENTS.md`](../AGENTS.md) for the full rule.
 
 ## Persistence Layers
 

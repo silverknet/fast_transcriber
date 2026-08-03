@@ -14,8 +14,19 @@
  * `onUpdate(state => …)` callbacks and call mutator methods. No store
  * dependency.
  */
+import { bufferSecToWallSec, wallSecToBufferSec } from './varispeed'
+import { audioDevice } from './audioDevice'
+import { liveOutputMap, type LiveOutputMap } from './liveOutputMap'
+import {
+  clickIsOutOfHouse,
+  outputChannelsForLane,
+  type RigLayout,
+} from '$lib/hardware/liveRigPlan'
 
 export type TrackKey = string
+
+/** Ceiling for the MIDI compensation delay; real shifters report a few ms. */
+const MAX_SHIFTER_LATENCY_SEC = 1
 
 /** A processing insert: caller wires source → input, output → track gain. */
 export interface MixerInsert {
@@ -23,12 +34,90 @@ export interface MixerInsert {
   output: AudioNode
 }
 
+/**
+ * A shared EFFECT BUS (aux send/return). Unlike `MixerInsert`, which sits
+ * in-line on ONE track, a bus is fed by sends from any number of tracks and
+ * returns once into the master — so several tracks can share one reverb
+ * instead of each paying for their own.
+ *
+ *     trackGain → sendGain(level) → bus.chain → returnGain → masterGain
+ */
+export interface MixerBus {
+  key: string
+  label: string
+  /** The effect itself; signal enters `input` and leaves `output`. */
+  chain: MixerInsert
+  /** Return level into the master bus (0..1.5). */
+  level: number
+  muted?: boolean
+}
+
+/**
+ * A live instrument backing a MIDI track.
+ *
+ * The engine never asks what it is — only to connect its output and to
+ * schedule itself for a stretch of the timeline. That keeps drums (sampled
+ * one-shots) and the synths (KeysSynth voices) behind one contract.
+ *
+ * Because `output` lands on the SAME track gain an audio lane uses, MIDI
+ * tracks get faders, mute/solo and effect sends for free — the send taps that
+ * gain node, so nothing about routing has to know MIDI exists.
+ */
+/** A lane-strip view of a MIDI part: hits on `rows` stacked lanes. */
+export interface MidiVisual {
+  /** How many stacked rows the hits are spread over (e.g. one per drum voice). */
+  rows: number
+  /** `row` 0 is drawn at the BOTTOM, like a drum grid with the kick lowest. */
+  hits: { timeSec: number; row: number; gain: number }[]
+}
+
+export interface MidiInstrument {
+  /** Connect this to the track's input; the engine wires it once. */
+  output: AudioNode
+  /**
+   * Schedule every note from `fromSec` on the mix timeline onward, where
+   * `fromSec` lands at context time `atCtx`. `rate` is the varispeed factor.
+   */
+  schedule: (fromSec: number, atCtx: number, rate: number) => void
+  /**
+   * Cancel everything pending/sounding.
+   *
+   * With no argument: silence NOW (stop, seek, re-play).
+   * With `atCtxTime`: silence AT that context time — used by the bar-quantized
+   * jump, where buffer lanes get `source.stop(at)` and a MIDI lane must not go
+   * quiet the ~80 ms earlier that the jump commits.
+   */
+  allNotesOff: (atCtxTime?: number) => void
+  /**
+   * Optional: called each transport tick with the current scheduling position,
+   * for instruments that schedule in a ROLLING WINDOW rather than all at once.
+   * A synth voice costs several nodes, so a whole song's worth cannot go on the
+   * clock in one pass the way a sampled drum lane can.
+   */
+  tick?: (positionSec: number) => void
+  /** Part length, so a MIDI-only song still has a mix duration. */
+  durationSec: number
+  /**
+   * What to DRAW for this lane. A MIDI track has no waveform, but it does have
+   * a pattern, and showing it is far more use than an empty strip: you can see
+   * the groove, the fills and the section changes at a glance.
+   */
+  visual?: () => MidiVisual | null
+  /** Release nodes. Optional so simple instruments can skip it. */
+  dispose?: () => void
+}
+
 export interface MixerTrack {
   key: TrackKey
   /** Display label. */
   label: string
-  /** Decoded buffer with any prepend-silence already applied. */
-  buffer: AudioBuffer
+  /**
+   * AUDIO track: a decoded buffer with any prepend-silence applied.
+   * Exactly one of `buffer` / `instrument` is set.
+   */
+  buffer?: AudioBuffer
+  /** MIDI track: scheduled live, so changing its sound needs no re-render. */
+  instrument?: MidiInstrument
   /** Per-track linear gain (0..1.5). 1 = unity. */
   volume: number
   muted: boolean
@@ -81,6 +170,16 @@ interface ActiveSource {
   trackKey: TrackKey
 }
 
+/** Disconnect a node, tolerating "was never connected". */
+function safeDisconnect(n: AudioNode | null | undefined): void {
+  if (!n) return
+  try {
+    n.disconnect()
+  } catch {
+    /* not connected */
+  }
+}
+
 export class MixerEngine {
   readonly ac: AudioContext
   readonly masterGain: GainNode
@@ -96,12 +195,50 @@ export class MixerEngine {
   private rafId: number | null = null
   /** Current master-bus processing chain (see setMasterChain). */
   private masterChain: MixerInsert | null = null
+  /** Last node on the master bus, after `masterChain` (see setMasterTailNode). */
+  private masterTail: AudioNode | null = null
+  /**
+   * Sub-bus carrying only BUFFER-backed (recorded) tracks.
+   *
+   * A transpose re-pitches recorded audio, but a MIDI lane transposes by moving
+   * its NOTES — so running MIDI through the pitch shifter as well shifts it
+   * twice. Keeping recorded audio on its own bus lets the shifter sit where it
+   * belongs without touching the synths.
+   */
+  private readonly audioBus: GainNode
+  /** The pitch shifter, inserted between `audioBus` and the master. */
+  private audioPitchShift: AudioNode | null = null
+  /**
+   * Sub-bus for everything that must NOT be pitch-shifted but must stay in
+   * time with everything that is: MIDI lanes (their notes already carry the
+   * transpose) and spoken cues (nobody wants a transposed voice).
+   *
+   * Bypassing the shifter also bypasses its LATENCY, so this path carries a
+   * matching delay — otherwise these sources run early against the stems.
+   */
+  private readonly unshiftedBus: GainNode
+  /** Created only when a shifter actually reports latency. */
+  private unshiftedDelay: DelayNode | null = null
   /**
    * Transiently silenced tracks (gain forced to 0) WITHOUT changing their
    * stored mute/volume. Used to duck the baked cue lane during a loop/replay so
    * it doesn't collide with the live dynamic cue, then restore cleanly.
    */
   private suppressedKeys = new Set<TrackKey>()
+  // ── Effect busses (aux send/return) ───────────────────────────────────────
+  private readonly busses = new Map<string, MixerBus>()
+  private readonly busReturnGains = new Map<string, GainNode>()
+  /** trackKey → (busKey → send level). Absent/0 = no send. */
+  private readonly sends = new Map<TrackKey, Map<string, number>>()
+  /** `${trackKey}::${busKey}` → the tap gain node. */
+  private readonly sendGains = new Map<string, GainNode>()
+  /**
+   * Varispeed playback rate (1 = untransposed). The ONLY thing a naive
+   * transpose changes: buffers are played untouched, just faster or slower, so
+   * `rate = 1` is bit-identical playback. Every buffer-time ↔ context-time
+   * conversion below divides/multiplies by it — see `varispeed.ts`.
+   */
+  private playbackRate = 1
 
   // ── Bar-quantized jump (crisp section launch, Ableton-style) ──────────────
   /** A jump waiting for its boundary to enter the lookahead window. */
@@ -112,11 +249,97 @@ export class MixerEngine {
   /** How far ahead of the boundary we commit the scheduled sources (seconds). */
   private static readonly JUMP_LOOKAHEAD = 0.08
 
-  constructor() {
-    this.ac = new AudioContext()
+  /**
+   * @param ac  Context to run on. Defaults to the app-wide shared device;
+   *            tests inject their own. The engine never closes it — several
+   *            surfaces share one context, and one clock is what keeps them
+   *            sample-accurate against each other.
+   */
+  /** True only when this engine created its own context and may close it. */
+  #ownsContext: boolean
+  /** Output layout for this device — stereo fallback or split. */
+  private outputMap: LiveOutputMap | null = null
+  private outputMerger: ChannelMergerNode | null = null
+  private outputSplitter: ChannelSplitterNode | null = null
+  /** Stereo-forcing gain ahead of the splitter — see `rewireMasterOutput`. */
+  private outputStereoShim: GainNode | null = null
+  private clickOut: GainNode | null = null
+  private cueOut: GainNode | null = null
+
+  /**
+   * Turn an injected rig layout into the output map the graph is built from.
+   *
+   * The layout is the ONE derivation of the whole signal chain
+   * (`liveRigPlan.ts`) — where a lane leaves, which desk channel it arrives on,
+   * which USB source that strip listens to, and what stays off the house. The
+   * engine consumes it; it does not get an opinion.
+   *
+   * With no layout injected it falls back to `liveOutputMap`, which keeps every
+   * existing caller working unchanged while the migration lands in pieces.
+   */
+  private static resolveOutputMap(ac: AudioContext, layout?: RigLayout | null): LiveOutputMap {
+    const max = ac.destination.maxChannelCount ?? 2
+    if (!layout) return liveOutputMap(max)
+    const song = outputChannelsForLane(layout, 'original')
+    const click = outputChannelsForLane(layout, 'click')
+    const cue = outputChannelsForLane(layout, 'cue')
+    // "Split" means the click genuinely has somewhere else to go. Under
+    // stereo-sum that is true on a two-channel device, which the old
+    // `split`/`channelCount` pair could not express.
+    const split = clickIsOutOfHouse(layout) && layout.requiredOutputChannels <= max
+    return {
+      split,
+      channelCount: split ? layout.requiredOutputChannels : Math.max(1, Math.min(2, max)),
+      channels: { song, click, cue },
+      summary: layout.reason,
+    }
+  }
+
+  constructor(ac?: AudioContext, opts?: { layout?: RigLayout | null }) {
+    // Ownership decides who may CLOSE it. An injected context belongs to the
+    // caller (tests, offline renders) and closing it on dispose is correct; the
+    // shared device belongs to the whole app and closing it is catastrophic —
+    // see `dispose()`.
+    this.#ownsContext = ac !== undefined
+    this.ac = ac ?? audioDevice()
     this.masterGain = this.ac.createGain()
     this.masterGain.gain.value = 1
-    this.masterGain.connect(this.ac.destination)
+    // Output stage — see `rewireMasterOutput()`. On a multichannel device the
+    // song, the click and the cues leave on SEPARATE channels so the desk can
+    // keep the click out of the house; on a laptop they fold back into stereo.
+    // Opt-in. The split path silenced real playback when it was on by default,
+    // having only ever been proven in an offline render — so the app ships on
+    // the path that is known to work and separation is switched on deliberately.
+    this.outputMap = MixerEngine.resolveOutputMap(this.ac, opts?.layout)
+    if (this.outputMap.split) {
+      // EXACTLY the channels the layout needs. This used to be
+      // `maxChannelCount` — all eighteen, to place four — and asking CoreAudio
+      // for an eighteen-channel stream is the prime suspect for the total
+      // silence that followed when separation was switched on.
+      this.ac.destination.channelCount = this.outputMap.channelCount
+      this.ac.destination.channelCountMode = 'explicit'
+      // Without 'discrete' a 4- or 6-channel destination applies a SURROUND
+      // layout and sprays each signal across speakers instead of placing it.
+      // (At 18 channels the spec already falls back to discrete, but this must
+      // not depend on the device being big.)
+      this.ac.destination.channelInterpretation = 'discrete'
+      this.outputMerger = this.ac.createChannelMerger(this.outputMap.channelCount)
+      this.outputMerger.connect(this.ac.destination)
+      // Click and cues get their own gain nodes feeding their own channels.
+      this.clickOut = this.ac.createGain()
+      this.cueOut = this.ac.createGain()
+      for (const c of this.outputMap.channels.click) this.clickOut.connect(this.outputMerger, 0, c)
+      for (const c of this.outputMap.channels.cue) this.cueOut.connect(this.outputMerger, 0, c)
+    }
+    this.rewireMasterOutput()
+    // Recorded audio passes through here on its way to the master; MIDI lanes
+    // skip it. See `setAudioPitchShiftNode`.
+    this.audioBus = this.ac.createGain()
+    this.audioBus.gain.value = 1
+    this.audioBus.connect(this.masterGain)
+    this.unshiftedBus = this.ac.createGain()
+    this.unshiftedBus.gain.value = 1
+    this.unshiftedBus.connect(this.masterGain)
   }
 
   /** Subscribe to transport tick + state changes. Returns unsubscribe. */
@@ -144,16 +367,184 @@ export class MixerEngine {
     if (existing) existing.disconnect()
     const gain = this.ac.createGain()
     gain.gain.value = this.effectiveGainFor(track)
-    gain.connect(this.masterGain)
+    // WHERE THIS TRACK LEAVES.
+    //
+    // Click gets its own output channel when the device has one, so the desk can
+    // send it to every in-ear while keeping it OFF the main bus. Routing it
+    // through `masterGain` like everything else is what made that impossible:
+    // it arrived inside the song's own stereo pair, so taking the click off the
+    // house took the song with it.
+    //
+    // On stereo hardware `clickOutput` is null and it falls back to the normal
+    // path — identical behaviour to before, rather than a click placed on a
+    // channel that does not exist.
+    const dedicated = track.key === 'click' ? this.clickOutput : null
+    if (dedicated) {
+      gain.connect(dedicated)
+    } else {
+      // MIDI lanes take the latency-matched path so the audio pitch shifter can
+      // neither transpose them a second time nor leave them running early.
+      gain.connect(track.instrument ? this.unshiftedBus : this.audioBus)
+    }
     this.trackGains.set(track.key, gain)
     // Wire the insert's tail once; play() connects each source to insert.input.
     if (track.insert) track.insert.output.connect(gain)
+    // A MIDI instrument's output is persistent (not per-note), so it's wired
+    // here rather than in play().
+    if (track.instrument) {
+      safeDisconnect(track.instrument.output)
+      track.instrument.output.connect(track.insert ? track.insert.input : gain)
+    }
+    // The gain node above is BRAND NEW, so any sends off this track point at a
+    // node that is no longer in circuit — re-tap them or the effect goes quiet
+    // the next time the lane reloads.
+    this.rewireSendsForTrack(track.key)
     this.emitUpdate()
+  }
+
+  // ── Effect busses ─────────────────────────────────────────────────────────
+
+  private static sendId(trackKey: TrackKey, busKey: string): string {
+    return `${trackKey}::${busKey}`
+  }
+
+  /**
+   * Add or replace an effect bus. Its chain returns into the master bus through
+   * a return gain, so muting or trimming the bus never touches the dry tracks.
+   */
+  setBus(bus: MixerBus): void {
+    const prev = this.busses.get(bus.key)
+    if (prev && prev.chain !== bus.chain) safeDisconnect(prev.chain.output)
+    this.busses.set(bus.key, bus)
+
+    let ret = this.busReturnGains.get(bus.key)
+    if (!ret) {
+      ret = this.ac.createGain()
+      this.busReturnGains.set(bus.key, ret)
+    }
+    safeDisconnect(ret)
+    ret.gain.value = bus.muted ? 0 : bus.level
+    bus.chain.output.connect(ret)
+    // PRE-shifter, deliberately. A send taps the track GAIN, so a recorded
+    // lane feeds the bus at ORIGINAL pitch; returning here means the wet tail
+    // is transposed by the same shifter as its dry signal. Returning straight
+    // to the master (as this did) left a reverb tail in the wrong key and
+    // early by the shifter's latency.
+    //
+    // KNOWN DEVIATION: a MIDI lane's send is already at final pitch, so its wet
+    // is shifted once too often. It only applies with the tempo-hold dial above
+    // 0, and only to the wet portion. Fixing it properly needs a second chain
+    // instance per bus — see `docs/audio-architecture-review.md`.
+    ret.connect(this.audioBus)
+
+    // Tracks may already have sends aimed at this key (e.g. the bus was
+    // rebuilt) — re-tap them so the send survives.
+    for (const trackKey of this.sends.keys()) this.rewireSendsForTrack(trackKey)
+    this.emitUpdate()
+  }
+
+  removeBus(key: string): void {
+    const bus = this.busses.get(key)
+    if (bus) safeDisconnect(bus.chain.output)
+    this.busses.delete(key)
+    const ret = this.busReturnGains.get(key)
+    if (ret) {
+      safeDisconnect(ret)
+      this.busReturnGains.delete(key)
+    }
+    // Drop every send feeding it, so no orphan taps are left running.
+    for (const [trackKey, levels] of this.sends) {
+      if (!levels.delete(key)) continue
+      const id = MixerEngine.sendId(trackKey, key)
+      const sg = this.sendGains.get(id)
+      if (sg) {
+        safeDisconnect(sg)
+        this.sendGains.delete(id)
+      }
+      if (levels.size === 0) this.sends.delete(trackKey)
+    }
+    this.emitUpdate()
+  }
+
+  listBusses(): MixerBus[] {
+    return [...this.busses.values()]
+  }
+
+  /**
+   * How much of `trackKey` feeds `busKey`. POST-FADER: the tap is taken after
+   * the track's own volume/mute, so pulling a fader down takes its effect with
+   * it — the behaviour people expect from a mixer.
+   */
+  setSend(trackKey: TrackKey, busKey: string, level: number): void {
+    const lv = Math.max(0, Math.min(1.5, level))
+    const id = MixerEngine.sendId(trackKey, busKey)
+    if (lv <= 0) {
+      const sg = this.sendGains.get(id)
+      if (sg) {
+        safeDisconnect(sg)
+        this.sendGains.delete(id)
+      }
+      const levels = this.sends.get(trackKey)
+      if (levels) {
+        levels.delete(busKey)
+        if (levels.size === 0) this.sends.delete(trackKey)
+      }
+      this.emitUpdate()
+      return
+    }
+    const levels = this.sends.get(trackKey) ?? new Map<string, number>()
+    levels.set(busKey, lv)
+    this.sends.set(trackKey, levels)
+    this.rewireSendsForTrack(trackKey)
+    this.emitUpdate()
+  }
+
+  getSend(trackKey: TrackKey, busKey: string): number {
+    return this.sends.get(trackKey)?.get(busKey) ?? 0
+  }
+
+  /** Re-tap every send off a track onto its CURRENT gain node. */
+  private rewireSendsForTrack(trackKey: TrackKey): void {
+    const levels = this.sends.get(trackKey)
+    const gain = this.trackGains.get(trackKey)
+    if (!levels || !gain) return
+    for (const [busKey, level] of levels) {
+      const bus = this.busses.get(busKey)
+      const id = MixerEngine.sendId(trackKey, busKey)
+      let sg = this.sendGains.get(id)
+      if (!sg) {
+        sg = this.ac.createGain()
+        this.sendGains.set(id, sg)
+      }
+      sg.gain.value = level
+      safeDisconnect(sg)
+      // A send whose bus is gone stays REMEMBERED but unconnected, so adding
+      // the bus back restores it instead of silently losing the setting.
+      if (!bus) continue
+      gain.connect(sg)
+      sg.connect(bus.chain.input)
+    }
   }
 
   removeTrack(key: TrackKey): void {
     const prev = this.tracks.get(key)
+    if (prev?.instrument) {
+      prev.instrument.allNotesOff()
+      prev.instrument.dispose?.()
+      safeDisconnect(prev.instrument.output)
+    }
     if (prev?.insert) prev.insert.output.disconnect()
+    // Tear down this track's send taps — an orphan tap would keep feeding the
+    // bus after the lane is gone.
+    const levels = this.sends.get(key)
+    if (levels) {
+      for (const busKey of levels.keys()) {
+        const sg = this.sendGains.get(MixerEngine.sendId(key, busKey))
+        if (sg) safeDisconnect(sg)
+        this.sendGains.delete(MixerEngine.sendId(key, busKey))
+      }
+      this.sends.delete(key)
+    }
     this.tracks.delete(key)
     const gain = this.trackGains.get(key)
     if (gain) {
@@ -169,15 +560,162 @@ export class MixerEngine {
    * project-sound glue/limiter.
    */
   setMasterChain(chain: MixerInsert | null): void {
-    if (this.masterChain) this.masterChain.output.disconnect()
-    this.masterGain.disconnect()
     this.masterChain = chain
-    if (chain) {
-      this.masterGain.connect(chain.input)
-      chain.output.connect(this.ac.destination)
-    } else {
-      this.masterGain.connect(this.ac.destination)
+    this.rewireMasterOutput()
+  }
+
+  /**
+   * Park a node on the very end of the master bus (after the project-sound
+   * chain), or clear it with null. Used for the live pitch shifter that holds
+   * tempo during a naive transpose — one node for every summed track.
+   */
+  setMasterTailNode(node: AudioNode | null): void {
+    this.masterTail = node
+    this.rewireMasterOutput()
+  }
+
+  /**
+   * Delay the un-shifted path to match the audio shifter's latency.
+   *
+   * The delay node is built lazily: with pure varispeed there is no shifter and
+   * therefore nothing to compensate, so the MIDI path stays a plain connection.
+   */
+  private setUnshiftedLatencyCompensation(latencySec: number): void {
+    const wanted = Math.max(0, Math.min(MAX_SHIFTER_LATENCY_SEC, latencySec))
+    if (wanted <= 0) {
+      if (!this.unshiftedDelay) return
+      safeDisconnect(this.unshiftedBus)
+      safeDisconnect(this.unshiftedDelay)
+      this.unshiftedDelay = null
+      this.unshiftedBus.connect(this.masterGain)
+      return
     }
+    if (!this.unshiftedDelay) {
+      // A context without `createDelay` is a test stand-in; compensation is not
+      // what those are exercising, so skip it rather than crash the engine.
+      if (typeof this.ac.createDelay !== 'function') return
+      this.unshiftedDelay = this.ac.createDelay(MAX_SHIFTER_LATENCY_SEC)
+      safeDisconnect(this.unshiftedBus)
+      this.unshiftedBus.connect(this.unshiftedDelay)
+      this.unshiftedDelay.connect(this.masterGain)
+    }
+    this.unshiftedDelay.delayTime.value = wanted
+  }
+
+  /**
+   * Where to connect sources that must not be pitch-shifted but must stay in
+   * time — spoken cues, and anything else voice-like. Same path the MIDI lanes
+   * take, so it carries the shifter's latency compensation.
+   */
+  get unshiftedInput(): AudioNode {
+    return this.unshiftedBus
+  }
+
+  /**
+   * Insert a pitch shifter for RECORDED audio only (null removes it).
+   *
+   * This is what the tempo-hold dial needs: varispeed covers part of the
+   * transpose by changing the rate, and this covers the residual. MIDI lanes
+   * must NOT pass through it — their notes already carry the full transpose, so
+   * shifting them here would land them `n × tempoHold` semitones out of tune
+   * with everything else.
+   */
+  setAudioPitchShiftNode(node: AudioNode | null, latencySec = 0): void {
+    // Re-applied even when the node is unchanged: a shifter can report its
+    // latency only after it has been wired in.
+    this.setUnshiftedLatencyCompensation(node ? latencySec : 0)
+    if (this.audioPitchShift === node) return
+    safeDisconnect(this.audioBus)
+    safeDisconnect(this.audioPitchShift)
+    this.audioPitchShift = node
+    if (node) {
+      this.audioBus.connect(node)
+      node.connect(this.masterGain)
+    } else {
+      this.audioBus.connect(this.masterGain)
+    }
+  }
+
+  /** masterGain → [project sound] → [pitch shift] → destination. */
+  private rewireMasterOutput(): void {
+    safeDisconnect(this.masterGain)
+    safeDisconnect(this.masterChain?.output)
+    safeDisconnect(this.masterTail)
+    safeDisconnect(this.outputStereoShim)
+    safeDisconnect(this.outputSplitter)
+    this.outputStereoShim = null
+    this.outputSplitter = null
+
+    let tail: AudioNode = this.masterGain
+    if (this.masterChain) {
+      tail.connect(this.masterChain.input)
+      tail = this.masterChain.output
+    }
+    if (this.masterTail) {
+      tail.connect(this.masterTail)
+      tail = this.masterTail
+    }
+    if (this.outputMerger && this.outputMap?.split) {
+      // The song pair. A splitter picks the two channels apart before they are
+      // placed — connecting a stereo node straight to two merger inputs would
+      // send BOTH channels to each. And the tail is forced to STEREO first:
+      // the splitter is 'discrete', so a MONO master (mono song file, no
+      // stereo stems loaded) would otherwise land on the LEFT house channel
+      // only — the one-eared failure arriving by yet another route. The
+      // 'speakers' upmix duplicates mono into both sides; true stereo passes
+      // through untouched. Caught by the split-output render test, not a PA.
+      const toStereo = this.ac.createGain()
+      toStereo.channelCount = 2
+      toStereo.channelCountMode = 'explicit'
+      toStereo.channelInterpretation = 'speakers'
+      const splitter = this.ac.createChannelSplitter(2)
+      tail.connect(toStereo)
+      toStereo.connect(splitter)
+      const [l, r] = this.outputMap.channels.song
+      splitter.connect(this.outputMerger, 0, l ?? 0)
+      splitter.connect(this.outputMerger, 1, r ?? 1)
+      this.outputStereoShim = toStereo
+      this.outputSplitter = splitter
+    } else {
+      tail.connect(this.ac.destination)
+    }
+  }
+
+  /**
+   * Where the click should land so it can be kept out of the house.
+   *
+   * Null on a stereo device: there is nowhere separate to put it, and pretending
+   * otherwise would place the click on a channel that does not exist — silence,
+   * with no error, on the machine most people use.
+   */
+  /**
+   * The engine's ACTUAL output mode — what the graph really does, not what any
+   * panel derived it should do. Surfaces so the UI can never claim "separation
+   * is on" while the engine quietly runs stereo (which happened, on a stage).
+   */
+  get outputSplitActive(): boolean {
+    return this.outputMap?.split === true
+  }
+
+  get outputSummary(): string {
+    if (!this.outputMap) return 'stereo (no output map)'
+    return this.outputMap.split
+      ? `split: song→${this.outputMap.channels.song.join('/')}, click→${this.outputMap.channels.click.join('/')}, cue→${this.outputMap.channels.cue.join('/')} of ${this.outputMap.channelCount}`
+      : `stereo (${this.outputMap.summary || 'no separation'})`
+  }
+
+  get clickOutput(): AudioNode | null {
+    return this.outputMap?.split ? (this.clickOut ?? null) : null
+  }
+
+  /** Same for spoken cues. See {@link clickOutput}. */
+  get cueOutput(): AudioNode | null {
+    return this.outputMap?.split ? (this.cueOut ?? null) : null
+  }
+
+  /** How the outputs are laid out right now — the rig page explains this. */
+  get outputLayout(): LiveOutputMap | null {
+    return this.outputMap ?? null
   }
 
   /** Returns a snapshot of current track keys + their saved per-track state. */
@@ -242,16 +780,133 @@ export class MixerEngine {
   durationSec(): number {
     let max = 0
     for (const t of this.tracks.values()) {
-      const d = t.buffer.duration
+      const d = t.buffer ? t.buffer.duration : (t.instrument?.durationSec ?? 0)
       if (d > max) max = d
     }
     return max
   }
 
+  /**
+   * Set the varispeed playback rate (1 = off). Applies to sources already
+   * playing, and re-anchors the transport so the playhead does not jump: the
+   * position reached SO FAR was accumulated at the old rate, so we restart the
+   * accounting from here rather than re-deriving the whole elapsed span.
+   */
+  setPlaybackRate(rate: number): void {
+    const next = Number.isFinite(rate) && rate > 0 ? rate : 1
+    if (next === this.playbackRate) return
+    if (this.state === 'playing') {
+      // Freeze the current position under the OLD rate, then make it the new anchor.
+      const here = this.positionSec()
+      this.playStartPositionSec = here
+      this.playStartCtxTime = this.ac.currentTime
+    }
+    this.playbackRate = next
+    for (const a of this.active) a.source.playbackRate.value = next
+    // A buffer source follows its `playbackRate`; a MIDI part does not — its
+    // notes are already pinned to context times computed at the OLD rate. Left
+    // alone the drums would keep the old tempo while everything else changed.
+    if (this.state === 'playing') {
+      for (const t of this.tracks.values()) {
+        if (t.instrument) this.rescheduleInstrument(t.key)
+      }
+    }
+    if (this.state === 'playing') this.scheduleAutoStop() // the end moved
+  }
+
+  /**
+   * Re-schedule ONE MIDI track from the live playhead, without disturbing the
+   * transport or restarting any other lane. This is what makes changing a
+   * generated part instant: no render, no re-seek, nothing else interrupted.
+   *
+   * No-op unless playing — a stopped track picks the new part up on `play()`.
+   */
+  rescheduleInstrument(key: TrackKey): void {
+    const t = this.tracks.get(key)
+    if (!t?.instrument || this.state !== 'playing') return
+    const now = this.ac.currentTime
+    const at = now + 0.04
+    // Where the playhead WILL be at `at`, not where it is now — scheduling
+    // from the current position would drag the part late by the lead-in.
+    //
+    // SIGNED (`schedulingPositionSec`), not `positionSec()`: during an
+    // announcement pre-roll the playhead is legitimately NEGATIVE, and
+    // `positionSec()` floors it at 0. Using the floored value would place the
+    // whole part however many seconds of pre-roll remain too early — and
+    // because `schedule()` pins absolute context times, it would never
+    // self-correct.
+    const posAtStart =
+      this.schedulingPositionSec() + wallSecToBufferSec(at - now, this.playbackRate)
+    t.instrument.allNotesOff()
+    t.instrument.schedule(posAtStart, at, this.playbackRate)
+  }
+
+  /** Current varispeed rate (1 = untransposed). */
+  get rate(): number {
+    return this.playbackRate
+  }
+
   positionSec(): number {
     if (this.state !== 'playing') return this.playStartPositionSec
-    const elapsed = this.ac.currentTime - this.playStartCtxTime
-    return Math.max(0, this.playStartPositionSec + elapsed)
+    // Wall-clock elapsed → BUFFER seconds: at rate r, r seconds of audio play
+    // per second of wall time. The playhead therefore stays in ORIGINAL audio
+    // time, which is what keeps the untouched `.smap` grid in sync for free.
+    const elapsed = wallSecToBufferSec(this.ac.currentTime - this.playStartCtxTime, this.playbackRate)
+    // Clamp to [0, duration]: floored during the count-in / announcement pre-roll
+    // (elapsed negative), capped at the end so the UI clock never runs away if a
+    // stop is a frame late.
+    return Math.max(0, Math.min(this.durationSec(), this.playStartPositionSec + elapsed))
+  }
+
+  /**
+   * The exact `ac.currentTime` at which the current sources finish: they were
+   * started at `playStartCtxTime` from offset `playStartPositionSec`, so they run
+   * for `(duration - startPos)` seconds. `playStartCtxTime` already bakes in the
+   * `0.04` lookahead AND any `startDelaySec` announcement pre-roll — which is why
+   * auto-stop must derive from THIS, not from `positionSec()` (0 during pre-roll).
+   */
+  private currentEndCtx(): number {
+    // The remaining span is BUFFER seconds; at rate r it takes r× less wall time.
+    return (
+      this.playStartCtxTime +
+      bufferSecToWallSec(Math.max(0, this.durationSec() - this.playStartPositionSec), this.playbackRate)
+    )
+  }
+
+  /**
+   * Transport anchor exposure for an EXTERNAL click/count-in loop that
+   * schedules against this engine's clock (e.g. `UnifiedTransport`).
+   *
+   * `playStartCtx` is the exact `ac.currentTime` the current sources were
+   * scheduled to start at (already includes the `0.04` lookahead + any
+   * `startDelaySec` pre-roll). `playStartPos` is the mix-timeline offset
+   * they were started from. Together they let the caller pre-schedule
+   * count-in clicks at `playStartCtx + clickPoint.timeSec`, sample-aligned
+   * with the song's first sample. Read-only — they do not mutate state.
+   */
+  get playStartCtx(): number {
+    return this.playStartCtxTime
+  }
+
+  get playStartPos(): number {
+    return this.playStartPositionSec
+  }
+
+  /**
+   * SIGNED playhead on the scheduling timeline — same derivation as
+   * `positionSec()` but WITHOUT the `Math.max(0, …)` floor, so it can go
+   * below `playStartPositionSec` during a `startDelaySec` pre-roll (the
+   * shortfall is "how long until the first sample plays", negated). An
+   * external click loop needs this signed value so a downbeat at
+   * plan-time 0 stays correctly AHEAD during the count-in instead of
+   * being dumped into "now". Returns `playStartPositionSec` when stopped.
+   */
+  schedulingPositionSec(): number {
+    if (this.state !== 'playing') return this.playStartPositionSec
+    return (
+      this.playStartPositionSec +
+      wallSecToBufferSec(this.ac.currentTime - this.playStartCtxTime, this.playbackRate)
+    )
   }
 
   snapshot(): MixerSnapshot {
@@ -262,22 +917,43 @@ export class MixerEngine {
     }
   }
 
+  /** Number of live buffer sources currently scheduled (debug/test observability). */
+  get activeSourceCount(): number {
+    return this.active.length
+  }
+
   async play(fromSec?: number, opts?: { startDelaySec?: number }): Promise<void> {
     if (this.ac.state === 'suspended') await this.ac.resume().catch(() => {})
-    if (this.state === 'playing') this.stopSourcesOnly()
+    // ALWAYS tear down any prior/stale source set first — never overlap two sets
+    // (the "fucked up sound" on replay). Safe to call when already stopped.
+    this.stopSourcesOnly()
 
-    const startAt = Math.max(0, fromSec ?? this.playStartPositionSec)
+    let startAt = Math.max(0, fromSec ?? this.playStartPositionSec)
+    // Defense-in-depth: a start position at/past the end (e.g. a stale wedged
+    // position) would create NO sources → a dead replay. Restart from the top.
+    const dur = this.durationSec()
+    if (dur > 0 && startAt >= dur) startAt = 0
     // Optional lead delay (e.g. to let a song announcement finish first).
     const ctxStartTime = this.ac.currentTime + 0.04 + Math.max(0, opts?.startDelaySec ?? 0)
 
     this.active = []
     for (const t of this.tracks.values()) {
-      const src = this.ac.createBufferSource()
-      src.buffer = t.buffer
       const gain = this.trackGains.get(t.key)
       if (!gain) continue
+      if (t.instrument) {
+        // MIDI: the instrument schedules its own notes. Its output is wired
+        // once in `setTrack`, so it already runs through the insert + fader
+        // and feeds any effect sends.
+        t.instrument.allNotesOff()
+        t.instrument.schedule(startAt, ctxStartTime, this.playbackRate)
+        continue
+      }
+      if (!t.buffer) continue
+      const src = this.ac.createBufferSource()
+      src.buffer = t.buffer
       // Through the insert when present (insert.output is pre-wired to gain).
       src.connect(t.insert ? t.insert.input : gain)
+      src.playbackRate.value = this.playbackRate // naive transpose; 1 = untouched
       // Offset within the buffer = startAt; if startAt > buffer duration, skip.
       if (startAt < t.buffer.duration) {
         src.start(ctxStartTime, startAt)
@@ -293,18 +969,29 @@ export class MixerEngine {
     this.scheduleAutoStop()
   }
 
-  /** (Re)arm the "all tracks finished → stop" timer for the current position. */
+  /**
+   * (Re)arm the "all tracks finished → stop" timer, derived from the ctx-clock
+   * END of the current sources (`currentEndCtx`) so it accounts for the `0.04`
+   * lookahead AND any `startDelaySec` announcement pre-roll. If the OS coalesces
+   * the timer and it fires early, RE-ARM rather than silently wedging.
+   */
   private scheduleAutoStop(): void {
     if (this.autoStopTimer != null) {
       clearTimeout(this.autoStopTimer)
       this.autoStopTimer = null
     }
     if (this.state !== 'playing') return
-    const remaining = this.durationSec() - this.positionSec()
-    if (remaining <= 0) return
+    const remaining = this.currentEndCtx() - this.ac.currentTime
+    if (remaining <= 0) {
+      if (this.durationSec() > 0) this.stop()
+      return
+    }
     this.autoStopTimer = window.setTimeout(() => {
-      if (this.state === 'playing' && this.positionSec() >= this.durationSec() - 0.05) this.stop()
-    }, Math.ceil(remaining * 1000) + 80)
+      this.autoStopTimer = null
+      if (this.state !== 'playing') return
+      if (this.ac.currentTime >= this.currentEndCtx() - 0.05) this.stop()
+      else this.scheduleAutoStop() // fired early — re-arm for the true end
+    }, Math.ceil(remaining * 1000) + 40)
   }
 
   /** Current AudioContext time — the one true clock. */
@@ -321,7 +1008,9 @@ export class MixerEngine {
   armJumpAtPosition(boundaryPositionSec: number, toPositionSec: number): void {
     if (this.state !== 'playing') return
     if (this.committedJump) return // too close to the boundary — let it fire
-    const targetCtxTime = this.playStartCtxTime + (boundaryPositionSec - this.playStartPositionSec)
+    const targetCtxTime =
+      this.playStartCtxTime +
+      bufferSecToWallSec(boundaryPositionSec - this.playStartPositionSec, this.playbackRate)
     if (targetCtxTime <= this.ac.currentTime) return // boundary already gone
     this.pendingJump = {
       targetCtxTime,
@@ -363,10 +1052,22 @@ export class MixerEngine {
         for (const t of this.tracks.values()) {
           const gain = this.trackGains.get(t.key)
           if (!gain) continue
-          if (toPositionSec < t.buffer.duration) {
+          if (t.instrument) {
+            // A bar-quantized jump re-schedules MIDI from the target sample-
+            // accurately, exactly as buffers are re-started below. Silence AT
+            // the boundary, not now: the jump commits up to JUMP_LOOKAHEAD
+            // early, and an immediate stop would punch that much silence into
+            // the drums before every section launch while the stems play on.
+            t.instrument.allNotesOff(at)
+            t.instrument.schedule(toPositionSec, at, this.playbackRate)
+            continue
+          }
+          const buffer = t.buffer
+          if (buffer && toPositionSec < buffer.duration) {
             const src = this.ac.createBufferSource()
-            src.buffer = t.buffer
+            src.buffer = buffer
             src.connect(t.insert ? t.insert.input : gain)
+            src.playbackRate.value = this.playbackRate
             src.start(at, toPositionSec)
             newSources.push({ source: src, gain, trackKey: t.key })
           }
@@ -416,6 +1117,10 @@ export class MixerEngine {
   }
 
   private stopSourcesOnly(): void {
+    // MIDI tracks hold their own scheduled notes; a buffer stop can't reach
+    // them, so they have to be silenced explicitly or a seek leaves the old
+    // part ringing over the new one.
+    for (const t of this.tracks.values()) t.instrument?.allNotesOff()
     // Any armed/scheduled jump is void once we tear down the transport.
     this.pendingJump = null
     if (this.committedJump) {
@@ -447,10 +1152,27 @@ export class MixerEngine {
     this.active = []
   }
 
+  /**
+   * Let instruments that schedule in a rolling window top it up.
+   *
+   * A synth voice is several oscillators plus a filter and a gain, so a lane
+   * cannot put a whole song's worth on the clock at once the way a sampled
+   * drum lane can. Instruments that need it expose `tick`; the rest ignore it.
+   */
+  private serviceInstrumentWindows(): void {
+    if (this.state !== 'playing') return
+    const pos = this.schedulingPositionSec()
+    for (const t of this.tracks.values()) t.instrument?.tick?.(pos)
+  }
+
   private startTick(): void {
     if (this.rafId != null) return
     const tick = () => {
       this.serviceJumps()
+      // REQUIRED: the drum instrument (and any other rolling-window lane) only
+      // schedules a window at a time now, so without this it falls silent once
+      // the first window runs out.
+      this.serviceInstrumentWindows()
       this.emitUpdate()
       if (this.state === 'playing') {
         this.rafId = requestAnimationFrame(tick)
@@ -479,7 +1201,7 @@ export class MixerEngine {
     }
   }
 
-  /** Tear down — disconnect all nodes, close the context. */
+  /** Tear down — disconnect all of OUR nodes. Never closes a borrowed context. */
   async dispose(): Promise<void> {
     this.stopSourcesOnly()
     this.stopTick()
@@ -498,10 +1220,19 @@ export class MixerEngine {
       /* ignore */
     }
     this.subscribers.clear()
-    try {
-      await this.ac.close()
-    } catch {
-      /* ignore */
+    // ONLY a context we created. Closing the shared device here silenced the
+    // ENTIRE APP: a closed AudioContext accepts createGain/connect/start and
+    // every automation call without throwing, freezes currentTime at 0, and
+    // `audioDevice()` kept handing the same dead object to every later caller.
+    // Symptom: open a project, navigate away, and nothing makes a sound again
+    // until reload — with no error anywhere. The class doc at the constructor
+    // already promised "the engine never closes it"; now it is true.
+    if (this.#ownsContext) {
+      try {
+        await this.ac.close()
+      } catch {
+        /* already closed */
+      }
     }
   }
 }

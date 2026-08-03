@@ -473,3 +473,45 @@ describe('wholesale harmony replacement (sheet import vs stale cloud)', () => {
     expect(report.merged.harmony.map((x) => x.id).sort()).toEqual(['n2', 'o2', 's1'])
   })
 })
+
+describe('collabMerge · timeline.original is preserved through a merge', () => {
+  // Regression: the merged SongMap rebuilt `timeline` as just `{ bars, beats }`,
+  // silently dropping `timeline.original` — the analyzed baseline the editor
+  // uses for "Reset grid". After any collab/cloud conflict resolve the reset
+  // affordance vanished. `original` is captured once at analysis and never
+  // hand-edited, so it must ride through the merge untouched.
+  function withOriginal(): SongMap {
+    const base = createEmptySongMap()
+    return {
+      ...base,
+      timeline: {
+        bars: [bar('b-0', 0)],
+        beats: [beat('bt-0', 'b-0', 0, 0)],
+        original: {
+          bars: [bar('b-0', 0)],
+          beats: [beat('bt-0', 'b-0', 0, 0)],
+        },
+      },
+    }
+  }
+
+  it('keeps original when both sides have it', () => {
+    const sm = withOriginal()
+    const { merged } = mergeForConflict(sm, sm)
+    expect(merged.timeline.original).toBeTruthy()
+    expect(merged.timeline.original!.bars.map((b) => b.id)).toEqual(['b-0'])
+    expect(merged.timeline.original!.beats.map((b) => b.id)).toEqual(['bt-0'])
+  })
+
+  it('keeps original even if only the LOCAL side carries it', () => {
+    const local = withOriginal()
+    const cloud: SongMap = {
+      ...local,
+      timeline: { bars: local.timeline.bars, beats: local.timeline.beats },
+    }
+    expect(cloud.timeline.original).toBeUndefined()
+    const { merged } = mergeForConflict(local, cloud)
+    expect(merged.timeline.original).toBeTruthy()
+    expect(merged.timeline.original!.bars.map((b) => b.id)).toEqual(['b-0'])
+  })
+})

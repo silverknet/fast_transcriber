@@ -91,7 +91,26 @@ export function reanalyzeWithHarmony(
         chordsDropped++
         continue
       }
-      nextHarmony.push({ ...h, beatId: newSorted[idx]!.id })
+      // RE-ANCHOR THE BAR TOO, not just the beat.
+      //
+      // A `HarmonyEvent` stores `barId` AND `beatId`, and the beat already
+      // knows its bar — so the two can disagree, and here they did. Only
+      // `beatId` was updated; `barId` came through untouched on `...h`, still
+      // naming a bar from the OLD analysis that no longer exists.
+      //
+      // Every chord in the song then failed validation with "barId does not
+      // match beat's bar", which the editor reports as a wall of errors instead
+      // of a grid. Re-analysis is exactly when bar ids change, so this fired on
+      // every re-analysis of every song that had chords.
+      const beat = newSorted[idx]!
+      nextHarmony.push({
+        ...h,
+        beatId: beat.id,
+        barId: beat.barId,
+        // Same story one level down: the cached position-in-bar has to follow
+        // the beat it describes, or it warns on every chord.
+        ...(h.beatAnchor ? { beatAnchor: { indexInBar: beat.indexInBar } } : {}),
+      })
       chordsKept++
     }
   } else {

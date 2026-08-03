@@ -1403,12 +1403,17 @@ export type LyricsTranscriptionEvent =
  */
 export async function enqueueLyricsTranscription(
   audioAbsPath: string,
+  opts: { language?: string; model?: string } = {},
 ): Promise<{ ok: true; jobId: string } | { ok: false; error: string; code?: string }> {
   try {
     const res = await fetch(`${BASE_URL}/native/transcribe-lyrics`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audioAbsPath }),
+      body: JSON.stringify({
+        audioAbsPath,
+        ...(opts.language ? { language: opts.language } : {}),
+        ...(opts.model ? { model: opts.model } : {}),
+      }),
       cache: 'no-store',
     })
     if (res.status === 404) {
@@ -1446,6 +1451,16 @@ export type AlignWindow = {
  */
 export type AudioAlignment = {
   offsetSec: number
+  /**
+   * How much the TARGET must be stretched to sit on the ref timeline:
+   * `t_ref = offsetSec + speedRatio · t_target`. 1 for two copies of one
+   * master; ~1.008 for an upload played 0.8% fast to dodge content matching,
+   * which is common enough that ignoring it silently ruins the last chorus.
+   * Absent (⇒ 1) from older sidecars.
+   */
+  speedRatio?: number
+  /** Which stage decided: sample-level waveform match, or chord-level. */
+  method?: 'waveform' | 'harmonic'
   /** Same-recording confidence, 0..1 (coarse onset cross-correlation peak). */
   confidence: number
   /** Heuristic recommendation: confident match AND negligible drift. */
@@ -1503,6 +1518,8 @@ export async function shiftAudioFile(args: {
   dstAbsPath: string
   offsetSec: number
   targetDurationSec?: number
+  /** See `AudioAlignment.speedRatio` — applied BEFORE the offset. */
+  speedRatio?: number
 }): Promise<
   | { ok: true; sampleRate: number; channels: number; durationSec: number }
   | { ok: false; error: string; code?: string }
@@ -1516,6 +1533,7 @@ export async function shiftAudioFile(args: {
         dstPath: args.dstAbsPath,
         offsetSec: args.offsetSec,
         targetDurationSec: args.targetDurationSec ?? null,
+        speedRatio: args.speedRatio ?? 1,
       }),
       cache: 'no-store',
     })

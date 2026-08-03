@@ -273,3 +273,189 @@ export function cueTrackHasSharedData(track: CueTrack): boolean {
       track.spokenCountIn,
   )
 }
+
+// ── Project-wide cue setup ───────────────────────────────────────────────────
+//
+// One cue track per performer, in every song, with the spoken song
+// introduction on each of them. Everything below is PURE `(SongMap) -> SongMap`
+// so the same code runs for the song open in the editor and for a bulk pass
+// over a whole project — a bulk operation that behaved differently from the
+// interactive one would be a trap, not a feature.
+
+/**
+ * The generated key the OLD announcement model used.
+ *
+ * The spoken introduction used to be materialized as a generated `intro` event
+ * per song, switched on and off by a bulk pass. That made "all songs announce"
+ * a fact about button presses, not about the setting: a song added after the
+ * press silently did not announce, and a renamed song kept announcing its old
+ * title frozen in the event text.
+ *
+ * The announcement is now DERIVED at render/playback time from the project
+ * setting (`defaults.preCountInCue.mode`), with an intro EVENT meaning only
+ * "override the words". This key survives solely so the migration below can
+ * recognise and strip the old generated events; a user-EDITED one is kept —
+ * it is a real override.
+ */
+export const SPOKEN_INTRO_KEY = 'intro:song'
+
+/** Strip un-edited generated intro events (old-model debris). Edited = kept. */
+function stripGeneratedIntro(track: CueTrack): CueTrack {
+  const stale = track.events.some(
+    (e) => e.kind === 'intro' && e.generatedKey === SPOKEN_INTRO_KEY && !e.edited,
+  )
+  if (!stale) return track
+  return {
+    ...track,
+    events: track.events.filter(
+      (e) => !(e.kind === 'intro' && e.generatedKey === SPOKEN_INTRO_KEY && !e.edited),
+    ),
+    renderExport: undefined,
+  }
+}
+
+export type CuePerformer = { id: string; name: string }
+
+/**
+ * One cue track per performer, keyed by `performerId`.
+ *
+ * Existing linked tracks are kept as they are. The FIRST unlinked track is
+ * adopted by the first unclaimed performer rather than left orphaned beside a
+ * new one — that track is almost always the legacy `main`, and duplicating it
+ * would leave every song with an unowned track full of the user's real work.
+ */
+export function ensurePerformerCueTracks(
+  songMap: SongMap,
+  performers: readonly CuePerformer[],
+  opts: { idFactory?: IdFactory } = {},
+): SongMap {
+  if (performers.length === 0) return songMap
+  const newId = opts.idFactory ?? (() => crypto.randomUUID())
+  const tracks = [...songMap.cueTracks]
+  const claimed = new Set(tracks.map((t) => t.performerId).filter(Boolean) as string[])
+  let changed = false
+
+  for (const performer of performers) {
+    if (claimed.has(performer.id)) continue
+    const orphan = tracks.findIndex((t) => !t.performerId)
+    if (orphan >= 0) {
+      tracks[orphan] = { ...tracks[orphan]!, performerId: performer.id, name: performer.name }
+    } else {
+      tracks.push({
+        ...createDefaultCueTrack({ id: newId(), name: performer.name }),
+        performerId: performer.id,
+      })
+    }
+    claimed.add(performer.id)
+    changed = true
+  }
+  return changed ? { ...songMap, cueTracks: tracks } : songMap
+}
+
+/**
+ * The whole project-wide cue setup for ONE song: a cue track per performer,
+ * section cues generated on each.
+ *
+ * Deliberately NOT here: the spoken song introduction. It is derived from the
+ * project setting wherever cues are rendered or played, so it cannot drift —
+ * a song added tomorrow announces because the setting says so, not because a
+ * button was pressed after it arrived. This pass only cleans up events the
+ * old materialized model left behind.
+ */
+export function applyProjectCueDefaults(
+  songMap: SongMap,
+  opts: {
+    performers: readonly CuePerformer[]
+    idFactory?: IdFactory
+  },
+): SongMap {
+  const withTracks = ensurePerformerCueTracks(songMap, opts.performers, {
+    idFactory: opts.idFactory,
+  })
+  const cueTracks = withTracks.cueTracks.map((track) =>
+    stripGeneratedIntro(generateCueTrackFromSections(withTracks, track, { idFactory: opts.idFactory })),
+  )
+  return { ...withTracks, cueTracks }
+}
+
+// ── The one cue-playback switch ─────────────────────────────────────────────
+
+/**
+ * Are spoken cues muted for this song?
+ *
+ * ONE flag, `mixState.tracks['cue'].muted`, read by every surface that can
+ * sound a cue (the overview mixer, live mode) and written by every toggle (the
+ * editor's transport bar, the live cue pill). It lives in `mixState` because it
+ * is a per-song playback preference, not shared musical content.
+ *
+ * These helpers exist so no component re-implements the find-and-patch — the
+ * mixer and the transport bar each had their own copy growing in place.
+ */
+export function cuePlaybackMuted(songMap: SongMap): boolean {
+  return songMap.mixState?.tracks.find((t) => t.key === 'cue')?.muted ?? false
+}
+
+/** The same song with cue playback muted or not. Pure; safe for `patchSongMap`. */
+export function withCuePlaybackMuted(songMap: SongMap, muted: boolean): SongMap {
+  const tracks = (songMap.mixState?.tracks ?? []).filter((t) => t.key !== 'cue')
+  return {
+    ...songMap,
+    mixState: { ...songMap.mixState, tracks: [...tracks, { key: 'cue', volume: 1, muted }] },
+  }
+}
+
+// ── Authoring the spoken parts of a track ───────────────────────────────────
+
+/** The current announcement override text, if any ("Winehouse"). */
+export function announcementOverrideText(track: CueTrack): string | undefined {
+  return track.events.find((e) => e.enabled && e.kind === 'intro')?.text?.trim() || undefined
+}
+
+/**
+ * Set, replace or clear this track's announcement override.
+ *
+ * The override is an `intro` EVENT carrying only the WORDS — the project
+ * setting stays the only switch. Marked `edited: true` so the migration in
+ * `applyProjectCueDefaults` treats it as a person's decision and never strips
+ * it. Empty text removes the override entirely: the announcement then derives
+ * from the song title again, and KEEPS deriving — clearing must restore
+ * inheritance, not freeze today's title.
+ */
+export function withAnnouncementOverride(track: CueTrack, text: string): CueTrack {
+  const spoken = cleanText(text)
+  const others = track.events.filter((e) => e.kind !== 'intro')
+  if (!spoken) {
+    if (others.length === track.events.length) return track
+    return { ...track, events: others, renderExport: undefined }
+  }
+  const existing = announcementOverrideText(track)
+  if (existing === spoken) return track
+  return {
+    ...track,
+    events: [
+      {
+        id: stableIdFromKey('cue', `intro_override_${track.id}`),
+        kind: 'intro',
+        enabled: true,
+        anchor: { kind: 'time', timeSec: 0 },
+        text: spoken,
+        edited: true,
+        source: 'custom',
+      },
+      ...others,
+    ],
+    renderExport: undefined,
+  }
+}
+
+/**
+ * Switch the spoken count-in ("{title} … {N} … one, two, …") on or off.
+ * Clears the render — the spoken content changed.
+ */
+export function withSpokenCountIn(track: CueTrack, on: boolean): CueTrack {
+  if (!!track.spokenCountIn === on) return track
+  const next: CueTrack = { ...track, renderExport: undefined }
+  if (on) next.spokenCountIn = true
+  else delete next.spokenCountIn
+  return next
+}

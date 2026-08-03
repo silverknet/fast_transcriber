@@ -13,6 +13,7 @@ import {
   validateProjectFolderPath,
   type AutoStemName,
   type AutoStemQuality,
+  type Performer,
   type ProjectAutoStems,
   type ProjectFile,
   type ProjectSongEntry,
@@ -140,6 +141,8 @@ export function parseProjectJson(text: string): ProjectFile {
   const defaults = parseDefaults(o.defaults)
   const mastering = parseMastering(o.mastering)
   const performers = parsePerformers(o.performers)
+  const performerMixes = parsePerformerMixes(o.performerMixes)
+  const liveRig = parseLiveRig(o.liveRig)
 
   return {
     formatVersion: PROJECT_FILE_VERSION,
@@ -153,10 +156,66 @@ export function parseProjectJson(text: string): ProjectFile {
     ...(defaults ? { defaults } : {}),
     ...(mastering ? { mastering } : {}),
     ...(performers ? { performers } : {}),
+    ...(performerMixes ? { performerMixes } : {}),
+    ...(liveRig ? { liveRig } : {}),
   }
 }
 
+/**
+ * Parse the optional per-performer mixes defensively. A malformed level is
+ * dropped (falls back to the default at resolve time) — never coerced to 0,
+ * which would silently mute someone's monitor.
+ */
+function parsePerformerMixes(raw: unknown): ProjectFile['performerMixes'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const clamp = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : undefined
+  const out: NonNullable<ProjectFile['performerMixes']> = {}
+  for (const [performerId, rawMix] of Object.entries(raw as Record<string, unknown>)) {
+    if (!rawMix || typeof rawMix !== 'object') continue
+    const m = rawMix as Record<string, unknown>
+    const stems: NonNullable<ProjectFile['performerMixes']>[string]['stems'] = {}
+    if (m.stems && typeof m.stems === 'object') {
+      for (const [name, v] of Object.entries(m.stems as Record<string, unknown>)) {
+        const lv = clamp(v)
+        if (lv !== undefined) stems[name as keyof typeof stems] = lv
+      }
+    }
+    const mix: NonNullable<ProjectFile['performerMixes']>[string] = { stems }
+    for (const key of ['original', 'click', 'cue', 'fallback'] as const) {
+      const lv = clamp(m[key])
+      if (lv !== undefined) mix[key] = lv
+    }
+    out[performerId] = mix
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 /** Parse the optional `performers` roster defensively (skips malformed rows). */
+/**
+ * A performer's desk inputs (the band's patch plan). Channels are XR18 analog
+ * inputs: 1 = mono, 2 = stereo pair; junk entries are dropped rather than
+ * kept broken. Mirrored in the sidecar's `parseManifestPerformers` — a field
+ * read here but not there is silently deleted on the next sidecar write.
+ */
+function parsePerformerInputs(raw: unknown): Performer['inputs'] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: NonNullable<Performer['inputs']> = []
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue
+    const o = r as Record<string, unknown>
+    if (typeof o.id !== 'string' || !o.id) continue
+    if (typeof o.label !== 'string') continue
+    if (!Array.isArray(o.channels)) continue
+    const channels = o.channels
+      .filter((c): c is number => typeof c === 'number' && Number.isInteger(c) && c >= 1 && c <= 16)
+      .slice(0, 2)
+    if (channels.length < 1 || new Set(channels).size !== channels.length) continue
+    out.push({ id: o.id, label: o.label, channels })
+  }
+  return out.length > 0 ? out : undefined
+}
+
 function parsePerformers(raw: unknown): ProjectFile['performers'] | undefined {
   if (!Array.isArray(raw)) return undefined
   const out: NonNullable<ProjectFile['performers']> = []
@@ -167,9 +226,149 @@ function parsePerformers(raw: unknown): ProjectFile['performers'] | undefined {
     const p: NonNullable<ProjectFile['performers']>[number] = { id: o.id, name: o.name }
     if (typeof o.role === 'string' && o.role.trim()) p.role = o.role
     if (typeof o.userId === 'string' && o.userId) p.userId = o.userId
+    if (typeof o.monitorBus === 'number' && o.monitorBus >= 1 && o.monitorBus <= 6) {
+      p.monitorBus = Math.round(o.monitorBus)
+    }
+    const inputs = parsePerformerInputs(o.inputs)
+    if (inputs) p.inputs = inputs
     out.push(p)
   }
   return out.length > 0 ? out : undefined
+}
+
+/**
+ * Parse the project-wide LIVE RIG block defensively.
+ *
+ * Every value is clamped to what an XR18 can actually accept — 16 channels, 6
+ * buses, levels 0..1 — because this drives real hardware. A junk channel number
+ * from a hand-edited manifest would otherwise become an OSC write to an address
+ * the desk does not have, which X-AIR ignores in silence.
+ *
+ * Malformed rows are SKIPPED rather than defaulted. There is no safe default for
+ * "which channel carries the click": guessing one could put it in the house.
+ */
+function parseLiveRig(raw: unknown): ProjectFile['liveRig'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  const out: NonNullable<ProjectFile['liveRig']> = {}
+  const channelVector = (value: unknown, minimum: number, maximum: number): number[] =>
+    Array.isArray(value)
+      ? [
+          ...new Set(
+            value
+              .filter((channel): channel is number =>
+                typeof channel === 'number' && Number.isInteger(channel),
+              )
+              .filter((channel) => channel >= minimum && channel <= maximum),
+          ),
+        ].sort((left, right) => left - right)
+      : []
+  const channelList = (value: unknown): number[] => channelVector(value, 1, 16)
+
+  if (r.routingProfile && typeof r.routingProfile === 'object') {
+    const profile = r.routingProfile as Record<string, unknown>
+    if (
+      typeof profile.id === 'string' &&
+      profile.id.length > 0 &&
+      typeof profile.version === 'number' &&
+      Number.isInteger(profile.version) &&
+      profile.version > 0 &&
+      typeof profile.mainPhysicalOutputId === 'string' &&
+      Array.isArray(profile.sourceLanes) &&
+      Array.isArray(profile.monitorOutputs)
+    ) {
+      const sourceLanes: NonNullable<typeof out.routingProfile>['sourceLanes'] = []
+      for (const rawLane of profile.sourceLanes) {
+        if (!rawLane || typeof rawLane !== 'object') continue
+        const lane = rawLane as Record<string, unknown>
+        if (
+          typeof lane.id !== 'string' ||
+          (lane.role !== 'program' && lane.role !== 'click' && lane.role !== 'cue') ||
+          (lane.mainPolicy !== 'on' && lane.mainPolicy !== 'off')
+        ) continue
+        const parsedLane: (typeof sourceLanes)[number] = {
+          id: lane.id,
+          role: lane.role,
+          webAudioChannels: channelVector(lane.webAudioChannels, 0, 17),
+          usbReturnChannels: channelVector(lane.usbReturnChannels, 0, 17),
+          xr18InputStrips: channelList(lane.xr18InputStrips),
+          mainPolicy: lane.mainPolicy,
+        }
+        if (typeof lane.performerId === 'string') parsedLane.performerId = lane.performerId
+        sourceLanes.push(parsedLane)
+      }
+      const monitorOutputs: NonNullable<typeof out.routingProfile>['monitorOutputs'] = []
+      for (const rawOutput of profile.monitorOutputs) {
+        if (!rawOutput || typeof rawOutput !== 'object') continue
+        const output = rawOutput as Record<string, unknown>
+        if (
+          typeof output.monitorBus === 'number' &&
+          Number.isInteger(output.monitorBus) &&
+          output.monitorBus >= 1 &&
+          output.monitorBus <= 6 &&
+          typeof output.physicalOutputId === 'string' &&
+          output.physicalOutputId
+        ) {
+          monitorOutputs.push({
+            monitorBus: output.monitorBus,
+            physicalOutputId: output.physicalOutputId,
+          })
+        }
+      }
+      out.routingProfile = {
+        id: profile.id,
+        version: profile.version,
+        mainPhysicalOutputId: profile.mainPhysicalOutputId,
+        sourceLanes,
+        monitorOutputs,
+      }
+    }
+  }
+
+  if (Array.isArray(r.routes)) {
+    const routes: NonNullable<NonNullable<ProjectFile['liveRig']>['routes']> = []
+    for (const row of r.routes) {
+      if (!row || typeof row !== 'object') continue
+      const o = row as Record<string, unknown>
+      if (typeof o.laneKey !== 'string' || !o.laneKey) continue
+      const entry: (typeof routes)[number] = { laneKey: o.laneKey, channels: channelList(o.channels) }
+      if (typeof o.followVolume === 'boolean') entry.followVolume = o.followVolume
+      if (typeof o.followMute === 'boolean') entry.followMute = o.followMute
+      routes.push(entry)
+    }
+    if (routes.length > 0) out.routes = routes
+  }
+
+  const level = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : null
+
+  if (r.monitorSends && typeof r.monitorSends === 'object') {
+    const sends: Record<number, Record<string, number>> = {}
+    for (const [busKey, lanes] of Object.entries(r.monitorSends as Record<string, unknown>)) {
+      const bus = Number(busKey)
+      if (!Number.isInteger(bus) || bus < 1 || bus > 6) continue
+      if (!lanes || typeof lanes !== 'object') continue
+      const perLane: Record<string, number> = {}
+      for (const [laneKey, v] of Object.entries(lanes as Record<string, unknown>)) {
+        const lv = level(v)
+        if (laneKey && lv !== null) perLane[laneKey] = lv
+      }
+      if (Object.keys(perLane).length > 0) sends[bus] = perLane
+    }
+    if (Object.keys(sends).length > 0) out.monitorSends = sends
+  }
+
+  if (r.busMaster && typeof r.busMaster === 'object') {
+    const masters: Record<number, number> = {}
+    for (const [busKey, v] of Object.entries(r.busMaster as Record<string, unknown>)) {
+      const bus = Number(busKey)
+      const lv = level(v)
+      if (Number.isInteger(bus) && bus >= 1 && bus <= 6 && lv !== null) masters[bus] = lv
+    }
+    if (Object.keys(masters).length > 0) out.busMaster = masters
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** Parse the optional project-wide `mastering` (project sound) block. */
@@ -180,6 +379,9 @@ function parseMastering(raw: unknown): ProjectFile['mastering'] | undefined {
   const out: NonNullable<ProjectFile['mastering']> = { enabled: r.enabled }
   if (typeof r.matchLoudness === 'boolean') out.matchLoudness = r.matchLoudness
   if (typeof r.masterGlue === 'boolean') out.masterGlue = r.masterGlue
+  if (typeof r.kickPunch === 'number' && Number.isFinite(r.kickPunch)) {
+    out.kickPunch = Math.max(0, Math.min(1, r.kickPunch))
+  }
   const stems = r.stems as Record<string, unknown> | undefined
   if (stems && typeof stems === 'object') {
     const parsed: NonNullable<NonNullable<ProjectFile['mastering']>['stems']> = {}
