@@ -26,6 +26,7 @@ export function bassTrackFingerprintPayload(sm: SongMap): unknown {
     sound: bm?.sound ?? null,
     tone: bm?.tone ?? null,
     kickFollow: bm?.kickFollow ?? 0,
+    kickNotes: bm?.kickNotes === true,
     events: (bm?.events ?? []).map((e) => ({
       t: round6(e.timeSec),
       d: round6(e.durationSec),

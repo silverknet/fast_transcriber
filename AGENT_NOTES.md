@@ -1975,3 +1975,27 @@ REMAINING from Martin's bass requests:
   - detector quality: transcribe_bass.py is still YIN + RMS gate; pyin +
     onset-informed segmentation + cleanup is the upgrade, measurable against
     his real stems.
+
+## 2026-08-04 (Fable) — "Note on every kick" (Martin: Lock to kick "doesn't do anything")
+
+He was right that it felt inert — I had built ALIGNMENT (nudge existing onsets
+onto kicks) when what he described is a bassist RE-ARTICULATING on each kick.
+- `addNotesOnKicks(events, kickTimes, opts)` in bassKickFollow.ts (+10 tests,
+  23 in the file): adds a note on any kick the bass is not already playing.
+  Pitch is BORROWED, never invented: the note sounding at that moment → else
+  the most recently played note (the bassist is still on that root) → else the
+  next note coming up (anticipation). A kick in genuine silence adds NOTHING,
+  because rests are real and filling them is what makes a generated line stop
+  sounding like a person.
+- `BassMidi.kickNotes?: boolean` + parser + render fingerprint.
+- Order in `applyKickFollow`: ALIGN first, then ADD — so a note already nearly
+  on a kick counts as playing it and does not get a second note stacked on it.
+  Added notes: length 0.9 beat, velocity ×0.92 (supports the kick rather than
+  competing), pitch reach 8 beats.
+- UI now says what each control does: checkbox "Note on every kick" (the new
+  behaviour) beside the renamed "Tighten to kick" slider (the old alignment).
+- SENTINEL: `routes/project/debug/ending/+page.svelte` tripped the sound-path
+  sentinel. NOT my file — it came from the concurrent session and got swept into
+  an earlier commit of mine. Allowlisted as a debug page (own throwaway context,
+  unreachable from Live). Worth Codex knowing it is now tracked.
+- Suites: 2309 unit / 393 browser / 0 typecheck.

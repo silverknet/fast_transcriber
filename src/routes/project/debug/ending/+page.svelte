@@ -23,7 +23,12 @@
   import { project as projectStore } from '$lib/stores/project'
   import { songMap as activeSongMap } from '$lib/stores/songMap'
   import type { Bar, ChordSymbol, DrumClass, SongMap } from '$lib/songmap/types'
-  import { chordVoicingMidi, formatChordSymbol, resolveChordAtEachBeat } from '$lib/chords'
+  import {
+    chordRootToPitchClass,
+    chordVoicingMidi,
+    formatChordSymbol,
+    resolveChordAtEachBeat,
+  } from '$lib/chords'
   import { DRUM_KIT_SAMPLE_RATE, loadDrumKit } from '$lib/audio/drumKits'
   import {
     computeVisualBlockPeaksFromChannels,
@@ -32,7 +37,7 @@
     waveformBlockBucketCount,
   } from '$lib/audio/waveformBlocks'
 
-  type SnapMode = 'bar' | 'beat' | 'free'
+  type SnapMode = 'bar' | 'beat' | 'tonic' | 'free'
   type EndingStyle = 'cut' | 'hit' | 'fill-hit' | 'echo' | 'filter' | 'fade'
   type EndingChordMode = 'tonic' | 'song' | 'none'
   type EchoDivision = 'eighth' | 'dotted-eighth' | 'quarter'
@@ -44,6 +49,13 @@
     indexInBar: number
     timeSec: number
     downbeat: boolean
+  }
+
+  type SnapPoint = {
+    id: string
+    timeSec: number
+    barId?: string
+    beatId?: string
   }
 
   type SongOption = {
@@ -120,7 +132,7 @@
   let tailing = $state(false)
   let error = $state('')
 
-  let snapMode = $state<SnapMode>('beat')
+  let snapMode = $state<SnapMode>('bar')
   let endingStyle = $state<EndingStyle>('fill-hit')
   let endingChordMode = $state<EndingChordMode>('tonic')
   let previewBars = $state(4)
@@ -143,6 +155,12 @@
   const trimDurationSec = $derived(Math.max(0, trimEndSec - trimStartSec))
   const selectedBeat = $derived.by(() => nearestBeat(selectedPointSec, beatPoints))
   const selectedBar = $derived.by(() => {
+    if (snapMode === 'bar' && bars.length > 0) {
+      return nearestTimedPoint(
+        selectedPointSec,
+        bars.map((bar) => ({ ...bar, timeSec: bar.endSec })),
+      )
+    }
     const beat = selectedBeat
     if (beat) return bars.find((bar) => bar.id === beat.barId) ?? null
     return bars.find((bar) => selectedPointSec >= bar.startSec && selectedPointSec < bar.endSec) ?? null
@@ -162,6 +180,43 @@
     )
   })
   const chordByBeat = $derived(loadedMap ? resolveChordAtEachBeat(loadedMap) : new Map<string, ChordSymbol | null>())
+  const tonicSnapPoints = $derived.by<SnapPoint[]>(() => {
+    const map = loadedMap
+    const key = map?.metadata.keyDetail
+    if (!map || !key) return []
+    const tonicPitchClass = chordRootToPitchClass(key.root, key.accidental)
+    const points = new Map<string, SnapPoint>()
+
+    for (const beat of beatPoints) {
+      const chord = chordByBeat.get(beat.id)
+      if (!beat.downbeat || !chord || chord.noChord) continue
+      if (chordRootToPitchClass(chord.root, chord.accidental) !== tonicPitchClass) continue
+      points.set(beat.id, {
+        id: `tonic-beat:${beat.id}`,
+        timeSec: beat.timeSec,
+        barId: beat.barId,
+        beatId: beat.id,
+      })
+    }
+
+    for (const event of map.harmony) {
+      if (event.chord.noChord) continue
+      if (chordRootToPitchClass(event.chord.root, event.chord.accidental) !== tonicPitchClass) continue
+      const beat = event.beatId ? beatPoints.find((point) => point.id === event.beatId) : null
+      const keyForPoint = beat?.id ?? `${event.barId}:${event.startSec.toFixed(4)}`
+      points.set(keyForPoint, {
+        id: `tonic-event:${event.id}`,
+        timeSec: event.startSec,
+        barId: event.barId,
+        beatId: beat?.id,
+      })
+    }
+
+    return [...points.values()]
+      .filter((point) => point.timeSec >= trimStartSec - 0.01 && point.timeSec <= trimEndSec + 0.01)
+      .sort((a, b) => a.timeSec - b.timeSec)
+  })
+  const selectedTonicPoint = $derived(nearestTimedPoint(selectedPointSec, tonicSnapPoints))
   const songChord = $derived.by<ChordSymbol | null>(() => {
     const beat = beatAtOrBefore(selectedPointSec, beatPoints)
     return beat ? (chordByBeat.get(beat.id) ?? null) : null
@@ -190,6 +245,11 @@
     const beat = selectedBeat
     const bar = selectedBar
     if (!bar) return fmtTime(selectedPointSec)
+    if (snapMode === 'bar') return `End of bar ${bar.index + 1}`
+    if (snapMode === 'tonic') {
+      const beatLabel = beat ? `Beat ${beat.indexInBar + 1}` : 'chord change'
+      return `1 chord · Bar ${bar.index + 1}, ${beatLabel}`
+    }
     const beatLabel = beat ? `Beat ${beat.indexInBar + 1}` : 'Free point'
     return `Bar ${bar.index + 1}, ${beatLabel}`
   })
@@ -199,7 +259,8 @@
       const fallback = selectedPointSec - previewBars * averageBarDuration()
       return clamp(fallback, trimStartSec, selectedPointSec)
     }
-    const startIndex = Math.max(0, selectedBarPosition - previewBars)
+    const offset = snapMode === 'bar' ? previewBars - 1 : previewBars
+    const startIndex = Math.max(0, selectedBarPosition - offset)
     return clamp(bars[startIndex]?.startSec ?? trimStartSec, trimStartSec, selectedPointSec)
   })
   const markerPct = $derived(
@@ -228,7 +289,7 @@
     return `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`
   }
 
-  function nearestBeat(timeSec: number, points: BeatPoint[]): BeatPoint | null {
+  function nearestTimedPoint<T extends { timeSec: number }>(timeSec: number, points: T[]): T | null {
     if (points.length === 0) return null
     let best = points[0]!
     let distance = Math.abs(best.timeSec - timeSec)
@@ -240,6 +301,10 @@
       distance = nextDistance
     }
     return best
+  }
+
+  function nearestBeat(timeSec: number, points: BeatPoint[]): BeatPoint | null {
+    return nearestTimedPoint(timeSec, points)
   }
 
   function beatAtOrBefore(timeSec: number, points: BeatPoint[]): BeatPoint | null {
@@ -269,8 +334,14 @@
     return averageBeatDuration() * 4
   }
 
-  function selectablePoints(mode = snapMode): BeatPoint[] {
-    return mode === 'bar' ? beatPoints.filter((point) => point.downbeat) : beatPoints
+  function selectablePoints(mode = snapMode): SnapPoint[] {
+    if (mode === 'bar') {
+      return bars
+        .filter((bar) => bar.endSec >= trimStartSec && bar.endSec <= trimEndSec + 0.01)
+        .map((bar) => ({ id: `bar-end:${bar.id}`, timeSec: bar.endSec, barId: bar.id }))
+    }
+    if (mode === 'tonic') return tonicSnapPoints
+    return beatPoints.map((point) => ({ ...point, beatId: point.id }))
   }
 
   function setSelectedPoint(rawTimeSec: number): void {
@@ -281,12 +352,13 @@
       positionSec = raw
       return
     }
-    const point = nearestBeat(raw, selectablePoints())
+    const point = nearestTimedPoint(raw, selectablePoints())
     selectedPointSec = point?.timeSec ?? raw
     positionSec = selectedPointSec
   }
 
   function changeSnapMode(next: SnapMode): void {
+    if (next === 'tonic' && tonicSnapPoints.length === 0) return
     snapMode = next
     setSelectedPoint(selectedPointSec)
   }
@@ -298,21 +370,38 @@
     }
     const points = selectablePoints()
     if (points.length === 0) return
-    const current = nearestBeat(selectedPointSec, points)
+    const current = nearestTimedPoint(selectedPointSec, points)
     const index = current ? points.findIndex((point) => point.id === current.id) : 0
     const next = points[clamp(index + direction, 0, points.length - 1)]
     if (next) setSelectedPoint(next.timeSec)
   }
 
   function selectBar(barId: string): void {
-    const point = beatPoints.find((beat) => beat.barId === barId && beat.downbeat)
     const bar = bars.find((candidate) => candidate.id === barId)
-    setSelectedPoint(point?.timeSec ?? bar?.startSec ?? selectedPointSec)
+    if (!bar) return
+    if (snapMode === 'bar') {
+      setSelectedPoint(bar.endSec)
+      return
+    }
+    const point = beatPoints.find((beat) => beat.barId === barId && beat.downbeat)
+    setSelectedPoint(point?.timeSec ?? bar.startSec)
   }
 
   function selectBeat(beatId: string): void {
     const point = beatPoints.find((beat) => beat.id === beatId)
     if (point) setSelectedPoint(point.timeSec)
+  }
+
+  function selectTonicPoint(pointId: string): void {
+    const point = tonicSnapPoints.find((candidate) => candidate.id === pointId)
+    if (point) setSelectedPoint(point.timeSec)
+  }
+
+  function tonicPointLabel(point: SnapPoint): string {
+    const bar = bars.find((candidate) => candidate.id === point.barId)
+    const beat = point.beatId ? beatPoints.find((candidate) => candidate.id === point.beatId) : null
+    if (!bar) return fmtTime(point.timeSec)
+    return `Bar ${bar.index + 1}${beat ? ` · Beat ${beat.indexInBar + 1}` : ''}`
   }
 
   function setPointFromWaveform(event: PointerEvent): void {
@@ -505,7 +594,7 @@
 
   async function prepareDrumBuffers(current: AudioGraph): Promise<void> {
     if (drumBuffers.size > 0) return
-    const kit = await loadDrumKit('acoustic')
+    const kit = await loadDrumKit('tr707')
     for (const [kind, samples] of Object.entries(kit.voices) as [DrumClass, Float32Array][]) {
       const buffer = current.ctx.createBuffer(1, samples.length, DRUM_KIT_SAMPLE_RATE)
       buffer.getChannelData(0).set(samples)
@@ -755,10 +844,11 @@
 
     sourceLabel = label
     sourceDetail = detail
-    const defaultPoint = [...beatPoints]
+    snapMode = 'bar'
+    const defaultBar = [...bars]
       .reverse()
-      .find((point) => point.downbeat && point.timeSec < trimEndSec - 0.15)
-    selectedPointSec = defaultPoint?.timeSec ?? Math.max(trimStartSec, trimEndSec - averageBarDuration())
+      .find((bar) => bar.endSec <= trimEndSec + 0.01 && bar.endSec > trimStartSec + 0.15)
+    selectedPointSec = clamp(defaultBar?.endSec ?? trimEndSec, trimStartSec, trimEndSec)
     positionSec = selectedPointSec
     audioElement.currentTime = selectedPointSec
     endingChordMode = map.metadata.keyDetail ? 'tonic' : 'song'

@@ -451,6 +451,12 @@ export type BassMidi = {
    * when it is on, otherwise from the detected drums.
    */
   kickFollow?: number
+  /**
+   * Play a note on EVERY kick — what "following the drummer" means to a
+   * player. Existing notes are re-articulated at their own pitch; a kick in
+   * genuine silence stays silent, because rests are real.
+   */
+  kickNotes?: boolean
   /** Saved render of the bass track, when written into the project. */
   renderExport?: RenderedCueExport
 }

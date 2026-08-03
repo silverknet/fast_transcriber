@@ -22,7 +22,7 @@ import { normalizeBassTone, type BassTone } from './bassTone'
 import { renderBassVoice } from './renderBassVoice'
 import { transposeMidiNote } from './midiTranspose'
 import { inferBassGroove } from '$lib/songmap/bassGroove'
-import { followKick, kickTimesFrom } from '$lib/songmap/bassKickFollow'
+import { addNotesOnKicks, followKick, kickTimesFrom } from '$lib/songmap/bassKickFollow'
 import { generateDrumGroove } from '$lib/songmap/generateDrumGroove'
 import { DRUM_KIT_SAMPLE_RATE } from './drumKits'
 import { applyBusCompression, applySaturation } from './drumBus'
@@ -353,7 +353,8 @@ export function detectedBassEvents(
  * wrong beat.
  */
 function applyKickFollow(sm: SongMap, events: BassMidiEvent[], amount: number): BassMidiEvent[] {
-  if (!(amount > 0) || events.length === 0) return events
+  const wantNotes = sm.bassMidi?.kickNotes === true
+  if ((!(amount > 0) && !wantNotes) || events.length === 0) return events
   const machineKicks = sm.drumMachine?.enabled
     ? kickTimesFrom(generateDrumGroove(sm, sm.drumMachine))
     : []
@@ -366,7 +367,26 @@ function applyKickFollow(sm: SongMap, events: BassMidiEvent[], amount: number): 
     if (s > 0.1 && s < 3) spans.push(s)
   }
   const beatSec = spans.length ? spans.sort((a, b) => a - b)[spans.length >> 1]! : 0.5
-  return followKick(events, kicks, amount, beatSec / 2)
+
+  let out = events
+  // ALIGN first, so a note that is nearly on a kick counts as playing it and
+  // does not then get a second note stacked on top of it.
+  if (amount > 0) out = followKick(out, kicks, amount, beatSec / 2)
+  if (wantNotes) {
+    out = addNotesOnKicks(out, kicks, {
+      toleranceSec: Math.min(0.08, beatSec / 6),
+      // A hit, not a drone: long enough to speak, trimmed by whatever comes
+      // next in `trimBassOverlaps`.
+      noteSec: beatSec * 0.9,
+      // Borrow a pitch from up to two bars away; past that the bass is really
+      // resting and inventing a note would be guessing.
+      reachSec: beatSec * 8,
+      // Slightly under the played notes: a re-articulation supports the kick,
+      // it does not compete with the line.
+      velocityScale: 0.92,
+    })
+  }
+  return out
 }
 
 export async function renderBassTrackWavBlob(

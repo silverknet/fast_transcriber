@@ -1019,6 +1019,7 @@ function parseBassMidi(raw: unknown, path: string): import('./types').BassMidi |
   }
   const kickFollow = optUnit(o.kickFollow)
   if (kickFollow !== undefined) out.kickFollow = kickFollow
+  if (typeof o.kickNotes === 'boolean') out.kickNotes = o.kickNotes
   const renderExport = parseCueTrackExport(o.renderExport, `${path}.renderExport`)
   if (renderExport) out.renderExport = renderExport
   return out

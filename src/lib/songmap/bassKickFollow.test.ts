@@ -4,7 +4,7 @@
  * a note that simply is not near a kick.
  */
 import { describe, expect, it } from 'vitest'
-import { followKick, kickTimesFrom } from './bassKickFollow'
+import { addNotesOnKicks, followKick, kickTimesFrom } from './bassKickFollow'
 import type { BassMidiEvent } from './types'
 
 const note = (timeSec: number, midi = 40): BassMidiEvent => ({
@@ -87,5 +87,76 @@ describe('reading kicks out of a drum part', () => {
 
   it('no kicks means no times — the caller then does nothing', () => {
     expect(kickTimesFrom([{ timeSec: 1, cls: 'snare' }])).toEqual([])
+  })
+})
+
+describe('playing a note on every kick — following the drummer', () => {
+  const note = (timeSec: number, midi = 40, durationSec = 0.4): BassMidiEvent => ({
+    timeSec,
+    durationSec,
+    midi,
+    velocity: 0.8,
+  })
+  const OPTS = { toleranceSec: 0.06, noteSec: 0.25, reachSec: 2 }
+
+  it('adds a note on a kick the bass was not playing', () => {
+    // Bass holds one long note; kicks at 1.0 and 1.5.
+    const out = addNotesOnKicks([note(1.0, 40, 1.0)], [1.0, 1.5], OPTS)
+    expect(out).toHaveLength(2)
+    expect(out[1]!.timeSec).toBeCloseTo(1.5, 9)
+  })
+
+  it('re-articulates the note that is SOUNDING — same pitch, not a guess', () => {
+    const out = addNotesOnKicks([note(1.0, 43, 1.0)], [1.5], OPTS)
+    expect(out.find((e) => e.timeSec === 1.5)!.midi).toBe(43)
+  })
+
+  it('a kick the bass already plays gets nothing added', () => {
+    const out = addNotesOnKicks([note(1.0)], [1.0], OPTS)
+    expect(out).toHaveLength(1)
+  })
+
+  it('close enough counts as already playing — no flams', () => {
+    const out = addNotesOnKicks([note(1.02)], [1.0], OPTS)
+    expect(out).toHaveLength(1)
+  })
+
+  it('after a note has ended it stays on that root and hits it again', () => {
+    // Note 1.0-1.2, kick at 1.6: nothing sounding, but the bassist is on 45.
+    const out = addNotesOnKicks([note(1.0, 45, 0.2)], [1.6], OPTS)
+    expect(out.find((e) => e.timeSec === 1.6)!.midi).toBe(45)
+  })
+
+  it('before the first note it can anticipate the phrase', () => {
+    const out = addNotesOnKicks([note(2.0, 38)], [1.5], OPTS)
+    expect(out.find((e) => e.timeSec === 1.5)!.midi).toBe(38)
+  })
+
+  it('a kick in genuine silence adds NOTHING — rests are real', () => {
+    // Nearest note is 10s away, far past the reach.
+    const out = addNotesOnKicks([note(20, 40)], [1.0], OPTS)
+    expect(out).toHaveLength(1)
+  })
+
+  it('no kicks, or no bass at all, is a safe no-op', () => {
+    expect(addNotesOnKicks([note(1)], [], OPTS)).toHaveLength(1)
+    expect(addNotesOnKicks([], [1, 2], OPTS)).toEqual([])
+  })
+
+  it('returns everything in time order', () => {
+    const out = addNotesOnKicks([note(1.0, 40, 2)], [2.5, 1.5, 2.0], OPTS)
+    const times = out.map((e) => e.timeSec)
+    expect([...times].sort((a, b) => a - b)).toEqual(times)
+  })
+
+  it('every kick in a run gets covered', () => {
+    const kicks = [1.0, 1.5, 2.0, 2.5, 3.0]
+    const out = addNotesOnKicks([note(1.0, 40, 2.5)], kicks, OPTS)
+    for (const k of kicks) {
+      expect(
+        out.some((e) => Math.abs(e.timeSec - k) <= 0.001),
+        `no bass note on the kick at ${k}s`,
+      ).toBe(true)
+    }
   })
 })

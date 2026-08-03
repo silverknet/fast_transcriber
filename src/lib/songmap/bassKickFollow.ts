@@ -71,3 +71,68 @@ export function kickTimesFrom(events: readonly { timeSec: number; cls: string }[
     .map((e) => e.timeSec)
     .sort((a, b) => a - b)
 }
+
+/**
+ * PLAY A NOTE ON EVERY KICK — what "following the drummer" actually means.
+ *
+ * Aligning existing notes (above) only tightens what the bassist already
+ * played. A player locking with a drummer does more than that: when the kick
+ * hits and the bass is holding — or resting — they re-articulate. That is the
+ * sound of a rhythm section rather than two parts that happen to coincide.
+ *
+ * Pitch comes from the line itself, never invented harmony:
+ *   1. a note SOUNDING at the kick → re-pluck the same note,
+ *   2. otherwise the note most recently played → the bassist is still on that
+ *      root and hits it again,
+ *   3. otherwise the next note coming up → an anticipation into the phrase.
+ *
+ * With nothing detected anywhere near, nothing is added. Silence in the bass
+ * part is usually a real rest, and filling every rest with guesses is how a
+ * generated line stops sounding like a person.
+ */
+export function addNotesOnKicks(
+  events: readonly BassMidiEvent[],
+  kickTimes: readonly number[],
+  opts: {
+    /** An onset this close to the kick already counts as playing it. */
+    toleranceSec: number
+    /** Length of an added note before the next onset trims it. */
+    noteSec: number
+    /** How far to look for a pitch to borrow. */
+    reachSec: number
+    /** Velocity for added notes, relative to the borrowed note. */
+    velocityScale?: number
+  },
+): BassMidiEvent[] {
+  if (kickTimes.length === 0) return events.map((e) => ({ ...e }))
+  const sorted = [...events].sort((a, b) => a.timeSec - b.timeSec)
+  const vScale = opts.velocityScale ?? 1
+  const added: BassMidiEvent[] = []
+
+  for (const t of kickTimes) {
+    // Already playing here? Then the kick is covered.
+    if (sorted.some((e) => Math.abs(e.timeSec - t) <= opts.toleranceSec)) continue
+
+    // 1. Sounding through this moment.
+    let src = sorted.find((e) => e.timeSec <= t && t < e.timeSec + e.durationSec)
+    // 2. Most recently played, within reach.
+    if (!src) {
+      for (const e of sorted) {
+        if (e.timeSec > t) break
+        if (t - e.timeSec <= opts.reachSec) src = e
+      }
+    }
+    // 3. Coming up, within reach.
+    if (!src) src = sorted.find((e) => e.timeSec > t && e.timeSec - t <= opts.reachSec)
+    if (!src) continue
+
+    added.push({
+      timeSec: t,
+      durationSec: opts.noteSec,
+      midi: src.midi,
+      velocity: Math.max(0, Math.min(1, src.velocity * vScale)),
+    })
+  }
+
+  return [...sorted, ...added].sort((a, b) => a.timeSec - b.timeSec)
+}

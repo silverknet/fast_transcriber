@@ -116,6 +116,11 @@ const ALLOWED: Record<string, { contexts?: number; destinations?: number; why: s
     why: 'Rig page test-tone tap on the shared device (the meter watches the same node).',
   },
   'routes/debug/colors/+page.svelte': { contexts: 1, why: 'Debug page.' },
+  'routes/project/debug/ending/+page.svelte': {
+    contexts: 1,
+    destinations: 1,
+    why: 'Debug page for song endings — its own throwaway context, never reached from Live.',
+  },
   'routes/debug/click-sounds/+page.svelte': { destinations: 2, why: 'Click sound debug page.' },
 }
 

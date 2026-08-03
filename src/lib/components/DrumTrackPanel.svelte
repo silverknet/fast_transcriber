@@ -318,6 +318,14 @@
     onChanged?.()
   }
 
+  /** Play a note on every kick, like a bassist locking with the drummer. */
+  function setBassKickNotes(on: boolean) {
+    patchSongMap((m) =>
+      m.bassMidi ? { ...m, bassMidi: { ...m.bassMidi, kickNotes: on } } : m,
+    )
+    onChanged?.()
+  }
+
   // ── Pads: audition the kit voices + the bass voice ─────────────────────
   let padCtx: AudioContext | null = null
   const PAD_VOICES: { cls: DrumClass; label: string }[] = [
@@ -698,8 +706,20 @@
            is playing, otherwise from the detected drums. A pull, not a snap:
            playing fractionally behind the kick is groove, welded is a
            sequencer, and which you want is a musical choice. -->
-      <label class="inline-flex items-center gap-1.5" title="Pull bass notes onto the kick. Off leaves the line as played; higher locks it tighter.">
-        <span class="text-muted-foreground">Lock to kick</span>
+      <!-- Play ON the kick — the thing a bassist locking with a drummer
+           actually does. Distinct from the slider beside it, which only
+           tightens notes that are already there. -->
+      <label class="inline-flex items-center gap-1.5" title="Play a bass note on every kick drum hit, at the pitch the bass is already on. Kicks in real silence stay silent.">
+        <input
+          type="checkbox"
+          class="accent-foreground size-3.5"
+          checked={bm.kickNotes === true}
+          onchange={(e) => setBassKickNotes((e.currentTarget as HTMLInputElement).checked)}
+        />
+        <span class="text-muted-foreground">Note on every kick</span>
+      </label>
+      <label class="inline-flex items-center gap-1.5" title="Nudge notes that are ALREADY there onto the nearest kick. Subtle — for playing tighter, not for adding notes.">
+        <span class="text-muted-foreground">Tighten to kick</span>
         <input
           type="range"
           min="0"
