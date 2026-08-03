@@ -1,9 +1,9 @@
 {
-  "version": "latest",
+  "version": "0.1.8",
   "artifacts": {
     "darwin-arm64": {
       "label": "macOS (Apple silicon)",
-      "url": "https://github.com/silverknet/fast_transcriber/releases/latest/download/BarBro-Desktop-arm64.dmg"
+      "url": "/releases/barbro-desktop-0.1.8-arm64.dmg"
     },
     "darwin-x64": {
       "label": "macOS (Intel)",
