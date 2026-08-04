@@ -37,6 +37,9 @@
   import { loadRigSetup } from '$lib/hardware/rigSetupStore'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
   import { LEGACY_LIVE_STEMS } from '$lib/audio/liveStemDefaults'
+  import { audibleSlotSet } from '$lib/hardware/liveSlotDefaults'
+  import { LIVE_SLOT_LABELS } from '$lib/hardware/liveSlotLinks'
+  import { LIVE_SLOT_NAMES, type LiveSlotName } from '$lib/project/types'
   import {
     AUTO_STEM_NAMES,
     type AutoStemName,
@@ -82,13 +85,10 @@
     other: false,
   })
   let quality = $state<AutoStemQuality>('balanced')
-  /** Which stems play by default in LIVE mode (checked = audible; rest muted). */
-  let liveSelected = $state<Record<AutoStemName, boolean>>({
-    vocals: false,
-    drums: false,
-    bass: false,
-    other: false,
-  })
+  /** Which LIVE BUTTONS start switched on (checked = on; the rest start off). */
+  let liveSlotSelected = $state<Record<LiveSlotName, boolean>>(
+    Object.fromEntries(LIVE_SLOT_NAMES.map((n) => [n, false])) as Record<LiveSlotName, boolean>,
+  )
   let countInBeats = $state(0)
   let cueMode = $state<PreCountInCueMode>('off')
   let performers = $state<Performer[]>([])
@@ -176,13 +176,13 @@
     }
     // Live default stems: seed from the saved config, or the legacy default
     // (all stems except vocals) so the checkboxes show today's behavior.
-    const liveSet = new Set(snap.data?.defaults?.liveStems ?? LEGACY_LIVE_STEMS)
-    liveSelected = {
-      vocals: liveSet.has('vocals'),
-      drums: liveSet.has('drums'),
-      bass: liveSet.has('bass'),
-      other: liveSet.has('other'),
-    }
+    // Seeded through the SAME resolver live uses, so the boxes show what will
+    // actually happen — including for a project that has only the older
+    // stem-based setting, which migrates in place the first time this is saved.
+    const onNow = audibleSlotSet(snap.data?.defaults?.liveSlots, snap.data?.defaults?.liveStems)
+    liveSlotSelected = Object.fromEntries(
+      LIVE_SLOT_NAMES.map((n) => [n, onNow.has(n)]),
+    ) as Record<LiveSlotName, boolean>
     countInBeats = snap.data?.defaults?.countInBeats ?? 0
     const pc = snap.data?.defaults?.preCountInCue
     cueMode = pc?.mode ?? 'off'
@@ -212,7 +212,7 @@
   })
 
   const chosenStems = $derived(AUTO_STEM_NAMES.filter((n) => selected[n]))
-  const chosenLiveStems = $derived(AUTO_STEM_NAMES.filter((n) => liveSelected[n]))
+  const chosenLiveSlots = $derived(LIVE_SLOT_NAMES.filter((n) => liveSlotSelected[n]))
   const noStemsButEnabled = $derived(enabled && chosenStems.length === 0)
   const songCount = $derived($projectStore.data?.songs.length ?? 0)
   const canExportSetlist = $derived(
@@ -236,7 +236,7 @@
       await setProjectDefaults({
         countInBeats: countInBeats > 0 ? countInBeats : 0,
         preCountInCue,
-        liveStems: chosenLiveStems,
+        liveSlots: chosenLiveSlots,
       })
       await setProjectPerformers(
         performers
@@ -498,27 +498,27 @@
 
         <!-- Live default stems (project-wide) -->
         <div class="border-foreground/10 flex flex-col gap-1.5 border-t pt-3">
-          <span class="text-sm font-semibold">Live stems</span>
+          <span class="text-sm font-semibold">What starts switched on</span>
           <span class="text-muted-foreground text-xs">
-            Which stems play when you start a song in live mode. Checked = you hear it; everything
-            else loads muted. Every song opens with this set, whatever its saved mix — you can still
-            change stems on the fly while performing.
+            The live buttons that are already on when a song starts. Every song opens the same way,
+            whatever mix it was last edited with — you still change anything you like while
+            performing. Link each mixer channel to a button in the mixer.
           </span>
           <div class="mt-1 grid grid-cols-2 gap-1.5">
-            {#each AUTO_STEM_NAMES as name (name)}
+            {#each LIVE_SLOT_NAMES as name (name)}
               <label class="flex cursor-pointer items-center gap-2 text-sm">
                 <input
                   type="checkbox"
-                  bind:checked={liveSelected[name]}
+                  bind:checked={liveSlotSelected[name]}
                   class="accent-foreground size-3.5"
                 />
-                {STEM_LABELS[name]}
+                {LIVE_SLOT_LABELS[name]}
               </label>
             {/each}
           </div>
           <span class="text-muted-foreground text-[11px]">
-            A song without the chosen stems separated falls back to its full mix, so it’s never
-            silent on stage.
+            A song with none of these buttons carrying anything falls back to its full mix, so it is
+            never silent on stage.
           </span>
         </div>
 

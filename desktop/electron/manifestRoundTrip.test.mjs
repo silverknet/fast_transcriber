@@ -35,7 +35,12 @@ const FULL_MANIFEST = {
   // announcement mode. Both were dropped here: the live-stem set silently did
   // not exist, and a project using 'auto' had its announcement deleted on every
   // manifest write.
-  defaults: { countInBeats: 8, preCountInCue: { mode: 'auto' }, liveStems: ['drums', 'bass'] },
+  defaults: {
+    countInBeats: 8,
+    preCountInCue: { mode: 'auto' },
+    liveStems: ['drums', 'bass'],
+    liveSlots: ['drums', 'bass', 'click', 'cue', 'custom1'],
+  },
   mastering: { enabled: true, matchLoudness: true },
   performers: [
     {

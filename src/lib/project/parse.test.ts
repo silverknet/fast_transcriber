@@ -322,3 +322,44 @@ describe('project defaults survive a load — the live-stem set', () => {
     expect(d?.liveStems).toEqual(['bass'])
   })
 })
+
+describe('the live BUTTON start state survives a load', () => {
+  const withDefaults = (defaults: unknown) =>
+    parseProjectJson(
+      JSON.stringify({
+        formatVersion: 1,
+        id: 'p1',
+        name: 'Gig',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        songs: [],
+        defaults,
+      }),
+    )
+
+  it('keeps the chosen buttons, including the Custom ones a stem list could not name', () => {
+    expect(
+      withDefaults({ liveSlots: ['drums', 'bass', 'click', 'cue', 'custom1'] }).defaults?.liveSlots,
+    ).toEqual(['drums', 'bass', 'click', 'cue', 'custom1'])
+  })
+
+  it('EMPTY means every button starts off, and is not mistaken for unset', () => {
+    expect(withDefaults({ liveSlots: [] }).defaults?.liveSlots).toEqual([])
+  })
+
+  it('unset stays unset, so the old stem setting still drives the start state', () => {
+    expect(withDefaults({ liveStems: ['drums'] }).defaults?.liveSlots).toBeUndefined()
+  })
+
+  it('drops junk names and duplicates, in canonical order', () => {
+    expect(
+      withDefaults({ liveSlots: ['custom2', 'nope', 'bass', 'bass'] }).defaults?.liveSlots,
+    ).toEqual(['bass', 'custom2'])
+  })
+
+  it('carries both settings together during the migration window', () => {
+    const d = withDefaults({ liveStems: ['drums', 'bass'], liveSlots: ['drums'] }).defaults
+    expect(d?.liveStems).toEqual(['drums', 'bass'])
+    expect(d?.liveSlots).toEqual(['drums'])
+  })
+})

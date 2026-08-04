@@ -32,7 +32,7 @@ export interface ProjectFile {
   createdAt: string
   /**
    * Last time the project manifest changed:
-   * project rename, add/remove song, hide/unhide, reorder.
+   * project rename, add/remove song, hide/unhide, reorder, transition recipe.
    * Does NOT update when individual song.smap files are edited.
    */
   updatedAt: string
@@ -80,6 +80,73 @@ export interface ProjectFile {
    * because who hears what is band setup rather than one laptop's preference.
    */
   liveRig?: LiveRigConfig
+  /**
+   * Programmed handoffs between adjacent setlist songs. The transition is
+   * project-level because it describes a relationship between two songs.
+   * Source audio and song maps remain untouched.
+   */
+  transitions?: ProjectTransitionRecipe[]
+}
+
+export type TransitionAnchorMode = 'bar' | 'beat' | 'tonic' | 'free'
+export type TransitionDelayDivision = 'quarter' | 'dotted-eighth' | 'eighth'
+
+export interface ProjectTransitionAnchor {
+  mode: TransitionAnchorMode
+  /** Seconds on the canonical song timeline. */
+  timeSec: number
+  /** One-based display coordinates; null when no analyzed grid is available. */
+  barNumber: number | null
+  beatNumber: number | null
+  label: string
+}
+
+export interface ProjectEchoTransition {
+  throwRule: 'beat-3-or-7'
+  /** Seconds on the outgoing song timeline where the effect input opens. */
+  throwTimeSec: number
+  delayDivision: TransitionDelayDivision
+  captureLengthBeats: number
+  drySongHoldBeats: number
+  sendLevel: number
+  wetLevel: number
+  feedback: number
+  repeatBuild: number
+  toneHz: number
+  tailLengthSec: number
+  effectiveTailLengthSec: number
+  blendReverbLevel: number
+  blendReverbLengthSec: number
+}
+
+/**
+ * V1 intentionally supports one prepared, deterministic transition: an echo
+ * throw whose reverb tail overlaps the next song. Song ids and seconds are the
+ * playback authority; titles and labels are human-readable snapshots.
+ */
+export interface ProjectTransitionRecipe {
+  schema: 'barbro.transition-recipe'
+  version: 1
+  outgoing: {
+    songId: string
+    title: string
+    endAnchor: ProjectTransitionAnchor
+  }
+  incoming: {
+    songId: string
+    title: string
+    startAnchor: ProjectTransitionAnchor
+  }
+  transition: {
+    type: 'echo'
+    echo: ProjectEchoTransition
+    nextSongDelay: {
+      measuredFrom: 'echo-stop'
+      beats: number
+      secondsAtOutgoingTempo: number
+      startOffsetAfterOutgoingEndSec: number
+    }
+  }
 }
 
 /** How firmly a stem's levels are evened out (compression preset intensity). */
@@ -248,6 +315,22 @@ export interface ProjectDefaults {
    * back to its full original mix so it is never silent on stage.
    */
   liveStems?: AutoStemName[]
+  /**
+   * Which LIVE BUTTONS start switched on, project-wide. The successor to
+   * {@link liveStems}, and the one that matches how the stage actually works:
+   * you link a mixer channel to a button (Drums, Bass, … Custom 1, Custom 2)
+   * and that button is what you press. A stem list could not express "the
+   * chord machine starts off" or "no click in this set", because those are not
+   * stems.
+   *
+   * `undefined` = derive from {@link liveStems} exactly as before, so a project
+   * that has never touched this behaves identically. Setting it takes over
+   * completely — an EMPTY array means every button starts off.
+   *
+   * The never-silent rule is unchanged: a song with nothing audible on a
+   * musical button falls back to its full original mix.
+   */
+  liveSlots?: LiveSlotName[]
 }
 
 /**
@@ -288,6 +371,26 @@ export interface ProjectPerformerMix {
 export type AutoStemQuality = 'best' | 'balanced' | 'preview'
 
 export const AUTO_STEM_NAMES: readonly AutoStemName[] = ['vocals', 'drums', 'bass', 'other']
+
+/**
+ * The ten canonical live buttons, in APC order: the bottom pad row / track
+ * buttons, then the two Custom pads above them. Declared here so the project
+ * schema can name them without the project layer importing the hardware layer;
+ * `liveMidiMap.CANONICAL_LIVE_SLOTS` is pinned equal to this by a test.
+ */
+export const LIVE_SLOT_NAMES = [
+  'drums',
+  'bass',
+  'vocals',
+  'other',
+  'guitar',
+  'fx',
+  'click',
+  'cue',
+  'custom1',
+  'custom2',
+] as const
+export type LiveSlotName = (typeof LIVE_SLOT_NAMES)[number]
 export const AUTO_STEM_QUALITIES: readonly AutoStemQuality[] = ['best', 'balanced', 'preview']
 
 export interface ProjectAutoStems {

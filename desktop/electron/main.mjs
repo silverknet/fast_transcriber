@@ -1241,6 +1241,13 @@ function parseManifestDefaults(raw) {
     // An empty array means "every stem starts muted" — a real choice, kept.
     out.liveStems = order.filter((n) => seen.has(n))
   }
+  // The per-BUTTON start state (successor to liveStems). Must be mirrored here
+  // or the sidecar deletes it on every manifest write, like liveStems was.
+  if (Array.isArray(raw.liveSlots)) {
+    const SLOTS = ['drums', 'bass', 'vocals', 'other', 'guitar', 'fx', 'click', 'cue', 'custom1', 'custom2']
+    const seen = new Set(raw.liveSlots.filter((v) => SLOTS.includes(v)))
+    out.liveSlots = SLOTS.filter((n) => seen.has(n))
+  }
   const pc = raw.preCountInCue
   // 'auto' and 'triggered' are the CURRENT modes; 'title'/'custom' are legacy
   // spellings the web side migrates to 'auto'. This list had only the legacy

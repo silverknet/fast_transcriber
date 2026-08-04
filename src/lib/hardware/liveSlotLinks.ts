@@ -21,7 +21,7 @@
  * Pure decision layer: no audio, no engine, no Svelte. `MixerView` owns the
  * lanes and applies the results.
  */
-import { audibleStemSet } from '$lib/audio/liveStemDefaults'
+import { slotStartsOn } from './liveSlotDefaults'
 import type { AutoStemName } from '$lib/project/types'
 import { CANONICAL_LIVE_SLOTS, laneSlotIndex } from './liveMidiMap'
 
@@ -29,6 +29,10 @@ export { CANONICAL_LIVE_SLOTS }
 
 /** A canonical live-button slot, by name (order-independent — safe to persist). */
 export type LiveSlotName = (typeof CANONICAL_LIVE_SLOTS)[number]
+
+// `savedMuted` is still accepted so callers do not all change at once, but the
+// live start state is now a project decision rather than a per-song leftover.
+
 
 /** What a track's `liveSlot` may say: a slot name, or explicitly nothing. */
 export type LiveSlotLink = LiveSlotName | 'none'
@@ -165,24 +169,19 @@ export function liveInitialMuted(opts: {
   liveSlot?: LiveSlotLink
   savedMuted: boolean
   liveStems: readonly AutoStemName[] | undefined
+  /** The project's per-BUTTON start state. Unset = behave exactly as before. */
+  liveSlots?: readonly LiveSlotName[] | undefined
   /** Does this song have ANY lane on a musical button? See above. */
   hasMusicalSlotLane: boolean
 }): boolean {
-  const { key, liveSlot, savedMuted, liveStems, hasMusicalSlotLane } = opts
+  const { key, liveSlot, savedMuted, liveStems, liveSlots, hasMusicalSlotLane } = opts
   const slot = resolveLaneSlot(key, liveSlot)
   if (slot !== null) {
     const name = slotNameByIndex(slot)
-    if (name === 'cue') return false
-    // The click starts ON for EVERY analysed song in live — deterministic,
-    // never inherited. It used to return `savedMuted`, the click state left
-    // over from EDITING that song — so across a set, some songs clicked and
-    // some didn't, tracking nothing but each song's editing history. On a
-    // stage that reads as data corruption ("some songs have clicks, some
-    // don't"). Whether the click SOUNDS is governed live by the fail-closed
-    // gate and the click pill — a per-show decision, not twenty saved ones.
-    if (name === 'click') return false
-    if (isDemucsSlot(name)) return !audibleStemSet(liveStems).includes(name)
-    return false // guitar / fx / custom — linked on purpose
+    // ONE RULE FOR ALL TEN BUTTONS. Which start on is a project decision, and
+    // `audibleSlotSet` reproduces the old per-slot behaviour exactly when the
+    // project has not set one — so nothing moves until someone chooses.
+    return !slotStartsOn(name, liveSlots, liveStems)
   }
   if (key === 'original') return hasMusicalSlotLane
   // NOT LINKED TO ANY BUTTON → NOT IN THE SHOW. Fail closed.

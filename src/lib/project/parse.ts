@@ -8,6 +8,7 @@
 
 import {
   AUTO_STEM_NAMES,
+  LIVE_SLOT_NAMES,
   AUTO_STEM_QUALITIES,
   PROJECT_FILE_VERSION,
   validateProjectFolderPath,
@@ -437,6 +438,15 @@ function parseDefaults(raw: unknown): ProjectFile['defaults'] | undefined {
     // collapse back to the legacy default, so it is stored whenever the key
     // was present and well-formed.
     out.liveStems = AUTO_STEM_NAMES.filter((n) => seen.has(n))
+  }
+  // The per-BUTTON start state. Same whitelist trap as `liveStems` above —
+  // omitting it here would make the setting save and vanish, which is exactly
+  // the bug this pair of lines is replacing.
+  if (Array.isArray(r.liveSlots)) {
+    const seen = new Set<string>()
+    for (const v of r.liveSlots) if (typeof v === 'string') seen.add(v)
+    // Empty is meaningful: "every button starts off".
+    out.liveSlots = LIVE_SLOT_NAMES.filter((n) => seen.has(n))
   }
   const pc = r.preCountInCue as Record<string, unknown> | undefined
   if (pc && typeof pc.mode === 'string') {
