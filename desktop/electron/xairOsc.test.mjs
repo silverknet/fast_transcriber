@@ -7,7 +7,10 @@ import {
   decodeOscMessage,
   decodeXAirMeters,
   encodeOscString,
+  isXAirWritableIntAddress,
+  XAIR_CHANNEL_LINK_PAIRS,
   XAIR_METER_FLOOR_DB,
+  xairChannelLinkPath,
   encodeOscMessage,
   parseXAirChannelState,
   xairBusFaderPath,
@@ -84,6 +87,34 @@ test('the USB switch and source addresses', () => {
   // mistaking one for the other cost an afternoon.
   assert.equal(xairChannelUsbSwitchPath(9), '/ch/09/preamp/rtnsw')
   assert.equal(xairChannelUsbSourcePath(9), '/ch/09/config/rtnsrc')
+})
+
+test('channel-link paths exist only for the desk’s FIXED pairs', () => {
+  // X-Air joins 1-2, 3-4, … and NOTHING else. A stereo source patched to 6/7
+  // cannot be linked; sending `/config/chlink/6-7` is an address the desk does
+  // not have, and it drops unknown addresses in silence — which reads exactly
+  // like success. Refusing here is the only way that failure is ever seen.
+  assert.equal(xairChannelLinkPath('9-10'), '/config/chlink/9-10')
+  assert.equal(xairChannelLinkPath('1-2'), '/config/chlink/1-2')
+  assert.equal(XAIR_CHANNEL_LINK_PAIRS.length, 8)
+  assert.throws(() => xairChannelLinkPath('6-7'), /pair/)
+  assert.throws(() => xairChannelLinkPath('9-11'), /pair/)
+})
+
+test('the raw-int write whitelist accepts config and refuses levels', () => {
+  // The endpoint is safe to expose ONLY because nothing it accepts can raise a
+  // level. If a fader or send address ever passes this gate, a routing bug
+  // becomes a loudness bug — on a stage, in someone's ears.
+  assert.ok(isXAirWritableIntAddress('/ch/09/preamp/rtnsw'))
+  assert.ok(isXAirWritableIntAddress('/ch/12/config/rtnsrc'))
+  assert.ok(isXAirWritableIntAddress('/config/chlink/9-10'))
+  assert.ok(!isXAirWritableIntAddress('/config/chlink/6-7'))
+  assert.ok(!isXAirWritableIntAddress('/ch/09/mix/fader'))
+  assert.ok(!isXAirWritableIntAddress('/bus/3/mix/fader'))
+  assert.ok(!isXAirWritableIntAddress('/lr/mix/fader'))
+  assert.ok(!isXAirWritableIntAddress('/ch/17/preamp/rtnsw'))
+  assert.ok(!isXAirWritableIntAddress(''))
+  assert.ok(!isXAirWritableIntAddress(null))
 })
 
 test('FOH-safety + monitor path builders', () => {

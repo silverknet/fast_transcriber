@@ -97,7 +97,7 @@ import {
   normalizeTransposeSemitones,
   transposeCacheSubpath,
 } from './transposeCache.mjs'
-import { createXAirClient, discoverXAirConsoles } from './xairOsc.mjs'
+import { createXAirClient, discoverXAirConsoles, isXAirWritableIntAddress } from './xairOsc.mjs'
 import { serveFileFromDisk } from './serveFile.mjs'
 import {
   atomicWriteFile,
@@ -825,16 +825,11 @@ async function handleXAirQuery(req, res, cors) {
  * allowed, and neither can make a sound on its own — they choose a SOURCE, not
  * a level.
  */
-const XAIR_WRITABLE_INT_ADDRESSES = [
-  /^\/ch\/(0[1-9]|1[0-6])\/preamp\/rtnsw$/, // socket (0) or USB (1)
-  /^\/ch\/(0[1-9]|1[0-6])\/config\/rtnsrc$/, // which USB channel, zero-based
-]
-
 async function handleXAirOscInt(req, res, cors) {
   try {
     const body = await readRequestJson(req)
     const address = typeof body?.address === 'string' ? body.address.trim() : ''
-    if (!XAIR_WRITABLE_INT_ADDRESSES.some((re) => re.test(address))) {
+    if (!isXAirWritableIntAddress(address)) {
       throw new Error(`Address not writable through this endpoint: ${address || '(empty)'}`)
     }
     if (!Number.isInteger(body?.value) || body.value < 0 || body.value > 63) {

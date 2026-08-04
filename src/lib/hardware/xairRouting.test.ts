@@ -272,6 +272,35 @@ describe('buildXAirBusSends', () => {
     const second = diffXAirBusWrites(buildXAirBusSends(routes, mixes), first.nextState)
     expect(second.changed).toHaveLength(0)
   })
+
+  it('a PRIMED baseline makes a reconnect write nothing — the band keeps their levels', () => {
+    // The bug this locks: `sentBusState` is wiped on disconnect, so the first
+    // sync after a reconnect saw every send as "changed" and pushed BarBro's
+    // stored mixes over the desk. A performer sets their own level on their
+    // phone, the laptop's Wi-Fi blinks, and their mix is silently reset.
+    //
+    // The fix is to PRIME the baseline from the same builder without sending,
+    // which only works if `nextState` covers every write even when nothing was
+    // sent — that is the property under test.
+    const mixes: XAirMonitorMix[] = [
+      { performerId: 'p1', bus: 1, sends: { click: 1.0, cue: 0.8 }, master: 0.4 },
+      { performerId: 'p2', bus: 2, sends: { click: 0.6 }, master: 0.4 },
+    ]
+    const writes = buildXAirBusSends(routes, mixes)
+    expect(writes.length).toBeGreaterThan(0)
+
+    const { changed, nextState } = diffXAirBusWrites(writes, new Map()) // prime — nothing sent
+    expect(changed).toHaveLength(writes.length)
+
+    const afterReconnect = diffXAirBusWrites(buildXAirBusSends(routes, mixes), nextState)
+    expect(afterReconnect.changed).toEqual([])
+
+    // …and a DELIBERATE change in the panel still reaches the desk.
+    const raised: XAirMonitorMix[] = [{ ...mixes[0], sends: { click: 0.5, cue: 0.8 } }, mixes[1]]
+    const edited = diffXAirBusWrites(buildXAirBusSends(routes, raised), nextState)
+    expect(edited.changed).toHaveLength(1)
+    expect(edited.changed[0]).toMatchObject({ kind: 'bus-send', bus: 1 })
+  })
 })
 
 describe('verifyFohSafe — the vacuous-safe bug', () => {

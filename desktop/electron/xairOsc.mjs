@@ -115,8 +115,42 @@ export function xairChannelUsbSourcePath(channel) {
   return xairChannelPath(channel, '/config/rtnsrc')
 }
 
+/**
+ * Stereo-link a FIXED pair: `/config/chlink/9-10`. One fader for a stereo
+ * source instead of two that drift apart on the band's phones.
+ *
+ * The pairs are the only ones the desk has. `/config/chlink/6-7` is not an
+ * address — X-Air drops unknown addresses in silence, which reads exactly like
+ * success, so this refuses rather than sends.
+ */
+export const XAIR_CHANNEL_LINK_PAIRS = ['1-2', '3-4', '5-6', '7-8', '9-10', '11-12', '13-14', '15-16']
+
+export function xairChannelLinkPath(pair) {
+  if (!XAIR_CHANNEL_LINK_PAIRS.includes(pair)) throw new Error(`Not a channel-link pair: ${pair}`)
+  return `/config/chlink/${pair}`
+}
+
 export function xairMainFaderPath() {
   return '/lr/mix/fader'
+}
+
+/**
+ * THE WRITE WHITELIST for the raw integer endpoint.
+ *
+ * Everything here is CONFIGURATION — what a strip listens to, and whether two
+ * strips move together. None of it can raise a level, which is the property
+ * that lets the sidecar accept these writes at all: a bug here changes routing,
+ * never loudness. Anything that moves a fader goes through its own endpoint
+ * with its own clamp.
+ */
+export const XAIR_WRITABLE_INT_ADDRESSES = [
+  /^\/ch\/(0[1-9]|1[0-6])\/preamp\/rtnsw$/, // socket (0) or USB (1)
+  /^\/ch\/(0[1-9]|1[0-6])\/config\/rtnsrc$/, // which USB channel, zero-based
+  /^\/config\/chlink\/(1-2|3-4|5-6|7-8|9-10|11-12|13-14|15-16)$/, // stereo pair
+]
+
+export function isXAirWritableIntAddress(address) {
+  return typeof address === 'string' && XAIR_WRITABLE_INT_ADDRESSES.some((re) => re.test(address))
 }
 
 /**

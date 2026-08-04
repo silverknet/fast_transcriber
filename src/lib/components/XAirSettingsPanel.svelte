@@ -43,6 +43,16 @@
     readBusTopology,
     type BusTopology,
   } from '$lib/hardware/deskTopology'
+  import {
+    CHANNEL_LINK_PAIRS,
+    chLinkAddress,
+    guardDrift,
+    linkGuardAddresses,
+    readChannelLinks as readChannelLinksFrom,
+    stereoLinkProblems,
+    stereoLinkTargets,
+    type ChannelLinkPair,
+  } from '$lib/hardware/channelLink'
   import { patchList, performerInputProblems } from '$lib/project/performerInputs'
   import {
     DEFAULT_STAGE_SEND,
@@ -283,6 +293,7 @@
       // "unverified" waiting for a button — read the desk back by itself.
       if (!stopped && !verifiedOnOpen && next?.xair?.connected === true) {
         verifiedOnOpen = true
+        primeMonitorBaseline()
         void verifyFoh()
         void readTopology()
       }
@@ -332,6 +343,9 @@
     }
     status = r.xair
     note = 'Connected. Verify the house is safe before you go live.'
+    // Adopt whatever the desk (and the band's phones) already have, so the
+    // first sync after connecting writes nothing.
+    primeMonitorBaseline()
     setTimeout(() => void verifyFoh(), 400) // give the desk a beat to reply
     setTimeout(() => void readTopology(), 600)
     // Claimed strips re-apply THEMSELVES on every connect — the one-time
@@ -450,6 +464,24 @@
       }
     }
   }
+  /**
+   * ADOPT the desk's monitor mixes instead of asserting ours over them.
+   *
+   * `sentBusState` is the record of what we last wrote, and it is wiped on
+   * disconnect — so the first sync after a reconnect saw every send as
+   * "changed" and pushed BarBro's stored mixes over the desk. On a stage that
+   * means a performer sets their own level on their phone, the laptop's Wi-Fi
+   * blinks, and their mix is silently reset to whatever the project remembers.
+   *
+   * Priming the baseline WITHOUT writing makes the reconnect a no-op: from
+   * then on only a deliberate change in this panel produces a write, and the
+   * band owns everything they have touched.
+   */
+  function primeMonitorBaseline(): void {
+    const { nextState } = diffXAirBusWrites(buildXAirBusSends(routes, monitorMixes), new Map())
+    sentBusState = nextState
+  }
+
   async function syncMonitors(force = false) {
     if (!connected) return
     const { changed, nextState } = diffXAirBusWrites(
@@ -726,6 +758,92 @@
   async function readTopology() {
     const q = await queryXAirPaths([...BUS_LINK_PATHS], 900)
     if (q.ok) busTopology = readBusTopology(q.replies)
+    await readChannelLinks()
+  }
+
+  // ── Stereo links: ONE "BarBro" fader on the band's phones, not two ────────
+  //
+  // The backing track arrives on two strips, so everyone sees "BarBro L" and
+  // "BarBro R" and has to match them by eye every time they want less track in
+  // their ears. Joining the pair on the desk makes it one fader. Same for a
+  // stereo keyboard or guitar.
+  let deskLinkedPairs = $state<ChannelLinkPair[]>([])
+  let linkAnswered = $state(0)
+  let linkBusy = $state(false)
+  let linkReport = $state('')
+  let linkOk = $state(false)
+
+  const linkTargets = $derived(stereoLinkTargets(splitLayout, performers))
+  const linkProblems = $derived(stereoLinkProblems(splitLayout, performers))
+  const unlinkedTargets = $derived(linkTargets.filter((t) => !deskLinkedPairs.includes(t.pair)))
+
+  async function readChannelLinks() {
+    const q = await queryXAirPaths(
+      CHANNEL_LINK_PAIRS.map((p) => chLinkAddress(p)),
+      900,
+    )
+    if (!q.ok) return
+    const state = readChannelLinksFrom(q.replies)
+    deskLinkedPairs = state.linked
+    linkAnswered = state.answered
+  }
+
+  /**
+   * Join each stereo pair, and PROVE the join did not move the audio.
+   *
+   * X-Air couples a linked pair's settings and does not document which way the
+   * copy runs. If it were to copy `config/rtnsrc` across, both strips would
+   * carry USB channel 1 and the backing track would go left-signal-in-both-ears
+   * — inaudible as a fault, catastrophic as a mix. So every pair is read BEFORE
+   * and AFTER, compared, and unlinked again the moment anything else moved.
+   */
+  async function applyStereoLinks() {
+    if (linkBusy || !connected) return
+    linkBusy = true
+    linkReport = ''
+    linkOk = false
+    try {
+      const todo = unlinkedTargets
+      if (todo.length === 0) {
+        linkReport =
+          linkTargets.length === 0
+            ? 'Nothing stereo to join yet — BarBro needs the split layout, and stereo inputs are set in Project settings.'
+            : 'Already joined on the desk — every stereo source is one fader.'
+        linkOk = linkTargets.length > 0
+        return
+      }
+      const done: string[] = []
+      for (const target of todo) {
+        const guards = linkGuardAddresses(target)
+        const before = await queryXAirPaths(guards, 900)
+        const w = await setXAirOscInt(target.address, 1)
+        if (!w.ok) throw new Error(`${target.label}: ${w.error}`)
+        const got = w.after?.[0]?.value
+        if (typeof got === 'number' && Math.round(got) !== 1) {
+          linkReport = `The desk did not join ${target.label} (strips ${target.channels.join(' and ')}). Nothing else was changed.`
+          return
+        }
+        const after = await queryXAirPaths(guards, 900)
+        const drift =
+          before.ok && after.ok ? guardDrift(before.replies, after.replies, guards) : []
+        if (drift.length > 0) {
+          // Joining them broke the routing — undo it immediately and say what
+          // the desk did, rather than leave a rig that looks tidier and sounds
+          // wrong.
+          await setXAirOscInt(target.address, 0)
+          linkReport = `Joining ${target.label} changed the routing (${drift.join('; ')}), so it was undone. Leave these as two faders.`
+          return
+        }
+        done.push(target.label)
+      }
+      await readChannelLinks()
+      linkOk = true
+      linkReport = `Verified from the desk: ${done.join(', ')} ${done.length === 1 ? 'is' : 'are'} one fader now, and nothing else moved.`
+    } catch (e) {
+      linkReport = e instanceof Error ? e.message : String(e)
+    } finally {
+      linkBusy = false
+    }
   }
   /** For pair "1-2", bus 2 is swallowed — it mirrors bus 1, not its own mix. */
   const swallowedBuses = $derived(
@@ -1060,6 +1178,57 @@
       {#if stageReport}
         <p class="mt-1 text-xs {stageOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive'}">
           {stageReport}
+        </p>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- ── Stereo pairs: one fader each on the band's phones ─────────────────── -->
+  {#if linkTargets.length > 0 || linkProblems.length > 0}
+    <div>
+      <p class="mb-1.5 text-xs font-black uppercase tracking-wide">One fader per stereo source</p>
+      <p class="text-muted-foreground text-xs">
+        A stereo source is two strips on the desk, so the band sees two faders and has to match
+        them by eye. Joining each pair gives everyone one.
+      </p>
+      {#each linkProblems as problem (problem)}
+        <p class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">{problem}</p>
+      {/each}
+      {#if linkTargets.length > 0}
+        <div class="mt-1.5 flex flex-wrap gap-1.5 text-[11px]">
+          {#each linkTargets as target (target.pair)}
+            {@const joined = deskLinkedPairs.includes(target.pair)}
+            <span
+              class="border-foreground/15 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 {joined
+                ? 'text-emerald-600 dark:text-emerald-400'
+                : 'text-muted-foreground'}"
+            >
+              <span class="font-bold">{target.label}</span>
+              <span class="font-mono">{target.channels.join('/')}</span>
+              <span>{joined ? 'one fader' : linkAnswered === 0 ? 'not read yet' : 'two faders'}</span>
+            </span>
+          {/each}
+        </div>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            class=""
+            onclick={() => void applyStereoLinks()}
+            disabled={!connected || linkBusy}
+            title={!connected
+              ? 'Connect to the desk first.'
+              : 'Join each stereo pair on the desk, then read it back to prove the routing did not move.'}
+          >
+            {linkBusy ? 'Joining…' : unlinkedTargets.length === 0 ? 'Re-check' : `Join ${unlinkedTargets.length} pair${unlinkedTargets.length === 1 ? '' : 's'}`}
+          </Button>
+          <p class="text-muted-foreground text-[11px]">
+            Configuration only — joining two strips cannot change a level.
+          </p>
+        </div>
+      {/if}
+      {#if linkReport}
+        <p class="mt-1 text-xs {linkOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive'}">
+          {linkReport}
         </p>
       {/if}
     </div>
