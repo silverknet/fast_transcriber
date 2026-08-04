@@ -94,13 +94,27 @@ export function formatXAirChannelList(channels: readonly number[]): string {
 }
 
 /** The XR18 channel pair a stem lane defaults to (live-rig contract: stems on 9-16). */
+/**
+ * NO DEFAULT CHANNEL FOR A STEM — deliberately.
+ *
+ * This used to hand stems fixed pairs: drums 9/10, bass 11/12, vocals 13/14,
+ * other 15/16. That map was written for a rig that sends each stem to the desk
+ * on its own channel — which does not exist and is still deferred work. On the
+ * rig that DOES exist, BarBro occupies 9-12 with song L, song R, click and cue,
+ * so those defaults collided head-on with it:
+ *
+ *   - a song with a BASS stem claimed 11 and 12 — the click and cue strips. Arm
+ *     "Live follow" and the mixer's Bass fader drives the click; muting Bass
+ *     silences the click and the cues in every performer's ears at once.
+ *   - a song with a DRUMS stem claimed 9 and 10 — the backing track itself.
+ *
+ * Both are silent until armed, and then catastrophic. A guessed route to a
+ * channel that carries something else is worse than no route: no route writes
+ * nothing. Anyone who really does have per-stem desk channels can still set
+ * them by hand in the Rig panel — that is a deliberate act with the desk in
+ * front of you, which is exactly what it should be.
+ */
 function stemPairForLaneKey(laneKey: string): number[] | null {
-  if (!laneKey.startsWith('stem:')) return null
-  const rest = laneKey.slice('stem:'.length).toLowerCase()
-  if (/drum/.test(rest)) return [9, 10]
-  if (/bass/.test(rest)) return [11, 12]
-  if (/vocal/.test(rest)) return [13, 14]
-  if (/other/.test(rest)) return [15, 16]
   return null
 }
 
@@ -331,8 +345,12 @@ export type XAirMonitorMix = {
   bus: number
   /** laneKey → BarBro linear send level (1.0 = unity), through the fader law. */
   sends: Record<string, number>
-  /** Optional bus-master linear level. */
-  master?: number
+  /**
+   * Optional bus-master linear level. `null`/absent means DO NOT WRITE IT —
+   * an in-ear bus master is a hearing-safety control, and BarBro asserting a
+   * default it was never given is how six packs jump to unity at once.
+   */
+  master?: number | null
 }
 
 export type XAirBusWrite =

@@ -54,7 +54,8 @@ describe('ensureXAirRoutesForLanes', () => {
     expect(routes.map((r) => [r.laneKey, r.channels])).toEqual([
       ['original', [9, 10]],
       ['cue', [16]],
-      ['stem:vocals.wav', [13, 14]],
+      // A stem gets NO guessed channel — see the stem-collision test below.
+      ['stem:vocals.wav', []],
     ])
     expect(defaultXAirChannelsForLane('click')).toEqual([15]) // click → its own channel, off FOH
   })
@@ -333,5 +334,51 @@ describe('verifyFohSafe — the vacuous-safe bug', () => {
     expect(v.safe).toBe(false)
     expect(v.unsafeChannels).toEqual([15])
     expect(v.reason).toMatch(/channel 15/)
+  })
+})
+
+describe('the in-ear bus master is a hearing-safety control', () => {
+  const routes = [
+    { laneKey: 'click', channels: [11], followVolume: false, followMute: false },
+  ]
+
+  it('writes NOTHING for a bus whose master BarBro was never given', () => {
+    // THE BUG: this defaulted to 0.75 — XR18 unity — so arming "Live follow"
+    // slammed all six in-ear masters to full line level over whatever the band
+    // had set. Packs run around 0.4 (−18 dB); that was a ~15 dB jump into six
+    // people's ears from one checkbox.
+    const writes = buildXAirBusSends(routes, [
+      { performerId: 'p1', bus: 1, sends: { click: 0.5 } },
+      { performerId: 'p2', bus: 2, sends: { click: 0.5 }, master: null },
+    ])
+    expect(writes.filter((w) => w.kind === 'bus-fader')).toEqual([])
+    expect(writes.filter((w) => w.kind === 'bus-send')).toHaveLength(2)
+  })
+
+  it('still writes a master the user actually set', () => {
+    const writes = buildXAirBusSends(routes, [
+      { performerId: 'p1', bus: 1, sends: {}, master: 0.4 },
+    ])
+    expect(writes).toEqual([
+      { kind: 'bus-fader', bus: 1, value: xairFaderFromLinearGain(0.4) },
+    ])
+  })
+})
+
+describe('a stem never claims a channel that carries something else', () => {
+  it('gives stems NO default channel — 9-12 belong to song/click/cue', () => {
+    // THE BUG: bass defaulted to 11/12 (the click and cue strips) and drums to
+    // 9/10 (the backing track). Arm "Live follow" and the mixer's Bass fader
+    // drives the click channel; muting Bass silences click AND cue in every
+    // performer's ears at once.
+    for (const key of ['stem:bass.wav', 'stem:drums.wav', 'stem:vocals.wav', 'stem:other.wav']) {
+      expect(defaultXAirChannelsForLane(key), `${key} must not claim a channel`).toEqual([])
+    }
+  })
+
+  it('leaves the full-mix and monitor-only defaults alone', () => {
+    expect(defaultXAirChannelsForLane('original')).toEqual([9, 10])
+    expect(defaultXAirChannelsForLane('click')).toEqual([15])
+    expect(defaultXAirChannelsForLane('cue')).toEqual([16])
   })
 })

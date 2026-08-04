@@ -156,7 +156,15 @@
         performerId: p.id,
         bus: p.monitorBus!,
         sends: monitorSends[p.monitorBus!] ?? {},
-        master: busMaster[p.monitorBus!] ?? 0.75,
+        // NO FALLBACK. This defaulted to 0.75 — XR18 UNITY — so arming "Live
+        // follow" slammed all six in-ear bus masters to full line level, over
+        // whatever the band had set. Packs are run around 0.4 (−18 dB) because
+        // unity into an in-ear is genuinely dangerous, so that was a ~15 dB jump
+        // into six people's ears from one checkbox.
+        //
+        // `buildXAirBusSends` skips a null master, so a bus BarBro was never
+        // told about is now left exactly where the desk has it.
+        master: busMaster[p.monitorBus!] ?? null,
       }))
       .sort((a, b) => a.bus - b.bus),
   )
