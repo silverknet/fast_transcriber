@@ -142,6 +142,7 @@
   } from '$lib/audio/detectedBassTrack'
   import { chordJam } from '$lib/audio/chordJam.svelte'
   import { jamVoicesSuppressedInMixer } from '$lib/audio/jamVoiceRouting'
+  import { mergePersistedTracks } from '$lib/audio/mixStatePersist'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
   import { audioDevice } from '$lib/audio/audioDevice'
   import { mayStartSong } from '$lib/audio/clickStartGate'
@@ -2563,7 +2564,19 @@
         if (isEqWorthStoring(eq)) entry.eq = eq
         return [entry]
       })
-      const next: MixState = { tracks }
+      // CARRY FORWARD what this session did not BUILD.
+      //
+      // `tracks` is rebuilt from `engine.listTracks()`, so any lane absent from
+      // this session vanished from the song entirely — its fader, its EQ and,
+      // worst of all, its live-button link. The generated lanes are exactly the
+      // ones this bites: whether the Chords lane exists is a PER-BROWSER
+      // localStorage flag (`barbro::mixer::chordLane`), not something stored in
+      // the song. So linking Chords to Custom 1 on one laptop, then opening the
+      // song anywhere the lane was not built and touching any fader, silently
+      // erased the link — and the button went dead again with nothing to say so.
+      //
+      // A lane this session did not build is not a lane this session may erase.
+      const next: MixState = { tracks: mergePersistedTracks(tracks, $songMap?.mixState?.tracks) }
       patchSongMap((m) => ({ ...m, mixState: next }))
     }, 800)
   }
