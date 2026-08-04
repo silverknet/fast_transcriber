@@ -103,9 +103,19 @@ desk's Wi-Fi — USB audio still works, routing verification does not).
 2. Step through every song once (or check hydration lights) — a COLD first
    open registers the click lane ~10 s into playback; warmed songs start with
    click from beat one.
-3. Packs start LOW (bus masters run ~0.7 — hot). Raise per person by ear in
+3. Rig → **One fader per stereo source** → *Join pairs*. Joins BarBro's 9/10
+   (and any stereo keys/guitar) on the desk so the band's phones show ONE
+   "BarBro" fader instead of two that drift apart. Reads the strips back
+   before and after and undoes the join if the desk moved anything else.
+4. Packs start LOW (bus masters run ~0.7 — hot). Raise per person by ear in
    Rig → performer sliders.
-4. Emma's U308 receiver on **MONO** — stereo mode + mono aux = one ear.
+5. Emma's U308 receiver on **MONO** — stereo mode + mono aux = one ear.
+
+**Whose level wins:** once the band sets their own monitor levels on their
+phones, BarBro leaves them alone — it adopts the desk's mixes when it connects
+and only writes when someone moves a slider in the Rig panel. The one
+exception is arming **Live follow**, which deliberately asserts the project's
+stored mixes over the desk; arm at load-in, not mid-set.
 
 **Known open items:** cold-open click delay (fix planned: hold play until the
 click lane is ready); in-ear sound QUALITY report unresolved — suspects: USB
