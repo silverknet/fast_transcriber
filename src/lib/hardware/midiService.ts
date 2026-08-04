@@ -27,6 +27,7 @@ import {
   APC_RECORD_NOTE,
   APC_STOP_ALL_CLIPS_NOTE,
 } from './apcKey25'
+import { portsNeedingOpen } from './midiPortOpen'
 
 export type MidiStatus = {
   supported: boolean
@@ -89,11 +90,28 @@ function findApcLedOutput(a: MIDIAccess): MIDIOutput | null {
 
 function refresh() {
   if (!access) return
-  for (const input of access.inputs.values()) {
+  const inputs = [...access.inputs.values()]
+  for (const input of inputs) {
     if (!boundInputs.has(input)) {
       input.addEventListener('midimessage', dispatchInput)
       boundInputs.add(input)
     }
+  }
+  // AND OPEN THEM. `addEventListener('midimessage')` does NOT open a Web MIDI
+  // port — only `onmidimessage = fn` does. A connected-but-closed input
+  // delivers nothing, in silence, while every indicator says the controller is
+  // there: the APC lit up perfectly (outputs ARE opened, below) and not one
+  // button did anything. It came and went because any other path that used
+  // `onmidimessage=` — the MIDI debug page, the mapping dialog — opened the
+  // port as a side effect and left it open for the session.
+  //
+  // Outside the bind guard on purpose: an unplugged-and-replugged device comes
+  // back as the SAME object with `connection` reset to 'closed', so opening
+  // has to be re-decided every refresh or the buttons stay dead until reload.
+  for (const input of portsNeedingOpen(inputs)) {
+    void input.open().catch(() => {
+      /* racing a disconnect — the next refresh will retry */
+    })
   }
   const apcInput = findApcInput(access)
   apcOut = findApcLedOutput(access)
