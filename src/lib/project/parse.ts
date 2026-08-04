@@ -18,6 +18,7 @@ import {
   type ProjectFile,
   type ProjectSongEntry,
 } from './types'
+import { parseProjectTransitions } from './transitions'
 
 /**
  * Parse the optional `autoStems` block defensively. Unknown / malformed
@@ -143,6 +144,7 @@ export function parseProjectJson(text: string): ProjectFile {
   const performers = parsePerformers(o.performers)
   const performerMixes = parsePerformerMixes(o.performerMixes)
   const liveRig = parseLiveRig(o.liveRig)
+  const transitions = parseProjectTransitions(o.transitions, songs)
 
   return {
     formatVersion: PROJECT_FILE_VERSION,
@@ -158,6 +160,7 @@ export function parseProjectJson(text: string): ProjectFile {
     ...(performers ? { performers } : {}),
     ...(performerMixes ? { performerMixes } : {}),
     ...(liveRig ? { liveRig } : {}),
+    ...(transitions ? { transitions } : {}),
   }
 }
 
@@ -416,6 +419,24 @@ function parseDefaults(raw: unknown): ProjectFile['defaults'] | undefined {
   const out: NonNullable<ProjectFile['defaults']> = {}
   if (typeof r.countInBeats === 'number' && Number.isInteger(r.countInBeats) && r.countInBeats >= 0) {
     out.countInBeats = r.countInBeats
+  }
+  // WHICH STEMS START AUDIBLE LIVE. Dropping this was invisible and total: the
+  // setting saved, the dialog reopened showing the LEGACY default (drums + bass
+  // + other) as if nothing had been ticked, and live played 'other' on every
+  // song because `audibleStemSet(undefined)` falls back to that same legacy
+  // set. One missing parser line, and the whole project-wide live-stem config
+  // silently did not exist.
+  if (Array.isArray(r.liveStems)) {
+    const seen = new Set<AutoStemName>()
+    for (const v of r.liveStems) {
+      if (typeof v === 'string' && (AUTO_STEM_NAMES as readonly string[]).includes(v)) {
+        seen.add(v as AutoStemName)
+      }
+    }
+    // An EMPTY array is meaningful — "start every stem muted" — and must not
+    // collapse back to the legacy default, so it is stored whenever the key
+    // was present and well-formed.
+    out.liveStems = AUTO_STEM_NAMES.filter((n) => seen.has(n))
   }
   const pc = r.preCountInCue as Record<string, unknown> | undefined
   if (pc && typeof pc.mode === 'string') {

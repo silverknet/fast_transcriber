@@ -28,10 +28,14 @@ const FULL_MANIFEST = {
   name: 'Bröllopsgig',
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-08-01T00:00:00.000Z',
-  songs: [{ id: 's1', folder: 'songs/one' }],
+  songs: [{ id: 's1', folder: 'songs/one' }, { id: 's2', folder: 'songs/two' }],
   autoStems: { enabled: true, stems: ['drums'], quality: 'fast' },
   cloud: { projectId: 'c1', lastSyncedRevision: 3 },
-  defaults: { countInBeats: 8, preCountInCue: { mode: 'title' } },
+  // `liveStems` = which stems start audible on stage; `auto` is the CURRENT
+  // announcement mode. Both were dropped here: the live-stem set silently did
+  // not exist, and a project using 'auto' had its announcement deleted on every
+  // manifest write.
+  defaults: { countInBeats: 8, preCountInCue: { mode: 'auto' }, liveStems: ['drums', 'bass'] },
   mastering: { enabled: true, matchLoudness: true },
   performers: [
     {
@@ -58,6 +62,31 @@ const FULL_MANIFEST = {
     monitorSends: { 1: { click: 1, original: 0.8 } },
     busMaster: { 1: 0.75 },
   },
+  transitions: [{
+    schema: 'barbro.transition-recipe', version: 1,
+    outgoing: {
+      songId: 's1', title: 'One',
+      endAnchor: { mode: 'bar', timeSec: 120, barNumber: 64, beatNumber: 4, label: 'End of bar 64' },
+    },
+    incoming: {
+      songId: 's2', title: 'Two',
+      startAnchor: { mode: 'bar', timeSec: 2, barNumber: 1, beatNumber: 1, label: 'Start of bar 1' },
+    },
+    transition: {
+      type: 'echo',
+      echo: {
+        throwRule: 'beat-3-or-7', throwTimeSec: 119.2, delayDivision: 'dotted-eighth',
+        captureLengthBeats: 0.75, drySongHoldBeats: 1.75, sendLevel: 0.62,
+        wetLevel: 0.72, feedback: 0.96, repeatBuild: 0.53, toneHz: 5200,
+        tailLengthSec: 5.8, effectiveTailLengthSec: 5.8,
+        blendReverbLevel: 0.72, blendReverbLengthSec: 7.6,
+      },
+      nextSongDelay: {
+        measuredFrom: 'echo-stop', beats: 0, secondsAtOutgoingTempo: 0,
+        startOffsetAfterOutgoingEndSec: 5,
+      },
+    },
+  }],
 }
 
 /**
@@ -76,6 +105,7 @@ async function loadParser() {
     'parseManifestPerformers',
     'parseManifestPerformerMixes',
     'parseManifestLiveRig',
+    'parseManifestTransitions',
   ]
   const fns = names
     .map((n) => {
@@ -102,6 +132,36 @@ async function loadParser() {
   )
   return mod.parseManifestObject
 }
+
+test('project DEFAULTS survive field for field, not just as an object', async () => {
+  // The top-level check above only proves `defaults` is still there. It was —
+  // while `liveStems` inside it was being eaten, so the project-wide "which
+  // stems start audible on stage" setting silently did not exist: it saved, the
+  // dialog reopened showing the legacy default, and live played the legacy set.
+  // A whitelist inside a whitelist needs its own test.
+  const parse = await loadParser()
+  const out = parse(FULL_MANIFEST)
+  assert.deepEqual(out.defaults, FULL_MANIFEST.defaults)
+})
+
+test('an EMPTY live-stem set is a choice, not an absence', async () => {
+  // "Every stem starts muted" must not collapse back to the legacy default —
+  // that would be the setting doing the opposite of what was asked.
+  const parse = await loadParser()
+  const out = parse({ ...FULL_MANIFEST, defaults: { liveStems: [] } })
+  assert.deepEqual(out.defaults.liveStems, [])
+})
+
+test('the CURRENT announcement modes survive, not only the legacy spellings', async () => {
+  // The accepted list was ['off','title','custom'] — the legacy three. A project
+  // using 'auto' or 'triggered' had its song announcement deleted on every
+  // manifest write, which on desktop is every save.
+  const parse = await loadParser()
+  for (const mode of ['auto', 'triggered', 'off']) {
+    const out = parse({ ...FULL_MANIFEST, defaults: { preCountInCue: { mode } } })
+    assert.equal(out.defaults?.preCountInCue?.mode, mode, `mode ${mode} was dropped`)
+  }
+})
 
 test('a full manifest survives the round trip with NOTHING dropped', async () => {
   const parse = await loadParser()
@@ -195,6 +255,12 @@ test('performer mixes survive, level for level', async () => {
   const out = parse(FULL_MANIFEST)
   assert.deepEqual(out.performerMixes.p1, { stems: { drums: 0.6, vocals: 0.2 }, click: 0.9, cue: 1 })
   assert.deepEqual(out.performerMixes.p2, { stems: { vocals: 1 }, original: 0.7 })
+})
+
+test('programmed transitions survive with their exact anchors and effect settings', async () => {
+  const parse = await loadParser()
+  const out = parse(FULL_MANIFEST)
+  assert.deepEqual(out.transitions, FULL_MANIFEST.transitions)
 })
 
 test('a junk mix level is dropped, never coerced to silence', async () => {

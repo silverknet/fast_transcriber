@@ -1233,8 +1233,21 @@ function parseManifestDefaults(raw) {
   if (typeof raw.countInBeats === 'number' && Number.isInteger(raw.countInBeats) && raw.countInBeats >= 0) {
     out.countInBeats = raw.countInBeats
   }
+  // Which stems start audible in live. The web parser dropped this too, so the
+  // project-wide setting silently did not survive a load at either end.
+  if (Array.isArray(raw.liveStems)) {
+    const order = ['vocals', 'drums', 'bass', 'other']
+    const seen = new Set(raw.liveStems.filter((v) => order.includes(v)))
+    // An empty array means "every stem starts muted" — a real choice, kept.
+    out.liveStems = order.filter((n) => seen.has(n))
+  }
   const pc = raw.preCountInCue
-  if (pc && typeof pc === 'object' && (pc.mode === 'off' || pc.mode === 'title' || pc.mode === 'custom')) {
+  // 'auto' and 'triggered' are the CURRENT modes; 'title'/'custom' are legacy
+  // spellings the web side migrates to 'auto'. This list had only the legacy
+  // three, so a project using the modern 'auto' had its song announcement
+  // quietly deleted every time the sidecar rewrote the manifest.
+  const CUE_MODES = ['off', 'auto', 'triggered', 'title', 'custom']
+  if (pc && typeof pc === 'object' && CUE_MODES.includes(pc.mode)) {
     out.preCountInCue = { mode: pc.mode }
     if (typeof pc.text === 'string') out.preCountInCue.text = pc.text
   }

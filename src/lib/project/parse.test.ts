@@ -140,6 +140,72 @@ describe('parseProjectJson — canonical Live rig profile', () => {
   })
 })
 
+describe('parseProjectJson — programmed transitions', () => {
+  const SONGS = [
+    { id: 'song-a', folder: 'songs/song-a' },
+    { id: 'song-b', folder: 'songs/song-b' },
+  ]
+  const RECIPE = {
+    schema: 'barbro.transition-recipe',
+    version: 1,
+    outgoing: {
+      songId: 'song-a',
+      title: 'Outgoing',
+      endAnchor: { mode: 'bar', timeSec: 208.65, barNumber: 130, beatNumber: 4, label: 'End of bar 130' },
+    },
+    incoming: {
+      songId: 'song-b',
+      title: 'Incoming',
+      startAnchor: { mode: 'bar', timeSec: 4.76, barNumber: 1, beatNumber: 1, label: 'Start of bar 1' },
+    },
+    transition: {
+      type: 'echo',
+      echo: {
+        throwRule: 'beat-3-or-7',
+        throwTimeSec: 207.85,
+        delayDivision: 'dotted-eighth',
+        captureLengthBeats: 0.75,
+        drySongHoldBeats: 1.75,
+        sendLevel: 0.62,
+        wetLevel: 0.72,
+        feedback: 0.96,
+        repeatBuild: 0.53,
+        toneHz: 5200,
+        tailLengthSec: 5.8,
+        effectiveTailLengthSec: 5.8,
+        blendReverbLevel: 0.72,
+        blendReverbLengthSec: 7.6,
+      },
+      nextSongDelay: {
+        measuredFrom: 'echo-stop',
+        beats: 0,
+        secondsAtOutgoingTempo: 0,
+        startOffsetAfterOutgoingEndSec: 5,
+      },
+    },
+  }
+
+  it('round-trips a valid project-level echo recipe', () => {
+    const parsed = parseProjectJson(manifest({ songs: SONGS, transitions: [RECIPE] }))
+    expect(parsed.transitions).toEqual([RECIPE])
+    expect(parseProjectJson(serializeProject(parsed)).transitions).toEqual([RECIPE])
+  })
+
+  it('drops malformed, cross-project, and duplicate outgoing recipes fail-closed', () => {
+    const invalidLevel = structuredClone(RECIPE)
+    invalidLevel.transition.echo.feedback = 1.2
+    const crossProject = structuredClone(RECIPE)
+    crossProject.incoming.songId = 'not-in-project'
+    const replacement = structuredClone(RECIPE)
+    replacement.incoming.title = 'Last valid recipe wins'
+    const parsed = parseProjectJson(
+      manifest({ songs: SONGS, transitions: [invalidLevel, crossProject, RECIPE, replacement] }),
+    )
+    expect(parsed.transitions).toHaveLength(1)
+    expect(parsed.transitions?.[0]?.incoming.title).toBe('Last valid recipe wins')
+  })
+})
+
 describe('performers round-trip — the field-by-field whitelist is guarded here', () => {
   /**
    * The whitelist class in its natural habitat: `parsePerformers` reads each
@@ -192,5 +258,67 @@ describe('performers round-trip — the field-by-field whitelist is guarded here
       }),
     )
     expect(project.performers?.[0]?.inputs).toEqual([{ id: 'ok', label: 'Sång', channels: [3] }])
+  })
+})
+
+describe('project defaults survive a load — the live-stem set', () => {
+  /**
+   * REPORTED: "I press in just drums and bass, but other is still toggled when
+   * I go in… I unchecked other, went in again, it was checked again."
+   *
+   * `parseDefaults` read `countInBeats` and `preCountInCue` and silently
+   * dropped `liveStems`. One missing line made the whole project-wide setting
+   * not exist: it saved, the load threw it away, the dialog reseeded from the
+   * LEGACY default (drums + bass + other) so "other" reappeared ticked, and
+   * live played 'other' on every song because `audibleStemSet(undefined)`
+   * falls back to that same legacy set. Both symptoms, one cause.
+   */
+  const withDefaults = (defaults: unknown) =>
+    parseProjectJson(
+      JSON.stringify({
+        formatVersion: 1,
+        id: 'p1',
+        name: 'Gig',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        songs: [],
+        defaults,
+      }),
+    )
+
+  it('THE BUG: keeps the chosen live stems instead of dropping them', () => {
+    expect(withDefaults({ liveStems: ['drums', 'bass'] }).defaults?.liveStems).toEqual([
+      'drums',
+      'bass',
+    ])
+  })
+
+  it('an EMPTY set means "every stem starts muted" and must not become the legacy default', () => {
+    expect(withDefaults({ liveStems: [] }).defaults?.liveStems).toEqual([])
+  })
+
+  it('normalises to canonical order and drops junk names', () => {
+    expect(
+      withDefaults({ liveStems: ['other', 'nonsense', 'drums', 'drums'] }).defaults?.liveStems,
+    ).toEqual(['drums', 'other'])
+  })
+
+  it('an absent key stays absent, so the legacy fallback still applies', () => {
+    expect(withDefaults({ countInBeats: 4 }).defaults?.liveStems).toBeUndefined()
+  })
+
+  it('a non-array is ignored rather than crashing the whole project load', () => {
+    expect(withDefaults({ liveStems: 'drums' }).defaults?.liveStems).toBeUndefined()
+  })
+
+  it('still carries the other defaults through', () => {
+    const d = withDefaults({
+      countInBeats: 8,
+      liveStems: ['bass'],
+      preCountInCue: { mode: 'auto' },
+    }).defaults
+    expect(d?.countInBeats).toBe(8)
+    expect(d?.preCountInCue?.mode).toBe('auto')
+    expect(d?.liveStems).toEqual(['bass'])
   })
 })
