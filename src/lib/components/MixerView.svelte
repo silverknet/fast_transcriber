@@ -75,7 +75,6 @@
   import MixerStageWaveform from '$lib/components/MixerStageWaveform.svelte'
   import MonitorStatusStrip from '$lib/components/MonitorStatusStrip.svelte'
   import { Cable, Pause, Play, Repeat, Repeat1, RotateCcw, SkipBack, SkipForward, Square, Trash2, X } from '@lucide/svelte'
-  import ALargeSmall from '@lucide/svelte/icons/a-large-small'
   import {
     formatChordSymbol,
     formatSongKeyLabel,
@@ -142,6 +141,7 @@
     updateDetectedBassInstrument,
   } from '$lib/audio/detectedBassTrack'
   import { chordJam } from '$lib/audio/chordJam.svelte'
+  import { jamVoicesSuppressedInMixer } from '$lib/audio/jamVoiceRouting'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
   import { audioDevice } from '$lib/audio/audioDevice'
   import { mayStartSong } from '$lib/audio/clickStartGate'
@@ -165,7 +165,7 @@
   import { loadProjectDrumKit } from '$lib/client/projectDrumKit'
   import { loadProjectSongIntoEditor, refreshProjectInfo, selectBestStemSet } from '$lib/project/commit'
   import { sectionKindColor } from '$lib/songmap/sectionColors'
-  import { renderClickTrackData, renderCueTrackWavBlob } from '$lib/audio/renderCueTrack'
+  import { renderClickTrackData } from '$lib/audio/renderCueTrack'
   import { LiveCueScheduler } from '$lib/audio/liveCueScheduler'
   import { renderSectionCueClips } from '$lib/audio/sectionCueClips'
   import { sectionCueSpecsFromSongMap } from '$lib/songmap/sectionCueSpecs'
@@ -181,7 +181,12 @@
   import { sortBeatsByTime } from '$lib/songmap/normalize'
   import { audioSession } from '$lib/stores/audioSession'
   import { audibleStemSet } from '$lib/audio/liveStemDefaults'
-  import type { AutoStemName, ProjectMastering } from '$lib/project/types'
+  import type { AutoStemName, ProjectMastering, ProjectTransitionRecipe } from '$lib/project/types'
+  import { transitionForSongs } from '$lib/project/transitions'
+  import {
+    scheduleTransitionPrelude,
+    transitionCountInWindow,
+  } from '$lib/audio/liveTransitionPrelude'
   import { project as projectStore, isBrowserCloudProject } from '$lib/stores/project'
   import { loadCloudSongIntoEditor } from '$lib/client/browserCloudProject'
   import { loadSongStemBlobsFor } from '$lib/audio/loadSongStems'
@@ -252,6 +257,7 @@
     lockPlaybackMode = false,
     liveMode = false,
     playbackMode = $bindable(false),
+    largeStageText = $bindable(false),
     generatorPanel = $bindable(null),
     controls = $bindable(null),
     transposeSemitonesOverride = null,
@@ -264,6 +270,8 @@
     liveMode?: boolean
     /** Bindable so the editor's left rail can own the Playback tab. */
     playbackMode?: boolean
+    /** Bindable so the Live page can keep this between-song control in its setlist footer. */
+    largeStageText?: boolean
     /** Which stem GENERATOR panel is open — a different feature from the
      *  machines, so it gets its own "Add track" entries. */
     generatorPanel?: 'drums' | 'bass' | null
@@ -445,7 +453,6 @@
   // their own stacking context above the editor — so the stage fills the area
   // BELOW the chrome (measured) rather than fighting z-index with the navbar.
   let chromeInsetPx = $state(0)
-  let largeStageText = $state(false)
   let repeatSectionEnabled = $state(false)
   let repeatSectionId = $state<string | null>(null)
   let repeatSeekGuard = false
@@ -464,27 +471,26 @@
   let transportState = $state<MixerSnapshot['state']>('stopped')
   let lanes = $state<LaneView[]>([])
   /**
-   * Jam voices the mixer plays as scheduled MIDI lanes. Those must NOT also be
-   * fired per frame by `chordJam`, or you hear each note twice — once on the
-   * mixer's clock and once on the jam's own context.
-   */
-  /**
-   * Jam voices the mixer must NOT fire directly — which is every voice that is
-   * not hosted as a visible lane.
+   * Jam voices the mixer must NOT fire directly — ALL of them, always.
    *
-   * This list used to contain only lane-hosted voices (to avoid doubling), so
-   * any jam voice armed in localStorage could sound during mixer and LIVE
-   * playback with no channel, no fader, no mute and no pill anywhere. What you
-   * see is what sounds: a hosted voice is suppressed from the preview player to
-   * avoid doubling, and an unhosted voice is suppressed completely.
+   * Two different failures, one rule. A voice HOSTED as a lane is already
+   * played by the engine on its own clock, so firing it per frame as well is
+   * the same note twice. A voice NOT hosted has no channel, no fader, no mute
+   * and no pill — nothing on screen would even hint at it.
+   *
+   * The filter this replaces did the opposite of what its own comment claimed:
+   * it DROPPED 'keys' from the suppression list exactly when `chord-machine`
+   * was present, so adding the Chords track to the mixer was the thing that
+   * armed a second chord voice the mute could not reach. Muting the lane,
+   * pressing its live pad, pulling its fader — none of it touched the jam
+   * copy, because the jam copy was never in the mixer's graph. A chord track
+   * you cannot stop, on stage. It only bit when both halves were armed (the
+   * lane here, "hear chords" over in the Chords tab, each remembered
+   * separately), which is why it read as "sometimes".
+   *
+   * See `jamVoiceRouting.ts` — stated once, as a rule, with its own test.
    */
-  const jamVoicesSuppressedHere = $derived(
-    (['keys', 'bass', 'arp'] as const).filter(
-      (v) =>
-        !(v === 'keys' && lanes.some((l) => l.key === 'chord-machine')) &&
-        !(v === 'arp' && lanes.some((l) => l.key === 'arp-machine')),
-    ),
-  )
+  const jamVoicesSuppressedHere = $derived(jamVoicesSuppressedInMixer(lanes.map((l) => l.key)))
   const mixerCanPlay = $derived(!loading && !loadError && lanes.length > 0)
 
   // Declutter: the generated BarBro Band (drums/bass) lanes and the live-rig
@@ -1428,6 +1434,47 @@
   const canGoNextProjectSong = $derived(
     projectSongSwitchAvailable && activeProjectSongIndex < projectSongNavItems.length - 1,
   )
+  type LiveTransitionPhase = 'armed' | 'echoing' | 'loading-next' | 'starting-next' | 'counting-in' | 'blending'
+  type LiveTransitionRun = {
+    id: number
+    recipe: ProjectTransitionRecipe
+    targetIndex: number
+    handoffCtxTime: number
+    phase: LiveTransitionPhase
+    audibleTrackKeys: string[]
+    timers: number[]
+  }
+  let liveTransitionRun = $state<LiveTransitionRun | null>(null)
+  let liveTransitionSequence = 0
+  let liveTransitionNotice = $state('')
+  const programmedTransition = $derived.by(() => {
+    if (!liveMode || activeProjectSongIndex < 0) return null
+    const outgoing = projectSongNavItems[activeProjectSongIndex]
+    const incoming = projectSongNavItems[activeProjectSongIndex + 1]
+    if (!outgoing || !incoming) return null
+    return transitionForSongs($projectStore.data, outgoing.id, incoming.id)
+  })
+  const programmedEndMixerSec = $derived(
+    programmedTransition
+      ? programmedTransition.outgoing.endAnchor.timeSec + mixerSongOffsetSec
+      : null,
+  )
+  const liveTransitionStatus = $derived.by(() => {
+    const run = liveTransitionRun
+    if (run) {
+      const destination = run.recipe.incoming.title || 'next song'
+      if (liveTransitionNotice) return liveTransitionNotice
+      if (run.phase === 'armed') return `Transition armed · ${run.audibleTrackKeys.length} live source${run.audibleTrackKeys.length === 1 ? '' : 's'} → ${destination}`
+      if (run.phase === 'echoing') return `Echo transition → ${destination}`
+      if (run.phase === 'loading-next') return `Loading ${destination} under the echo…`
+      if (run.phase === 'counting-in') return `Count-in → ${destination}`
+      if (run.phase === 'blending') return `Blending into ${destination}`
+      return `Starting ${destination}…`
+    }
+    if (liveTransitionNotice) return liveTransitionNotice
+    if (programmedTransition) return `Programmed transition → ${programmedTransition.incoming.title || 'next song'}`
+    return ''
+  })
 
   const chordTimelineSegments = $derived.by<ChordTimelineSegment[]>(() => {
     const sm = $songMap
@@ -2564,6 +2611,7 @@
 
   function onSeekFraction(frac: number) {
     if (!engine) return
+    cancelLiveTransition()
     engine.seek(frac * snapshot.durationSec)
   }
 
@@ -2586,19 +2634,25 @@
   function onPlayPause() {
     if (!mixerCanPlay) return
     if (!engine) return
-    if (snapshot.state === 'playing') engine.pause()
+    if (snapshot.state === 'playing') {
+      cancelLiveTransition()
+      engine.pause()
+    }
     else announcedPlay()
   }
 
   function onStop() {
     if (!engine) return
+    cancelLiveTransition()
     pendingStartWhenClickReady = null // stop also cancels a parked start
     cueScheduler?.cancelPending()
+    suppressLinearCuesUntilSec = 0
     engine.stop()
   }
 
   function onRestartSong() {
     if (!mixerCanPlay || !engine) return
+    cancelLiveTransition()
     replayOnceSectionId = null
     replayOnceConsumed = false
     if (snapshot.state === 'playing') {
@@ -2610,7 +2664,7 @@
     }
   }
 
-  async function loadProjectSongAt(index: number) {
+  async function loadProjectSongAt(index: number, options?: { transitionRunId?: number }) {
     const target = projectSongNavItems[index]
     if (!target || projectSongSwitching) return
     if (target.id === $projectStore.activeSongId) return
@@ -2622,19 +2676,34 @@
       clickLaneReady = false
       pendingStartWhenClickReady = null // a queued start must not fire into a NEW song
       loadingMsg = `Loading ${target.title}…`
-      onStop()
+      const transitionRunId = options?.transitionRunId
+      const isProgrammedHandoff =
+        transitionRunId !== undefined && liveTransitionRun?.id === transitionRunId
+      if (isProgrammedHandoff) {
+        cueScheduler?.cancelPending()
+        engine?.stop()
+      } else {
+        cancelLiveTransition()
+        onStop()
+      }
       // Collab (browser-cloud) mode has no local folder (`osPath` is null), so
       // the disk loader throws "No active project" — the exact reason in-mixer
       // prev/next did nothing in browser mode. Route through the cloud loader,
       // mirroring the setlist page's openSong().
       if (isBrowserCloudProject(get(projectStore))) {
         const r = await loadCloudSongIntoEditor(target.id)
-        if (!r.ok) loadError = r.error
+        if (!r.ok) {
+          loadError = r.error
+          if (isProgrammedHandoff) failLiveTransition(`Transition stopped: ${r.error}`)
+        }
       } else {
         await loadProjectSongIntoEditor(target.id)
       }
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e)
+      if (options?.transitionRunId !== undefined) {
+        failLiveTransition(`Transition stopped: ${loadError}`)
+      }
       loading = false
     } finally {
       projectSongSwitching = false
@@ -2643,11 +2712,13 @@
 
   function onPreviousProjectSong() {
     if (!canGoPreviousProjectSong) return
+    cancelLiveTransition()
     void loadProjectSongAt(activeProjectSongIndex - 1)
   }
 
   function onNextProjectSong() {
     if (!canGoNextProjectSong) return
+    cancelLiveTransition()
     void loadProjectSongAt(activeProjectSongIndex + 1)
   }
 
@@ -2667,11 +2738,17 @@
   let sectionCueClips = new Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>()
   let sectionCueFp = ''
   let sectionCueRenderToken = 0
+  let sectionCuePreparingFp = ''
+  let sectionCuePreparePromise: Promise<Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>> | null = null
   // Guard so each loop/replay pass pre-fires its lead-in cue exactly once.
   let loopCueArmedForId: string | null = null
   // Playhead position at the previous transport tick — drives "fire a section's
   // cue as we cross into its lead-in" during normal (non-launch) playback.
   let lastLinearCuePos = 0
+  // A programmed handoff schedules the opening section cue explicitly against
+  // the destination anchor. Suppress the ordinary crossing scanner until that
+  // anchor has passed so it cannot schedule the same spoken count twice.
+  let suppressLinearCuesUntilSec = 0
 
   /** The lanes toggleable from the controller's live pads: stems + cue + click
    *  (not the original mix or the generated band). Stable order. */
@@ -2861,7 +2938,7 @@
       queuedSectionIndex = null
       loopCueArmedForId = null
       // Natural end (playhead was at the tail), not a manual stop.
-      if (liveMode && dur > 0 && lastPosForEnd >= dur - 1.0) {
+      if (liveMode && !liveTransitionRun && dur > 0 && lastPosForEnd >= dur - 1.0) {
         if (canGoNextProjectSong) {
           onNextProjectSong()
           awaitingStart = true
@@ -2888,25 +2965,24 @@
     return null
   }
 
-  // Render (and cache) the per-section lead-in cue clips whenever the cue setup
-  // or timing changes. Needs the desktop sidecar for TTS; a no-op in browser
-  // mode (dynamic cues simply don't fire there, same as the baked cue WAV).
-  $effect(() => {
-    const sm = $songMap
-    const reachable = $desktopCompanionStatus.reachable
-    void engineReady
-    const eng = engine
-    if (!eng || !sm || !reachable) return
+  async function prepareSectionCueClips(
+    sm: SongMap,
+    eng: MixerEngine,
+  ): Promise<Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>> {
     const fp = fingerprintCueTrackInputs(sm)
-    if (fp === sectionCueFp) return
+    if (fp === sectionCueFp && !sectionCuePreparePromise) return sectionCueClips
+    if (fp === sectionCuePreparingFp && sectionCuePreparePromise) return sectionCuePreparePromise
+
     const specs = sectionCueSpecsFromSongMap(sm)
-    sectionCueFp = fp
     if (specs.length === 0) {
       sectionCueClips = new Map()
-      return
+      sectionCueFp = fp
+      return sectionCueClips
     }
+
     const token = ++sectionCueRenderToken
-    void (async () => {
+    sectionCuePreparingFp = fp
+    const promise = (async () => {
       // Positioning is pure frontend; only the spoken WORDS come from the
       // sidecar, and those are cached by text — so moving sections / retiming
       // re-lays-out cues here without re-synthesizing anything.
@@ -2917,15 +2993,38 @@
           return { data: buf.getChannelData(0), sampleRate: buf.sampleRate }
         },
       })
-      if (token !== sectionCueRenderToken) return // superseded by a newer render
+      if (token !== sectionCueRenderToken) return new Map() // superseded by a newer render
       const map = new Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>()
       for (const [id, clip] of clips) {
         const buffer = eng.ac.createBuffer(1, clip.data.length, clip.sampleRate)
         buffer.copyToChannel(new Float32Array(clip.data), 0, 0)
         map.set(id, { buffer, downbeatOffsetSec: clip.downbeatOffsetSec })
       }
-      sectionCueClips = map
+      return map
     })()
+    sectionCuePreparePromise = promise
+    const map = await promise
+    if (token === sectionCueRenderToken) {
+      sectionCueClips = map
+      sectionCueFp = fp
+    }
+    if (sectionCuePreparePromise === promise) {
+      sectionCuePreparePromise = null
+      sectionCuePreparingFp = ''
+    }
+    return token === sectionCueRenderToken ? map : sectionCueClips
+  }
+
+  // Render (and cache) the per-section lead-in cue clips whenever the cue setup
+  // or timing changes. Needs the desktop sidecar for TTS; a no-op in browser
+  // mode (dynamic cues simply don't fire there, same as the baked cue WAV).
+  $effect(() => {
+    const sm = $songMap
+    const reachable = $desktopCompanionStatus.reachable
+    void engineReady
+    const eng = engine
+    if (!eng || !sm || !reachable) return
+    void prepareSectionCueClips(sm, eng)
   })
 
   // Cues are on unless explicitly muted in mixState (persisted, per-song).
@@ -2964,6 +3063,37 @@
   let announcementClip = $state<AudioBuffer | null>(null)
   let announcementClipText = ''
   let announcementRenderToken = 0
+  let announcementLoadingText = ''
+  let announcementClipPromise: Promise<AudioBuffer | null> | null = null
+
+  async function ensureAnnouncementClip(text: string, eng: MixerEngine): Promise<AudioBuffer | null> {
+    if (text === announcementClipText && announcementClip) return announcementClip
+    if (text === announcementLoadingText && announcementClipPromise) return announcementClipPromise
+
+    const token = ++announcementRenderToken
+    announcementLoadingText = text
+    const promise = (async () => {
+      const result = await fetchTtsWavCached(text)
+      if (!result.ok) return null
+      try {
+        return await eng.ac.decodeAudioData(await result.blob.arrayBuffer())
+      } catch {
+        return null
+      }
+    })()
+    announcementClipPromise = promise
+    const clip = await promise
+    if (token === announcementRenderToken) {
+      announcementClipText = text
+      announcementClip = clip
+    }
+    if (announcementClipPromise === promise) {
+      announcementClipPromise = null
+      announcementLoadingText = ''
+    }
+    return token === announcementRenderToken ? clip : announcementClip
+  }
+
   // Synthesize (cached by text) the announcement clip whenever it's in use.
   $effect(() => {
     void engineReady
@@ -2972,23 +3102,14 @@
     const text = announcementText
     const reachable = $desktopCompanionStatus.reachable
     if (!eng || mode === 'off' || !text || !reachable) {
+      announcementRenderToken += 1
       announcementClip = null
       announcementClipText = ''
+      announcementClipPromise = null
+      announcementLoadingText = ''
       return
     }
-    if (text === announcementClipText && announcementClip) return
-    announcementClipText = text
-    const token = ++announcementRenderToken
-    void (async () => {
-      const r = await fetchTtsWavCached(text)
-      if (!r.ok || token !== announcementRenderToken) return
-      try {
-        const buf = await eng.ac.decodeAudioData(await r.blob.arrayBuffer())
-        if (token === announcementRenderToken) announcementClip = buf
-      } catch {
-        if (token === announcementRenderToken) announcementClip = null
-      }
-    })()
+    void ensureAnnouncementClip(text, eng)
   })
 
   /** Speak the song name now — the 'triggered' Akai action, and 'auto' on play. */
@@ -3040,6 +3161,7 @@
     // opening spoken cue fires again (it stayed stale ≈duration after the last
     // play finished, which suppressed the intro cue on every replay).
     lastLinearCuePos = startAt
+    suppressLinearCuesUntilSec = 0
     loopCueArmedForId = null
     const clip = announcementClip
     // `privateLanesAudible` must gate the DELAY too, not only the speech: with
@@ -3048,10 +3170,291 @@
     // the top of every song, which on a stage reads as "it broke".
     if (startAt < 0.05 && announcementMode === 'auto' && clip && privateLanesAudible) {
       announceSongNow()
-      void engine.play(fromSec, { startDelaySec: clip.duration + 0.15 })
+      void engine.play(fromSec, { startDelaySec: clip.duration + 0.15 }).then(() => {
+        armProgrammedTransition()
+      })
     } else {
-      void engine.play(fromSec)
+      void engine.play(fromSec).then(() => {
+        armProgrammedTransition()
+      })
     }
+  }
+
+  function transitionBeatDuration(sm: SongMap, nearTimeSec: number): number {
+    const beats = sortBeatsByTime(sm.timeline.beats)
+    const gaps: number[] = []
+    for (let index = 1; index < beats.length; index += 1) {
+      const previous = beats[index - 1]!
+      const current = beats[index]!
+      if (Math.abs(current.timeSec - nearTimeSec) > 12) continue
+      const gap = current.timeSec - previous.timeSec
+      if (gap >= 0.15 && gap <= 2) gaps.push(gap)
+    }
+    gaps.sort((a, b) => a - b)
+    return gaps[Math.floor(gaps.length / 2)] ?? 60 / Math.max(40, sm.metadata.bpm ?? 120)
+  }
+
+  function cancelLiveTransition(clearNotice = true): void {
+    const run = liveTransitionRun
+    if (run) {
+      for (const timer of run.timers) clearTimeout(timer)
+    }
+    liveTransitionRun = null
+    const restoreOutgoingMix = !run || run.phase === 'armed' || run.phase === 'echoing'
+    engine?.cancelEchoTransition(restoreOutgoingMix)
+    if (clearNotice) liveTransitionNotice = ''
+  }
+
+  function failLiveTransition(message: string): void {
+    cancelLiveTransition(false)
+    liveTransitionNotice = message
+  }
+
+  function updateLiveTransitionPhase(id: number, phase: LiveTransitionPhase): void {
+    if (liveTransitionRun?.id !== id) return
+    liveTransitionRun.phase = phase
+  }
+
+  function beginProgrammedHandoff(id: number): void {
+    const run = liveTransitionRun
+    if (!run || run.id !== id) return
+    updateLiveTransitionPhase(id, 'loading-next')
+    cueScheduler?.cancelPending()
+    void loadProjectSongAt(run.targetIndex, { transitionRunId: id })
+  }
+
+  async function scheduleTransitionEndCue(
+    runId: number,
+    throwAtCtxTime: number,
+    beatWallSec: number,
+  ): Promise<void> {
+    const eng = engine
+    if (!eng || !cuesEnabled || !$desktopCompanionStatus.reachable) return
+    const rendered = await fetchTtsWavCached('End.')
+    if (!rendered.ok || liveTransitionRun?.id !== runId) return
+
+    let clip: AudioBuffer
+    try {
+      clip = await eng.ac.decodeAudioData(await rendered.blob.arrayBuffer())
+    } catch {
+      return
+    }
+    const run = liveTransitionRun
+    if (!run || run.id !== runId) return
+    const cueAtCtxTime = throwAtCtxTime - Math.max(beatWallSec, clip.duration + 0.1)
+    const scheduleCallAt = Math.max(eng.currentCtxTime(), cueAtCtxTime - 0.08)
+    run.timers.push(window.setTimeout(() => {
+      if (liveTransitionRun?.id !== runId || !privateLanesAudible || !cuesEnabled) return
+      cueScheduler?.scheduleAt(clip, cueAtCtxTime)
+    }, Math.max(0, scheduleCallAt - eng.currentCtxTime()) * 1000))
+  }
+
+  function armProgrammedTransition(): void {
+    const eng = engine
+    const recipe = programmedTransition
+    const sm = get(songMap)
+    if (!liveMode || !eng || !recipe || !sm || repeatSectionEnabled || replayOnceSectionRange) return
+    cancelLiveTransition()
+
+    const echo = recipe.transition.echo
+    const offset = mixerSongOffsetSec
+    const beatSongSec = transitionBeatDuration(sm, echo.throwTimeSec)
+    const throwMixerSec = echo.throwTimeSec + offset
+    const throwAtCtxTime = eng.contextTimeForPosition(throwMixerSec)
+    const nextBeatCtxTime = eng.contextTimeForPosition(throwMixerSec + beatSongSec)
+    const dryCutSongSec = Math.min(
+      recipe.outgoing.endAnchor.timeSec,
+      echo.throwTimeSec + beatSongSec * echo.drySongHoldBeats,
+    )
+    const dryCutAtCtxTime = eng.contextTimeForPosition(dryCutSongSec + offset)
+    if (throwAtCtxTime == null || nextBeatCtxTime == null || dryCutAtCtxTime == null) return
+    const beatWallSec = Math.max(0.08, nextBeatCtxTime - throwAtCtxTime)
+    const division = echo.delayDivision === 'eighth'
+      ? 0.5
+      : echo.delayDivision === 'dotted-eighth'
+        ? 0.75
+        : 1
+    const echoStopAtCtxTime = throwAtCtxTime + echo.effectiveTailLengthSec
+    const handoffCtxTime =
+      echoStopAtCtxTime + recipe.transition.nextSongDelay.secondsAtOutgoingTempo
+    const linkedMusicalKeys = liveLanes
+      .filter((lane): lane is LiveLane => lane?.kind === 'stem')
+      .flatMap((lane) => lane.keys)
+    // Current-path source admission: linked musical live slots own the show.
+    // Only a song with no musical slot at all may use its normal full-mix
+    // fallback. This transition never invents a fallback based on mute state.
+    const transitionSourceKeys = linkedMusicalKeys.length > 0 ? linkedMusicalKeys : ['original']
+    const result = eng.scheduleEchoTransition({
+      throwAtCtxTime,
+      captureDurationSec: beatWallSec * echo.captureLengthBeats,
+      dryCutAtCtxTime,
+      echoStopAtCtxTime,
+      delaySec: beatWallSec * division,
+      sendLevel: echo.sendLevel,
+      wetLevel: echo.wetLevel,
+      feedback: echo.feedback,
+      repeatBuild: echo.repeatBuild,
+      toneHz: echo.toneHz,
+      blendReverbLevel: echo.blendReverbLevel,
+      blendReverbLengthSec: echo.blendReverbLengthSec,
+      sourceTrackKeys: transitionSourceKeys,
+    })
+    if (!result.scheduled) {
+      if (result.reason === 'no-audible-musical-source') {
+        liveTransitionNotice = 'Transition not armed: no musical source is audible.'
+      }
+      return
+    }
+
+    const id = ++liveTransitionSequence
+    const now = eng.currentCtxTime()
+    const transitionRun: LiveTransitionRun = {
+      id,
+      recipe,
+      targetIndex: activeProjectSongIndex + 1,
+      handoffCtxTime,
+      phase: 'armed',
+      audibleTrackKeys: result.audibleTrackKeys,
+      timers: [],
+    }
+    transitionRun.timers.push(
+      window.setTimeout(
+        () => updateLiveTransitionPhase(id, 'echoing'),
+        Math.max(0, throwAtCtxTime - now) * 1000,
+      ),
+    )
+    const loadAtCtxTime = Math.max(
+      dryCutAtCtxTime,
+      throwAtCtxTime + beatWallSec * echo.captureLengthBeats,
+    ) + 0.03
+    transitionRun.timers.push(
+      window.setTimeout(
+        () => beginProgrammedHandoff(id),
+        Math.max(0, loadAtCtxTime - now) * 1000,
+      ),
+    )
+    liveTransitionRun = transitionRun
+    void scheduleTransitionEndCue(id, throwAtCtxTime, beatWallSec)
+    console.info(
+      `[live-transition] armed ${recipe.outgoing.songId} → ${recipe.incoming.songId}; captured lanes: ${result.audibleTrackKeys.join(', ')}`,
+    )
+  }
+
+  async function startProgrammedTransitionDestination(activeSongId: string): Promise<void> {
+    const run = liveTransitionRun
+    const eng = engine
+    const sm = get(songMap)
+    if (!run || !eng || !sm || run.recipe.incoming.songId !== activeSongId) return
+    if (loadError) {
+      failLiveTransition(`Transition stopped: ${loadError}`)
+      return
+    }
+    if (!clickGateAllowsStart(() => void startProgrammedTransitionDestination(activeSongId))) return
+    updateLiveTransitionPhase(run.id, 'starting-next')
+
+    const countIn = transitionCountInWindow(
+      sm,
+      run.recipe.incoming.startAnchor.timeSec,
+      mixerSongOffsetSec,
+    )
+    const canSchedulePrivateAudio = privateLanesAudible && cuesEnabled
+    let introClip: AudioBuffer | null = null
+    if (
+      canSchedulePrivateAudio &&
+      announcementMode === 'auto' &&
+      announcementText &&
+      $desktopCompanionStatus.reachable
+    ) {
+      // The click is the hard requirement. Give the already-warming TTS cache a
+      // short chance, then continue without speech rather than making the band
+      // wait indefinitely for a network/sidecar response.
+      introClip = await Promise.race([
+        ensureAnnouncementClip(announcementText, eng),
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 450)),
+      ])
+    }
+
+    let preparedSectionCues = sectionCueClips
+    if (canSchedulePrivateAudio && $desktopCompanionStatus.reachable) {
+      preparedSectionCues = await Promise.race([
+        prepareSectionCueClips(sm, eng),
+        new Promise<Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>>((resolve) =>
+          window.setTimeout(() => resolve(new Map()), 450),
+        ),
+      ])
+    }
+    if (liveTransitionRun?.id !== run.id) return
+
+    const schedule = scheduleTransitionPrelude({
+      nowCtxTime: eng.currentCtxTime(),
+      requestedAnchorCtxTime: run.handoffCtxTime,
+      startMixerSec: countIn.startMixerSec,
+      anchorMixerSec: countIn.anchorMixerSec,
+      playbackRate: eng.rate,
+      announcementDurationSec: introClip?.duration,
+    })
+    const startDelaySec = Math.max(0, schedule.sourceStartCtxTime - eng.currentCtxTime() - 0.04)
+    lastLinearCuePos = countIn.startMixerSec
+    suppressLinearCuesUntilSec = countIn.anchorMixerSec + 0.05
+    loopCueArmedForId = null
+    await eng.play(countIn.startMixerSec, { startDelaySec })
+    if (liveTransitionRun?.id !== run.id) return
+
+    const preRollWallSec = Math.max(0, countIn.anchorMixerSec - countIn.startMixerSec) / eng.rate
+    const actualAnchorCtxTime = eng.playStartCtx + preRollWallSec
+    const lateBySec = Math.max(0, actualAnchorCtxTime - run.handoffCtxTime)
+    run.handoffCtxTime = actualAnchorCtxTime
+
+    if (introClip && cueScheduler && privateLanesAudible && cuesEnabled) {
+      cueScheduler.scheduleAt(introClip, eng.playStartCtx - introClip.duration - 0.15)
+    }
+
+    const openingSection = sectionTimelineRanges.find(
+      (section) => Math.abs(section.startSec - countIn.anchorMixerSec) <= 0.08,
+    )
+    const openingCue = openingSection ? preparedSectionCues.get(openingSection.id) : null
+    if (openingCue) {
+      const scheduleOpeningCue = () => {
+        if (liveTransitionRun?.id !== run.id || !privateLanesAudible || !cuesEnabled) return
+        cueScheduler?.scheduleAt(
+          openingCue.buffer,
+          actualAnchorCtxTime - openingCue.downbeatOffsetSec,
+        )
+      }
+      if (introClip) {
+        // The song announcement owns the cue scheduler first. Hand it to the
+        // section/count clip after speech has ended, still with AudioContext
+        // lookahead before count-in beat one.
+        run.timers.push(window.setTimeout(
+          scheduleOpeningCue,
+          Math.max(0, eng.playStartCtx - eng.currentCtxTime() - 0.06) * 1000,
+        ))
+      } else {
+        scheduleOpeningCue()
+      }
+    }
+
+    awaitingStart = false
+    updateLiveTransitionPhase(run.id, countIn.usesCanonicalCountIn ? 'counting-in' : 'starting-next')
+    run.timers.push(window.setTimeout(() => {
+      if (liveTransitionRun?.id !== run.id) return
+      liveTransitionNotice = lateBySec > 0.15
+        ? `Transition landed ${lateBySec.toFixed(1)} s late to preserve the full count-in.`
+        : `Transitioned to ${run.recipe.incoming.title || 'the next song'}.`
+      updateLiveTransitionPhase(run.id, 'blending')
+    }, Math.max(0, actualAnchorCtxTime - eng.currentCtxTime()) * 1000))
+    run.timers.push(window.setTimeout(() => {
+      if (liveTransitionRun?.id !== run.id) return
+      liveTransitionRun = null
+      liveTransitionNotice = ''
+      // A set can contain several prepared handoffs. Arm the new song only
+      // after the previous overlap tail has naturally left the graph.
+      armProgrammedTransition()
+    }, (
+      Math.max(0, actualAnchorCtxTime - eng.currentCtxTime()) +
+      run.recipe.transition.echo.blendReverbLengthSec +
+      0.35
+    ) * 1000))
   }
 
   /**
@@ -3062,6 +3465,7 @@
   function jumpToSection(index: number, mode: 'next-bar' | 'section-end' = 'next-bar') {
     const section = sectionTimelineRanges[index]
     if (!engine || !section) return
+    cancelLiveTransition()
     replayOnceSectionId = null
     replayOnceConsumed = false
     // Not playing → nothing to quantize to; start there now (through the
@@ -3163,6 +3567,7 @@
   }
 
   function toggleRepeatSection() {
+    cancelLiveTransition()
     if (repeatSectionEnabled) {
       repeatSectionEnabled = false
       repeatSectionId = null
@@ -3177,6 +3582,7 @@
 
   function replayCurrentSectionOnce() {
     if (!engine || !currentSectionRange) return
+    cancelLiveTransition()
     // Press again while it's still armed (before the replay has fired) cancels.
     if (replayOnceSectionId && !replayOnceConsumed) {
       replayOnceSectionId = null
@@ -3195,6 +3601,7 @@
 
   function seekSectionStartWithGuard(startSec: number) {
     if (!engine) return
+    cancelLiveTransition()
     repeatSeekGuard = true
     engine.seek(startSec)
     // Re-arm the loop/replay lead-in cue for the next pass.
@@ -3249,7 +3656,8 @@
     const launchActive =
       engine.jumpPending() || repeatSectionEnabled || !!replayOnceSectionRange
     const cueDelta = s.positionSec - lastLinearCuePos
-    if (!launchActive && cueDelta > 0 && cueDelta < 0.5) {
+    const openingCueAlreadyScheduled = suppressLinearCuesUntilSec > 0 && s.positionSec <= suppressLinearCuesUntilSec
+    if (!launchActive && !openingCueAlreadyScheduled && cueDelta > 0 && cueDelta < 0.5) {
       for (const range of sectionTimelineRanges) {
         const clip = sectionCueClips.get(range.id)
         if (!clip) continue
@@ -3258,6 +3666,9 @@
           fireSectionCueLeadingTo(range.id, range.startSec)
         }
       }
+    }
+    if (suppressLinearCuesUntilSec > 0 && s.positionSec > suppressLinearCuesUntilSec) {
+      suppressLinearCuesUntilSec = 0
     }
     lastLinearCuePos = s.positionSec
 
@@ -3431,7 +3842,10 @@
     replayOnceConsumed = false
     repeatSectionEnabled = false
     repeatSectionId = null
-    void reload(false) // song switch — metadata already loaded; keep it instant
+    void (async () => {
+      await reload(false) // song switch — metadata already loaded; keep it instant
+      await startProgrammedTransitionDestination(activeId ?? '')
+    })()
   })
 
   // ── Live prefetch — never watch stems load mid-set ─────────────────────────
@@ -3892,6 +4306,7 @@
         waveBuffer={stageWaveformLane?.buffer ?? null}
         positionSec={snapshot.positionSec}
         durationSec={snapshot.durationSec}
+        endPositionSec={programmedEndMixerSec}
         {sectionBands}
         {onSeekFraction}
         isPlaying={snapshot.state === 'playing'}
@@ -3899,9 +4314,9 @@
         {onStop}
       />
     {:else}
-    <section class="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden" aria-label="Playback mode">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex min-w-0 items-center gap-3">
+    <section class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden" aria-label="Playback mode">
+      <div class="grid shrink-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+        <div class="flex min-w-0 items-center gap-2">
           <button
             type="button"
             class="border-foreground bg-foreground text-background inline-flex size-12 shrink-0 items-center justify-center rounded-full border-2 shadow-md transition hover:brightness-110 disabled:opacity-40"
@@ -4027,35 +4442,31 @@
               chord lane and the song header, and on stage they were pure width
               in a bar that was wrapping because of it.
             -->
-            <div class="text-foreground flex items-baseline gap-2 font-mono text-sm font-black tabular-nums">
+            <div class="text-foreground flex items-baseline gap-1.5 whitespace-nowrap font-mono text-sm font-black tabular-nums">
               <span>{fmtTime(snapshot.positionSec)}</span>
               <span class="text-muted-foreground font-normal">/ {fmtTime(snapshot.durationSec)}</span>
-              {#if currentSectionRange}
-                <span class="text-muted-foreground truncate font-normal">{currentSectionRange.label}</span>
-              {/if}
               {#if !liveMode}
                 <span class="text-muted-foreground font-normal">{songKeyLabel}</span>
                 <span class="text-muted-foreground font-normal">{songBpmLabel}</span>
               {/if}
             </div>
           </div>
-        </div>
-        <div class="flex max-w-full flex-wrap items-center justify-end gap-1.5">
-          {#if liveMode}
-            <button
-              type="button"
-              class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-black transition-colors {largeStageText
-                ? 'bg-[var(--studio-orange)] text-[var(--studio-ink)] shadow-sm'
-                : 'bg-foreground/8 text-muted-foreground hover:bg-foreground/15 hover:text-foreground'}"
-              onclick={() => (largeStageText = !largeStageText)}
-              aria-pressed={largeStageText}
-              aria-label="Large chords and lyrics"
-              title="Make upcoming chords and lyrics larger"
+          {#if liveMode && liveTransitionStatus}
+            <div
+              class="flex h-7 w-44 min-w-0 shrink-0 items-center gap-1.5 rounded-full px-2 text-[10px] font-black {liveTransitionNotice.includes('stopped') || liveTransitionNotice.includes('not armed') || liveTransitionNotice.includes('late')
+                ? 'bg-red-100 text-red-900'
+                : liveTransitionRun
+                  ? 'bg-[var(--studio-orange)] text-[var(--studio-ink)]'
+                  : 'bg-foreground/7 text-muted-foreground'}"
+              role="status"
+              title={liveTransitionStatus}
             >
-              <ALargeSmall class="size-4" aria-hidden="true" />
-              Large view
-            </button>
+              <span class="size-1.5 shrink-0 rounded-full bg-current opacity-70" aria-hidden="true"></span>
+              <span class="truncate">{liveTransitionStatus}</span>
+            </div>
           {/if}
+        </div>
+        <div class="flex min-w-0 items-center justify-end">
           <!-- The 10 canonical live slots, in controller order: slots 1-8 are
                the APC's bottom row / track buttons; Custom 1/2 begin row 4.
                The arranging mixer below
@@ -4070,7 +4481,7 @@
                  · off     — solid muted fill, hollow dot
                  · on      — inverted fill, coloured dot (glow = sounding now) -->
           <div
-            class="border-foreground/40 inline-flex h-8 max-w-full overflow-hidden rounded-full border"
+            class="border-foreground/40 inline-flex h-8 w-full max-w-[46rem] overflow-hidden rounded-full border"
             role="group"
             aria-label="Live tracks"
           >
@@ -4078,7 +4489,7 @@
               <button
                 type="button"
                 disabled={!pill.present}
-                class="relative inline-flex items-center gap-1.5 px-2.5 text-[11px] font-black transition-all {i > 0
+                class="relative inline-flex min-w-0 flex-1 items-center justify-center gap-1 px-1.5 text-[11px] font-black transition-all {i > 0
                   ? 'border-l'
                   : ''} {pill.present
                   ? 'border-foreground/40 hover:brightness-110'
@@ -4102,7 +4513,7 @@
                     style={`background: ${pill.on ? pill.color : 'transparent'}; box-shadow: inset 0 0 0 1px ${pill.on ? pill.color : 'color-mix(in oklch, var(--foreground) 35%, transparent)'}`}
                   ></span>
                 {/if}
-                {pill.label}
+                <span class="truncate">{pill.label}</span>
                 {#if pill.count > 1}
                   <span class="font-mono text-[9px] opacity-70">×{pill.count}</span>
                 {/if}
@@ -4126,6 +4537,14 @@
       <div class="flex min-h-0 flex-1 flex-col items-center justify-center gap-5">
         <!-- Current chord — centered toward the middle, big but not overwhelming. -->
         <div class="flex flex-col items-center text-center">
+          <div class="text-muted-foreground mb-2 flex h-5 max-w-[70vw] items-center gap-1.5 text-xs font-black uppercase">
+            <span
+              class="size-2 shrink-0 rounded-full"
+              style={`background: ${currentSectionColor}`}
+              aria-hidden="true"
+            ></span>
+            <span class="truncate">{currentSectionRange?.label ?? 'No section'}</span>
+          </div>
           <div class="text-muted-foreground text-xs font-black uppercase tracking-wider">{currentChordHeading}</div>
           <!--
             Smaller than it was (7xl/8xl). The chord is read in a glance from a
@@ -4408,6 +4827,7 @@
         color="var(--foreground)"
         positionSec={snapshot.positionSec}
         durationSec={snapshot.durationSec}
+        endPositionSec={programmedEndMixerSec}
         {sectionBands}
         onSeekFraction={onSeekFraction}
       />
