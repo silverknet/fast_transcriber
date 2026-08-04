@@ -35,7 +35,6 @@
   type StoredConfig = {
     host: string
     portText: string
-    armed: boolean
     routes: XAirLaneRoute[]
   }
 
@@ -86,7 +85,8 @@
       const parsed = JSON.parse(raw) as Partial<StoredConfig>
       host = typeof parsed.host === 'string' && parsed.host.trim() ? parsed.host.trim() : host
       portText = typeof parsed.portText === 'string' ? parsed.portText : portText
-      armed = parsed.armed === true
+      // NEVER restore `armed`: live follow asserts BarBro's own levels over the
+      // console, so it must be a deliberate act every session, not a leftover.
       routes = ensureXAirRoutesForLanes(Array.isArray(parsed.routes) ? parsed.routes : [], lanes)
     } catch {
       routes = ensureXAirRoutesForLanes([], lanes)
@@ -96,7 +96,7 @@
   function saveConfig() {
     if (!browser || !loadedStorageKey) return
     try {
-      const cfg: StoredConfig = { host, portText, armed, routes }
+      const cfg: StoredConfig = { host, portText, routes }
       localStorage.setItem(loadedStorageKey, JSON.stringify(cfg))
     } catch {
       /* local storage is best-effort only */
@@ -128,7 +128,6 @@
   $effect(() => {
     host
     portText
-    armed
     routes
     saveConfig()
   })

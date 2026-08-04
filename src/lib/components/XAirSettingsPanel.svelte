@@ -97,7 +97,6 @@
   type StoredConfig = {
     host: string
     portText: string
-    armed: boolean
     routes: XAirLaneRoute[]
     /** bus (1-6) → laneKey → send level; and bus → master level. Per-device. */
     monitorSends: Record<number, Record<string, number>>
@@ -188,10 +187,16 @@
   //   setup. It used to live in localStorage, so exactly one laptop knew the
   //   monitor mixes — set them up, open the project anywhere else, gone.
   //
-  //   DEVICE (localStorage): the desk's address, and whether this machine is
-  //   armed to write to it. Those describe the room you are standing in, and
-  //   arming is deliberately not inherited — a laptop that opens the project
-  //   should not start moving a desk it was not pointed at.
+  //   DEVICE (localStorage): the desk's address. That describes the room you
+  //   are standing in.
+  //
+  //   ARMING IS NEVER PERSISTED. "Live follow" means BarBro asserts its own
+  //   faders, sends and bus masters over whatever is on the console — it is
+  //   the one mode that can move a setting somebody made by hand at the desk.
+  //   It used to be restored from localStorage, so a laptop that had been
+  //   armed once came back armed after every reload and started driving a desk
+  //   nobody had pointed it at. Arming is now a deliberate act, once per
+  //   session, by a person who is looking at the console.
   function loadConfig(key: string) {
     if (!browser) return
     loadedStorageKey = key
@@ -207,7 +212,7 @@
       const parsed = JSON.parse(raw) as Partial<StoredConfig>
       host = typeof parsed.host === 'string' && parsed.host.trim() ? parsed.host.trim() : host
       portText = typeof parsed.portText === 'string' ? parsed.portText : portText
-      armed = parsed.armed === true
+      // `armed` is deliberately NOT restored — see the note below.
       // The MUSICAL half now lives on the project. What is in localStorage is a
       // pre-migration leftover: adopt it once, then let the project own it, so
       // an existing rig is not silently thrown away by the move.
@@ -232,7 +237,7 @@
       // Device half only. `routes`/`monitorSends`/`busMaster` are still written
       // here so a downgrade or an offline machine keeps working, but the project
       // is the source of truth and wins on load.
-      const cfg: StoredConfig = { host, portText, armed, routes, monitorSends, busMaster }
+      const cfg: StoredConfig = { host, portText, routes, monitorSends, busMaster }
       localStorage.setItem(loadedStorageKey, JSON.stringify(cfg))
     } catch {
       /* best-effort */
@@ -269,7 +274,7 @@
     if (JSON.stringify(next) !== JSON.stringify(routes)) routes = next
   })
   $effect(() => {
-    void [host, portText, armed, routes, monitorSends, busMaster]
+    void [host, portText, routes, monitorSends, busMaster]
     saveConfig()
   })
   // The shared half, separately: it must not be rewritten when only the desk
