@@ -9,6 +9,9 @@ import {
   buildSplitBusSends,
   buildSplitStripWrites,
   SPLIT_SEND_START,
+  seedableSplitSends,
+  splitSendPath,
+  splitSendReadPlan,
   splitStrips,
   splitVerifyPlan,
 } from './splitRouting'
@@ -90,5 +93,63 @@ describe('the proof read-back', () => {
       { address: '/ch/12/config/rtnsrc', expect: 3 },
       { address: '/ch/12/mix/lr', expect: 0 },
     ])
+  })
+})
+
+describe('seed once, then never again — the band owns their click level', () => {
+  const BAND = [
+    { name: 'Martin', monitorBus: 1 },
+    { name: 'Thor', monitorBus: 2 },
+  ]
+  const sends = buildSplitBusSends(MULTI, BAND)
+  const at = (level: number) => [{ type: 'f', value: level }]
+
+  it('addresses the desk with a ZERO-PADDED bus, like the desk expects', () => {
+    expect(splitSendPath(11, 1)).toBe('/ch/11/mix/01/level')
+    expect(splitSendReadPlan(sends)).toEqual([
+      '/ch/11/mix/01/level',
+      '/ch/11/mix/02/level',
+      '/ch/12/mix/01/level',
+      '/ch/12/mix/02/level',
+    ])
+  })
+
+  it('seeds a bus the desk says has NOTHING there — silence reads as broken', () => {
+    const desk = Object.fromEntries(splitSendReadPlan(sends).map((a) => [a, at(0)]))
+    expect(seedableSplitSends(sends, desk)).toHaveLength(4)
+  })
+
+  it('THE BUG: leaves alone every send the band has already set', () => {
+    // Martin turned his click down to 30% between songs. BarBro reconnecting
+    // used to shove it back to 65% — on stage, silently, mid-set.
+    const desk = Object.fromEntries(splitSendReadPlan(sends).map((a) => [a, at(0.3)]))
+    expect(seedableSplitSends(sends, desk)).toEqual([])
+  })
+
+  it('seeds only the person who is new, not the whole band', () => {
+    const desk: Record<string, { type: string; value: number }[]> = {
+      '/ch/11/mix/01/level': at(0.42), // Martin has a click level
+      '/ch/12/mix/01/level': at(0.55), // …and a cue level
+      '/ch/11/mix/02/level': at(0), // Thor just got a bus — nothing there
+      '/ch/12/mix/02/level': at(0),
+    }
+    const seeded = seedableSplitSends(sends, desk)
+    expect(seeded.map((s) => `${s.channel}->${s.bus}`)).toEqual(['11->2', '12->2'])
+    for (const s of seeded) expect(s.value).toBe(SPLIT_SEND_START)
+  })
+
+  it('an unanswered address counts as ALREADY SET — never write on a guess', () => {
+    // Silence from the desk is not evidence that a send is missing, and
+    // guessing wrong here writes over a person's monitor mix.
+    expect(seedableSplitSends(sends, {})).toEqual([])
+    expect(seedableSplitSends(sends, { '/ch/11/mix/01/level': at(0) })).toHaveLength(1)
+  })
+
+  it('treats a send pulled fully down as unseeded, not as a preference', () => {
+    // A performer who wants NO click mutes or pulls to zero; that is
+    // indistinguishable from never-set, and seeding an audible level is the
+    // safer of the two errors — silent ears at a gig is the worse one.
+    const desk = Object.fromEntries(splitSendReadPlan(sends).map((a) => [a, at(0.005)]))
+    expect(seedableSplitSends(sends, desk)).toHaveLength(4)
   })
 })

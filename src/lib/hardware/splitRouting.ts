@@ -95,6 +95,55 @@ export function buildSplitBusSends(
   return out
 }
 
+/** Where a click/cue send lives on the desk. Bus is ZERO-PADDED here. */
+export function splitSendPath(channel: number, bus: number): string {
+  return `/ch/${pad(channel)}/mix/${pad(bus)}/level`
+}
+
+/**
+ * A send is "unseeded" below this. The desk reports levels 0..1; anything this
+ * low is inaudible in a pack, so it is indistinguishable from never having been
+ * set — which is exactly the case worth fixing automatically.
+ */
+const UNSEEDED_BELOW = 0.02
+
+type OscValue = { type: string; value: number | string }
+export type OscReplies = Record<string, OscValue[] | undefined>
+
+/**
+ * SEED ONCE, THEN NEVER AGAIN — which click/cue sends BarBro may write.
+ *
+ * BarBro's job is to make sure click and cue EXIST: on the right strips, off
+ * the house, at a consistent level leaving the desk. How loud each of them
+ * sits in one person's ears is that person's business, and it changes by song,
+ * by room and by mood. Re-asserting a stored level on every connect took that
+ * away — the drummer turns the click down between songs, the laptop's Wi-Fi
+ * blinks, and it is back at 65%.
+ *
+ * But a send of zero is silence, and silence is indistinguishable from broken:
+ * that is how an hour disappears at a soundcheck. So a bus the desk says has
+ * NOTHING there gets a starting level, once, and everything the band has
+ * touched is left exactly as they left it.
+ *
+ * An address the desk did not answer is treated as already-set. Silence is not
+ * evidence of a missing send, and guessing wrong here writes over somebody.
+ */
+export function seedableSplitSends(
+  writes: readonly BusSendWrite[],
+  deskLevels: OscReplies,
+): BusSendWrite[] {
+  return writes.filter((w) => {
+    const level = deskLevels[splitSendPath(w.channel, w.bus)]?.[0]?.value
+    if (typeof level !== 'number') return false
+    return level < UNSEEDED_BELOW
+  })
+}
+
+/** The addresses to read before deciding what to seed. */
+export function splitSendReadPlan(writes: readonly BusSendWrite[]): string[] {
+  return writes.map((w) => splitSendPath(w.channel, w.bus))
+}
+
 /** The read-back that proves the strip config took. address → expected value. */
 export function splitVerifyPlan(layout: RigLayout): { address: string; expect: number }[] {
   return splitStrips(layout).flatMap((s) => [

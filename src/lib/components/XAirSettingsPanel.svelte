@@ -35,6 +35,8 @@
   import {
     buildSplitBusSends,
     buildSplitStripWrites,
+    seedableSplitSends,
+    splitSendReadPlan,
     splitStrips,
     splitVerifyPlan,
   } from '$lib/hardware/splitRouting'
@@ -639,11 +641,26 @@
           await setXAirChannelOn(ch, w.value === 1)
         }
       }
-      for (const s of buildSplitBusSends(
+      // SEED ONCE, THEN NEVER AGAIN. The strip config above is asserted every
+      // time because it is safety (off the house) and correctness (the right
+      // USB return) — those are not opinions. The SEND LEVELS are: how much
+      // click one person wants in their ears changes by song, by room and by
+      // mood, and re-asserting a stored value on every connect took it away
+      // from them. So only a bus the desk says has nothing there is given a
+      // starting level. See `seedableSplitSends`.
+      const wanted = buildSplitBusSends(
         layout,
         performers.map((p) => ({ name: p.name, monitorBus: p.monitorBus ?? null })),
-      )) {
-        await setXAirBusSend(s.channel, s.bus, s.value)
+      )
+      let seededCount = 0
+      if (wanted.length > 0) {
+        const levels = await queryXAirPaths(splitSendReadPlan(wanted), 1200)
+        // No answer means no evidence, and `seedableSplitSends` writes nothing
+        // on no evidence — the band's levels survive a flaky network.
+        for (const s of seedableSplitSends(wanted, levels.ok ? levels.replies : {})) {
+          await setXAirBusSend(s.channel, s.bus, s.value)
+          seededCount++
+        }
       }
       // House-off proof via the same state refresh the FOH banner trusts —
       // patient, retried once, instead of one hasty bulk query.
@@ -670,7 +687,11 @@
       } else {
         splitReady = true
         const strips = splitStrips(layout).map((s) => `${s.role}→strip ${s.channel}`).join(', ')
-        splitReport = `Verified from the desk: ${strips}, off the house, feeding the monitor buses.${lrProven ? '' : ' (House-off read-back pending — press Verify above to double-check.)'}`
+        const seeded =
+          seededCount > 0
+            ? ` Gave ${seededCount} silent monitor send${seededCount === 1 ? '' : 's'} a starting level; every level already set was left alone.`
+            : ' Monitor levels left exactly as the band set them.'
+        splitReport = `Verified from the desk: ${strips}, off the house, feeding the monitor buses.${seeded}${lrProven ? '' : ' (House-off read-back pending — press Verify above to double-check.)'}`
         // The routing just changed what the safety banner is ABOUT — re-judge
         // it now rather than leaving a stale verdict above a green report.
         void verifyFoh()
