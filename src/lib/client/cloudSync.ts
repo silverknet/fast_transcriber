@@ -335,6 +335,24 @@ export async function createCloudProject(): Promise<
  * For now this is a straight overwrite (Phase 4 model). Phase 8 will
  * route same-song conflicts through `collabMerge.ts` before writing.
  */
+
+/**
+ * Apply a pull's sync stamps to whatever songs the project has NOW.
+ *
+ * Pure and exported for its test. The stamps are keyed by song id, so songs the
+ * pull never saw — including ones added while it was running — pass through
+ * untouched instead of being dropped.
+ */
+export function stampPulledSongs(
+  songs: readonly ProjectSongEntry[],
+  syncedBySong: ReadonlyMap<string, { revision: number; contentHash: string }>,
+): ProjectSongEntry[] {
+  return songs.map((s) => {
+    const u = syncedBySong.get(s.id)
+    return u ? { ...s, lastSyncedRevision: u.revision, lastSyncedContentHash: u.contentHash } : s
+  })
+}
+
 export async function pullCloudChanges(): Promise<
   | { ok: true; pulledSongs: number; revision: number; changedTitles: string[] }
   | { ok: false; error: string }
@@ -373,17 +391,32 @@ export async function pullCloudChanges(): Promise<
     if (res.changed) changedTitles.push(res.title || 'Untitled song')
   }
 
+  // RE-READ THE STORE. `proj` was snapshotted before the cloud fetch and before
+  // a loop that does sidecar read/decode/encode/write ONCE PER SONG — minutes,
+  // in a real project. Rebuilding `songs` from that snapshot silently DELETED
+  // any song added in the meantime, from the store and then from disk.
+  //
+  // It happened: a song was added and analysed at 09:27, its folder and .smap
+  // written; a pull that started earlier finished at 09:37 and wrote a 16-song
+  // manifest over the 17-song one. The song was intact on disk and invisible in
+  // the app, because nothing scans `songs/` — the manifest IS the project.
+  // A manual repair was reverted twelve seconds after the app picked it up.
+  //
+  // The desktop path is the twin of `browserCloudPull`, which already re-reads
+  // here for the same reason. It never got the fix.
+  //
+  // Re-read rather than UNION with the snapshot: `removeSongFromProject`
+  // defaults to leaving files on disk, so a song deleted during the pull is
+  // indistinguishable from one added, and a union would resurrect it.
+  const latest = get(projectStore).data ?? proj
   const nextManifest: ProjectFile = {
-    ...proj,
+    ...latest,
     name: manifest.project.name,
     // Stamp each pulled song's revision + content fingerprint so the autosave
     // dirty-check recognises it as already-synced and doesn't bounce it back.
-    songs: proj.songs.map((s) => {
-      const u = syncedBySong.get(s.id)
-      return u ? { ...s, lastSyncedRevision: u.revision, lastSyncedContentHash: u.contentHash } : s
-    }),
+    songs: stampPulledSongs(latest.songs, syncedBySong),
     cloud: {
-      ...proj.cloud,
+      ...(latest.cloud ?? proj.cloud),
       lastSyncedRevision: manifest.project.revision,
       lastPulledAt: new Date().toISOString(),
     },
