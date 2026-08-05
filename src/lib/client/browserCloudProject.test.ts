@@ -68,7 +68,7 @@ describe('openCloudProjectInBrowser (data-loss fix)', () => {
     ] as never)
 
     const res = await openCloudProjectInBrowser('cloud-proj-xyz')
-    expect(res).toEqual({ ok: true, songCount: 2 })
+    expect(res).toEqual({ ok: true, songCount: 2, skipped: 0 })
 
     const snap = get(project)
     expect(snap.osPath).toBeNull() // browser mode — no disk folder
@@ -89,5 +89,36 @@ describe('openCloudProjectInBrowser (data-loss fix)', () => {
 
     // Persisted so a hard refresh can restore this sidecar-less session.
     expect(readLastCloudProjectId()).toBe('cloud-proj-xyz')
+  })
+})
+
+describe('a song this build cannot read is REPORTED, never silently dropped', () => {
+  /**
+   * 2026-08-05. The desktop app bumped the .smap format 6 → 7 and pushed all 17
+   * songs. barbro.app was still serving a build from before that, whose parser
+   * throws "saved by a newer version of BarBro" on every one of them — and
+   * `if (!sm) continue` threw the message away, returning success with zero
+   * songs. The owner's reasonable conclusion, three days before a concert, was
+   * that his gig data had been deleted. Nothing was: all 17 rows were healthy
+   * in the database the whole time.
+   *
+   * A client that cannot read the data cannot fix itself. It can say so.
+   */
+  it('counts unreadable songs instead of returning a silent empty project', async () => {
+    vi.mocked(getCloudProjectManifest).mockResolvedValue({
+      project: { id: 'p1', name: 'Bröllopsgig', revision: 1139 },
+    } as never)
+    // Two rows the parser refuses (as a newer formatVersion would be), one good.
+    vi.mocked(fetchCloudSongs).mockResolvedValue([
+      { id: 'too-new-1', revision: 1, hidden: false, song_map: { formatVersion: 99 }, cloud_audio: null },
+      { id: 'too-new-2', revision: 1, hidden: false, song_map: { formatVersion: 99 }, cloud_audio: null },
+    ] as never)
+
+    const r = await openCloudProjectInBrowser('p1')
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.songCount).toBe(0)
+    // THE FIX: the caller can now tell "empty project" from "I am out of date".
+    expect(r.skipped).toBe(2)
   })
 })

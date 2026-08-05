@@ -53,17 +53,32 @@ function folderFor(cloudSongId: string): string {
  */
 export async function openCloudProjectInBrowser(
   cloudProjectId: string,
-): Promise<{ ok: true; songCount: number } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; songCount: number; skipped: number } | { ok: false; error: string }
+> {
   const manifest = await getCloudProjectManifest(cloudProjectId)
   if (!manifest) return { ok: false, error: 'Could not load this cloud project.' }
   const songs = await fetchCloudSongs(cloudProjectId)
 
   registry.clear()
+  let skipped = 0
   const entries: ProjectSongEntry[] = []
   const meta: Record<string, ProjectSongMetadataLite> = {}
   for (const cs of songs) {
     const sm = normalizeCloudSongMap(cs.song_map)
-    if (!sm) continue
+    if (!sm) {
+      // COUNT IT. A song this build cannot read is skipped here, and silently
+      // skipping EVERY song returned `{ ok: true, songCount: 0 }` — success,
+      // with an empty project. That is what a stale deployment looks like from
+      // the outside: barbro.app was serving a build from before the .smap
+      // format went from 6 to 7, its parser threw "saved by a newer version of
+      // BarBro" on all 17 songs, and this line threw the message away. The
+      // owner's reasonable conclusion was that his gig data had been deleted.
+      //
+      // Nothing here can fix an out-of-date client. Saying so can.
+      skipped++
+      continue
+    }
     const folder = folderFor(cs.id)
     const bs: BrowserSong = {
       cloudSongId: cs.id,
@@ -102,7 +117,7 @@ export async function openCloudProjectInBrowser(
   // Remember this as the last session so a hard refresh re-opens it (browser
   // mode has no disk folder for the desktop restore path to find).
   writeLastCloudProjectId(cloudProjectId)
-  return { ok: true, songCount: entries.length }
+  return { ok: true, songCount: entries.length, skipped }
 }
 
 /**

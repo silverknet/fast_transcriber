@@ -432,6 +432,15 @@
     try {
       const r = await openCloudProjectInBrowser(c.id)
       if (!r.ok) openError = r.error
+      else if (r.songCount === 0 && r.skipped > 0) {
+        // Every song was unreadable by THIS build — almost always a browser tab
+        // running an older release than the app that saved them. Silence here
+        // read as "my gig data is gone", which is the worst possible way to
+        // learn that a page needs reloading.
+        openError = `${r.skipped} song${r.skipped === 1 ? ' was' : 's were'} saved by a newer version of BarBro than this page is running. Reload the page to update, then open the project again.`
+      } else if (r.skipped > 0) {
+        openError = `${r.skipped} song${r.skipped === 1 ? '' : 's'} could not be opened by this version of BarBro — reload the page to update. The rest opened normally.`
+      }
       // On success the project store is populated (osPath null) and the page
       // re-renders into the open-project view with this project's songs.
     } catch (e) {
@@ -481,6 +490,18 @@
     } finally {
       openingSongId = null
     }
+  }
+
+  function nextVisibleSongId(songId: string): string | null {
+    const songs = $project.data?.songs.filter((song) => !song.hidden) ?? []
+    const index = songs.findIndex((song) => song.id === songId)
+    return index >= 0 ? (songs[index + 1]?.id ?? null) : null
+  }
+
+  function openTransitionPreparation(songId: string): void {
+    const nextId = nextVisibleSongId(songId)
+    if (!nextId) return
+    void goto(`/project/transition?song=${encodeURIComponent(songId)}&next=${encodeURIComponent(nextId)}`)
   }
 
   async function onOpenStems(entry: ProjectSongEntry) {
@@ -1153,6 +1174,11 @@
               onAttachAudio={() => onAttachAudio(entry)}
               onReplaceAudio={() => onReplaceAudio(entry)}
               onExport={() => void askExport(entry)}
+              onTransition={
+                nextVisibleSongId(entry.id)
+                  ? () => openTransitionPreparation(entry.id)
+                  : undefined
+              }
             />
           {/each}
         </ul>
