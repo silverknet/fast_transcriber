@@ -73,10 +73,57 @@ configuration rather than transition-specific copies:
 - The incoming song loads its own live-slot/default state. Outgoing stem-button
   state is never copied into it.
 
+## Ending Types
+
+`transition.type` is a discriminated union. Each arm owns its own parameter
+block, so adding an ending cannot disturb the others.
+
+| type | what it does | live? |
+|---|---|---|
+| `echo` | Throw the last fragment into a delay whose tail carries into the next song. | yes |
+| `cut` | The backing stops dead on the anchor, with a de-click ramp. | yes |
+| `hit` | Kick + crash land on the anchor and the backing stops. | yes |
+| `fade` | A controlled fade over N bars reaching silence at the anchor. | yes |
+| `fill-hit`, `filter` | Implemented in the lab, auditionable, **not saveable** — no live executor. | no |
+
+`endingSchedule.ts` is the shared decision layer: recipe + local timing in,
+timed actions out, in mixer-timeline seconds. The lab's preview and the live
+engine run the same function so a rehearsal cannot lie about the gig.
+
+Execution notes that are load-bearing:
+
+- The stop is the engine's `setProgrammedEnd`, routed through `currentEndCtx()`
+  — the single existing definition of where a song ends, so `scheduleAutoStop`
+  re-derives it on every play, jump and seek. A programmed ending applies only
+  to a pass that STARTED before it, so seeking past the anchor lets you
+  rehearse an outro you have chosen to cut.
+- `scheduleProgrammeFade` is the one mechanism behind `cut` and `fade`, and it
+  excludes click and cue by identity.
+- A faded programme is RESTORED on the next `play()`
+  (`releaseProgrammeFade`), or ending a song would make the next press silent.
+- The `hit` goes on `unshiftedBus`, not a mixer track: it must not be
+  pitch-shifted with a transposed song, and a track linked to no live button is
+  force-muted in live mode. It is torn down by `stopSourcesOnly` like every
+  other scheduled source, so a pending crash cannot fire into the next song.
+
+## Warning The Band
+
+`transition.endWarning { text, leadBars }` speaks a warning that many BARS
+before the anchor, for every ending type. It reuses `renderSectionCueClips`
+(which never knew what a section was) and therefore inherits TTS caching, the
+`downbeatOffsetSec` contract and the private-output gating. The clip cache
+fingerprint includes the warning, or edits would re-use a stale clip.
+
 ## Current Limitations
 
 - Recipes are local project-manifest data. Existing cloud manifest PATCH only
   syncs name/order/hidden state, so transition recipes are not yet cloud synced.
+- **An ending still requires a NEXT song.** `incoming` is mandatory, so the last
+  song of a set cannot be given a programmed ending, and reordering the setlist
+  silently orphans a recipe. Making `incoming` optional is a small schema change
+  but a real behavioural branch in the live hand-off state machine — 8 call
+  sites assume a destination exists — and was deliberately not attempted in the
+  days before a concert.
 - The current implementation prepares the next song during the echo window.
   A slow cache/load/TTS response can produce a clearly reported late landing;
   speech has a short preparation budget and may be skipped, while click remains
