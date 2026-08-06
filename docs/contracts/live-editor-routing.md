@@ -230,6 +230,15 @@ active replaces/cancels it per output; announcements do not stack indefinitely.
 | Change song while stopped | Prepare separately, dispose old song generation, commit new stopped song at zero. |
 | Change song while playing | Prepare separately; when ready, stop old transport, dispose its sources, commit new stopped song at zero. No automatic play or crossfade. |
 
+A saved, pair-specific transition is a separate explicit transport program, not
+an arbitrary Change Song command. The current `MixerView` echo handoff is an
+experimental development-path implementation documented in
+[`../domains/live-transitions.md`](../domains/live-transitions.md); it is not yet
+part of the approved target runtime. Target cutover must represent the outgoing
+capture, dry cut, private-lane exclusion, destination readiness, incoming anchor,
+and overlap tail in one generation-owned schedule. If the exact destination is
+not acknowledged ready, the target runtime must not improvise a source fallback.
+
 Song-specific state includes decoded buffers, source nodes, MIDI schedules,
 click/count-in schedule, cue/announcement sources, selected section, repeat
 intent, and song-scoped errors. None survives the replacement boundary. Device,

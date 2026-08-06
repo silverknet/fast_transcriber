@@ -17,6 +17,7 @@
   import { readyState } from '$lib/audio/livePrefetch'
   import { songMap } from '$lib/stores/songMap'
   import { ArrowLeft, HelpCircle, ListMusic, Maximize2, Minimize2, Music4, Play, RefreshCw } from '@lucide/svelte'
+  import ALargeSmall from '@lucide/svelte/icons/a-large-small'
   import ApcKey25Guide from '$lib/components/ApcKey25Guide.svelte'
   import { isNarrow } from '$lib/stores/viewport'
 
@@ -34,6 +35,7 @@
   let showGuide = $state(false)
   let refreshing = $state(false)
   let fullscreen = $state(false)
+  let largeStageText = $state(false)
   /** Phone-only setlist sheet (the "corner menu" to switch songs). */
   let songMenuOpen = $state(false)
   let attemptedAutoLoadKey = ''
@@ -468,6 +470,17 @@
               <HelpCircle class="size-4" aria-hidden="true" />
             </Button>
             <Button
+              variant={largeStageText ? 'default' : 'outline'}
+              size="icon"
+              class="size-8"
+              onclick={() => (largeStageText = !largeStageText)}
+              title="Make upcoming chords and lyrics larger"
+              aria-label="Large chords and lyrics"
+              aria-pressed={largeStageText}
+            >
+              <ALargeSmall class="size-4" aria-hidden="true" />
+            </Button>
+            <Button
               variant={synthOn ? 'default' : 'outline'}
               size="icon"
               class="size-8"
@@ -575,7 +588,7 @@
           {/if}
 
           {#if hasLoadedSong}
-            <MixerView initialPlaybackMode lockPlaybackMode liveMode />
+            <MixerView initialPlaybackMode lockPlaybackMode liveMode bind:largeStageText />
           {:else}
             <div class="grid min-h-[45dvh] place-items-center text-muted-foreground">
               <p class="font-mono text-sm">{loadingSongId ? 'Loading song…' : 'Select a song'}</p>

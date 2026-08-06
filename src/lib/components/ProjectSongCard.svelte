@@ -37,6 +37,7 @@
     TextCursorInput,
     Trash2,
     Upload,
+    Waves,
   } from '@lucide/svelte'
 
   let {
@@ -51,6 +52,7 @@
     onAttachAudio,
     onReplaceAudio,
     onExport,
+    onTransition,
   } = $props<{
     entry: ProjectSongEntry
     metadata?: ProjectSongMetadataLite
@@ -67,6 +69,8 @@
     /** Replace the audio of a song that already has it (hard reset of derived data). */
     onReplaceAudio: () => void
     onExport: () => void
+    /** Prepare the programmed handoff from this song to its next setlist song. */
+    onTransition?: () => void
   }>()
 
   function formatKey(k: ProjectSongMetadataLite['keyDetail']): string {
@@ -357,6 +361,12 @@
           <Download class="size-3.5" aria-hidden="true" />
           Export…
         </DropdownMenuItem>
+        {#if onTransition}
+          <DropdownMenuItem class="" onclick={onTransition}>
+            <Waves class="size-3.5" aria-hidden="true" />
+            Transition to next…
+          </DropdownMenuItem>
+        {/if}
         <DropdownMenuItem class="" onclick={onToggleHidden}>
           {#if entry.hidden}
             <Eye class="size-3.5" aria-hidden="true" />

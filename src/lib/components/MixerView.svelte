@@ -2681,17 +2681,6 @@
     }
   }
 
-  /**
-   * The default hand-off between songs. Short enough that the next song is not
-   * held up (the load takes longer than this anyway), long enough that the last
-   * chord blooms instead of stopping. Dark on purpose — a bright tail fights
-   * the incoming song's top end and the count-in clicks over it.
-   */
-  const SONG_RING_OUT = { captureSec: 0.45, tailSec: 2.6, level: 0.5, toneHz: 3200 } as const
-
-  const sleepMs = (ms: number) =>
-    new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, Math.min(4000, ms))))
-
   async function loadProjectSongAt(index: number, options?: { transitionRunId?: number }) {
     const target = projectSongNavItems[index]
     if (!target || projectSongSwitching) return
@@ -2711,17 +2700,9 @@
         cueScheduler?.cancelPending()
         engine?.stop()
       } else {
+        // No authored transition for this pair → no transition. A song change
+        // the user has not programmed ends the way it always has.
         cancelLiveTransition()
-        // Ring the outgoing song out instead of cutting it dead. The tail lives
-        // on the master bus and keeps decaying while the next song loads, so the
-        // set never drops to silence between songs. Waiting for the dry fade is
-        // what gives the reverb something to bloom from — stopping immediately
-        // would feed it silence.
-        const ring = engine?.scheduleSongRingOut(SONG_RING_OUT)
-        if (ring?.scheduled) {
-          cueScheduler?.cancelPending()
-          await sleepMs((ring.dryEndsAtCtxTime - (engine?.ac.currentTime ?? 0)) * 1000)
-        }
         onStop()
       }
       // Collab (browser-cloud) mode has no local folder (`osPath` is null), so
@@ -4068,12 +4049,6 @@
     // the normal path on stereo hardware, where there is nowhere else to put
     // them — see `liveOutputMap`.
     cueScheduler = new LiveCueScheduler(engine.ac, engine.cueOutput ?? engine.unshiftedInput)
-    // Songs that end on their own are the common case in a set, and the manual
-    // hand-off cannot cover them: auto-advance runs only AFTER the transport has
-    // stopped, with no audio left to capture. Arming it on the engine starts the
-    // tail just before the end instead. Live/playback only — in the editor a
-    // song ending should simply stop.
-    if (liveMode) engine.setAutoRingOut(SONG_RING_OUT)
     engineReady = true
     void syncAndLoad()
   })

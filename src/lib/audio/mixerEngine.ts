@@ -139,6 +139,92 @@ export interface MixerSnapshot {
   durationSec: number
 }
 
+export interface EchoTransitionSchedule {
+  /** All times are on this engine's AudioContext clock. */
+  throwAtCtxTime: number
+  captureDurationSec: number
+  dryCutAtCtxTime: number
+  echoStopAtCtxTime: number
+  delaySec: number
+  sendLevel: number
+  wetLevel: number
+  feedback: number
+  repeatBuild: number
+  toneHz: number
+  blendReverbLevel: number
+  blendReverbLengthSec: number
+  /** Explicitly admitted current-song programme lanes. Private keys are rejected regardless. */
+  sourceTrackKeys?: readonly TrackKey[]
+}
+
+export interface EchoTransitionResult {
+  audibleTrackKeys: TrackKey[]
+  scheduled: boolean
+  reason?: 'transport-stopped' | 'throw-already-passed' | 'no-audible-musical-source'
+}
+
+/**
+ * The DEFAULT song hand-off: let the outgoing song ring out into a reverb
+ * instead of being cut to silence.
+ *
+ * This is not the programmed `echo` transition — no delay, no feedback, no
+ * authored recipe. It is what every song change gets for free so the set does
+ * not stop dead between songs.
+ */
+export interface SongRingOutSchedule {
+  /**
+   * How long the dry song keeps playing while feeding the reverb. The tail is
+   * built from this slice, so it must be long enough to bloom (a convolver
+   * turns even a short input into a full tail) but short enough that the next
+   * song is not held up.
+   */
+  captureSec: number
+  /** Reverb decay after the dry song has gone. */
+  tailSec: number
+  /** Wet level, 0..1. */
+  level: number
+  /** Reverb colour — darker sits behind the next song instead of fighting it. */
+  toneHz: number
+}
+
+export interface SongRingOutResult {
+  scheduled: boolean
+  reason?: 'transport-stopped' | 'no-audible-musical-source' | 'echo-transition-active'
+  /** The dry song is silent from here — safe to stop sources and load the next song. */
+  dryEndsAtCtxTime: number
+  /** The tail has fully decayed by here. */
+  tailEndsAtCtxTime: number
+}
+
+interface ActiveRingOut {
+  input: GainNode
+  predelay: DelayNode
+  reverb: ConvolverNode
+  wet: GainNode
+  limiter: DynamicsCompressorNode
+  tappedTrackGains: Array<{ key: TrackKey; node: GainNode }>
+  fadedTrackGains: Array<{ key: TrackKey; node: GainNode }>
+  fadedBusReturns: Array<{ node: GainNode; value: number }>
+  cleanupTimer: number | null
+}
+
+interface ActiveEchoTransition {
+  input: GainNode
+  delay: DelayNode
+  feedback: GainNode
+  filter: BiquadFilterNode
+  wet: GainNode
+  reverbSend: GainNode
+  reverbPredelay: DelayNode
+  reverb: ConvolverNode
+  reverbWet: GainNode
+  limiter: DynamicsCompressorNode
+  tappedTrackGains: Array<{ key: TrackKey; node: GainNode }>
+  fadedTrackGains: Array<{ key: TrackKey; node: GainNode }>
+  fadedBusReturns: Array<{ node: GainNode; value: number }>
+  cleanupTimer: number | null
+}
+
 /**
  * Prepend `prependSec` of silence to a buffer. Returns a new AudioBuffer
  * with channel data copied at sample offset. If prependSec ≤ 0, returns
@@ -178,6 +264,53 @@ function safeDisconnect(n: AudioNode | null | undefined): void {
   } catch {
     /* not connected */
   }
+}
+
+/** Deterministic filtered-noise impulse for the overlap tail. */
+/**
+ * Put a faded gain back, effective immediately.
+ *
+ * `setValueAtTime(v, now)` alone is not enough: the event sits at `now`, so the
+ * param does not report `v` until the audio thread reaches it, and a caller that
+ * plays again in the same tick sees the faded value. Assigning `.value` sets the
+ * intrinsic value straight away; the scheduled event keeps it there once
+ * automation resumes.
+ */
+function restoreGainNow(node: GainNode, value: number, now: number): void {
+  try {
+    node.gain.cancelScheduledValues(now)
+    node.gain.setValueAtTime(value, now)
+    node.gain.value = value
+  } catch {
+    /* param already torn down */
+  }
+}
+
+function buildTransitionReverbImpulse(
+  context: BaseAudioContext,
+  lengthSec: number,
+  toneHz: number,
+): AudioBuffer {
+  const duration = Math.max(0.35, Math.min(8, lengthSec))
+  const frameCount = Math.max(1, Math.round(context.sampleRate * duration))
+  const impulse = context.createBuffer(2, frameCount, context.sampleRate)
+  const cutoff = Math.max(700, Math.min(12_000, toneHz))
+  const smoothing = 1 - Math.exp((-2 * Math.PI * cutoff) / context.sampleRate)
+  const fadeInFrames = Math.max(1, Math.round(context.sampleRate * 0.008))
+  for (let channel = 0; channel < impulse.numberOfChannels; channel += 1) {
+    const data = impulse.getChannelData(channel)
+    let seed = (0x42524252 ^ frameCount ^ (channel * 0x9e3779b9)) >>> 0
+    let filtered = 0
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0
+      const noise = (seed / 0xffffffff) * 2 - 1
+      filtered += (noise - filtered) * smoothing
+      const progress = frame / frameCount
+      const fadeIn = Math.min(1, frame / fadeInFrames)
+      data[frame] = filtered * Math.exp(-6 * progress) * fadeIn
+    }
+  }
+  return impulse
 }
 
 export class MixerEngine {
@@ -232,6 +365,10 @@ export class MixerEngine {
   private readonly sends = new Map<TrackKey, Map<string, number>>()
   /** `${trackKey}::${busKey}` → the tap gain node. */
   private readonly sendGains = new Map<string, GainNode>()
+  /** One deliberately programmed cross-song effect; never includes private lanes. */
+  private activeEchoTransition: ActiveEchoTransition | null = null
+  /** The default song hand-off tail; outlives the tracks that fed it. */
+  private activeRingOut: ActiveRingOut | null = null
   /**
    * Varispeed playback rate (1 = untransposed). The ONLY thing a naive
    * transpose changes: buffers are played untouched, just faster or slower, so
@@ -246,6 +383,9 @@ export class MixerEngine {
   /** A jump whose audio is already scheduled sample-accurately at the boundary. */
   private committedJump: { targetCtxTime: number; toPositionSec: number; newSources: ActiveSource[] } | null = null
   private autoStopTimer: number | null = null
+  /** Arms the hand-off tail shortly before a song ends on its own. */
+  private autoRingOut: SongRingOutSchedule | null = null
+  private autoRingOutTimer: number | null = null
   /** How far ahead of the boundary we commit the scheduled sources (seconds). */
   private static readonly JUMP_LOOKAHEAD = 0.08
 
@@ -776,6 +916,425 @@ export class MixerEngine {
     this.emitUpdate()
   }
 
+  /**
+   * Capture the currently audible musical programme into an echo throw.
+   *
+   * The tap is post-fader and excludes click/cue by identity. Muted lanes are
+   * not admitted, so a two-stem live mix produces a two-stem transition; the
+   * hidden original can never appear as an implicit fallback.
+   */
+  scheduleEchoTransition(schedule: EchoTransitionSchedule): EchoTransitionResult {
+    this.cancelEchoTransition(true)
+    if (this.state !== 'playing') {
+      return { audibleTrackKeys: [], scheduled: false, reason: 'transport-stopped' }
+    }
+    const now = this.ac.currentTime
+    if (schedule.throwAtCtxTime <= now + 0.005) {
+      return { audibleTrackKeys: [], scheduled: false, reason: 'throw-already-passed' }
+    }
+
+    const admitted = schedule.sourceTrackKeys ? new Set(schedule.sourceTrackKeys) : null
+    const tappedTrackGains: Array<{ key: TrackKey; node: GainNode }> = []
+    const fadedTrackGains: Array<{ key: TrackKey; node: GainNode }> = []
+    const audibleTrackKeys: TrackKey[] = []
+    for (const track of this.tracks.values()) {
+      if (track.key === 'click' || track.key === 'cue') continue
+      const node = this.trackGains.get(track.key)
+      if (!node) continue
+      fadedTrackGains.push({ key: track.key, node })
+      if (admitted && !admitted.has(track.key)) continue
+      tappedTrackGains.push({ key: track.key, node })
+      if (this.effectiveGainFor(track) > 0.0001) audibleTrackKeys.push(track.key)
+    }
+    if (audibleTrackKeys.length === 0) {
+      return { audibleTrackKeys: [], scheduled: false, reason: 'no-audible-musical-source' }
+    }
+
+    const input = this.ac.createGain()
+    const delay = this.ac.createDelay(2)
+    const feedback = this.ac.createGain()
+    const filter = this.ac.createBiquadFilter()
+    const wet = this.ac.createGain()
+    const reverbSend = this.ac.createGain()
+    const reverbPredelay = this.ac.createDelay(0.2)
+    const reverb = this.ac.createConvolver()
+    const reverbWet = this.ac.createGain()
+    const limiter = this.ac.createDynamicsCompressor()
+    input.gain.value = 0
+    delay.delayTime.value = Math.max(0.02, Math.min(1.9, schedule.delaySec))
+    feedback.gain.value = 0
+    filter.type = 'lowpass'
+    filter.frequency.value = Math.max(600, Math.min(12_000, schedule.toneHz))
+    filter.Q.value = 0.45
+    wet.gain.value = 0
+    reverbSend.gain.value = 0
+    reverbPredelay.delayTime.value = 0.024
+    reverb.buffer = buildTransitionReverbImpulse(
+      this.ac,
+      schedule.blendReverbLengthSec,
+      schedule.toneHz,
+    )
+    reverbWet.gain.value = 0
+    limiter.threshold.value = -3
+    limiter.knee.value = 5
+    limiter.ratio.value = 12
+    limiter.attack.value = 0.003
+    limiter.release.value = 0.18
+
+    for (const tap of tappedTrackGains) tap.node.connect(input)
+    input.connect(delay)
+    delay.connect(filter)
+    filter.connect(wet)
+    wet.connect(limiter)
+    filter.connect(feedback)
+    feedback.connect(delay)
+    filter.connect(reverbSend)
+    reverbSend.connect(reverbPredelay)
+    reverbPredelay.connect(reverb)
+    reverb.connect(reverbWet)
+    reverbWet.connect(limiter)
+    limiter.connect(this.masterGain)
+
+    const throwAt = schedule.throwAtCtxTime
+    const captureEnd = throwAt + Math.max(0.04, schedule.captureDurationSec)
+    const captureEdge = Math.max(0.012, Math.min(0.07, schedule.captureDurationSec * 0.12))
+    const stopAt = Math.max(captureEnd, schedule.echoStopAtCtxTime)
+    const stopRampAt = Math.max(throwAt + 0.04, stopAt - 0.14)
+    const feedbackStart = Math.max(0.05, Math.min(0.96, schedule.feedback))
+    const feedbackEnd =
+      schedule.repeatBuild > 0
+        ? Math.min(1.045, 1 + schedule.repeatBuild * 0.075)
+        : Math.max(0.05, Math.min(0.96, feedbackStart * (1 + schedule.repeatBuild * 0.75)))
+    const wetStart = Math.max(0, Math.min(1.25, schedule.wetLevel * (schedule.repeatBuild > 0 ? 0.68 : 1)))
+    const wetEnd = Math.max(0, Math.min(1.35, schedule.wetLevel * (1 + schedule.repeatBuild * 0.85)))
+
+    input.gain.setValueAtTime(0, Math.max(now, throwAt - captureEdge))
+    input.gain.linearRampToValueAtTime(Math.max(0, Math.min(1, schedule.sendLevel)), throwAt)
+    input.gain.setValueAtTime(Math.max(0, Math.min(1, schedule.sendLevel)), Math.max(throwAt, captureEnd - captureEdge))
+    input.gain.linearRampToValueAtTime(0, captureEnd)
+    feedback.gain.setValueAtTime(feedbackStart, throwAt)
+    feedback.gain.linearRampToValueAtTime(feedbackEnd, stopRampAt)
+    feedback.gain.linearRampToValueAtTime(0, stopAt)
+    wet.gain.setValueAtTime(wetStart, throwAt)
+    wet.gain.linearRampToValueAtTime(wetEnd, stopRampAt)
+    wet.gain.linearRampToValueAtTime(0, stopAt)
+    reverbSend.gain.setValueAtTime(1, throwAt)
+    reverbSend.gain.setValueAtTime(1, stopRampAt)
+    reverbSend.gain.linearRampToValueAtTime(0, stopAt)
+    reverbWet.gain.setValueAtTime(
+      Math.max(0, Math.min(0.8, schedule.blendReverbLevel)),
+      throwAt,
+    )
+    reverbWet.gain.setValueAtTime(
+      Math.max(0, Math.min(0.8, schedule.blendReverbLevel)),
+      stopAt,
+    )
+    reverbWet.gain.linearRampToValueAtTime(
+      0,
+      stopAt + Math.max(0.35, Math.min(8, schedule.blendReverbLengthSec)),
+    )
+
+    const dryCut = Math.max(throwAt, schedule.dryCutAtCtxTime)
+    for (const tap of fadedTrackGains) {
+      const current = this.tracks.get(tap.key)
+      const value = current ? this.effectiveGainFor(current) : tap.node.gain.value
+      tap.node.gain.setValueAtTime(value, Math.max(now, dryCut - 0.045))
+      tap.node.gain.linearRampToValueAtTime(0, dryCut)
+    }
+    const fadedBusReturns = [...this.busReturnGains.values()].map((node) => ({
+      node,
+      value: node.gain.value,
+    }))
+    for (const { node, value } of fadedBusReturns) {
+      node.gain.setValueAtTime(value, Math.max(now, dryCut - 0.045))
+      node.gain.linearRampToValueAtTime(0, dryCut)
+    }
+
+    const cleanupAt = stopAt + Math.max(0.35, Math.min(8, schedule.blendReverbLengthSec)) + 0.25
+    const active: ActiveEchoTransition = {
+      input,
+      delay,
+      feedback,
+      filter,
+      wet,
+      reverbSend,
+      reverbPredelay,
+      reverb,
+      reverbWet,
+      limiter,
+      tappedTrackGains,
+      fadedTrackGains,
+      fadedBusReturns,
+      cleanupTimer: null,
+    }
+    active.cleanupTimer = window.setTimeout(() => {
+      if (this.activeEchoTransition === active) this.cancelEchoTransition(false)
+    }, Math.max(0, cleanupAt - now) * 1000)
+    this.activeEchoTransition = active
+    return { audibleTrackKeys, scheduled: true }
+  }
+
+  /**
+   * Ring the outgoing song out into a reverb, so a song change is a hand-off
+   * rather than a cut to silence.
+   *
+   * The tail deliberately OUTLIVES the song: the nodes hang off `masterGain`
+   * and are fed by post-fader taps, so once the capture window has passed, the
+   * reverb holds the sound and the caller is free to stop the transport, tear
+   * every track down and load the next song while it decays. Exactly the
+   * mechanism `scheduleEchoTransition` uses — this is its plain sibling.
+   *
+   * Click and cue lanes are never tapped: a metronome with a reverb tail on it
+   * is not a hand-off, it is a mess.
+   *
+   * The caller should wait until `dryEndsAtCtxTime` before stopping sources,
+   * otherwise the reverb is fed silence and there is nothing to ring.
+   */
+  scheduleSongRingOut(schedule: SongRingOutSchedule): SongRingOutResult {
+    const now = this.ac.currentTime
+    const miss = (reason: SongRingOutResult['reason']): SongRingOutResult => ({
+      scheduled: false,
+      reason,
+      dryEndsAtCtxTime: now,
+      tailEndsAtCtxTime: now,
+    })
+    if (this.state !== 'playing') return miss('transport-stopped')
+    // A programmed transition already owns the hand-off; two overlapping tails
+    // would double the wash and fight over the same dry fade.
+    if (this.activeEchoTransition) return miss('echo-transition-active')
+
+    this.cancelRingOut(false)
+
+    const captureSec = Math.max(0.05, Math.min(4, schedule.captureSec))
+    const tailSec = Math.max(0.35, Math.min(8, schedule.tailSec))
+    const level = Math.max(0, Math.min(1, schedule.level))
+
+    const tappedTrackGains: Array<{ key: TrackKey; node: GainNode }> = []
+    const fadedTrackGains: Array<{ key: TrackKey; node: GainNode }> = []
+    let audible = 0
+    for (const track of this.tracks.values()) {
+      if (track.key === 'click' || track.key === 'cue') continue
+      const node = this.trackGains.get(track.key)
+      if (!node) continue
+      fadedTrackGains.push({ key: track.key, node })
+      tappedTrackGains.push({ key: track.key, node })
+      if (this.effectiveGainFor(track) > 0.0001) audible += 1
+    }
+    if (audible === 0) return miss('no-audible-musical-source')
+
+    const input = this.ac.createGain()
+    const predelay = this.ac.createDelay(0.2)
+    const reverb = this.ac.createConvolver()
+    const wet = this.ac.createGain()
+    const limiter = this.ac.createDynamicsCompressor()
+    input.gain.value = 0
+    predelay.delayTime.value = 0.018
+    reverb.buffer = buildTransitionReverbImpulse(this.ac, tailSec, schedule.toneHz)
+    wet.gain.value = 0
+    limiter.threshold.value = -3
+    limiter.knee.value = 5
+    limiter.ratio.value = 12
+    limiter.attack.value = 0.003
+    limiter.release.value = 0.18
+
+    for (const tap of tappedTrackGains) tap.node.connect(input)
+    input.connect(predelay)
+    predelay.connect(reverb)
+    reverb.connect(wet)
+    wet.connect(limiter)
+    limiter.connect(this.masterGain)
+
+    const dryEnd = now + captureSec
+    const tailEnd = dryEnd + tailSec
+
+    // Send at FULL for the whole capture window while the dry fades underneath:
+    // the reverb has to be fed a healthy slice or the tail is a whisper.
+    input.gain.setValueAtTime(1, now)
+    input.gain.setValueAtTime(1, dryEnd)
+    input.gain.linearRampToValueAtTime(0, dryEnd + 0.02)
+    wet.gain.setValueAtTime(level, now)
+    wet.gain.setValueAtTime(level, dryEnd)
+    wet.gain.linearRampToValueAtTime(0, tailEnd)
+
+    // The dry song fades out across the capture window rather than stopping.
+    for (const tap of fadedTrackGains) {
+      const current = this.tracks.get(tap.key)
+      const value = current ? this.effectiveGainFor(current) : tap.node.gain.value
+      tap.node.gain.cancelScheduledValues(now)
+      tap.node.gain.setValueAtTime(value, now)
+      tap.node.gain.linearRampToValueAtTime(0, dryEnd)
+    }
+    const fadedBusReturns = [...this.busReturnGains.values()].map((node) => ({
+      node,
+      value: node.gain.value,
+    }))
+    for (const { node, value } of fadedBusReturns) {
+      node.gain.cancelScheduledValues(now)
+      node.gain.setValueAtTime(value, now)
+      node.gain.linearRampToValueAtTime(0, dryEnd)
+    }
+
+    const active: ActiveRingOut = {
+      input,
+      predelay,
+      reverb,
+      wet,
+      limiter,
+      tappedTrackGains,
+      fadedTrackGains,
+      fadedBusReturns,
+      cleanupTimer: null,
+    }
+    active.cleanupTimer = window.setTimeout(
+      () => {
+        if (this.activeRingOut === active) this.cancelRingOut(false)
+      },
+      Math.max(0, tailEnd + 0.25 - now) * 1000,
+    )
+    this.activeRingOut = active
+    return { scheduled: true, dryEndsAtCtxTime: dryEnd, tailEndsAtCtxTime: tailEnd }
+  }
+
+  /**
+   * Drop a ring-out tail. `restoreCurrentMix` puts the faded lanes back, which
+   * is what a manual transport action (the operator hitting play again) needs.
+   */
+  cancelRingOut(restoreCurrentMix = true): void {
+    const active = this.activeRingOut
+    if (!active) return
+    if (active.cleanupTimer != null) clearTimeout(active.cleanupTimer)
+    const now = this.ac.currentTime
+    for (const tap of active.tappedTrackGains) {
+      try {
+        tap.node.disconnect(active.input)
+      } catch {
+        /* already detached */
+      }
+    }
+    for (const tap of active.fadedTrackGains) {
+      if (restoreCurrentMix && this.trackGains.get(tap.key) === tap.node) {
+        const track = this.tracks.get(tap.key)
+        if (track) restoreGainNow(tap.node, this.effectiveGainFor(track), now)
+      }
+    }
+    for (const item of active.fadedBusReturns) {
+      if (restoreCurrentMix && [...this.busReturnGains.values()].includes(item.node)) {
+        restoreGainNow(item.node, item.value, now)
+      }
+    }
+    for (const node of [active.input, active.predelay, active.reverb, active.wet, active.limiter]) {
+      safeDisconnect(node)
+    }
+    this.activeRingOut = null
+  }
+
+  /**
+   * Let go of a ring-out because the transport is starting — WITHOUT killing a
+   * tail that is supposed to be ringing under the incoming song.
+   *
+   * The taps say which case this is. If any tapped gain node is still the
+   * current node for its key, nothing was reloaded: the operator aborted and is
+   * replaying the SAME song, so the faded mix has to be restored (otherwise the
+   * next press is silent) and the tail goes with it. If every tap is stale,
+   * `setTrack` minted fresh gain nodes during a song load — this is a hand-off,
+   * and cutting the tail here would silence it on the incoming song's first
+   * sample, which is the whole thing the tail exists to prevent.
+   */
+  private releaseRingOut(): void {
+    const active = this.activeRingOut
+    if (!active) return
+    const sameSongReplay = active.fadedTrackGains.some(
+      (tap) => this.trackGains.get(tap.key) === tap.node,
+    )
+    if (sameSongReplay) {
+      this.cancelRingOut(true)
+      return
+    }
+
+    // Hand-off: let it ring. Detach the taps so the INCOMING song is not fed
+    // into the outgoing song's reverb.
+    for (const tap of active.tappedTrackGains) {
+      try {
+        tap.node.disconnect(active.input)
+      } catch {
+        /* already detached */
+      }
+    }
+    active.tappedTrackGains = []
+    active.fadedTrackGains = []
+    // Bus returns are REUSED across a song load (`setBus` keeps the node), so
+    // the fade-to-zero automation is still on them. `setBus` has already written
+    // the incoming song's level; clearing the automation is what stops the old
+    // ramp from dragging the new song's effect returns back to silence.
+    const now = this.ac.currentTime
+    for (const item of active.fadedBusReturns) {
+      if (![...this.busReturnGains.values()].includes(item.node)) continue
+      try {
+        item.node.gain.cancelScheduledValues(now)
+        item.node.gain.setValueAtTime(item.node.gain.value, now)
+      } catch {
+        /* param gone */
+      }
+    }
+    active.fadedBusReturns = []
+  }
+
+  /**
+   * Arm an automatic ring-out for a song that ends on its own.
+   *
+   * The natural end is the common case in a set, and it is the one the manual
+   * path cannot cover: auto-advance only runs once the transport has already
+   * stopped, by which point there is no audio left to capture. Passing a
+   * schedule here makes the engine start the hand-off `captureSec` BEFORE the
+   * end, so the last moment of the song feeds the reverb instead of hitting a
+   * wall. `null` restores the old hard ending.
+   */
+  setAutoRingOut(schedule: SongRingOutSchedule | null): void {
+    this.autoRingOut = schedule
+    if (this.state === 'playing') this.scheduleAutoStop()
+  }
+
+  /** Is a hand-off tail currently armed or decaying? (Tests + diagnostics.) */
+  hasActiveRingOut(): boolean {
+    return this.activeRingOut !== null
+  }
+
+  /** A lane's live gain value. Test-only window onto the fade automation. */
+  trackGainValueForTest(key: TrackKey): number {
+    return this.trackGains.get(key)?.gain.value ?? 0
+  }
+
+  /** Cancel an armed/tailing transition. Manual transport actions restore the current mix. */
+  cancelEchoTransition(restoreCurrentMix = true): void {
+    const active = this.activeEchoTransition
+    if (!active) return
+    if (active.cleanupTimer != null) clearTimeout(active.cleanupTimer)
+    const now = this.ac.currentTime
+    for (const tap of active.tappedTrackGains) {
+      try { tap.node.disconnect(active.input) } catch { /* already detached */ }
+    }
+    for (const tap of active.fadedTrackGains) {
+      if (restoreCurrentMix && this.trackGains.get(tap.key) === tap.node) {
+        const track = this.tracks.get(tap.key)
+        if (track) {
+          tap.node.gain.cancelScheduledValues(now)
+          tap.node.gain.setValueAtTime(this.effectiveGainFor(track), now)
+        }
+      }
+    }
+    for (const item of active.fadedBusReturns) {
+      if (restoreCurrentMix && [...this.busReturnGains.values()].includes(item.node)) {
+        item.node.gain.cancelScheduledValues(now)
+        item.node.gain.setValueAtTime(item.value, now)
+      }
+    }
+    for (const node of [active.input, active.delay, active.feedback, active.filter, active.wet,
+      active.reverbSend, active.reverbPredelay, active.reverb, active.reverbWet, active.limiter]) {
+      safeDisconnect(node)
+    }
+    this.activeEchoTransition = null
+  }
+
   /** Longest track buffer defines transport duration. */
   durationSec(): number {
     let max = 0
@@ -924,6 +1483,7 @@ export class MixerEngine {
 
   async play(fromSec?: number, opts?: { startDelaySec?: number }): Promise<void> {
     if (this.ac.state === 'suspended') await this.ac.resume().catch(() => {})
+    this.releaseRingOut()
     // ALWAYS tear down any prior/stale source set first — never overlap two sets
     // (the "fucked up sound" on replay). Safe to call when already stopped.
     this.stopSourcesOnly()
@@ -980,11 +1540,30 @@ export class MixerEngine {
       clearTimeout(this.autoStopTimer)
       this.autoStopTimer = null
     }
+    if (this.autoRingOutTimer != null) {
+      clearTimeout(this.autoRingOutTimer)
+      this.autoRingOutTimer = null
+    }
     if (this.state !== 'playing') return
     const remaining = this.currentEndCtx() - this.ac.currentTime
     if (remaining <= 0) {
       if (this.durationSec() > 0) this.stop()
       return
+    }
+    // Hand the song off BEFORE it ends. Arming after the stop is too late —
+    // the sources are gone and the reverb would be fed silence.
+    const auto = this.autoRingOut
+    if (auto) {
+      const leadSec = Math.max(0.05, Math.min(4, auto.captureSec))
+      if (remaining > leadSec + 0.05) {
+        this.autoRingOutTimer = window.setTimeout(
+          () => {
+            this.autoRingOutTimer = null
+            if (this.state === 'playing') this.scheduleSongRingOut(auto)
+          },
+          Math.max(0, remaining - leadSec) * 1000,
+        )
+      }
     }
     this.autoStopTimer = window.setTimeout(() => {
       this.autoStopTimer = null
@@ -997,6 +1576,15 @@ export class MixerEngine {
   /** Current AudioContext time — the one true clock. */
   currentCtxTime(): number {
     return this.ac.currentTime
+  }
+
+  /** Convert a mixer-timeline position to the shared AudioContext clock. */
+  contextTimeForPosition(positionSec: number): number | null {
+    if (this.state !== 'playing') return null
+    return (
+      this.playStartCtxTime +
+      bufferSecToWallSec(positionSec - this.playStartPositionSec, this.playbackRate)
+    )
   }
 
   /**
@@ -1099,6 +1687,12 @@ export class MixerEngine {
   }
 
   stop(): void {
+    // A pending auto ring-out must not fire into a stopped transport — it would
+    // fade lanes that are already silent and leave them down for the next press.
+    if (this.autoRingOutTimer != null) {
+      clearTimeout(this.autoRingOutTimer)
+      this.autoRingOutTimer = null
+    }
     this.stopSourcesOnly()
     this.playStartPositionSec = 0
     this.state = 'stopped'
@@ -1203,6 +1797,8 @@ export class MixerEngine {
 
   /** Tear down — disconnect all of OUR nodes. Never closes a borrowed context. */
   async dispose(): Promise<void> {
+    this.cancelEchoTransition(false)
+    this.cancelRingOut(false)
     this.stopSourcesOnly()
     this.stopTick()
     for (const g of this.trackGains.values()) {

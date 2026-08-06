@@ -1,0 +1,27 @@
+<script>
+(async () => {
+  const log = (...a) => console.log(a.join(' '))
+  const ctx = new AudioContext({ latencyHint: 0 })
+  await ctx.resume().catch(() => {})
+  const max = ctx.destination.maxChannelCount
+  log('maxChannelCount=' + max, 'state=' + ctx.state, 'sr=' + ctx.sampleRate)
+
+  ctx.destination.channelCount = max
+  ctx.destination.channelCountMode = 'explicit'
+  ctx.destination.channelInterpretation = 'discrete'
+  log('destination.channelCount=' + ctx.destination.channelCount)
+
+  const merger = ctx.createChannelMerger(max)
+  merger.connect(ctx.destination)
+  const tone = (freq, gain, idx) => {
+    const o = ctx.createOscillator(); o.frequency.value = freq
+    const g = ctx.createGain(); g.gain.value = gain
+    o.connect(g); g.connect(merger, 0, idx); o.start()
+  }
+  // song L/R at -12, click at -18, cue at -24 — distinct so meters identify them
+  tone(440, 0.25, 0); tone(440, 0.25, 1); tone(1000, 0.12, 2); tone(300, 0.06, 3)
+  log('PLAYING 8s')
+  await new Promise(r => setTimeout(r, 8000))
+  log('DONE currentTime=' + ctx.currentTime.toFixed(2) + ' state=' + ctx.state)
+})()
+</script>

@@ -20,6 +20,7 @@ import type {
   ProjectFile,
   ProjectMastering,
   ProjectSongEntry,
+  ProjectTransitionRecipe,
   LiveRigConfig,
 } from './types'
 import { AUTO_STEM_NAMES } from './types'
@@ -64,6 +65,7 @@ import {
 import { STEM_PRESET_PRIORITY } from '$lib/client/desktopBridge'
 import { reconcileSongAudio, applyReconcileMatch } from '$lib/project/audioReconcile'
 import { pushCloudManifest } from '$lib/client/cloudSync'
+import { parseProjectTransition } from '$lib/project/transitions'
 import { hydrateRestorableSong } from '$lib/stores/restorableSong'
 import { audioSession } from '$lib/stores/audioSession'
 import { setCloudDiskPath, diskPathForCloudId } from '$lib/stores/cloudDiskPaths'
@@ -1414,6 +1416,48 @@ export async function setProjectDefaults(patch: Partial<ProjectDefaults>): Promi
     defaults: { ...snap.data.defaults, ...patch },
     updatedAt: nowIso(),
   }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/** Save or replace the programmed transition leaving one setlist song. */
+export async function setProjectTransition(recipe: ProjectTransitionRecipe): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('A local project must be open to save a transition')
+  const validated = parseProjectTransition(recipe)
+  if (!validated) throw new Error('The transition recipe is incomplete or unsafe')
+  const songIds = new Set(snap.data.songs.map((song) => song.id))
+  if (!songIds.has(validated.outgoing.songId) || !songIds.has(validated.incoming.songId)) {
+    throw new Error('Both transition songs must belong to the active project')
+  }
+  if (validated.outgoing.songId === validated.incoming.songId) {
+    throw new Error('A transition must lead to a different song')
+  }
+  const transitions = (snap.data.transitions ?? []).filter(
+    (saved) => saved.outgoing.songId !== validated.outgoing.songId,
+  )
+  transitions.push(validated)
+  const next: ProjectFile = {
+    ...snap.data,
+    transitions,
+    updatedAt: nowIso(),
+  }
+  const w = await writeProjectManifest(snap.osPath, next)
+  if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
+  setProjectData(next)
+}
+
+/** Remove the programmed transition leaving one setlist song. */
+export async function removeProjectTransition(outgoingSongId: string): Promise<void> {
+  const snap = get(project)
+  if (!snap.osPath || !snap.data) throw new Error('A local project must be open to remove a transition')
+  const transitions = (snap.data.transitions ?? []).filter(
+    (saved) => saved.outgoing.songId !== outgoingSongId,
+  )
+  const next: ProjectFile = { ...snap.data, updatedAt: nowIso() }
+  if (transitions.length > 0) next.transitions = transitions
+  else delete next.transitions
   const w = await writeProjectManifest(snap.osPath, next)
   if (!w.ok) throw new Error(`Failed to write manifest: ${w.error}`)
   setProjectData(next)

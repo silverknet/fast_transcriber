@@ -26,6 +26,7 @@
     waveBuffer = null,
     positionSec = 0,
     durationSec = 0,
+    endPositionSec = null,
     sectionBands = [],
     onSeekFraction,
     isPlaying = false,
@@ -39,6 +40,7 @@
     waveBuffer: AudioBuffer | null
     positionSec: number
     durationSec: number
+    endPositionSec?: number | null
     sectionBands?: { startFrac: number; endFrac: number; label: string; index: number; color?: string }[]
     onSeekFraction: (frac: number) => void
     isPlaying: boolean
@@ -54,7 +56,14 @@
 <div class="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="live-stage-mobile">
   <!-- Waveform (slim, top) -->
   <div class="shrink-0">
-    <MixerStageWaveform buffer={waveBuffer} {positionSec} {durationSec} {sectionBands} {onSeekFraction} />
+    <MixerStageWaveform
+      buffer={waveBuffer}
+      {positionSec}
+      {durationSec}
+      {endPositionSec}
+      {sectionBands}
+      {onSeekFraction}
+    />
   </div>
 
   <!-- Chord row: current big + next 3 (reads left→right like a timeline) -->

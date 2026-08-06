@@ -1016,6 +1016,77 @@ function parseManifestCloud(raw) {
   return cloud
 }
 
+/** Preserve only validated project-level echo handoffs on manifest rewrites. */
+function parseManifestTransitions(raw, songs) {
+  if (!Array.isArray(raw)) return undefined
+  const songIds = new Set(songs.map((song) => song.id))
+  const anchor = (value) => {
+    if (!value || typeof value !== 'object') return null
+    if (!['bar', 'beat', 'tonic', 'free'].includes(value.mode)) return null
+    if (typeof value.timeSec !== 'number' || !Number.isFinite(value.timeSec) || value.timeSec < 0) return null
+    if (typeof value.label !== 'string') return null
+    const displayNumber = (candidate) =>
+      candidate === null || (Number.isInteger(candidate) && candidate >= 1) ? candidate : undefined
+    const barNumber = displayNumber(value.barNumber)
+    const beatNumber = displayNumber(value.beatNumber)
+    if (barNumber === undefined || beatNumber === undefined) return null
+    return { mode: value.mode, timeSec: value.timeSec, barNumber, beatNumber, label: value.label }
+  }
+  const finite = (value, min, max) =>
+    typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
+  const byOutgoing = new Map()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || item.schema !== 'barbro.transition-recipe' || item.version !== 1) continue
+    const outgoing = item.outgoing
+    const incoming = item.incoming
+    const transition = item.transition
+    const echo = transition?.echo
+    const delay = transition?.nextSongDelay
+    if (!outgoing || !incoming || transition?.type !== 'echo' || !echo || !delay) continue
+    if (typeof outgoing.songId !== 'string' || typeof incoming.songId !== 'string') continue
+    if (!songIds.has(outgoing.songId) || !songIds.has(incoming.songId) || outgoing.songId === incoming.songId) continue
+    if (typeof outgoing.title !== 'string' || typeof incoming.title !== 'string') continue
+    const endAnchor = anchor(outgoing.endAnchor)
+    const startAnchor = anchor(incoming.startAnchor)
+    if (!endAnchor || !startAnchor || echo.throwRule !== 'beat-3-or-7') continue
+    if (!finite(echo.throwTimeSec, 0, 86400)) continue
+    if (!['quarter', 'dotted-eighth', 'eighth'].includes(echo.delayDivision)) continue
+    if (!finite(echo.captureLengthBeats, 0.05, 8) || !finite(echo.drySongHoldBeats, 0, 16)) continue
+    if (!finite(echo.sendLevel, 0, 1) || !finite(echo.wetLevel, 0, 1)) continue
+    if (!finite(echo.feedback, 0, 0.995) || !finite(echo.repeatBuild, -1, 1)) continue
+    if (!finite(echo.toneHz, 200, 18000)) continue
+    if (!finite(echo.tailLengthSec, 0.1, 30) || !finite(echo.effectiveTailLengthSec, 0.1, 30)) continue
+    if (!finite(echo.blendReverbLevel, 0, 1) || !finite(echo.blendReverbLengthSec, 0.1, 30)) continue
+    if (delay.measuredFrom !== 'echo-stop') continue
+    if (!finite(delay.beats, 0, 32) || !finite(delay.secondsAtOutgoingTempo, 0, 120)) continue
+    if (!finite(delay.startOffsetAfterOutgoingEndSec, 0, 120)) continue
+    byOutgoing.set(outgoing.songId, {
+      schema: 'barbro.transition-recipe', version: 1,
+      outgoing: { songId: outgoing.songId, title: outgoing.title, endAnchor },
+      incoming: { songId: incoming.songId, title: incoming.title, startAnchor },
+      transition: {
+        type: 'echo',
+        echo: {
+          throwRule: 'beat-3-or-7', throwTimeSec: echo.throwTimeSec,
+          delayDivision: echo.delayDivision, captureLengthBeats: echo.captureLengthBeats,
+          drySongHoldBeats: echo.drySongHoldBeats, sendLevel: echo.sendLevel,
+          wetLevel: echo.wetLevel, feedback: echo.feedback, repeatBuild: echo.repeatBuild,
+          toneHz: echo.toneHz, tailLengthSec: echo.tailLengthSec,
+          effectiveTailLengthSec: echo.effectiveTailLengthSec,
+          blendReverbLevel: echo.blendReverbLevel,
+          blendReverbLengthSec: echo.blendReverbLengthSec,
+        },
+        nextSongDelay: {
+          measuredFrom: 'echo-stop', beats: delay.beats,
+          secondsAtOutgoingTempo: delay.secondsAtOutgoingTempo,
+          startOffsetAfterOutgoingEndSec: delay.startOffsetAfterOutgoingEndSec,
+        },
+      },
+    })
+  }
+  return byOutgoing.size > 0 ? [...byOutgoing.values()] : undefined
+}
+
 /**
  * Validate + parse a manifest object (after JSON.parse). Throws on schema
  * violation. Mirrors the parser in src/lib/project/parse.ts.
@@ -1073,6 +1144,7 @@ function parseManifestObject(raw) {
   const performers = parseManifestPerformers(raw.performers)
   const performerMixes = parseManifestPerformerMixes(raw.performerMixes)
   const liveRig = parseManifestLiveRig(raw.liveRig)
+  const transitions = parseManifestTransitions(raw.transitions, songs)
   return {
     formatVersion: PROJECT_FILE_VERSION,
     id: raw.id,
@@ -1087,6 +1159,7 @@ function parseManifestObject(raw) {
     ...(performers ? { performers } : {}),
     ...(performerMixes ? { performerMixes } : {}),
     ...(liveRig ? { liveRig } : {}),
+    ...(transitions ? { transitions } : {}),
   }
 }
 

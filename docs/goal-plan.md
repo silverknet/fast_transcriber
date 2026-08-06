@@ -4,7 +4,7 @@ Living roadmap for BarBro. This file records current capability, confidence,
 and the next promotion gate. Detailed implementation history belongs in domain
 documents, tests, and Git history.
 
-**Last audited:** 2026-08-02 against the current working tree. Uncommitted code
+**Last audited:** 2026-08-04 against the current working tree. Uncommitted code
 with implementation and tests is included, but a row is not considered shipped
 until its migrations/assets/release requirements are also available.
 
@@ -240,7 +240,7 @@ set export work. Live playback remains a development surface.
 | Project audio movement | M | Hydration packages move local-quality assets; compressed AAC mix/stems can be uploaded for browser collaborators and cached client-side. Promote after storage/RLS deployment smoke, replacement/invalidation tests, and multi-device QA. |
 | Auto stem preparation | S | Project policy is persisted; the desktop daemon runs background preparation and the web shows status. Cross-platform packaging, interruption behavior, and source-replacement invalidation need proof. |
 | Ableton setlist export | M | Project settings export one Live 12 set with ordered scenes, stems, mixer gains, and regenerated click WAVs after preflight. Cue tracks, progress/cancel, and broader Live-version verification remain. |
-| Project Live playback | S | `/project/playback` supplies setlist navigation, stage UI, mixer, APC, and XR18 development controls. Current-path hardening (2026-08-02): click/cue/announcement fail closed off Main in `liveMode` behind a session-local Practice toggle (engine-level suppression, real-render tests); chord/arp voices only sound when hosted as visible mixer lanes, while unhosted preview voices are suppressed; `rigHealth` names its evidence level (`configured` vs `observed`). The APC map now exposes ten stable mixer-linked slots: the original bottom eight plus Custom 1/2 on the first two pads of the row above. Still explicitly not show-safe until the Live plan completes — hardening is not admission. |
+| Project Live playback | S | `/project/playback` supplies setlist navigation, stage UI, mixer, APC, and XR18 development controls. Current-path hardening (2026-08-04): project-level echo recipes can be prepared, previewed, persisted, and automatically hand off to the immediate next song. The effect captures only the audible live-slot musical mix, rejects click/cue, never resurrects a muted original, and loads the incoming song's own defaults. The handoff now derives the incoming canonical click count-in plus existing announcement/opening cue, preserves the complete pre-roll on late loads, derives a private End cue, and marks the programmed end on the stage waveform. Click/cue/announcement still fail closed off Main behind session-local Practice, and APC exposes ten stable mixer-linked slots. Still explicitly not show-safe until the Live plan completes; transition execution must move into the target runtime with acknowledged next-song readiness. |
 
 ### Ableton And Other Exports `AB`
 

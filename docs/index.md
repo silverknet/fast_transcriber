@@ -22,6 +22,7 @@ the short files first and open domain docs only when you touch that area.
 | Desktop sidecar and Python jobs | [`domains/desktop-sidecar.md`](domains/desktop-sidecar.md) |
 | Desktop vs browser — capability split & audio failsafe | [`domains/desktop-vs-browser.md`](domains/desktop-vs-browser.md) |
 | Hardware control / live rig | [`domains/hardware-control.md`](domains/hardware-control.md) |
+| Programmed live transitions (current development path) | [`domains/live-transitions.md`](domains/live-transitions.md) |
 | Offline mode — the no-login desktop build and how it syncs back | [`offline-mode.md`](offline-mode.md) |
 | Chord suggestions | [`domains/chord-suggestions.md`](domains/chord-suggestions.md) |
 | AI chord/section pipeline (for agents) | [`domains/ai-chord-pipeline.md`](domains/ai-chord-pipeline.md) |

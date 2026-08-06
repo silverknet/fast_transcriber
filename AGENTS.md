@@ -21,6 +21,7 @@ Important entry points:
 - Live audio entry point: [`docs/architecture/audio-system-overview.md`](docs/architecture/audio-system-overview.md)
 - Live shadow/input boundary: [`docs/architecture/live-audio-shadow-model.md`](docs/architecture/live-audio-shadow-model.md)
 - Live architecture review: [`docs/reviews/live-audio-architecture-independent-review.md`](docs/reviews/live-audio-architecture-independent-review.md)
+- Programmed Live transitions: [`docs/domains/live-transitions.md`](docs/domains/live-transitions.md)
 
 ## Current System
 
