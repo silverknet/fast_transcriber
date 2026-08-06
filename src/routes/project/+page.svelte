@@ -57,6 +57,7 @@
     openProjectByPath,
     readRecentProjectPaths,
     refreshProjectInfo,
+    removeProjectTransition,
     removeSongFromProject,
     renameProject,
     setSongHidden,
@@ -496,6 +497,24 @@
     const songs = $project.data?.songs.filter((song) => !song.hidden) ?? []
     const index = songs.findIndex((song) => song.id === songId)
     return index >= 0 ? (songs[index + 1]?.id ?? null) : null
+  }
+
+  /**
+   * Songs with a saved programmed ending. Drives the menu label and the Remove
+   * item, so the setlist can SHOW what is programmed — previously a transition
+   * was invisible outside the lab, and there was no way to delete one at all
+   * (`removeProjectTransition` shipped with zero callers).
+   */
+  const transitionOutgoingIds = $derived(
+    new Set(($project.data?.transitions ?? []).map((t) => t.outgoing.songId)),
+  )
+
+  async function removeTransitionFor(entry: ProjectSongEntry): Promise<void> {
+    try {
+      await removeProjectTransition(entry.id)
+    } catch (e) {
+      openError = e instanceof Error ? e.message : 'Could not remove the transition.'
+    }
   }
 
   function openTransitionPreparation(songId: string): void {
@@ -1179,6 +1198,8 @@
                   ? () => openTransitionPreparation(entry.id)
                   : undefined
               }
+              hasTransition={transitionOutgoingIds.has(entry.id)}
+              onRemoveTransition={() => void removeTransitionFor(entry)}
             />
           {/each}
         </ul>

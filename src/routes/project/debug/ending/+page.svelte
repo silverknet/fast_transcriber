@@ -16,6 +16,7 @@
     Scissors,
     SlidersHorizontal,
     Sparkles,
+    Trash2,
     Volume2,
     VolumeX,
     Waves,
@@ -24,7 +25,7 @@
   import { decodeSmapBytes } from '$lib/songmap/smapFile'
   import { audioSession } from '$lib/stores/audioSession'
   import { project as projectStore } from '$lib/stores/project'
-  import { setProjectTransition } from '$lib/project/commit'
+  import { removeProjectTransition, setProjectTransition } from '$lib/project/commit'
   import { parseProjectTransition } from '$lib/project/transitions'
   import type { ProjectTransitionRecipe } from '$lib/project/types'
   import { songMap as activeSongMap } from '$lib/stores/songMap'
@@ -620,6 +621,39 @@
     keepOutgoingPointVisible(selectedPointSec, true)
     keepIncomingPointVisible(incomingStartSec, true)
     queueWaveformDraw()
+  }
+
+  /** Is a recipe saved for exactly this pair? Drives the Remove button. */
+  const savedRecipeForPair = $derived(
+    savedTransitions.find(
+      (candidate) =>
+        candidate.outgoing.songId === selectedSongId &&
+        candidate.incoming.songId === selectedIncomingSongId,
+    ) ?? null,
+  )
+
+  /**
+   * Delete the saved transition for this outgoing song.
+   *
+   * `removeProjectTransition` has existed and worked since transitions shipped
+   * and had NO caller anywhere in the app — a recipe could be created and
+   * replaced but never removed, so an ending programmed by mistake was
+   * permanent short of hand-editing the project file.
+   */
+  async function removeTransitionForLive(): Promise<void> {
+    if (!selectedSongId) return
+    saveStatus = 'saving'
+    saveMessage = ''
+    try {
+      await removeProjectTransition(selectedSongId)
+      // Let the pair be re-applied from scratch if the user saves again.
+      appliedRecipeKey = ''
+      saveStatus = 'idle'
+      saveMessage = 'Removed. This song now ends normally and the next one is started by hand.'
+    } catch (cause) {
+      saveStatus = 'failed'
+      saveMessage = cause instanceof Error ? cause.message : 'Could not remove the transition.'
+    }
   }
 
   async function saveTransitionForLive(): Promise<void> {
@@ -1890,6 +1924,17 @@
       {#if saveStatus === 'saved'}<Check aria-hidden="true" />{:else}<Save aria-hidden="true" />{/if}
       {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved for Live' : 'Save for Live'}
     </button>
+    {#if savedRecipeForPair}
+      <button
+        class="save-live"
+        onclick={() => void removeTransitionForLive()}
+        disabled={saveStatus === 'saving'}
+        title="Delete this saved transition. The song will end normally again."
+      >
+        <Trash2 aria-hidden="true" />
+        Remove
+      </button>
+    {/if}
   </header>
 
   {#if saveMessage}

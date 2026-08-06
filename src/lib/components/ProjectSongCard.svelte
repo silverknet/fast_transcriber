@@ -53,6 +53,8 @@
     onReplaceAudio,
     onExport,
     onTransition,
+    hasTransition = false,
+    onRemoveTransition,
   } = $props<{
     entry: ProjectSongEntry
     metadata?: ProjectSongMetadataLite
@@ -71,6 +73,10 @@
     onExport: () => void
     /** Prepare the programmed handoff from this song to its next setlist song. */
     onTransition?: () => void
+    /** True when this song has a saved programmed ending/transition. */
+    hasTransition?: boolean
+    /** Delete this song's saved transition. Absent = deletion not available here. */
+    onRemoveTransition?: () => void
   }>()
 
   function formatKey(k: ProjectSongMetadataLite['keyDetail']): string {
@@ -364,7 +370,13 @@
         {#if onTransition}
           <DropdownMenuItem class="" onclick={onTransition}>
             <Waves class="size-3.5" aria-hidden="true" />
-            Transition to next…
+            {hasTransition ? 'Edit transition…' : 'Transition to next…'}
+          </DropdownMenuItem>
+        {/if}
+        {#if hasTransition && onRemoveTransition}
+          <DropdownMenuItem class="" onclick={onRemoveTransition}>
+            <Trash2 class="size-3.5" aria-hidden="true" />
+            Remove transition
           </DropdownMenuItem>
         {/if}
         <DropdownMenuItem class="" onclick={onToggleHidden}>
