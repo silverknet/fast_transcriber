@@ -4,7 +4,12 @@
  * they cannot disagree.
  */
 import { describe, expect, it } from 'vitest'
-import { defaultEndingEffect, planEnding, type EndingTiming } from './endingSchedule'
+import {
+  defaultEndingEffect,
+  endWarningMixerSec,
+  planEnding,
+  type EndingTiming,
+} from './endingSchedule'
 
 const TIMING: EndingTiming = { endMixerSec: 200, beatDurationSec: 0.5, barDurationSec: 2 }
 
@@ -111,5 +116,33 @@ describe('defaults for a newly chosen ending', () => {
 
   it('refuses to guess echo, which the lab tunes', () => {
     expect(defaultEndingEffect('echo')).toBeNull()
+  })
+})
+
+describe('the spoken warning before the ending', () => {
+  it('lands the requested number of BARS before the anchor', () => {
+    expect(endWarningMixerSec({ leadBars: 2 }, TIMING)).toBe(196)
+    expect(endWarningMixerSec({ leadBars: 4 }, TIMING)).toBe(192)
+  })
+
+  it('is musical, not clock-based — same bars, different tempo, different seconds', () => {
+    expect(endWarningMixerSec({ leadBars: 2 }, { ...TIMING, barDurationSec: 4 })).toBe(192)
+  })
+
+  it('is dropped rather than promised when it would fall before the song starts', () => {
+    // A cue at a negative time is either silently dropped or fires instantly at
+    // zero. Both are worse than not offering a warning at all.
+    expect(endWarningMixerSec({ leadBars: 8 }, { ...TIMING, endMixerSec: 3 })).toBeNull()
+    expect(endWarningMixerSec({ leadBars: 2 }, { ...TIMING, endMixerSec: 4 })).toBeNull()
+  })
+
+  it('is absent when no warning was authored', () => {
+    expect(endWarningMixerSec(undefined, TIMING)).toBeNull()
+  })
+
+  it('falls back sanely with no grid to measure', () => {
+    expect(
+      endWarningMixerSec({ leadBars: 1 }, { endMixerSec: 100, beatDurationSec: 0, barDurationSec: 0 }),
+    ).toBe(98)
   })
 })

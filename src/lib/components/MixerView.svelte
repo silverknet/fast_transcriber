@@ -143,7 +143,7 @@
   import { chordJam } from '$lib/audio/chordJam.svelte'
   import { jamVoicesSuppressedInMixer } from '$lib/audio/jamVoiceRouting'
   import { mergePersistedTracks } from '$lib/audio/mixStatePersist'
-  import { planEnding } from '$lib/audio/endingSchedule'
+  import { endWarningMixerSec, planEnding } from '$lib/audio/endingSchedule'
   import { kitToAudioBuffers, type DrumKitBuffers } from '$lib/audio/drumKitBuffers'
   import type { LiveSlotName } from '$lib/project/types'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
@@ -3015,15 +3015,37 @@
     return null
   }
 
+  /**
+   * Map key for the ending warning's clip. Namespaced so it can never collide
+   * with a real section id.
+   */
+  const END_WARNING_CUE_ID = 'transition:end-warning'
+
   async function prepareSectionCueClips(
     sm: SongMap,
     eng: MixerEngine,
   ): Promise<Map<string, { buffer: AudioBuffer; downbeatOffsetSec: number }>> {
-    const fp = fingerprintCueTrackInputs(sm)
+    // The recipe's warning is NOT part of the cue-track fingerprint, so it has
+    // to be folded in here — otherwise editing the words or the lead re-uses a
+    // stale clip and the change silently never happens.
+    const warn = programmedTransition?.transition.endWarning
+    const fp = `${fingerprintCueTrackInputs(sm)}|warn:${warn ? `${warn.text}@${warn.leadBars}` : ''}`
     if (fp === sectionCueFp && !sectionCuePreparePromise) return sectionCueClips
     if (fp === sectionCuePreparingFp && sectionCuePreparePromise) return sectionCuePreparePromise
 
     const specs = sectionCueSpecsFromSongMap(sm)
+    // The ending warning rides the SAME clip machinery as a section cue:
+    // `renderSectionCueClips` knows nothing about sections — `sectionId` is a
+    // map key and the rest are free numbers. `countInBeats: 0` because a
+    // warning is a heads-up, not a count; the count belongs to the next song.
+    if (warn) {
+      specs.push({
+        sectionId: END_WARNING_CUE_ID,
+        speechText: warn.text.trim() || 'ending',
+        countInBeats: 0,
+        beatDurationSec: transitionBeatDuration(sm, programmedTransition!.outgoing.endAnchor.timeSec),
+      })
+    }
     if (specs.length === 0) {
       sectionCueClips = new Map()
       sectionCueFp = fp
@@ -3308,11 +3330,38 @@
    * already re-derive. Adding a `liveTransitionRun` here would mean seven more
    * generation guards protecting nothing.
    */
+  /**
+   * Speak the warning ahead of an ending, so nobody is surprised by the exit.
+   *
+   * Placed in BARS before the anchor rather than seconds, so it arrives
+   * musically at any tempo. Fired with `fireSectionCueLeadingTo`, which means
+   * the words FINISH at that point — a warning that is still talking over the
+   * ending is not a warning.
+   *
+   * Inherits the cue contract for free: private-output gating and the "cues
+   * off" preference are both enforced inside `fireSectionCue`, so the room
+   * never hears it.
+   */
+  function armEndWarning(sm: SongMap, recipe: ProjectTransitionRecipe): void {
+    const warn = recipe.transition.endWarning
+    if (!warn) return
+    const endSongSec = recipe.outgoing.endAnchor.timeSec
+    const beat = transitionBeatDuration(sm, endSongSec)
+    const atMixerSec = endWarningMixerSec(warn, {
+      endMixerSec: endSongSec + mixerSongOffsetSec,
+      beatDurationSec: beat,
+      barDurationSec: beat * beatsInBarNear(sm, endSongSec),
+    })
+    if (atMixerSec == null) return
+    fireSectionCueLeadingTo(END_WARNING_CUE_ID, atMixerSec)
+  }
+
   function armSimpleEnding(
     eng: MixerEngine,
     sm: SongMap,
     recipe: ProjectTransitionRecipe,
   ): void {
+    armEndWarning(sm, recipe)
     const endSongSec = recipe.outgoing.endAnchor.timeSec
     const beat = transitionBeatDuration(sm, endSongSec)
     const schedule = planEnding(recipe.transition, {
@@ -3397,6 +3446,7 @@
       armSimpleEnding(eng, sm, recipe)
       return
     }
+    armEndWarning(sm, recipe)
     const echo = recipe.transition.echo
     const offset = mixerSongOffsetSec
     const beatSongSec = transitionBeatDuration(sm, echo.throwTimeSec)

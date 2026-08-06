@@ -122,3 +122,25 @@ export function defaultEndingEffect(type: ProjectTransitionEffect['type']): Proj
   if (type === 'fade') return { type: 'fade', fade: { bars: 2 } }
   return null // echo has too many parameters to guess; the lab owns its defaults
 }
+
+/**
+ * Where the spoken warning lands, in mixer-timeline seconds.
+ *
+ * Measured in BARS before the anchor so it arrives musically at any tempo — a
+ * fixed number of seconds would be half a bar at 80 bpm and two bars at 160.
+ *
+ * Returns null when there is no warning, or when the lead reaches back past the
+ * start of the song: a cue scheduled at a negative time would either be dropped
+ * silently or fire immediately at position zero, and both are worse than not
+ * promising one.
+ */
+export function endWarningMixerSec(
+  warning: { leadBars: number } | undefined,
+  timing: EndingTiming,
+): number | null {
+  if (!warning) return null
+  const beat = timing.beatDurationSec > 0 ? timing.beatDurationSec : 0.5
+  const bar = timing.barDurationSec > 0 ? timing.barDurationSec : beat * 4
+  const at = timing.endMixerSec - warning.leadBars * bar
+  return at > 0 ? at : null
+}

@@ -245,6 +245,9 @@
   let filterFloorHz = $state(320)
   let filterResonance = $state(5)
   let fadeBars = $state(4)
+  /** Spoken warning before the ending — off until the text is non-empty. */
+  let endWarningText = $state('')
+  let endWarningLeadBars = $state(2)
 
   const trimDurationSec = $derived(Math.max(0, trimEndSec - trimStartSec))
   const selectedBeat = $derived.by(() => nearestBeat(selectedPointSec, beatPoints))
@@ -583,6 +586,9 @@
                   blendReverbLengthSec: rounded(echoBlendLengthSec, 2),
                 }
               : null,
+          ...(endWarningText.trim()
+            ? { endWarning: { text: endWarningText.trim(), leadBars: endWarningLeadBars } }
+            : {}),
           nextSongDelay: {
             measuredFrom: endingStyle === 'echo' ? 'echo-stop' : 'outgoing-end',
             beats: transitionAirBeats,
@@ -627,6 +633,8 @@
       incomingTrimStartSec,
       incomingTrimEndSec,
     )
+    endWarningText = recipe.transition.endWarning?.text ?? ''
+    endWarningLeadBars = recipe.transition.endWarning?.leadBars ?? 2
     if (recipe.transition.type !== 'echo') {
       // A non-echo recipe restores its ending style; its parameters live in
       // their own block and are applied by the style-specific restore below.
@@ -2656,6 +2664,35 @@
           <p>The feedback stops first, but the blend tail remains audible across this gap and into the next song.</p>
         </div>
       {/if}
+
+      <!-- Works for EVERY ending type, so it sits outside the echo block. -->
+      <div class="control-group handoff-control">
+        <div class="control-heading">
+          <strong>Warn the band</strong>
+          <output>{endWarningText.trim() ? `${endWarningLeadBars} bars before` : 'off'}</output>
+        </div>
+        <input
+          type="text"
+          maxlength="120"
+          placeholder="e.g. ending — leave empty for no warning"
+          value={endWarningText}
+          aria-label="Spoken warning before the ending"
+          oninput={(event) => (endWarningText = event.currentTarget.value)}
+        />
+        <input
+          type="range"
+          min="0.5"
+          max="8"
+          step="0.5"
+          value={endWarningLeadBars}
+          aria-label="Bars before the ending"
+          oninput={(event) => (endWarningLeadBars = Number(event.currentTarget.value))}
+        />
+        <p>
+          Spoken into the in-ears this many bars before the ending, so nobody is surprised by the
+          exit. The room never hears it.
+        </p>
+      </div>
 
       {#if endingStyle === 'filter'}
         <div class="control-grid">
