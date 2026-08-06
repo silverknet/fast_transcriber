@@ -1046,15 +1046,23 @@ function parseManifestTransitions(raw, songs) {
     // Mirrors the web parser's arms EXACTLY. A type the sidecar does not know
     // is dropped on the next manifest write, which on desktop is every save —
     // this whitelist has silently eaten project settings four times.
-    if (!outgoing || !incoming || !delay) continue
-    if (!['echo', 'cut', 'hit', 'fade'].includes(endingType)) continue
+    if (!outgoing || !delay) continue
+    if (!['echo', 'cut', 'hit', 'fade', 'hold'].includes(endingType)) continue
     if (endingType === 'echo' && !echo) continue
-    if (typeof outgoing.songId !== 'string' || typeof incoming.songId !== 'string') continue
-    if (!songIds.has(outgoing.songId) || !songIds.has(incoming.songId) || outgoing.songId === incoming.songId) continue
-    if (typeof outgoing.title !== 'string' || typeof incoming.title !== 'string') continue
+    if (typeof outgoing.songId !== 'string' || !songIds.has(outgoing.songId)) continue
+    if (typeof outgoing.title !== 'string') continue
     const endAnchor = anchor(outgoing.endAnchor)
-    const startAnchor = anchor(incoming.startAnchor)
-    if (!endAnchor || !startAnchor) continue
+    if (!endAnchor) continue
+    // ENDING-ONLY: no incoming side. Mirrors the web parser exactly.
+    let incomingSide
+    if (incoming) {
+      if (typeof incoming.songId !== 'string' || !songIds.has(incoming.songId)) continue
+      if (outgoing.songId === incoming.songId) continue
+      if (typeof incoming.title !== 'string') continue
+      const startAnchor = anchor(incoming.startAnchor)
+      if (!startAnchor) continue
+      incomingSide = { songId: incoming.songId, title: incoming.title, startAnchor }
+    }
     if (echo && echo.throwRule !== 'beat-3-or-7') continue
     if (echo && !finite(echo.throwTimeSec, 0, 86400)) continue
     if (echo && !['quarter', 'dotted-eighth', 'eighth'].includes(echo.delayDivision)) continue
@@ -1085,6 +1093,11 @@ function parseManifestTransitions(raw, songs) {
       const fade = transition.fade
       if (!fade || !finite(fade.bars, 0.25, 32)) continue
       ending = { type: 'fade', fade: { bars: fade.bars } }
+    } else if (endingType === 'hold') {
+      const hold = transition.hold
+      if (!hold || !['kick', 'kick-bass', 'kick-hat', 'pad'].includes(hold.bed)) continue
+      if (!finite(hold.level, 0, 1)) continue
+      ending = { type: 'hold', hold: { bed: hold.bed, level: hold.level } }
     }
 
     // The spoken warning is optional and type-independent: junk is dropped
@@ -1098,7 +1111,7 @@ function parseManifestTransitions(raw, songs) {
     byOutgoing.set(outgoing.songId, {
       schema: 'barbro.transition-recipe', version: 1,
       outgoing: { songId: outgoing.songId, title: outgoing.title, endAnchor },
-      incoming: { songId: incoming.songId, title: incoming.title, startAnchor },
+      ...(incomingSide ? { incoming: incomingSide } : {}),
       transition: {
         ...(ending ?? { type: 'echo', echo: {
           throwRule: 'beat-3-or-7', throwTimeSec: echo.throwTimeSec,

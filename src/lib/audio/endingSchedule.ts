@@ -81,6 +81,20 @@ export function planEnding(
     return { endSec, actions: [], stopsAtEnd: false }
   }
 
+  if (effect.type === 'hold') {
+    // A hold stops the song cleanly at the anchor and then the BED takes over,
+    // which the engine loops separately — it has no deadline and no end, so it
+    // is not an action on this timeline. The de-click ramp is all that belongs
+    // here.
+    return {
+      endSec,
+      actions: [
+        { kind: 'programme-fade', fromSec: Math.max(0, endSec - 0.02), toSec: endSec },
+      ],
+      stopsAtEnd: true,
+    }
+  }
+
   if (effect.type === 'cut') {
     const fadeSec = clamp(effect.cut.softnessMs / 1000, MIN_FADE_SEC, MAX_DECLICK_SEC)
     return {
@@ -120,6 +134,7 @@ export function defaultEndingEffect(type: ProjectTransitionEffect['type']): Proj
   if (type === 'cut') return { type: 'cut', cut: { softnessMs: 18 } }
   if (type === 'hit') return { type: 'hit', hit: { kickLevel: 0.9, crashLevel: 0.7, softnessMs: 24 } }
   if (type === 'fade') return { type: 'fade', fade: { bars: 2 } }
+  if (type === 'hold') return { type: 'hold', hold: { bed: 'kick-bass', level: 0.6 } }
   return null // echo has too many parameters to guess; the lab owns its defaults
 }
 

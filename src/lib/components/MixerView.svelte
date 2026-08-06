@@ -1456,9 +1456,12 @@
   const programmedTransition = $derived.by(() => {
     if (!liveMode || activeProjectSongIndex < 0) return null
     const outgoing = projectSongNavItems[activeProjectSongIndex]
-    const incoming = projectSongNavItems[activeProjectSongIndex + 1]
-    if (!outgoing || !incoming) return null
-    return transitionForSongs($projectStore.data, outgoing.id, incoming.id)
+    if (!outgoing) return null
+    // `incoming` may legitimately be absent — the LAST song of a set. An
+    // ending-only recipe matches whatever follows, including nothing, which is
+    // the only way that song can be given a programmed ending at all.
+    const incoming = projectSongNavItems[activeProjectSongIndex + 1] ?? null
+    return transitionForSongs($projectStore.data, outgoing.id, incoming?.id ?? null)
   })
   const programmedEndMixerSec = $derived(
     programmedTransition
@@ -1491,7 +1494,7 @@
   const liveTransitionStatus = $derived.by(() => {
     const run = liveTransitionRun
     if (run) {
-      const destination = run.recipe.incoming.title || 'next song'
+      const destination = run.recipe.incoming?.title || 'next song'
       if (liveTransitionNotice) return liveTransitionNotice
       if (run.phase === 'armed') return `Transition armed · ${run.audibleTrackKeys.length} live source${run.audibleTrackKeys.length === 1 ? '' : 's'} → ${destination}`
       if (run.phase === 'echoing') return `Echo transition → ${destination}`
@@ -1501,7 +1504,10 @@
       return `Starting ${destination}…`
     }
     if (liveTransitionNotice) return liveTransitionNotice
-    if (programmedTransition) return `Programmed transition → ${programmedTransition.incoming.title || 'next song'}`
+    if (programmedTransition) {
+      const dest = programmedTransition.incoming?.title
+      return dest ? `Programmed transition → ${dest}` : 'Programmed ending armed'
+    }
     return ''
   })
 
@@ -3527,7 +3533,7 @@
     liveTransitionRun = transitionRun
     void scheduleTransitionEndCue(id, throwAtCtxTime, beatWallSec)
     console.info(
-      `[live-transition] armed ${recipe.outgoing.songId} → ${recipe.incoming.songId}; captured lanes: ${result.audibleTrackKeys.join(', ')}`,
+      `[live-transition] armed ${recipe.outgoing.songId} → ${recipe.incoming?.songId ?? '(ending only)'}; captured lanes: ${result.audibleTrackKeys.join(', ')}`,
     )
   }
 
@@ -3535,7 +3541,7 @@
     const run = liveTransitionRun
     const eng = engine
     const sm = get(songMap)
-    if (!run || !eng || !sm || run.recipe.incoming.songId !== activeSongId) return
+    if (!run || !eng || !sm || run.recipe.incoming?.songId !== activeSongId) return
     if (loadError) {
       failLiveTransition(`Transition stopped: ${loadError}`)
       return
@@ -3545,7 +3551,7 @@
 
     const countIn = transitionCountInWindow(
       sm,
-      run.recipe.incoming.startAnchor.timeSec,
+      run.recipe.incoming?.startAnchor.timeSec ?? 0,
       mixerSongOffsetSec,
     )
     const canSchedulePrivateAudio = privateLanesAudible && cuesEnabled
@@ -3631,7 +3637,7 @@
       if (liveTransitionRun?.id !== run.id) return
       liveTransitionNotice = lateBySec > 0.15
         ? `Transition landed ${lateBySec.toFixed(1)} s late to preserve the full count-in.`
-        : `Transitioned to ${run.recipe.incoming.title || 'the next song'}.`
+        : `Transitioned to ${run.recipe.incoming?.title || 'the next song'}.`
       updateLiveTransitionPhase(run.id, 'blending')
     }, Math.max(0, actualAnchorCtxTime - eng.currentCtxTime()) * 1000))
     run.timers.push(window.setTimeout(() => {

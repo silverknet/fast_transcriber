@@ -179,6 +179,32 @@ test('a half-valid ending is dropped, never written back broken', async () => {
   assert.equal(bad.transitions, undefined)
 })
 
+test('a HOLD transition and an ENDING-ONLY recipe survive the sidecar', async () => {
+  // `hold` is the transition with no deadline: the bed loops until the operator
+  // starts the next song. It is ending-only by definition, which is also the
+  // only way the LAST song of a set can have a programmed ending.
+  const parse = await loadParser()
+  const base = FULL_MANIFEST.transitions[0]
+  const delay = { measuredFrom: 'outgoing-end', beats: 0, secondsAtOutgoingTempo: 0, startOffsetAfterOutgoingEndSec: 0 }
+
+  const held = { ...base, transition: { type: 'hold', hold: { bed: 'kick-bass', level: 0.6 }, nextSongDelay: delay } }
+  delete held.incoming
+  const out = parse({ ...FULL_MANIFEST, transitions: [held] })
+  assert.equal(out.transitions.length, 1)
+  assert.equal(out.transitions[0].transition.type, 'hold')
+  assert.deepEqual(out.transitions[0].transition.hold, { bed: 'kick-bass', level: 0.6 })
+  assert.equal(out.transitions[0].incoming, undefined, 'ending-only must not gain a destination')
+})
+
+test('an unknown bed is dropped rather than becoming a surprise on stage', async () => {
+  const parse = await loadParser()
+  const base = FULL_MANIFEST.transitions[0]
+  const delay = { measuredFrom: 'outgoing-end', beats: 0, secondsAtOutgoingTempo: 0, startOffsetAfterOutgoingEndSec: 0 }
+  const bad = { ...base, transition: { type: 'hold', hold: { bed: 'bagpipes', level: 0.5 }, nextSongDelay: delay } }
+  const out = parse({ ...FULL_MANIFEST, transitions: [bad] })
+  assert.equal(out.transitions, undefined)
+})
+
 test('project DEFAULTS survive field for field, not just as an object', async () => {
   // The top-level check above only proves `defaults` is still there. It was —
   // while `liveStems` inside it was being eaten, so the project-wide "which

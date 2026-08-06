@@ -146,6 +146,25 @@ export interface ProjectFadeTransition {
 }
 
 /**
+ * HOLD: the song ends, a bed loops for as long as you need, and YOU start the
+ * next song.
+ *
+ * Every other transition is time-deterministic — the next song must load
+ * inside a fixed window, which is why a hand-off can land late. A hold has no
+ * deadline: the next song loads under the bed and waits. It exists so a band
+ * can change presets, breathe, and come in together.
+ *
+ * The bed runs at the INCOMING song's tempo and key, so the gap is not dead
+ * air but an open-ended count-in.
+ */
+export interface ProjectHoldTransition {
+  /** What loops under the gap. */
+  bed: 'kick' | 'kick-bass' | 'kick-hat' | 'pad'
+  /** 0..1. */
+  level: number
+}
+
+/**
  * How a song ENDS. `type` discriminates; each arm owns its own parameter block
  * so adding an ending never disturbs the others.
  *
@@ -157,6 +176,7 @@ export type ProjectTransitionEffect =
   | { type: 'cut'; cut: ProjectCutTransition }
   | { type: 'hit'; hit: ProjectHitTransition }
   | { type: 'fade'; fade: ProjectFadeTransition }
+  | { type: 'hold'; hold: ProjectHoldTransition }
 
 export type ProjectTransitionEndingType = ProjectTransitionEffect['type']
 
@@ -184,7 +204,15 @@ export interface ProjectTransitionRecipe {
     title: string
     endAnchor: ProjectTransitionAnchor
   }
-  incoming: {
+  /**
+   * Where the next song starts.
+   *
+   * OPTIONAL — an ending-only recipe says how this song finishes and nothing
+   * about what follows. That is what a `hold` transition always is, and it is
+   * also the only way the LAST song of a set can have a programmed ending at
+   * all. Absent means: end here, then the operator starts the next song.
+   */
+  incoming?: {
     songId: string
     title: string
     startAnchor: ProjectTransitionAnchor

@@ -2,6 +2,7 @@ import type {
   ProjectFile,
   ProjectTransitionAnchor,
   ProjectTransitionEffect,
+  ProjectHoldTransition,
   ProjectTransitionEndWarning,
   ProjectTransitionRecipe,
   TransitionAnchorMode,
@@ -52,19 +53,27 @@ export function parseProjectTransition(value: unknown): ProjectTransitionRecipe 
   const outgoing = objectValue(recipe.outgoing)
   const incoming = objectValue(recipe.incoming)
   const transition = objectValue(recipe.transition)
-  if (!outgoing || !incoming || !transition) return null
+  // `incoming` is OPTIONAL — an ending-only recipe has no destination.
+  if (!outgoing || !transition) return null
   const endingType = transition.type
-  if (endingType !== 'echo' && endingType !== 'cut' && endingType !== 'hit' && endingType !== 'fade') {
-    return null
-  }
+  const KNOWN = ['echo', 'cut', 'hit', 'fade', 'hold']
+  if (typeof endingType !== 'string' || !KNOWN.includes(endingType)) return null
   if (typeof outgoing.songId !== 'string' || !outgoing.songId) return null
-  if (typeof incoming.songId !== 'string' || !incoming.songId) return null
-  if (outgoing.songId === incoming.songId) return null
-  if (typeof outgoing.title !== 'string' || typeof incoming.title !== 'string') return null
+  if (typeof outgoing.title !== 'string') return null
   const endAnchor = parseAnchor(outgoing.endAnchor)
-  const startAnchor = parseAnchor(incoming.startAnchor)
+  // ENDING-ONLY: no incoming side at all. That is what a `hold` always is, and
+  // it is the only way the LAST song of a set can be given an ending.
+  let incomingSide: ProjectTransitionRecipe['incoming']
+  if (incoming) {
+    if (typeof incoming.songId !== 'string' || !incoming.songId) return null
+    if (outgoing.songId === incoming.songId) return null
+    if (typeof incoming.title !== 'string') return null
+    const startAnchor = parseAnchor(incoming.startAnchor)
+    if (!startAnchor) return null
+    incomingSide = { songId: incoming.songId, title: incoming.title, startAnchor }
+  }
   const nextSongDelay = objectValue(transition.nextSongDelay)
-  if (!endAnchor || !startAnchor || !nextSongDelay) return null
+  if (!endAnchor || !nextSongDelay) return null
 
   // The ending effect, one arm at a time. Each arm validates only its own
   // block; a recipe naming a type whose block is missing or junk is rejected
@@ -88,6 +97,15 @@ export function parseProjectTransition(value: unknown): ProjectTransitionRecipe 
     const fade = objectValue(transition.fade)
     if (!fade || !finiteIn(fade.bars, 0.25, 32)) return null
     effect = { type: 'fade', fade: { bars: fade.bars } }
+  } else if (endingType === 'hold') {
+    const hold = objectValue(transition.hold)
+    const BEDS = ['kick', 'kick-bass', 'kick-hat', 'pad']
+    if (!hold || typeof hold.bed !== 'string' || !BEDS.includes(hold.bed)) return null
+    if (!finiteIn(hold.level, 0, 1)) return null
+    effect = {
+      type: 'hold',
+      hold: { bed: hold.bed as ProjectHoldTransition['bed'], level: hold.level },
+    }
   }
 
   const echo = endingType === 'echo' ? objectValue(transition.echo) : null
@@ -128,11 +146,7 @@ export function parseProjectTransition(value: unknown): ProjectTransitionRecipe 
       title: outgoing.title,
       endAnchor,
     },
-    incoming: {
-      songId: incoming.songId,
-      title: incoming.title,
-      startAnchor,
-    },
+    ...(incomingSide ? { incoming: incomingSide } : {}),
     transition: {
       ...(echo
         ? {
@@ -176,19 +190,32 @@ export function parseProjectTransitions(
   for (const item of value) {
     const recipe = parseProjectTransition(item)
     if (!recipe) continue
-    if (!songIds.has(recipe.outgoing.songId) || !songIds.has(recipe.incoming.songId)) continue
+    if (!songIds.has(recipe.outgoing.songId)) continue
+    // An ending-only recipe has no destination to validate.
+    if (recipe.incoming && !songIds.has(recipe.incoming.songId)) continue
     byOutgoing.set(recipe.outgoing.songId, recipe)
   }
   return byOutgoing.size > 0 ? [...byOutgoing.values()] : undefined
 }
 
+/**
+ * The recipe that applies when this song is playing.
+ *
+ * An ENDING-ONLY recipe (no `incoming`) matches whatever comes next, including
+ * nothing — it describes how this song finishes and says nothing about the
+ * destination. A paired recipe still only applies to its own pair, so
+ * reordering the setlist cannot make one fire into the wrong song.
+ */
 export function transitionForSongs(
   project: ProjectFile | null | undefined,
   outgoingSongId: string,
-  incomingSongId: string,
+  incomingSongId: string | null,
 ): ProjectTransitionRecipe | null {
-  return project?.transitions?.find(
-    (recipe) =>
-      recipe.outgoing.songId === outgoingSongId && recipe.incoming.songId === incomingSongId,
-  ) ?? null
+  return (
+    project?.transitions?.find(
+      (recipe) =>
+        recipe.outgoing.songId === outgoingSongId &&
+        (!recipe.incoming || recipe.incoming.songId === incomingSongId),
+    ) ?? null
+  )
 }

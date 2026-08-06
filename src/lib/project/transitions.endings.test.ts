@@ -150,3 +150,64 @@ describe('the spoken end warning', () => {
     expect(out?.transition.endWarning?.text.length).toBe(120)
   })
 })
+
+describe('HOLD — the bed that waits for you', () => {
+  const holdRecipe = (hold: unknown, incoming = true): unknown => {
+    const r: Record<string, unknown> = {
+      schema: 'barbro.transition-recipe',
+      version: 1,
+      outgoing: { songId: 'a', title: 'Out', endAnchor: anchor(200) },
+      transition: { type: 'hold', hold, nextSongDelay: delay },
+    }
+    if (incoming) r.incoming = { songId: 'b', title: 'In', startAnchor: anchor(4) }
+    return r
+  }
+
+  it('round-trips its bed and level', () => {
+    const out = parseProjectTransition(
+      holdRecipe({ bed: 'kick-bass', level: 0.6 }),
+    ) as ProjectTransitionRecipe
+    expect(out.transition.type).toBe('hold')
+    if (out.transition.type !== 'hold') throw new Error('narrowing')
+    expect(out.transition.hold).toEqual({ bed: 'kick-bass', level: 0.6 })
+  })
+
+  it('accepts every bed the player offers', () => {
+    for (const bed of ['kick', 'kick-bass', 'kick-hat', 'pad']) {
+      expect(parseProjectTransition(holdRecipe({ bed, level: 0.5 }))).not.toBeNull()
+    }
+  })
+
+  it('rejects an unknown bed rather than falling back to a surprise', () => {
+    expect(parseProjectTransition(holdRecipe({ bed: 'bagpipes', level: 0.5 }))).toBeNull()
+    expect(parseProjectTransition(holdRecipe({ bed: 'kick', level: 9 }))).toBeNull()
+    expect(parseProjectTransition(holdRecipe({ level: 0.5 }))).toBeNull()
+  })
+})
+
+describe('ENDING-ONLY recipes — no next song at all', () => {
+  const endingOnly = (): unknown => ({
+    schema: 'barbro.transition-recipe',
+    version: 1,
+    outgoing: { songId: 'a', title: 'Out', endAnchor: anchor(200) },
+    transition: { type: 'cut', cut: { softnessMs: 20 }, nextSongDelay: delay },
+  })
+
+  it('parses with no incoming side', () => {
+    // This is the ONLY way the last song of a set can be given an ending.
+    const out = parseProjectTransition(endingOnly()) as ProjectTransitionRecipe
+    expect(out).not.toBeNull()
+    expect(out.incoming).toBeUndefined()
+    expect(out.outgoing.endAnchor.timeSec).toBe(200)
+  })
+
+  it('a PAIRED recipe still requires a valid, different destination', () => {
+    const paired = (incoming: unknown): unknown => ({
+      ...(endingOnly() as object),
+      incoming,
+    })
+    expect(parseProjectTransition(paired({ songId: 'a', title: 'Same', startAnchor: anchor(4) }))).toBeNull()
+    expect(parseProjectTransition(paired({ songId: '', title: 'x', startAnchor: anchor(4) }))).toBeNull()
+    expect(parseProjectTransition(paired({ songId: 'b', title: 'In' }))).toBeNull() // no anchor
+  })
+})

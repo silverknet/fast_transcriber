@@ -47,7 +47,7 @@
 
   type SnapMode = 'bar' | 'beat' | 'tonic' | 'free'
   type StartSnapMode = 'bar' | 'beat' | 'free'
-  type EndingStyle = 'cut' | 'hit' | 'fill-hit' | 'echo' | 'filter' | 'fade'
+  type EndingStyle = 'cut' | 'hit' | 'fill-hit' | 'echo' | 'filter' | 'fade' | 'hold'
   type EndingChordMode = 'tonic' | 'song' | 'none'
   type EchoDivision = 'eighth' | 'dotted-eighth' | 'quarter'
 
@@ -248,6 +248,15 @@
   /** Spoken warning before the ending — off until the text is non-empty. */
   let endWarningText = $state('')
   let endWarningLeadBars = $state(2)
+  /**
+   * ENDING ONLY: describe how this song finishes and say nothing about what
+   * follows. Always true for a `hold` (you trigger the next song), and the only
+   * way the last song of a set can have an ending at all.
+   */
+  let endingOnly = $state(false)
+  /** Which bed loops under a `hold`, and how loud. */
+  let holdBed = $state<'kick' | 'kick-bass' | 'kick-hat' | 'pad'>('kick-bass')
+  let holdLevel = $state(0.6)
 
   const trimDurationSec = $derived(Math.max(0, trimEndSec - trimStartSec))
   const selectedBeat = $derived.by(() => nearestBeat(selectedPointSec, beatPoints))
@@ -496,7 +505,7 @@
     Boolean(loadedMap && incomingMap && incomingAudio && selectedSongId !== selectedIncomingSongId),
   )
   /** Endings that have a LIVE executor, and may therefore be saved. */
-  const SAVEABLE_ENDINGS = ['echo', 'cut', 'hit', 'fade'] as const
+  const SAVEABLE_ENDINGS = ['echo', 'cut', 'hit', 'fade', 'hold'] as const
   const canSaveTransition = $derived(
     transitionReady &&
       (SAVEABLE_ENDINGS as readonly string[]).includes(endingStyle) &&
@@ -539,17 +548,24 @@
             label: selectedPointLabel,
           },
         },
-        incoming: {
-          songId: selectedIncomingSongId,
-          title: incomingSourceLabel,
-          startAnchor: {
-            mode: startSnapMode,
-            timeSec: rounded(incomingStartSec, 3),
-            barNumber: incomingSelectedBar ? incomingSelectedBar.index + 1 : null,
-            beatNumber: incomingSelectedBeat ? incomingSelectedBeat.indexInBar + 1 : null,
-            label: incomingStartLabel,
-          },
-        },
+        // A `hold` is ending-only by definition: YOU start the next song, so
+        // there is no anchor to promise. Omitting the whole side is also what
+        // lets the LAST song of a set have an ending.
+        ...(endingOnly || endingStyle === 'hold'
+          ? {}
+          : {
+              incoming: {
+                songId: selectedIncomingSongId,
+                title: incomingSourceLabel,
+                startAnchor: {
+                  mode: startSnapMode,
+                  timeSec: rounded(incomingStartSec, 3),
+                  barNumber: incomingSelectedBar ? incomingSelectedBar.index + 1 : null,
+                  beatNumber: incomingSelectedBeat ? incomingSelectedBeat.indexInBar + 1 : null,
+                  label: incomingStartLabel,
+                },
+              },
+            }),
         transition: {
           type: endingStyle,
           // Each ending arm carries only its own block. `fill-hit` and `filter`
@@ -567,6 +583,9 @@
               }
             : {}),
           ...(endingStyle === 'fade' ? { fade: { bars: fadeBars } } : {}),
+          ...(endingStyle === 'hold'
+            ? { hold: { bed: holdBed, level: rounded(holdLevel, 3) } }
+            : {}),
           echo:
             endingStyle === 'echo'
               ? {
@@ -603,7 +622,9 @@
   )
 
   function currentEchoRecipe(): ProjectTransitionRecipe | null {
-    if (!selectedSongId || !selectedIncomingSongId) return null
+    if (!selectedSongId) return null
+    // An ending-only recipe needs no destination selected.
+    if (!endingOnly && endingStyle !== 'hold' && !selectedIncomingSongId) return null
     if (!(SAVEABLE_ENDINGS as readonly string[]).includes(endingStyle)) return null
     // Through the REAL parser, so the JSON panel, what is saved and what Live
     // reads are literally the same bytes.
@@ -615,7 +636,7 @@
     const recipe = savedTransitions.find(
       (candidate) =>
         candidate.outgoing.songId === selectedSongId &&
-        candidate.incoming.songId === selectedIncomingSongId,
+        (candidate.incoming?.songId ?? selectedIncomingSongId) === selectedIncomingSongId,
     )
     if (!recipe) return
     const key = JSON.stringify(recipe)
@@ -625,11 +646,14 @@
     snapMode = recipe.outgoing.endAnchor.mode
     selectedPointSec = clamp(recipe.outgoing.endAnchor.timeSec, trimStartSec, trimEndSec)
     positionSec = selectedPointSec
-    startSnapMode = recipe.incoming.startAnchor.mode === 'tonic'
-      ? 'bar'
-      : recipe.incoming.startAnchor.mode
+    endingOnly = !recipe.incoming
+    startSnapMode = recipe.incoming
+      ? recipe.incoming.startAnchor.mode === 'tonic'
+        ? 'bar'
+        : recipe.incoming.startAnchor.mode
+      : startSnapMode
     incomingStartSec = clamp(
-      recipe.incoming.startAnchor.timeSec,
+      recipe.incoming?.startAnchor.timeSec ?? incomingStartSec,
       incomingTrimStartSec,
       incomingTrimEndSec,
     )
@@ -664,7 +688,7 @@
     savedTransitions.find(
       (candidate) =>
         candidate.outgoing.songId === selectedSongId &&
-        candidate.incoming.songId === selectedIncomingSongId,
+        (candidate.incoming?.songId ?? selectedIncomingSongId) === selectedIncomingSongId,
     ) ?? null,
   )
 
@@ -705,7 +729,9 @@
     try {
       await setProjectTransition(recipe)
       saveStatus = 'saved'
-      saveMessage = `Live Mode will transition to ${recipe.incoming.title}.`
+      saveMessage = recipe.incoming
+        ? `Live Mode will transition to ${recipe.incoming.title}.`
+        : 'Saved. This song will end here, and you start the next one yourself.'
     } catch (cause) {
       saveStatus = 'failed'
       saveMessage = cause instanceof Error ? cause.message : 'Could not save the transition.'

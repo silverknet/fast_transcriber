@@ -202,7 +202,7 @@ describe('parseProjectJson — programmed transitions', () => {
       manifest({ songs: SONGS, transitions: [invalidLevel, crossProject, RECIPE, replacement] }),
     )
     expect(parsed.transitions).toHaveLength(1)
-    expect(parsed.transitions?.[0]?.incoming.title).toBe('Last valid recipe wins')
+    expect(parsed.transitions?.[0]?.incoming?.title).toBe('Last valid recipe wins')
   })
 })
 

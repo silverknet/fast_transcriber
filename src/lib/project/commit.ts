@@ -1428,11 +1428,18 @@ export async function setProjectTransition(recipe: ProjectTransitionRecipe): Pro
   const validated = parseProjectTransition(recipe)
   if (!validated) throw new Error('The transition recipe is incomplete or unsafe')
   const songIds = new Set(snap.data.songs.map((song) => song.id))
-  if (!songIds.has(validated.outgoing.songId) || !songIds.has(validated.incoming.songId)) {
-    throw new Error('Both transition songs must belong to the active project')
+  if (!songIds.has(validated.outgoing.songId)) {
+    throw new Error('The transition’s song must belong to the active project')
   }
-  if (validated.outgoing.songId === validated.incoming.songId) {
-    throw new Error('A transition must lead to a different song')
+  // An ENDING-ONLY recipe has no destination to check — it says how this song
+  // finishes and nothing about what follows.
+  if (validated.incoming) {
+    if (!songIds.has(validated.incoming.songId)) {
+      throw new Error('Both transition songs must belong to the active project')
+    }
+    if (validated.outgoing.songId === validated.incoming.songId) {
+      throw new Error('A transition must lead to a different song')
+    }
   }
   const transitions = (snap.data.transitions ?? []).filter(
     (saved) => saved.outgoing.songId !== validated.outgoing.songId,
