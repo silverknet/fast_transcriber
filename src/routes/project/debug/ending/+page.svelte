@@ -605,6 +605,12 @@
       incomingTrimStartSec,
       incomingTrimEndSec,
     )
+    if (recipe.transition.type !== 'echo') {
+      // A non-echo recipe restores its ending style; its parameters live in
+      // their own block and are applied by the style-specific restore below.
+      endingStyle = recipe.transition.type
+      return
+    }
     const echo = recipe.transition.echo
     echoDivision = echo.delayDivision
     echoCaptureBeats = echo.captureLengthBeats

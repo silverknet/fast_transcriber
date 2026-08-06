@@ -120,9 +120,61 @@ export interface ProjectEchoTransition {
 }
 
 /**
- * V1 intentionally supports one prepared, deterministic transition: an echo
- * throw whose reverb tail overlaps the next song. Song ids and seconds are the
- * playback authority; titles and labels are human-readable snapshots.
+ * A CLEAN CUT: the backing stops dead on the anchor, with a short de-click
+ * ramp. The classic band ending, and the only one that adds no audio at all.
+ */
+export interface ProjectCutTransition {
+  /** De-click ramp into silence, milliseconds. Not an artistic fade. */
+  softnessMs: number
+}
+
+/**
+ * A BAND HIT: kick + crash land together on the anchor and the backing stops.
+ * Both sounds already exist in the drum kits (`DrumClass` includes `cymbal`).
+ */
+export interface ProjectHitTransition {
+  kickLevel: number
+  crashLevel: number
+  /** De-click ramp on the backing track under the hit, milliseconds. */
+  softnessMs: number
+}
+
+/** A controlled musical fade reaching silence exactly at the anchor. */
+export interface ProjectFadeTransition {
+  /** Length of the fade, in bars before the anchor. */
+  bars: number
+}
+
+/**
+ * How a song ENDS. `type` discriminates; each arm owns its own parameter block
+ * so adding an ending never disturbs the others.
+ *
+ * `echo` came first and is the only one whose block is named for a effect
+ * rather than for the ending — kept as-is because recipes on disk use it.
+ */
+export type ProjectTransitionEffect =
+  | { type: 'echo'; echo: ProjectEchoTransition }
+  | { type: 'cut'; cut: ProjectCutTransition }
+  | { type: 'hit'; hit: ProjectHitTransition }
+  | { type: 'fade'; fade: ProjectFadeTransition }
+
+export type ProjectTransitionEndingType = ProjectTransitionEffect['type']
+
+/**
+ * The spoken warning before an ending lands, so the band is never surprised by
+ * the exit. Placed in BARS before the anchor so it arrives musically rather
+ * than a fixed number of seconds early.
+ */
+export interface ProjectTransitionEndWarning {
+  /** What is said. Empty falls back to a sensible default. */
+  text: string
+  /** How many bars before the ending it lands. */
+  leadBars: number
+}
+
+/**
+ * Song ids and seconds are the playback authority; titles and labels are
+ * human-readable snapshots.
  */
 export interface ProjectTransitionRecipe {
   schema: 'barbro.transition-recipe'
@@ -137,15 +189,15 @@ export interface ProjectTransitionRecipe {
     title: string
     startAnchor: ProjectTransitionAnchor
   }
-  transition: {
-    type: 'echo'
-    echo: ProjectEchoTransition
+  transition: ProjectTransitionEffect & {
     nextSongDelay: {
-      measuredFrom: 'echo-stop'
+      measuredFrom: 'echo-stop' | 'outgoing-end'
       beats: number
       secondsAtOutgoingTempo: number
       startOffsetAfterOutgoingEndSec: number
     }
+    /** Optional spoken warning before the ending. */
+    endWarning?: ProjectTransitionEndWarning
   }
 }
 

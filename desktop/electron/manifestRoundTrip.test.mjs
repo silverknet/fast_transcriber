@@ -139,6 +139,46 @@ async function loadParser() {
   return mod.parseManifestObject
 }
 
+test('the NEW ending types survive the sidecar, not just echo', async () => {
+  // `transition.type` was the single literal 'echo'; the sidecar dropped
+  // anything else on the next manifest write, which on desktop is every save.
+  // Widening the union without widening this validator would have made every
+  // cut/hit/fade ending vanish the moment the app saved.
+  const parse = await loadParser()
+  const base = FULL_MANIFEST.transitions[0]
+  const delay = { measuredFrom: 'outgoing-end', beats: 0, secondsAtOutgoingTempo: 0, startOffsetAfterOutgoingEndSec: 1.5 }
+
+  const cut = parse({ ...FULL_MANIFEST, transitions: [{ ...base, transition: { type: 'cut', cut: { softnessMs: 24 }, nextSongDelay: delay } }] })
+  assert.equal(cut.transitions[0].transition.type, 'cut')
+  assert.equal(cut.transitions[0].transition.cut.softnessMs, 24)
+
+  const hit = parse({ ...FULL_MANIFEST, transitions: [{ ...base, transition: { type: 'hit', hit: { kickLevel: 0.9, crashLevel: 0.7, softnessMs: 24 }, nextSongDelay: delay } }] })
+  assert.equal(hit.transitions[0].transition.type, 'hit')
+  assert.deepEqual(hit.transitions[0].transition.hit, { kickLevel: 0.9, crashLevel: 0.7, softnessMs: 24 })
+
+  const fade = parse({ ...FULL_MANIFEST, transitions: [{ ...base, transition: { type: 'fade', fade: { bars: 2 }, nextSongDelay: delay } }] })
+  assert.equal(fade.transitions[0].transition.fade.bars, 2)
+})
+
+test('the spoken end warning survives the sidecar', async () => {
+  const parse = await loadParser()
+  const base = FULL_MANIFEST.transitions[0]
+  const withWarn = {
+    ...base,
+    transition: { ...base.transition, endWarning: { text: 'ending', leadBars: 2 } },
+  }
+  const out = parse({ ...FULL_MANIFEST, transitions: [withWarn] })
+  assert.deepEqual(out.transitions[0].transition.endWarning, { text: 'ending', leadBars: 2 })
+})
+
+test('a half-valid ending is dropped, never written back broken', async () => {
+  const parse = await loadParser()
+  const base = FULL_MANIFEST.transitions[0]
+  const delay = { measuredFrom: 'outgoing-end', beats: 0, secondsAtOutgoingTempo: 0, startOffsetAfterOutgoingEndSec: 1 }
+  const bad = parse({ ...FULL_MANIFEST, transitions: [{ ...base, transition: { type: 'cut', nextSongDelay: delay } }] })
+  assert.equal(bad.transitions, undefined)
+})
+
 test('project DEFAULTS survive field for field, not just as an object', async () => {
   // The top-level check above only proves `defaults` is still there. It was —
   // while `liveStems` inside it was being eaten, so the project-wide "which

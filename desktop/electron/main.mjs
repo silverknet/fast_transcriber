@@ -1042,31 +1042,65 @@ function parseManifestTransitions(raw, songs) {
     const transition = item.transition
     const echo = transition?.echo
     const delay = transition?.nextSongDelay
-    if (!outgoing || !incoming || transition?.type !== 'echo' || !echo || !delay) continue
+    const endingType = transition?.type
+    // Mirrors the web parser's arms EXACTLY. A type the sidecar does not know
+    // is dropped on the next manifest write, which on desktop is every save —
+    // this whitelist has silently eaten project settings four times.
+    if (!outgoing || !incoming || !delay) continue
+    if (!['echo', 'cut', 'hit', 'fade'].includes(endingType)) continue
+    if (endingType === 'echo' && !echo) continue
     if (typeof outgoing.songId !== 'string' || typeof incoming.songId !== 'string') continue
     if (!songIds.has(outgoing.songId) || !songIds.has(incoming.songId) || outgoing.songId === incoming.songId) continue
     if (typeof outgoing.title !== 'string' || typeof incoming.title !== 'string') continue
     const endAnchor = anchor(outgoing.endAnchor)
     const startAnchor = anchor(incoming.startAnchor)
-    if (!endAnchor || !startAnchor || echo.throwRule !== 'beat-3-or-7') continue
-    if (!finite(echo.throwTimeSec, 0, 86400)) continue
-    if (!['quarter', 'dotted-eighth', 'eighth'].includes(echo.delayDivision)) continue
-    if (!finite(echo.captureLengthBeats, 0.05, 8) || !finite(echo.drySongHoldBeats, 0, 16)) continue
-    if (!finite(echo.sendLevel, 0, 1) || !finite(echo.wetLevel, 0, 1)) continue
-    if (!finite(echo.feedback, 0, 0.995) || !finite(echo.repeatBuild, -1, 1)) continue
-    if (!finite(echo.toneHz, 200, 18000)) continue
-    if (!finite(echo.tailLengthSec, 0.1, 30) || !finite(echo.effectiveTailLengthSec, 0.1, 30)) continue
-    if (!finite(echo.blendReverbLevel, 0, 1) || !finite(echo.blendReverbLengthSec, 0.1, 30)) continue
-    if (delay.measuredFrom !== 'echo-stop') continue
+    if (!endAnchor || !startAnchor) continue
+    if (echo && echo.throwRule !== 'beat-3-or-7') continue
+    if (echo && !finite(echo.throwTimeSec, 0, 86400)) continue
+    if (echo && !['quarter', 'dotted-eighth', 'eighth'].includes(echo.delayDivision)) continue
+    if (echo && (!finite(echo.captureLengthBeats, 0.05, 8) || !finite(echo.drySongHoldBeats, 0, 16))) continue
+    if (echo && (!finite(echo.sendLevel, 0, 1) || !finite(echo.wetLevel, 0, 1))) continue
+    if (echo && (!finite(echo.feedback, 0, 0.995) || !finite(echo.repeatBuild, -1, 1))) continue
+    if (echo && !finite(echo.toneHz, 200, 18000)) continue
+    if (echo && (!finite(echo.tailLengthSec, 0.1, 30) || !finite(echo.effectiveTailLengthSec, 0.1, 30))) continue
+    if (echo && (!finite(echo.blendReverbLevel, 0, 1) || !finite(echo.blendReverbLengthSec, 0.1, 30))) continue
+    if (!['echo-stop', 'outgoing-end'].includes(delay.measuredFrom)) continue
     if (!finite(delay.beats, 0, 32) || !finite(delay.secondsAtOutgoingTempo, 0, 120)) continue
     if (!finite(delay.startOffsetAfterOutgoingEndSec, 0, 120)) continue
+
+    let ending = null
+    if (endingType === 'cut') {
+      const cut = transition.cut
+      if (!cut || !finite(cut.softnessMs, 1, 500)) continue
+      ending = { type: 'cut', cut: { softnessMs: cut.softnessMs } }
+    } else if (endingType === 'hit') {
+      const hit = transition.hit
+      if (!hit || !finite(hit.kickLevel, 0, 1.25) || !finite(hit.crashLevel, 0, 1.25)) continue
+      if (!finite(hit.softnessMs, 1, 500)) continue
+      ending = {
+        type: 'hit',
+        hit: { kickLevel: hit.kickLevel, crashLevel: hit.crashLevel, softnessMs: hit.softnessMs },
+      }
+    } else if (endingType === 'fade') {
+      const fade = transition.fade
+      if (!fade || !finite(fade.bars, 0.25, 32)) continue
+      ending = { type: 'fade', fade: { bars: fade.bars } }
+    }
+
+    // The spoken warning is optional and type-independent: junk is dropped
+    // rather than costing the whole recipe.
+    let endWarning
+    const warn = transition.endWarning
+    if (warn && typeof warn.text === 'string' && finite(warn.leadBars, 0.25, 16)) {
+      endWarning = { text: warn.text.slice(0, 120), leadBars: warn.leadBars }
+    }
+
     byOutgoing.set(outgoing.songId, {
       schema: 'barbro.transition-recipe', version: 1,
       outgoing: { songId: outgoing.songId, title: outgoing.title, endAnchor },
       incoming: { songId: incoming.songId, title: incoming.title, startAnchor },
       transition: {
-        type: 'echo',
-        echo: {
+        ...(ending ?? { type: 'echo', echo: {
           throwRule: 'beat-3-or-7', throwTimeSec: echo.throwTimeSec,
           delayDivision: echo.delayDivision, captureLengthBeats: echo.captureLengthBeats,
           drySongHoldBeats: echo.drySongHoldBeats, sendLevel: echo.sendLevel,
@@ -1075,12 +1109,13 @@ function parseManifestTransitions(raw, songs) {
           effectiveTailLengthSec: echo.effectiveTailLengthSec,
           blendReverbLevel: echo.blendReverbLevel,
           blendReverbLengthSec: echo.blendReverbLengthSec,
-        },
+        } }),
         nextSongDelay: {
-          measuredFrom: 'echo-stop', beats: delay.beats,
+          measuredFrom: delay.measuredFrom, beats: delay.beats,
           secondsAtOutgoingTempo: delay.secondsAtOutgoingTempo,
           startOffsetAfterOutgoingEndSec: delay.startOffsetAfterOutgoingEndSec,
         },
+        ...(endWarning ? { endWarning } : {}),
       },
     })
   }

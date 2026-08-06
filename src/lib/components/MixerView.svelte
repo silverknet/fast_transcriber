@@ -3304,6 +3304,12 @@
     if (!liveMode || !eng || !recipe || !sm || repeatSectionEnabled || replayOnceSectionRange) return
     cancelLiveTransition()
 
+    // Only the ECHO ending needs arming in advance — it schedules an effect
+    // graph ahead of the throw. The other endings are a stop (already handled
+    // by the engine's programmed end) plus, for `hit`, sounds placed on the
+    // anchor. Narrowing here rather than casting keeps the compiler enforcing
+    // that every new ending type is consciously handled at this call site.
+    if (recipe.transition.type !== 'echo') return
     const echo = recipe.transition.echo
     const offset = mixerSongOffsetSec
     const beatSongSec = transitionBeatDuration(sm, echo.throwTimeSec)
@@ -3500,7 +3506,7 @@
       armProgrammedTransition()
     }, (
       Math.max(0, actualAnchorCtxTime - eng.currentCtxTime()) +
-      run.recipe.transition.echo.blendReverbLengthSec +
+      (run.recipe.transition.type === 'echo' ? run.recipe.transition.echo.blendReverbLengthSec : 0) +
       0.35
     ) * 1000))
   }

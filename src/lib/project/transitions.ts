@@ -1,6 +1,8 @@
 import type {
   ProjectFile,
   ProjectTransitionAnchor,
+  ProjectTransitionEffect,
+  ProjectTransitionEndWarning,
   ProjectTransitionRecipe,
   TransitionAnchorMode,
   TransitionDelayDivision,
@@ -50,29 +52,70 @@ export function parseProjectTransition(value: unknown): ProjectTransitionRecipe 
   const outgoing = objectValue(recipe.outgoing)
   const incoming = objectValue(recipe.incoming)
   const transition = objectValue(recipe.transition)
-  if (!outgoing || !incoming || !transition || transition.type !== 'echo') return null
+  if (!outgoing || !incoming || !transition) return null
+  const endingType = transition.type
+  if (endingType !== 'echo' && endingType !== 'cut' && endingType !== 'hit' && endingType !== 'fade') {
+    return null
+  }
   if (typeof outgoing.songId !== 'string' || !outgoing.songId) return null
   if (typeof incoming.songId !== 'string' || !incoming.songId) return null
   if (outgoing.songId === incoming.songId) return null
   if (typeof outgoing.title !== 'string' || typeof incoming.title !== 'string') return null
   const endAnchor = parseAnchor(outgoing.endAnchor)
   const startAnchor = parseAnchor(incoming.startAnchor)
-  const echo = objectValue(transition.echo)
   const nextSongDelay = objectValue(transition.nextSongDelay)
-  if (!endAnchor || !startAnchor || !echo || !nextSongDelay) return null
-  if (echo.throwRule !== 'beat-3-or-7') return null
-  if (!finiteIn(echo.throwTimeSec, 0, 24 * 60 * 60)) return null
-  if (typeof echo.delayDivision !== 'string' || !DELAY_DIVISIONS.has(echo.delayDivision as TransitionDelayDivision)) return null
-  if (!finiteIn(echo.captureLengthBeats, 0.05, 8)) return null
-  if (!finiteIn(echo.drySongHoldBeats, 0, 16)) return null
-  if (!finiteIn(echo.sendLevel, 0, 1) || !finiteIn(echo.wetLevel, 0, 1)) return null
-  if (!finiteIn(echo.feedback, 0, 0.995) || !finiteIn(echo.repeatBuild, -1, 1)) return null
-  if (!finiteIn(echo.toneHz, 200, 18_000)) return null
-  if (!finiteIn(echo.tailLengthSec, 0.1, 30)) return null
-  if (!finiteIn(echo.effectiveTailLengthSec, 0.1, 30)) return null
-  if (!finiteIn(echo.blendReverbLevel, 0, 1)) return null
-  if (!finiteIn(echo.blendReverbLengthSec, 0.1, 30)) return null
-  if (nextSongDelay.measuredFrom !== 'echo-stop') return null
+  if (!endAnchor || !startAnchor || !nextSongDelay) return null
+
+  // The ending effect, one arm at a time. Each arm validates only its own
+  // block; a recipe naming a type whose block is missing or junk is rejected
+  // outright rather than half-applied — a half-valid ending is a silent
+  // surprise on a stage.
+  let effect: ProjectTransitionEffect | null = null
+  if (endingType === 'cut') {
+    const cut = objectValue(transition.cut)
+    if (!cut || !finiteIn(cut.softnessMs, 1, 500)) return null
+    effect = { type: 'cut', cut: { softnessMs: cut.softnessMs } }
+  } else if (endingType === 'hit') {
+    const hit = objectValue(transition.hit)
+    if (!hit) return null
+    if (!finiteIn(hit.kickLevel, 0, 1.25) || !finiteIn(hit.crashLevel, 0, 1.25)) return null
+    if (!finiteIn(hit.softnessMs, 1, 500)) return null
+    effect = {
+      type: 'hit',
+      hit: { kickLevel: hit.kickLevel, crashLevel: hit.crashLevel, softnessMs: hit.softnessMs },
+    }
+  } else if (endingType === 'fade') {
+    const fade = objectValue(transition.fade)
+    if (!fade || !finiteIn(fade.bars, 0.25, 32)) return null
+    effect = { type: 'fade', fade: { bars: fade.bars } }
+  }
+
+  const echo = endingType === 'echo' ? objectValue(transition.echo) : null
+  if (endingType === 'echo' && !echo) return null
+  if (echo && echo.throwRule !== 'beat-3-or-7') return null
+  if (echo && (!finiteIn(echo.throwTimeSec, 0, 24 * 60 * 60))) return null
+  if (echo && (typeof echo.delayDivision !== 'string' || !DELAY_DIVISIONS.has(echo.delayDivision as TransitionDelayDivision))) return null
+  if (echo && (!finiteIn(echo.captureLengthBeats, 0.05, 8))) return null
+  if (echo && (!finiteIn(echo.drySongHoldBeats, 0, 16))) return null
+  if (echo && (!finiteIn(echo.sendLevel, 0, 1) || !finiteIn(echo.wetLevel, 0, 1))) return null
+  if (echo && (!finiteIn(echo.feedback, 0, 0.995) || !finiteIn(echo.repeatBuild, -1, 1))) return null
+  if (echo && (!finiteIn(echo.toneHz, 200, 18_000))) return null
+  if (echo && (!finiteIn(echo.tailLengthSec, 0.1, 30))) return null
+  if (echo && (!finiteIn(echo.effectiveTailLengthSec, 0.1, 30))) return null
+  if (echo && (!finiteIn(echo.blendReverbLevel, 0, 1))) return null
+  if (echo && (!finiteIn(echo.blendReverbLengthSec, 0.1, 30))) return null
+  // The spoken warning before the ending. Optional and independent of the
+  // ending type — junk is dropped rather than rejecting the whole recipe, so a
+  // bad cue can never cost you a programmed ending.
+  let endWarning: ProjectTransitionEndWarning | undefined
+  const warnRaw = objectValue(transition.endWarning)
+  if (warnRaw && typeof warnRaw.text === 'string' && finiteIn(warnRaw.leadBars, 0.25, 16)) {
+    endWarning = { text: warnRaw.text.slice(0, 120), leadBars: warnRaw.leadBars }
+  }
+
+  if (nextSongDelay.measuredFrom !== 'echo-stop' && nextSongDelay.measuredFrom !== 'outgoing-end') {
+    return null
+  }
   if (!finiteIn(nextSongDelay.beats, 0, 32)) return null
   if (!finiteIn(nextSongDelay.secondsAtOutgoingTempo, 0, 120)) return null
   if (!finiteIn(nextSongDelay.startOffsetAfterOutgoingEndSec, 0, 120)) return null
@@ -91,29 +134,34 @@ export function parseProjectTransition(value: unknown): ProjectTransitionRecipe 
       startAnchor,
     },
     transition: {
-      type: 'echo',
-      echo: {
-        throwRule: 'beat-3-or-7',
-        throwTimeSec: echo.throwTimeSec,
-        delayDivision: echo.delayDivision as TransitionDelayDivision,
-        captureLengthBeats: echo.captureLengthBeats,
-        drySongHoldBeats: echo.drySongHoldBeats,
-        sendLevel: echo.sendLevel,
-        wetLevel: echo.wetLevel,
-        feedback: echo.feedback,
-        repeatBuild: echo.repeatBuild,
-        toneHz: echo.toneHz,
-        tailLengthSec: echo.tailLengthSec,
-        effectiveTailLengthSec: echo.effectiveTailLengthSec,
-        blendReverbLevel: echo.blendReverbLevel,
-        blendReverbLengthSec: echo.blendReverbLengthSec,
-      },
+      ...(echo
+        ? {
+            type: 'echo' as const,
+            echo: {
+              throwRule: 'beat-3-or-7' as const,
+              throwTimeSec: echo.throwTimeSec as number,
+              delayDivision: echo.delayDivision as TransitionDelayDivision,
+              captureLengthBeats: echo.captureLengthBeats as number,
+              drySongHoldBeats: echo.drySongHoldBeats as number,
+              sendLevel: echo.sendLevel as number,
+              wetLevel: echo.wetLevel as number,
+              feedback: echo.feedback as number,
+              repeatBuild: echo.repeatBuild as number,
+              toneHz: echo.toneHz as number,
+              tailLengthSec: echo.tailLengthSec as number,
+              effectiveTailLengthSec: echo.effectiveTailLengthSec as number,
+              blendReverbLevel: echo.blendReverbLevel as number,
+              blendReverbLengthSec: echo.blendReverbLengthSec as number,
+            },
+          }
+        : effect!),
       nextSongDelay: {
-        measuredFrom: 'echo-stop',
+        measuredFrom: nextSongDelay.measuredFrom as 'echo-stop' | 'outgoing-end',
         beats: nextSongDelay.beats,
         secondsAtOutgoingTempo: nextSongDelay.secondsAtOutgoingTempo,
         startOffsetAfterOutgoingEndSec: nextSongDelay.startOffsetAfterOutgoingEndSec,
       },
+      ...(endWarning ? { endWarning } : {}),
     },
   }
 }
