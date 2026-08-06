@@ -144,6 +144,7 @@
   import { jamVoicesSuppressedInMixer } from '$lib/audio/jamVoiceRouting'
   import { mergePersistedTracks } from '$lib/audio/mixStatePersist'
   import { planEnding } from '$lib/audio/endingSchedule'
+  import { kitToAudioBuffers, type DrumKitBuffers } from '$lib/audio/drumKitBuffers'
   import type { LiveSlotName } from '$lib/project/types'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
   import { audioDevice } from '$lib/audio/audioDevice'
@@ -3322,15 +3323,53 @@
       barDurationSec: beat * beatsInBarNear(sm, endSongSec),
     })
     for (const action of schedule.actions) {
-      if (action.kind !== 'programme-fade') continue
-      const from = eng.contextTimeForPosition(action.fromSec)
-      const to = eng.contextTimeForPosition(action.toSec)
-      if (from == null || to == null) continue
-      if (!eng.scheduleProgrammeFade(from, to)) {
-        liveTransitionNotice = 'Ending not armed: no musical source is audible.'
+      if (action.kind === 'programme-fade') {
+        const from = eng.contextTimeForPosition(action.fromSec)
+        const to = eng.contextTimeForPosition(action.toSec)
+        if (from == null || to == null) continue
+        if (!eng.scheduleProgrammeFade(from, to)) {
+          liveTransitionNotice = 'Ending not armed: no musical source is audible.'
+        }
+        continue
       }
+      const at = eng.contextTimeForPosition(action.atSec)
+      if (at == null) continue
+      const buffer = endingKitBuffers?.[action.cls]
+      if (!buffer) {
+        // Say so. A band hit that silently does not happen is the worst
+        // outcome: you count the room into a stop that never lands.
+        liveTransitionNotice = 'Ending hit unavailable: the drum kit has not loaded.'
+        continue
+      }
+      eng.scheduleEndingHit(buffer, at, action.level)
     }
   }
+
+  /**
+   * Drum buffers for a band-hit ending, loaded once per engine.
+   *
+   * Warmed as soon as a song with a `hit` recipe is live, because the hit is
+   * scheduled a bar or two ahead of the anchor and a cold kit fetch at that
+   * moment would miss it. `kitToAudioBuffers` is cached per AudioContext, so a
+   * second song costs nothing.
+   */
+  let endingKitBuffers = $state<DrumKitBuffers | null>(null)
+  $effect(() => {
+    const eng = engine
+    const needsKit = programmedTransition?.transition.type === 'hit'
+    if (!eng || !needsKit || endingKitBuffers) return
+    let cancelled = false
+    void loadDrumKit('tr707')
+      .then((kit) => {
+        if (!cancelled) endingKitBuffers = kitToAudioBuffers(eng.ac, kit)
+      })
+      .catch(() => {
+        /* reported at schedule time rather than as a load error nobody sees */
+      })
+    return () => {
+      cancelled = true
+    }
+  })
 
   /** Beats in the bar containing this time — 4 when there is no grid to ask. */
   function beatsInBarNear(sm: SongMap, atSongSec: number): number {

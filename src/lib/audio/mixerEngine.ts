@@ -388,6 +388,8 @@ export class MixerEngine {
    * audio. Mixer-timeline seconds, or null for "play to the end of the file".
    */
   private programmedEndSec: number | null = null
+  /** One-shot ending hits scheduled but not yet played. Cancelled on teardown. */
+  private endingHitSources = new Set<AudioBufferSourceNode>()
   /** Arms the hand-off tail shortly before a song ends on its own. */
   private autoRingOut: SongRingOutSchedule | null = null
   private autoRingOutTimer: number | null = null
@@ -1137,6 +1139,80 @@ export class MixerEngine {
     return faded > 0
   }
 
+  /**
+   * Land one authored ending hit — the kick or the crash of a band ending.
+   *
+   * ## Where it goes, and why that is the whole design
+   *
+   * Onto `unshiftedBus`, the path built for "must not be pitch-shifted but must
+   * stay in time with everything that is". A transposed song re-pitches its
+   * recorded audio; a crash cymbal dragged up three semitones with it would be
+   * wrong, and `unshiftedBus` already carries the delay that matches the
+   * shifter's latency so the hit still lands with the stems.
+   *
+   * ## Why it is not a mixer track
+   *
+   * It could be, and it would then get a fader — but a lane linked to no live
+   * button is force-muted in live mode (`liveInitialMuted` fails closed), so an
+   * `ending` track would be silent at exactly the gig it was written for, and
+   * fixing that would mean touching the APC's memorised control map. This is
+   * instead the same class as the echo tail and the ring-out: authored,
+   * bounded, part of the ending, hanging off the master, torn down by the same
+   * paths. It obeys the master fader; it is deliberately not on a channel.
+   *
+   * Returns false when there is no buffer for that voice, so a missing kit
+   * reports a refusal rather than a silent no-op.
+   */
+  scheduleEndingHit(buffer: AudioBuffer, atCtxTime: number, level: number): boolean {
+    if (!buffer || !(level > 0)) return false
+    const at = Math.max(this.ac.currentTime + 0.004, atCtxTime)
+    const src = this.ac.createBufferSource()
+    const gain = this.ac.createGain()
+    src.buffer = buffer
+    gain.gain.value = Math.min(1.25, Math.max(0, level))
+    src.connect(gain)
+    gain.connect(this.unshiftedBus)
+    src.start(at)
+    this.endingHitSources.add(src)
+    src.addEventListener(
+      'ended',
+      () => {
+        this.endingHitSources.delete(src)
+        try {
+          gain.disconnect()
+        } catch {
+          /* already gone */
+        }
+      },
+      { once: true },
+    )
+    return true
+  }
+
+  /**
+   * Drop any ending hit that has not sounded yet.
+   *
+   * A hit is scheduled ahead of time on the audio clock, so a stop, seek or
+   * song change between arming and the anchor would otherwise fire a crash into
+   * the next song. Called from the same teardown every other scheduled source
+   * goes through.
+   */
+  cancelEndingHits(): void {
+    for (const src of this.endingHitSources) {
+      try {
+        src.stop()
+      } catch {
+        /* not started yet / already stopped */
+      }
+      try {
+        src.disconnect()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.endingHitSources.clear()
+  }
+
   scheduleSongRingOut(schedule: SongRingOutSchedule): SongRingOutResult {
     const now = this.ac.currentTime
     const miss = (reason: SongRingOutResult['reason']): SongRingOutResult => ({
@@ -1803,6 +1879,10 @@ export class MixerEngine {
     // them, so they have to be silenced explicitly or a seek leaves the old
     // part ringing over the new one.
     for (const t of this.tracks.values()) t.instrument?.allNotesOff()
+    // An ending hit is scheduled ahead on the audio clock; without this a stop
+    // or a song change between arming and the anchor fires a crash into the
+    // next song.
+    this.cancelEndingHits()
     // Any armed/scheduled jump is void once we tear down the transport.
     this.pendingJump = null
     if (this.committedJump) {
