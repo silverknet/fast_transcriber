@@ -383,6 +383,11 @@ export class MixerEngine {
   /** A jump whose audio is already scheduled sample-accurately at the boundary. */
   private committedJump: { targetCtxTime: number; toPositionSec: number; newSources: ActiveSource[] } | null = null
   private autoStopTimer: number | null = null
+  /**
+   * A PROGRAMMED ending: the song stops here instead of at the end of its
+   * audio. Mixer-timeline seconds, or null for "play to the end of the file".
+   */
+  private programmedEndSec: number | null = null
   /** Arms the hand-off tail shortly before a song ends on its own. */
   private autoRingOut: SongRingOutSchedule | null = null
   private autoRingOutTimer: number | null = null
@@ -1428,8 +1433,49 @@ export class MixerEngine {
     // The remaining span is BUFFER seconds; at rate r it takes r× less wall time.
     return (
       this.playStartCtxTime +
-      bufferSecToWallSec(Math.max(0, this.durationSec() - this.playStartPositionSec), this.playbackRate)
+      bufferSecToWallSec(Math.max(0, this.effectiveEndSec() - this.playStartPositionSec), this.playbackRate)
     )
+  }
+
+  /**
+   * Where this song ends RIGHT NOW — the programmed ending if there is one and
+   * we have not already passed it, otherwise the end of the audio.
+   *
+   * The "already passed" rule matters more than it looks. Seeking beyond the
+   * programmed end is how you rehearse an outro you have chosen to cut, and an
+   * ending that stopped the transport the instant you landed there would make
+   * that impossible. So the anchor applies to a pass that STARTED before it,
+   * and is otherwise inert.
+   *
+   * Routed through here rather than through `durationSec()` on purpose: the
+   * playhead, the waveform and the scrubber all still describe the whole file.
+   * Only the STOP moves.
+   */
+  private effectiveEndSec(): number {
+    const dur = this.durationSec()
+    const end = this.programmedEndSec
+    if (end == null || end >= dur) return dur
+    if (this.playStartPositionSec >= end) return dur
+    return end
+  }
+
+  /**
+   * Set (or clear) the programmed ending. Re-arms the stop immediately, so
+   * moving the anchor while a song is playing takes effect on this pass.
+   */
+  setProgrammedEnd(positionSec: number | null): void {
+    const next =
+      typeof positionSec === 'number' && Number.isFinite(positionSec) && positionSec > 0
+        ? positionSec
+        : null
+    if (next === this.programmedEndSec) return
+    this.programmedEndSec = next
+    if (this.state === 'playing') this.scheduleAutoStop()
+  }
+
+  /** Where the transport will stop on this pass. For tests and the stage UI. */
+  effectiveEndPositionSec(): number {
+    return this.effectiveEndSec()
   }
 
   /**

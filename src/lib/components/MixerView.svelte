@@ -1463,6 +1463,29 @@
       ? programmedTransition.outgoing.endAnchor.timeSec + mixerSongOffsetSec
       : null,
   )
+  /**
+   * THE ORANGE END BAR, made real.
+   *
+   * `programmedEndMixerSec` drew a marker on the stage waveform and stopped
+   * nothing: both its consumers were drawing code. A marker that implies a
+   * behaviour which does not exist is worse than no marker — you plan a set
+   * around it and it lies to you.
+   *
+   * This is the one legitimate `$effect` shape: pushing derived reactive state
+   * into a non-reactive sink (the audio engine). The engine owns WHEN the stop
+   * happens, on the audio clock, and re-derives it on every play, jump and seek
+   * because `scheduleAutoStop` already runs from all of them.
+   *
+   * A successful echo transition still stops the transport earlier, at the
+   * hand-off. This is the backstop for every other case — a transition that
+   * refused to arm, or one that was cancelled — where the song would otherwise
+   * sail past its programmed ending to the end of the file.
+   */
+  $effect(() => {
+    engineReady
+    engine?.setProgrammedEnd(programmedEndMixerSec)
+  })
+
   const liveTransitionStatus = $derived.by(() => {
     const run = liveTransitionRun
     if (run) {
@@ -2957,6 +2980,12 @@
       queuedSectionIndex = null
       loopCueArmedForId = null
       // Natural end (playhead was at the tail), not a manual stop.
+      //
+      // A PROGRAMMED ending deliberately fails this test: it stops the transport
+      // well before `dur - 1.0`, so auto-advance does not fire and the next song
+      // is loaded and started by hand. That is the asked-for behaviour, not an
+      // accident of the threshold — a song you chose to end early is a song you
+      // are ending on a cue, and the set should wait for you.
       if (liveMode && !liveTransitionRun && dur > 0 && lastPosForEnd >= dur - 1.0) {
         if (canGoNextProjectSong) {
           onNextProjectSong()
