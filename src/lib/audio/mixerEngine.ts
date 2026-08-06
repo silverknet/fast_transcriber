@@ -1095,6 +1095,48 @@ export class MixerEngine {
    * The caller should wait until `dryEndsAtCtxTime` before stopping sources,
    * otherwise the reverb is fed silence and there is nothing to ring.
    */
+  /**
+   * Ramp the PROGRAMME to silence between two context times — the mechanism
+   * behind every simple ending.
+   *
+   * A `cut` uses a few milliseconds of this to avoid a click; a `fade` uses
+   * bars of it as the ending itself. One mechanism, so a cut can never end up
+   * with subtly different behaviour from a short fade.
+   *
+   * Click and cue are excluded BY IDENTITY, exactly as the echo tap excludes
+   * them: fading the metronome out under an ending would take the click away
+   * from the band at the precise moment they are trying to land together.
+   *
+   * Returns false when there is nothing to fade or the transport is not
+   * playing, so the caller can report a refusal instead of assuming silence.
+   */
+  scheduleProgrammeFade(fromCtxTime: number, toCtxTime: number): boolean {
+    if (this.state !== 'playing') return false
+    const now = this.ac.currentTime
+    const end = Math.max(toCtxTime, now + 0.005)
+    const start = Math.max(now, Math.min(fromCtxTime, end - 0.005))
+    let faded = 0
+    for (const track of this.tracks.values()) {
+      if (track.key === 'click' || track.key === 'cue') continue
+      const node = this.trackGains.get(track.key)
+      if (!node) continue
+      const value = this.effectiveGainFor(track)
+      node.gain.cancelScheduledValues(start)
+      node.gain.setValueAtTime(value, start)
+      node.gain.linearRampToValueAtTime(0, end)
+      faded++
+    }
+    // Bus returns too, or an effect tail keeps sounding after the programme has
+    // gone — the same reason the echo's dry cut fades them.
+    for (const node of this.busReturnGains.values()) {
+      const value = node.gain.value
+      node.gain.cancelScheduledValues(start)
+      node.gain.setValueAtTime(value, start)
+      node.gain.linearRampToValueAtTime(0, end)
+    }
+    return faded > 0
+  }
+
   scheduleSongRingOut(schedule: SongRingOutSchedule): SongRingOutResult {
     const now = this.ac.currentTime
     const miss = (reason: SongRingOutResult['reason']): SongRingOutResult => ({

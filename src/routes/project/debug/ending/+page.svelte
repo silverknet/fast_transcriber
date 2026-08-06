@@ -492,8 +492,12 @@
   const transitionReady = $derived(
     Boolean(loadedMap && incomingMap && incomingAudio && selectedSongId !== selectedIncomingSongId),
   )
+  /** Endings that have a LIVE executor, and may therefore be saved. */
+  const SAVEABLE_ENDINGS = ['echo', 'cut', 'hit', 'fade'] as const
   const canSaveTransition = $derived(
-    transitionReady && endingStyle === 'echo' && projectWritable,
+    transitionReady &&
+      (SAVEABLE_ENDINGS as readonly string[]).includes(endingStyle) &&
+      projectWritable,
   )
   const transitionGapSec = $derived(transitionAirBeats * averageBeatDuration())
   const echoThrowLeadSec = $derived(Math.max(0.05, selectedPointSec - echoThrowPointSec))
@@ -545,6 +549,21 @@
         },
         transition: {
           type: endingStyle,
+          // Each ending arm carries only its own block. `fill-hit` and `filter`
+          // remain preview-only for now: they have no live executor yet, and a
+          // saveable ending that silently does nothing on stage is worse than
+          // one you can only audition.
+          ...(endingStyle === 'cut' ? { cut: { softnessMs: Math.round(cutSoftnessMs) } } : {}),
+          ...(endingStyle === 'hit'
+            ? {
+                hit: {
+                  kickLevel: rounded(hitLevel, 3),
+                  crashLevel: rounded(crashLevel, 3),
+                  softnessMs: 24,
+                },
+              }
+            : {}),
+          ...(endingStyle === 'fade' ? { fade: { bars: fadeBars } } : {}),
           echo:
             endingStyle === 'echo'
               ? {
@@ -578,7 +597,10 @@
   )
 
   function currentEchoRecipe(): ProjectTransitionRecipe | null {
-    if (endingStyle !== 'echo' || !selectedSongId || !selectedIncomingSongId) return null
+    if (!selectedSongId || !selectedIncomingSongId) return null
+    if (!(SAVEABLE_ENDINGS as readonly string[]).includes(endingStyle)) return null
+    // Through the REAL parser, so the JSON panel, what is saved and what Live
+    // reads are literally the same bytes.
     return parseProjectTransition(JSON.parse(transitionRecipeJson))
   }
 
@@ -666,7 +688,8 @@
     const recipe = currentEchoRecipe()
     if (!recipe) {
       saveStatus = 'failed'
-      saveMessage = 'Only the Echo throw can be programmed for Live Mode in this version.'
+      saveMessage =
+        'Fill + hit and Filter dive can be auditioned but not yet saved — they have no live executor. Choose Clean cut, Band hit, Fade out or Echo throw.'
       return
     }
     saveStatus = 'saving'
@@ -1925,7 +1948,9 @@
       class="save-live"
       onclick={() => void saveTransitionForLive()}
       disabled={!canSaveTransition || saveStatus === 'saving'}
-      title={endingStyle !== 'echo' ? 'Choose Echo throw to save this transition' : undefined}
+      title={canSaveTransition
+        ? undefined
+        : 'This ending can be auditioned but not yet saved for Live'}
     >
       {#if saveStatus === 'saved'}<Check aria-hidden="true" />{:else}<Save aria-hidden="true" />{/if}
       {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved for Live' : 'Save for Live'}

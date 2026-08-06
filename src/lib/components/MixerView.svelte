@@ -143,6 +143,7 @@
   import { chordJam } from '$lib/audio/chordJam.svelte'
   import { jamVoicesSuppressedInMixer } from '$lib/audio/jamVoiceRouting'
   import { mergePersistedTracks } from '$lib/audio/mixStatePersist'
+  import { planEnding } from '$lib/audio/endingSchedule'
   import type { LiveSlotName } from '$lib/project/types'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
   import { audioDevice } from '$lib/audio/audioDevice'
@@ -3297,6 +3298,47 @@
     }, Math.max(0, scheduleCallAt - eng.currentCtxTime()) * 1000))
   }
 
+  /**
+   * Schedule a cut / fade / hit ending on the audio clock.
+   *
+   * No run/phase state: these endings have no hand-off machinery to cancel —
+   * the fade is committed to the Web Audio clock and the stop belongs to the
+   * engine's programmed end, which `cancelLiveTransition` and every seek
+   * already re-derive. Adding a `liveTransitionRun` here would mean seven more
+   * generation guards protecting nothing.
+   */
+  function armSimpleEnding(
+    eng: MixerEngine,
+    sm: SongMap,
+    recipe: ProjectTransitionRecipe,
+  ): void {
+    const endSongSec = recipe.outgoing.endAnchor.timeSec
+    const beat = transitionBeatDuration(sm, endSongSec)
+    const schedule = planEnding(recipe.transition, {
+      endMixerSec: endSongSec + mixerSongOffsetSec,
+      beatDurationSec: beat,
+      // Bars vary; near the ending the local beat times the bar's own beat
+      // count is closer than any global average.
+      barDurationSec: beat * beatsInBarNear(sm, endSongSec),
+    })
+    for (const action of schedule.actions) {
+      if (action.kind !== 'programme-fade') continue
+      const from = eng.contextTimeForPosition(action.fromSec)
+      const to = eng.contextTimeForPosition(action.toSec)
+      if (from == null || to == null) continue
+      if (!eng.scheduleProgrammeFade(from, to)) {
+        liveTransitionNotice = 'Ending not armed: no musical source is audible.'
+      }
+    }
+  }
+
+  /** Beats in the bar containing this time — 4 when there is no grid to ask. */
+  function beatsInBarNear(sm: SongMap, atSongSec: number): number {
+    const bar = sm.timeline.bars.find((b) => atSongSec >= b.startSec && atSongSec <= b.endSec)
+    const count = bar?.beatCount
+    return Number.isFinite(count) && (count ?? 0) > 0 ? (count as number) : 4
+  }
+
   function armProgrammedTransition(): void {
     const eng = engine
     const recipe = programmedTransition
@@ -3304,12 +3346,18 @@
     if (!liveMode || !eng || !recipe || !sm || repeatSectionEnabled || replayOnceSectionRange) return
     cancelLiveTransition()
 
-    // Only the ECHO ending needs arming in advance — it schedules an effect
-    // graph ahead of the throw. The other endings are a stop (already handled
-    // by the engine's programmed end) plus, for `hit`, sounds placed on the
-    // anchor. Narrowing here rather than casting keeps the compiler enforcing
-    // that every new ending type is consciously handled at this call site.
-    if (recipe.transition.type !== 'echo') return
+    // The SIMPLE endings — cut, fade, hit — are a programme fade landing on the
+    // anchor, plus (for `hit`) sounds on the anchor itself. The stop is already
+    // owned by the engine's programmed end, so all that is scheduled here is
+    // the shape of the ending.
+    //
+    // The plan comes from `planEnding`, the same pure function the Transition
+    // Lab's preview runs, so what you rehearse and what the stage does cannot
+    // drift apart.
+    if (recipe.transition.type !== 'echo') {
+      armSimpleEnding(eng, sm, recipe)
+      return
+    }
     const echo = recipe.transition.echo
     const offset = mixerSongOffsetSec
     const beatSongSec = transitionBeatDuration(sm, echo.throwTimeSec)
