@@ -390,6 +390,12 @@ export class MixerEngine {
   private programmedEndSec: number | null = null
   /** One-shot ending hits scheduled but not yet played. Cancelled on teardown. */
   private endingHitSources = new Set<AudioBufferSourceNode>()
+  /**
+   * Tracks a programme fade has taken to silence, so the NEXT press restores
+   * them. See `releaseProgrammeFade` — this exists because forgetting it is
+   * the silent-next-press bug, which this engine has shipped once already.
+   */
+  private programmeFadedKeys = new Set<TrackKey>()
   /** Arms the hand-off tail shortly before a song ends on its own. */
   private autoRingOut: SongRingOutSchedule | null = null
   private autoRingOutTimer: number | null = null
@@ -674,6 +680,9 @@ export class MixerEngine {
   }
 
   removeTrack(key: TrackKey): void {
+    // A gone track cannot be un-faded; leaving its key would keep a dead entry
+    // alive across every future song.
+    this.programmeFadedKeys.delete(key)
     const prev = this.tracks.get(key)
     if (prev?.instrument) {
       prev.instrument.allNotesOff()
@@ -1126,6 +1135,7 @@ export class MixerEngine {
       node.gain.cancelScheduledValues(start)
       node.gain.setValueAtTime(value, start)
       node.gain.linearRampToValueAtTime(0, end)
+      this.programmeFadedKeys.add(track.key)
       faded++
     }
     // Bus returns too, or an effect tail keeps sounding after the programme has
@@ -1197,6 +1207,32 @@ export class MixerEngine {
    * the next song. Called from the same teardown every other scheduled source
    * goes through.
    */
+  /**
+   * Put back what an ending faded, so the next press is not silent.
+   *
+   * A `cut` or `fade` ending leaves every musical lane ramped to zero. Those
+   * gain nodes survive a stop — they belong to the tracks, not the sources — so
+   * without this, ending a song and pressing play again gives you silence with
+   * a moving playhead. That is the exact shape of the replay show-stopper this
+   * engine shipped once before (`mixerEngine.replay.browser.test.ts`), and the
+   * ring-out path carries the same restore for the same reason.
+   *
+   * Restores only what THIS engine faded, and only for tracks that still exist:
+   * a hand-off deliberately leaves the outgoing song faded, and those tracks
+   * are gone by then anyway.
+   */
+  private releaseProgrammeFade(): void {
+    if (this.programmeFadedKeys.size === 0) return
+    const now = this.ac.currentTime
+    for (const key of this.programmeFadedKeys) {
+      const track = this.tracks.get(key)
+      const node = this.trackGains.get(key)
+      if (!track || !node) continue
+      restoreGainNow(node, this.effectiveGainFor(track), now)
+    }
+    this.programmeFadedKeys.clear()
+  }
+
   cancelEndingHits(): void {
     for (const src of this.endingHitSources) {
       try {
@@ -1648,6 +1684,9 @@ export class MixerEngine {
   async play(fromSec?: number, opts?: { startDelaySec?: number }): Promise<void> {
     if (this.ac.state === 'suspended') await this.ac.resume().catch(() => {})
     this.releaseRingOut()
+    // An ending faded the programme to zero; put it back or this press is
+    // silent. Must run BEFORE sources are created.
+    this.releaseProgrammeFade()
     // ALWAYS tear down any prior/stale source set first — never overlap two sets
     // (the "fucked up sound" on replay). Safe to call when already stopped.
     this.stopSourcesOnly()

@@ -198,3 +198,55 @@ describe('the band hit — one-shot, and the scenarios that break apps like this
     engine.dispose()
   })
 })
+
+describe('THE SILENT NEXT PRESS — the bug this engine has shipped before', () => {
+  it('a song faded by its ending is audible again on the next play', async () => {
+    // A cut/fade ending ramps every musical lane to zero. Those gain nodes
+    // belong to the TRACKS, not the sources, so they survive a stop — press
+    // play again and you get a moving playhead over silence. Exactly the shape
+    // of the replay show-stopper that cost a rehearsal.
+    const engine = new MixerEngine()
+    addTrack(engine, 'original')
+    await engine.play(0)
+    const now = engine.currentCtxTime()
+    engine.scheduleProgrammeFade(now, now + 0.1)
+    await wait(300)
+    expect(engine.trackGainValueForTest('original')).toBeCloseTo(0, 3)
+
+    engine.stop()
+    await engine.play(0)
+    await wait(120)
+    expect(engine.trackGainValueForTest('original')).toBeGreaterThan(0.9)
+    engine.dispose()
+  })
+
+  it('restores the USER’s level, not a hard-coded 1', async () => {
+    const engine = new MixerEngine()
+    addTrack(engine, 'original')
+    engine.setVolume('original', 0.4)
+    await engine.play(0)
+    engine.scheduleProgrammeFade(engine.currentCtxTime(), engine.currentCtxTime() + 0.08)
+    await wait(250)
+    engine.stop()
+    await engine.play(0)
+    await wait(120)
+    expect(engine.trackGainValueForTest('original')).toBeCloseTo(0.4, 2)
+    engine.dispose()
+  })
+
+  it('a muted track stays muted through the round trip', async () => {
+    const engine = new MixerEngine()
+    addTrack(engine, 'original')
+    addTrack(engine, 'stem:drums.wav')
+    engine.setMuted('stem:drums.wav', true)
+    await engine.play(0)
+    engine.scheduleProgrammeFade(engine.currentCtxTime(), engine.currentCtxTime() + 0.08)
+    await wait(250)
+    engine.stop()
+    await engine.play(0)
+    await wait(120)
+    expect(engine.trackGainValueForTest('stem:drums.wav')).toBeCloseTo(0, 3)
+    expect(engine.trackGainValueForTest('original')).toBeGreaterThan(0.9)
+    engine.dispose()
+  })
+})
