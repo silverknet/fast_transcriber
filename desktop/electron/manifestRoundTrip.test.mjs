@@ -40,6 +40,7 @@ const FULL_MANIFEST = {
     preCountInCue: { mode: 'auto' },
     liveStems: ['drums', 'bass'],
     liveSlots: ['drums', 'bass', 'click', 'cue', 'custom1'],
+    autoCloudAudio: true,
   },
   mastering: { enabled: true, matchLoudness: true },
   performers: [

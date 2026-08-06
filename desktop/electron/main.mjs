@@ -1321,6 +1321,7 @@ function parseManifestDefaults(raw) {
     const seen = new Set(raw.liveSlots.filter((v) => SLOTS.includes(v)))
     out.liveSlots = SLOTS.filter((n) => seen.has(n))
   }
+  if (typeof raw.autoCloudAudio === 'boolean') out.autoCloudAudio = raw.autoCloudAudio
   const pc = raw.preCountInCue
   // 'auto' and 'triggered' are the CURRENT modes; 'title'/'custom' are legacy
   // spellings the web side migrates to 'auto'. This list had only the legacy

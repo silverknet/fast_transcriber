@@ -29,7 +29,7 @@
   import { page } from '$app/stores'
   import { project } from '$lib/stores/project'
   import { desktopCompanionStatus } from '$lib/stores/desktopCompanionStatus'
-  import { refreshProjectInfo } from '$lib/project/commit'
+  import { refreshProjectInfo, setProjectDefaults } from '$lib/project/commit'
   import {
     pickSaveFileViaDesktop,
     pickOpenFileViaDesktop,
@@ -163,7 +163,26 @@
   let cloudAudioError = $state('')
   let cloudAudioStatus = $state('')
 
-  async function onPrepareCloudAudio(limit?: number) {
+  /** Project-wide: keep browser audio current without anyone remembering to. */
+  let autoCloudAudio = $state(false)
+  $effect(() => {
+    autoCloudAudio = $project.data?.defaults?.autoCloudAudio === true
+  })
+  async function onToggleAutoCloudAudio(next: boolean) {
+    autoCloudAudio = next
+    cloudAudioError = ''
+    try {
+      await setProjectDefaults({ autoCloudAudio: next })
+      cloudAudioStatus = next
+        ? 'New songs will be prepared for browser members automatically.'
+        : 'Automatic preparing is off.'
+    } catch (e) {
+      autoCloudAudio = !next
+      cloudAudioError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  async function onPrepareCloudAudio(limit?: number, force = false) {
     cloudAudioError = ''
     cloudAudioStatus = ''
     if (!browser || !osPath || !proj) {
@@ -183,13 +202,17 @@
       const { uploadProjectCloudAudio } = await import('$lib/client/cloudAudioSync')
       const results = await uploadProjectCloudAudio({
         limit,
+        force,
         onProgress: (m) => {
           cloudAudioStatus = m
         },
       })
       const ok = results.filter((r) => r.ok).length
       const failed = results.filter((r) => !r.ok)
-      cloudAudioStatus = `Prepared ${ok}/${results.length} song(s) for browser members.`
+      cloudAudioStatus =
+        results.length === 0
+          ? 'Every song is already up to date for browser members.'
+          : `Prepared ${ok}/${results.length} song(s) for browser members.`
       if (failed.length) cloudAudioError = failed.map((f) => `${f.title}: ${f.error}`).join(' · ')
     } catch (e) {
       cloudAudioError = e instanceof Error ? e.message : String(e)
@@ -518,27 +541,44 @@
             collaborate in the browser. Your local HD audio stays the master — the compressed copy
             is only ever used in browser mode.
           </p>
+          <label class="flex cursor-pointer items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={autoCloudAudio}
+              disabled={!cloud || cloudAudioBusy}
+              onchange={(e) => void onToggleAutoCloudAudio(e.currentTarget.checked)}
+              class="accent-foreground mt-0.5 size-3.5"
+            />
+            <span>
+              <span class="font-bold">Keep browser audio up to date</span>
+              <span class="text-muted-foreground block text-[11px]">
+                Prepares a song automatically once it has audio and stems, so a song you add is
+                playable for the band without remembering this dialog.
+              </span>
+            </span>
+          </label>
           <div class="flex flex-wrap gap-2">
             <Button
               variant="outline"
               size="sm"
               class="gap-1"
               disabled={cloudAudioBusy || !cloud || !$desktopCompanionStatus.reachable}
-              onclick={() => void onPrepareCloudAudio(1)}
-              title="Prepare just the first song — a cheap way to confirm it works before the whole setlist."
+              onclick={() => void onPrepareCloudAudio()}
+              title="Only songs that are missing or were made from different audio. Songs already up to date are skipped."
             >
               <Upload class="size-3.5" aria-hidden="true" />
-              {cloudAudioBusy ? 'Preparing…' : 'Test (1 song)'}
+              {cloudAudioBusy ? 'Preparing…' : 'Prepare what’s missing'}
             </Button>
             <Button
               variant="outline"
               size="sm"
               class="gap-1"
               disabled={cloudAudioBusy || !cloud || !$desktopCompanionStatus.reachable}
-              onclick={() => void onPrepareCloudAudio()}
+              onclick={() => void onPrepareCloudAudio(undefined, true)}
+              title="Re-upload every song even if the cloud copy already matches. Slow — only needed if something looks wrong."
             >
               <Upload class="size-3.5" aria-hidden="true" />
-              {cloudAudioBusy ? 'Preparing…' : 'Prepare all songs'}
+              {cloudAudioBusy ? 'Preparing…' : 'Re-do all'}
             </Button>
           </div>
           {#if cloudAudioError}

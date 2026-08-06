@@ -363,3 +363,27 @@ describe('the live BUTTON start state survives a load', () => {
     expect(d?.liveSlots).toEqual(['drums'])
   })
 })
+
+describe('the auto-prepare-browser-audio setting survives a load', () => {
+  const withDefaults = (defaults: unknown) =>
+    parseProjectJson(
+      JSON.stringify({
+        formatVersion: 1, id: 'p1', name: 'Gig',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+        songs: [], defaults,
+      }),
+    )
+
+  it('keeps the flag both ways', () => {
+    expect(withDefaults({ autoCloudAudio: true }).defaults?.autoCloudAudio).toBe(true)
+    expect(withDefaults({ autoCloudAudio: false }).defaults?.autoCloudAudio).toBe(false)
+  })
+
+  it('unset stays unset — off, but distinguishable from a deliberate off', () => {
+    expect(withDefaults({ countInBeats: 4 }).defaults?.autoCloudAudio).toBeUndefined()
+  })
+
+  it('ignores junk rather than treating it as on', () => {
+    expect(withDefaults({ autoCloudAudio: 'yes' }).defaults?.autoCloudAudio).toBeUndefined()
+  })
+})

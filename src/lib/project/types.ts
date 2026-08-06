@@ -331,6 +331,15 @@ export interface ProjectDefaults {
    * musical button falls back to its full original mix.
    */
   liveSlots?: LiveSlotName[]
+  /**
+   * Keep the compressed browser copies current without anyone remembering to.
+   *
+   * Preparing browser audio is a manual dialog nobody opens after adding a
+   * song, so a new song plays perfectly on the creator's laptop and is silent
+   * for every browser member — with nothing anywhere saying so. When this is
+   * on, a song is prepared as soon as it has audio and stems.
+   */
+  autoCloudAudio?: boolean
 }
 
 /**

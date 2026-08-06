@@ -448,6 +448,7 @@ function parseDefaults(raw: unknown): ProjectFile['defaults'] | undefined {
     // Empty is meaningful: "every button starts off".
     out.liveSlots = LIVE_SLOT_NAMES.filter((n) => seen.has(n))
   }
+  if (typeof r.autoCloudAudio === 'boolean') out.autoCloudAudio = r.autoCloudAudio
   const pc = r.preCountInCue as Record<string, unknown> | undefined
   if (pc && typeof pc.mode === 'string') {
     // Migrate legacy modes: 'title'/'custom' both announced the song → 'auto'.

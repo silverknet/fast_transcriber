@@ -24,6 +24,8 @@ import {
   type CloudAudioManifest,
 } from './cloudAudio'
 import { getSupabaseBrowserClient } from './supabase/browserClient'
+import { fetchCloudSongs } from './cloudSync'
+import { cloudAudioNeed } from './cloudAudioNeeds'
 
 export interface CloudAudioUploadTask {
   kind: 'mix' | `stem:${string}`
@@ -153,6 +155,13 @@ export async function uploadProjectCloudAudio(opts?: {
   /** Process at most this many (non-hidden) songs — e.g. 1 for a cheap test run. */
   limit?: number
   bitrateKbps?: number
+  /**
+   * Re-do songs whose cloud copy already matches the local master. Default
+   * false: preparing one added song used to mean re-transcoding and
+   * re-uploading the entire set — 85 files for a 17-song gig — so the action
+   * was too expensive to use for the thing people actually needed it for.
+   */
+  force?: boolean
   onProgress?: (msg: string) => void
 }): Promise<CloudAudioUploadResult[]> {
   const snap = get(project)
@@ -162,7 +171,20 @@ export async function uploadProjectCloudAudio(opts?: {
   const cloud = proj.cloud
   if (!cloud) throw new Error('Enable cloud sync for this project first.')
 
+  // What does the cloud already have? One query for the whole project, so the
+  // skip decision costs a request rather than a transcode per song.
+  const existing = new Map<string, CloudAudioManifest | null>()
+  if (!opts?.force) {
+    try {
+      for (const cs of await fetchCloudSongs(cloud.projectId)) existing.set(cs.id, cs.cloud_audio)
+    } catch {
+      // Could not read the cloud state — prepare everything rather than skip on
+      // a guess. Slow is recoverable; a silently un-uploaded song is not.
+    }
+  }
+
   const results: CloudAudioUploadResult[] = []
+  let skipped = 0
   for (const entry of proj.songs) {
     if (entry.hidden) continue
     if (opts?.limit != null && results.length >= opts.limit) break
@@ -189,6 +211,18 @@ export async function uploadProjectCloudAudio(opts?: {
         results.push({ songId, title, ok: false, error: 'no local audio — relink it first' })
         continue
       }
+      // Already prepared from this exact master, with these stems? Leave it.
+      if (!opts?.force) {
+        const need = cloudAudioNeed(
+          { sha256: sm.audio?.sha256, stemNames: Object.keys(sm.stemRefs ?? {}) },
+          existing.get(songId) ?? null,
+        )
+        if (need === 'current') {
+          skipped++
+          opts?.onProgress?.(`${title}: already up to date`)
+          continue
+        }
+      }
       const manifest = await uploadSongCloudAudio({
         osPath,
         songFolder: entry.folder,
@@ -206,5 +240,6 @@ export async function uploadProjectCloudAudio(opts?: {
       results.push({ songId, title, ok: false, error: e instanceof Error ? e.message : String(e) })
     }
   }
+  if (skipped > 0) opts?.onProgress?.(`${skipped} song(s) already up to date — skipped.`)
   return results
 }
