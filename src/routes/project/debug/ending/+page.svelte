@@ -120,6 +120,11 @@
     { id: 'echo', name: 'Echo throw', description: 'Build the last fragment, then carry its space into the next song.' },
     { id: 'filter', name: 'Filter dive', description: 'Close the music down before a sharp final cut.' },
     { id: 'fade', name: 'Fade out', description: 'A controlled musical fade ending at the marker.' },
+    {
+      id: 'hold',
+      name: 'Hold + trigger',
+      description: 'End, then loop a bed in the NEXT song’s tempo and key until you press Play.',
+    },
   ]
 
   const PREVIEW_BAR_OPTIONS = [1, 2, 4, 8]
@@ -2691,7 +2696,58 @@
         </div>
       {/if}
 
+      {#if endingStyle === 'hold'}
+        <div class="control-group handoff-control">
+          <div class="control-heading">
+            <strong>What loops in the gap</strong>
+            <output>{Math.round(holdLevel * 100)}%</output>
+          </div>
+          <select
+            value={holdBed}
+            aria-label="Hold bed"
+            onchange={(event) => (holdBed = event.currentTarget.value as typeof holdBed)}
+          >
+            <option value="kick">Kick pulse</option>
+            <option value="kick-bass">Kick + root note</option>
+            <option value="kick-hat">Kick + hats</option>
+            <option value="pad">Pad on the new key</option>
+          </select>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={holdLevel}
+            aria-label="Bed level"
+            oninput={(event) => (holdLevel = Number(event.currentTarget.value))}
+          />
+          <p>
+            Runs at the NEXT song’s tempo and key, so the gap is an open-ended count-in rather than
+            dead air. The next song loads underneath and waits — press Play when the band is ready.
+          </p>
+        </div>
+      {/if}
+
       <!-- Works for EVERY ending type, so it sits outside the echo block. -->
+      <div class="control-group handoff-control">
+        <div class="control-heading">
+          <strong>End here, I’ll start the next song</strong>
+          <output>{endingOnly || endingStyle === 'hold' ? 'on' : 'off'}</output>
+        </div>
+        <label class="ending-only-row">
+          <input
+            type="checkbox"
+            checked={endingOnly || endingStyle === 'hold'}
+            disabled={endingStyle === 'hold'}
+            onchange={(event) => (endingOnly = event.currentTarget.checked)}
+          />
+          <span>
+            Save only the ending — no next song, no start anchor. The last song of a set needs this,
+            and Hold + trigger always uses it.
+          </span>
+        </label>
+      </div>
+
       <div class="control-group handoff-control">
         <div class="control-heading">
           <strong>Warn the band</strong>
@@ -2857,6 +2913,19 @@
   .incoming-section,
   .preview-bar,
   .ending-workspace,
+  .ending-only-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    cursor: pointer;
+  }
+
+  .ending-only-row input {
+    margin-top: 0.15rem;
+  }
+
   .recipe-output {
     width: min(1500px, 100%);
     margin-inline: auto;

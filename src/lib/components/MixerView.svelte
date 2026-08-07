@@ -144,6 +144,8 @@
   import { jamVoicesSuppressedInMixer } from '$lib/audio/jamVoiceRouting'
   import { mergePersistedTracks } from '$lib/audio/mixStatePersist'
   import { endWarningMixerSec, planEnding } from '$lib/audio/endingSchedule'
+  import { holdBedIsSilent, holdBedPattern, type HoldBedKind } from '$lib/audio/holdBed'
+  import { chordRootToPitchClass } from '$lib/chords/pitchClass'
   import { kitToAudioBuffers, type DrumKitBuffers } from '$lib/audio/drumKitBuffers'
   import type { LiveSlotName } from '$lib/project/types'
   import { UNITY, planFaderReset } from '$lib/audio/faderReset'
@@ -1429,6 +1431,9 @@
       .filter((entry) => !entry.hidden)
       .map((entry) => ({
         id: entry.id,
+        // The folder is the key into `metadataByFolder`, which is how a HOLD
+        // bed learns the NEXT song's tempo and key before that song has loaded.
+        folder: entry.folder,
         title: $projectStore.metadataByFolder[entry.folder]?.title?.trim() || 'Untitled song',
       }))
   })
@@ -1492,6 +1497,8 @@
   })
 
   const liveTransitionStatus = $derived.by(() => {
+    // A hold outranks everything: it is the state the operator is standing in.
+    if (holdRun) return `Holding — press Play to start ${holdRun.title}`
     const run = liveTransitionRun
     if (run) {
       const destination = run.recipe.incoming?.title || 'next song'
@@ -2691,6 +2698,13 @@
   })
 
   function onPlayPause() {
+    // While a hold is up, Play means "we are ready" — stop the bed and start
+    // the song that has been waiting under it. The transport is stopped in a
+    // hold, so this gesture is otherwise unused; no control map changes.
+    if (holdRun) {
+      endHoldAndStart()
+      return
+    }
     if (!mixerCanPlay) return
     if (!engine) return
     if (snapshot.state === 'playing') {
@@ -2702,6 +2716,10 @@
 
   function onStop() {
     if (!engine) return
+    if (holdRun) {
+      holdRun = null
+      engine.stopHoldVamp()
+    }
     cancelLiveTransition()
     pendingStartWhenClickReady = null // stop also cancels a parked start
     cueScheduler?.cancelPending()
@@ -3373,6 +3391,98 @@
     fireSectionCueLeadingTo(END_WARNING_CUE_ID, atMixerSec)
   }
 
+  /**
+   * A HOLD in progress: the bed is looping and the next song is loading (or
+   * loaded) underneath it, waiting for the operator to start it.
+   *
+   * Deliberately NOT a `LiveTransitionRun`. A hold has no schedule to guard —
+   * it ends when a person presses Play, which could be in four seconds or in
+   * four minutes. Modelling it as a run would mean generation guards protecting
+   * timers that do not exist.
+   */
+  let holdRun = $state<{ targetIndex: number; title: string } | null>(null)
+
+  /**
+   * Start the bed and load the next song under it.
+   *
+   * Tempo and key come from the INCOMING song's stored metadata, so the bed is
+   * right before that song has finished loading — which is the entire point:
+   * the band hears the next song's tempo while they are still changing presets.
+   */
+  function beginHold(eng: MixerEngine, hold: { bed: HoldBedKind; level: number }): void {
+    const targetIndex = activeProjectSongIndex + 1
+    const target = projectSongNavItems[targetIndex]
+    const meta = target ? $projectStore.metadataByFolder?.[target.folder] : undefined
+
+    const key = meta?.keyDetail ?? meta?.detectedKey
+    const tonicMidi = key
+      ? 60 + chordRootToPitchClass(key.root as never, key.accidental as never)
+      : null
+
+    const pattern = holdBedPattern({
+      kind: hold.bed,
+      bpm: meta?.bpm,
+      tonicMidi,
+      level: hold.level,
+    })
+    if (holdBedIsSilent(pattern)) return
+
+    const kit = endingKitBuffers
+    const ok = eng.startHoldVamp({
+      beatDurationSec: pattern.beatDurationSec,
+      loopBeats: pattern.loopBeats,
+      scheduleBar: (barAt, out) => {
+        const made: AudioScheduledSourceNode[] = []
+        for (const hit of pattern.drums) {
+          const buf = kit?.[hit.cls]
+          if (!buf || hit.level <= 0) continue
+          const src = eng.ac.createBufferSource()
+          const g = eng.ac.createGain()
+          src.buffer = buf
+          g.gain.value = hit.level
+          src.connect(g)
+          g.connect(out)
+          src.start(barAt + hit.atBeat * pattern.beatDurationSec)
+          made.push(src)
+        }
+        for (const note of pattern.notes) {
+          if (note.level <= 0) continue
+          const at = barAt + note.atBeat * pattern.beatDurationSec
+          const dur = Math.max(0.05, note.beats * pattern.beatDurationSec)
+          const osc = eng.ac.createOscillator()
+          const g = eng.ac.createGain()
+          osc.type = 'triangle'
+          osc.frequency.value = 440 * Math.pow(2, (note.midi - 69) / 12)
+          // Soft edges: a bed that clicks is worse than no bed.
+          g.gain.setValueAtTime(0, at)
+          g.gain.linearRampToValueAtTime(note.level, at + 0.03)
+          g.gain.setValueAtTime(note.level, at + dur - 0.06)
+          g.gain.linearRampToValueAtTime(0, at + dur)
+          osc.connect(g)
+          g.connect(out)
+          osc.start(at)
+          osc.stop(at + dur + 0.02)
+          made.push(osc)
+        }
+        return made
+      },
+    })
+    if (!ok) return
+
+    holdRun = { targetIndex, title: target?.title ?? 'the next song' }
+    // Load the next song UNDER the bed. No deadline — this is the whole reason
+    // a hold cannot land late.
+    if (target) void loadProjectSongAt(targetIndex)
+  }
+
+  /** The operator has decided the gap is over. */
+  function endHoldAndStart(): void {
+    if (!holdRun) return
+    holdRun = null
+    engine?.stopHoldVamp()
+    announcedPlay(0)
+  }
+
   function armSimpleEnding(
     eng: MixerEngine,
     sm: SongMap,
@@ -3423,6 +3533,20 @@
       }
     }
 
+    if (recipe.transition.type === 'hold') {
+      const holdCfg = recipe.transition.hold
+      const endCtxTime = eng.contextTimeForPosition(schedule.endSec)
+      if (endCtxTime != null) {
+        const now = eng.currentCtxTime()
+        window.setTimeout(
+          () => {
+            if (engine) beginHold(engine, holdCfg)
+          },
+          Math.max(0, endCtxTime - now) * 1000,
+        )
+      }
+    }
+
     for (const action of schedule.actions) {
       if (action.kind === 'programme-fade') {
         const from = eng.contextTimeForPosition(action.fromSec)
@@ -3457,7 +3581,8 @@
   let endingKitBuffers = $state<DrumKitBuffers | null>(null)
   $effect(() => {
     const eng = engine
-    const needsKit = programmedTransition?.transition.type === 'hit'
+    const t = programmedTransition?.transition.type
+    const needsKit = t === 'hit' || t === 'hold'
     if (!eng || !needsKit || endingKitBuffers) return
     let cancelled = false
     void loadDrumKit('tr707')
