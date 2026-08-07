@@ -390,6 +390,13 @@ export class MixerEngine {
   private programmedEndSec: number | null = null
   /** One-shot ending hits scheduled but not yet played. Cancelled on teardown. */
   private endingHitSources = new Set<AudioBufferSourceNode>()
+  /** The looping bed of a HOLD transition, if one is running. */
+  private holdVamp: {
+    gain: GainNode
+    timer: number | null
+    sources: Set<AudioScheduledSourceNode>
+    stopped: boolean
+  } | null = null
   /**
    * Tracks a programme fade has taken to silence, so the NEXT press restores
    * them. See `releaseProgrammeFade` — this exists because forgetting it is
@@ -1249,6 +1256,104 @@ export class MixerEngine {
     this.endingHitSources.clear()
   }
 
+  /**
+   * Start the looping bed of a HOLD transition.
+   *
+   * ## Why this cannot live in the transport
+   *
+   * The whole point of a hold is that it outlives the song. The transport stops
+   * at the ending, every track is torn down, the next song loads — and the bed
+   * keeps playing throughout, because the band is still changing presets. So it
+   * hangs off `unshiftedBus` like the ending hit and the spoken cues: never
+   * pitch-shifted (a bed dragged up three semitones by a transposed OUTGOING
+   * song would be in the wrong key for the INCOMING one), and torn down only
+   * when explicitly stopped.
+   *
+   * `nextBar` is called by a self-rescheduling timer rather than one long
+   * schedule, because a hold has no known length — it ends when a person
+   * decides it does.
+   *
+   * Returns false when there is nothing to play, so the caller can report
+   * rather than leave a silent gap the operator thinks is a bed.
+   */
+  startHoldVamp(input: {
+    beatDurationSec: number
+    loopBeats: number
+    /** Called for each loop; returns the sources it scheduled, already started. */
+    scheduleBar: (barStartCtxTime: number, out: GainNode) => AudioScheduledSourceNode[]
+  }): boolean {
+    this.stopHoldVamp()
+    const beat = input.beatDurationSec > 0 ? input.beatDurationSec : 0.5
+    const loopSec = Math.max(0.25, beat * Math.max(1, input.loopBeats))
+
+    const gain = this.ac.createGain()
+    gain.gain.value = 1
+    gain.connect(this.unshiftedBus)
+    const vamp = { gain, timer: null as number | null, sources: new Set<AudioScheduledSourceNode>(), stopped: false }
+    this.holdVamp = vamp
+
+    let nextBarAt = this.ac.currentTime + 0.06
+    const pump = () => {
+      if (vamp.stopped || this.holdVamp !== vamp) return
+      // Schedule a bar or two ahead so a busy main thread cannot make the bed
+      // stutter; the loading of the next song happens on this same thread.
+      const horizon = this.ac.currentTime + loopSec * 2
+      while (nextBarAt < horizon) {
+        for (const src of input.scheduleBar(nextBarAt, vamp.gain)) {
+          vamp.sources.add(src)
+          src.addEventListener('ended', () => vamp.sources.delete(src), { once: true })
+        }
+        nextBarAt += loopSec
+      }
+      vamp.timer = window.setTimeout(pump, Math.max(60, loopSec * 500))
+    }
+    pump()
+    return vamp.sources.size > 0 || vamp.timer != null
+  }
+
+  /** Is a hold bed currently playing? */
+  holdVampActive(): boolean {
+    return this.holdVamp != null && !this.holdVamp.stopped
+  }
+
+  /**
+   * Stop the bed, with a short fade so it does not click into the downbeat of
+   * the song it was covering for.
+   */
+  stopHoldVamp(fadeSec = 0.12): void {
+    const vamp = this.holdVamp
+    if (!vamp) return
+    vamp.stopped = true
+    this.holdVamp = null
+    if (vamp.timer != null) clearTimeout(vamp.timer)
+    const now = this.ac.currentTime
+    const end = now + Math.max(0.01, fadeSec)
+    try {
+      vamp.gain.gain.cancelScheduledValues(now)
+      vamp.gain.gain.setValueAtTime(vamp.gain.gain.value, now)
+      vamp.gain.gain.linearRampToValueAtTime(0, end)
+    } catch {
+      /* a stand-in context in tests */
+    }
+    for (const src of vamp.sources) {
+      try {
+        src.stop(end)
+      } catch {
+        /* not started / already stopped */
+      }
+    }
+    window.setTimeout(
+      () => {
+        try {
+          vamp.gain.disconnect()
+        } catch {
+          /* already gone */
+        }
+      },
+      Math.ceil((end - now) * 1000) + 120,
+    )
+  }
+
   scheduleSongRingOut(schedule: SongRingOutSchedule): SongRingOutResult {
     const now = this.ac.currentTime
     const miss = (reason: SongRingOutResult['reason']): SongRingOutResult => ({
@@ -2004,6 +2109,9 @@ export class MixerEngine {
 
   /** Tear down — disconnect all of OUR nodes. Never closes a borrowed context. */
   async dispose(): Promise<void> {
+    // A hold bed outlives the transport by design, so only dispose can be
+    // trusted to end it — otherwise closing a page leaves a kick looping.
+    this.stopHoldVamp(0.02)
     this.cancelEchoTransition(false)
     this.cancelRingOut(false)
     this.stopSourcesOnly()
