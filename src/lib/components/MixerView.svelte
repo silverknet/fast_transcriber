@@ -1496,9 +1496,20 @@
     if (run) {
       const destination = run.recipe.incoming?.title || 'next song'
       if (liveTransitionNotice) return liveTransitionNotice
-      if (run.phase === 'armed') return `Transition armed · ${run.audibleTrackKeys.length} live source${run.audibleTrackKeys.length === 1 ? '' : 's'} → ${destination}`
+      if (run.phase === 'armed') {
+        // The echo reports how many sources it captured, because that is the
+        // thing that can silently be zero. A cut/fade/hit has nothing to
+        // capture, so counting sources there would be noise on a stage.
+        return run.recipe.transition.type === 'echo'
+          ? `Transition armed · ${run.audibleTrackKeys.length} live source${run.audibleTrackKeys.length === 1 ? '' : 's'} → ${destination}`
+          : `Ending armed → ${destination}`
+      }
       if (run.phase === 'echoing') return `Echo transition → ${destination}`
-      if (run.phase === 'loading-next') return `Loading ${destination} under the echo…`
+      if (run.phase === 'loading-next') {
+        return run.recipe.transition.type === 'echo'
+          ? `Loading ${destination} under the echo…`
+          : `Loading ${destination}…`
+      }
       if (run.phase === 'counting-in') return `Count-in → ${destination}`
       if (run.phase === 'blending') return `Blending into ${destination}`
       return `Starting ${destination}…`
@@ -3377,6 +3388,41 @@
       // count is closer than any global average.
       barDurationSec: beat * beatsInBarNear(sm, endSongSec),
     })
+    // HAND OFF, if this recipe names a destination.
+    //
+    // Only the echo path did this, so a paired `cut` ended the song and then
+    // simply sat there — the ending worked and nothing followed it, which from
+    // the stage is indistinguishable from a crash. The machinery is shared:
+    // the same run, the same `beginProgrammedHandoff`, the same prelude and
+    // count-in. All a simple ending has to say is WHEN.
+    //
+    // No destination (an ending-only recipe, or a `hold`) means exactly what it
+    // says: the song ends and the operator starts the next one.
+    if (recipe.incoming) {
+      const endCtxTime = eng.contextTimeForPosition(schedule.endSec)
+      if (endCtxTime != null) {
+        const gapSec = Math.max(0, recipe.transition.nextSongDelay.secondsAtOutgoingTempo)
+        const id = ++liveTransitionSequence
+        const now = eng.currentCtxTime()
+        const run: LiveTransitionRun = {
+          id,
+          recipe,
+          targetIndex: activeProjectSongIndex + 1,
+          handoffCtxTime: endCtxTime + gapSec,
+          phase: 'armed',
+          audibleTrackKeys: [],
+          timers: [],
+        }
+        // Load at the ending itself, not after the gap: the gap is silence the
+        // audience hears, and the next song should be ready before it ends
+        // rather than starting to load when it does.
+        run.timers.push(
+          window.setTimeout(() => beginProgrammedHandoff(id), Math.max(0, endCtxTime - now) * 1000),
+        )
+        liveTransitionRun = run
+      }
+    }
+
     for (const action of schedule.actions) {
       if (action.kind === 'programme-fade') {
         const from = eng.contextTimeForPosition(action.fromSec)
