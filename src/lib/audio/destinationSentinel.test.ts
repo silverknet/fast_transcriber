@@ -122,6 +122,10 @@ const ALLOWED: Record<string, { contexts?: number; destinations?: number; why: s
     why: 'Debug page for song endings — its own throwaway context, never reached from Live.',
   },
   'routes/debug/click-sounds/+page.svelte': { destinations: 2, why: 'Click sound debug page.' },
+  'routes/debug/timer/timerSound.ts': {
+    destinations: 1,
+    why: '45-second rehearsal timer (debug route). Deliberately orthogonal to the app: its own AudioContext, created on the space press and closed when the bell has rung. It is never on stage and never inside a song, so routing it through MixerEngine would give it a mixer channel it must not have.',
+  },
 }
 
 const CONTEXT_RE = /new AudioContext\(/g

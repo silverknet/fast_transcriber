@@ -164,6 +164,13 @@ those facts into the one application-level runtime snapshot.
   click without a dedicated output into the musical bus (lines 360-386), and
   `MixerView` sends cues to `engine.cueOutput ?? engine.unshiftedInput` (lines
   3237-3246). This violates the target fail-closed contract.
+- [`routes/debug/timer/timerSound.ts`](../../src/routes/debug/timer/timerSound.ts)
+  owns its own `AudioContext` for the 45-second rehearsal timer. It is a debug
+  route, deliberately outside every engine: the context is created on the space
+  press and closed once the bell has rung, it imports nothing from `$lib`, and
+  nothing imports it. It is not a Live source and must never acquire a mixer
+  channel — routing it through `MixerEngine` would give it one. Allow-listed in
+  [`destinationSentinel.test.ts`](../../src/lib/audio/destinationSentinel.test.ts).
 
 ### XR18 control
 
