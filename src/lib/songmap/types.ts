@@ -731,6 +731,20 @@ export interface MixTrackState {
    */
   liveSlot?: string
   /**
+   * Whether this track is switched OFF in live mode, remembered per song.
+   *
+   * Separate from `muted`, which is the arranging mixer's state and is
+   * deliberately ignored live — that separation is what lets a whole set open
+   * from one backing-track configuration regardless of editing history.
+   *
+   * ABSENT means "never decided live", and the project's start-state applies.
+   * PRESENT means the operator pressed the button for this song, and that
+   * choice outlives the session. Without the distinction there is no way to
+   * tell "the project says Custom 1 starts on" from "I turned Custom 1 off
+   * here and meant it".
+   */
+  liveMuted?: boolean
+  /**
    * This channel's EQ — a four-band strip plus a high-pass, applied as an
    * INSERT on this lane only (not a bus). Absent / flat = no filters are built
    * at all. Playback processing; the audio file is never rewritten.

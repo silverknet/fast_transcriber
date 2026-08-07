@@ -592,3 +592,85 @@ describe('LIVE FAILS CLOSED: a lane on no button is not in the show (regression)
     expect(liveInitialMuted({ key: 'original', savedMuted: false, liveStems: undefined, hasMusicalSlotLane: false })).toBe(false)
   })
 })
+
+describe('a live choice is remembered per song', () => {
+  /**
+   * Reported: "if i go in and turn off custom 1 one time it needs to stay that
+   * way. right now for some song custom1 and 2 is always turned on from the
+   * start."
+   *
+   * Live deliberately ignores the ARRANGING mute, so a whole set opens from one
+   * backing-track configuration regardless of editing history. But that also
+   * threw away deliberate live decisions: pressing Custom 1 off was forgotten
+   * the moment the song reloaded, every time.
+   *
+   * `savedLiveMuted` is the distinction. Absent = never decided, project
+   * start-state applies. Present = the operator pressed the button and meant it.
+   */
+  const linked = (savedLiveMuted?: boolean) =>
+    liveInitialMuted({
+      key: 'chord-machine',
+      liveSlot: 'custom1',
+      savedMuted: false,
+      savedLiveMuted,
+      liveStems: undefined,
+      liveSlots: undefined,
+      hasMusicalSlotLane: true,
+    })
+
+  it('THE BUG: an untouched Custom 1 follows the project and starts ON', () => {
+    expect(linked(undefined)).toBe(false)
+  })
+
+  it('turning it off is remembered', () => {
+    expect(linked(true)).toBe(true)
+  })
+
+  it('turning it back ON is remembered too, even against a project default of off', () => {
+    // `false` has to be stored, not treated as absent — otherwise "I switched
+    // this on for this song" is indistinguishable from "never decided".
+    expect(
+      liveInitialMuted({
+        key: 'chord-machine',
+        liveSlot: 'custom1',
+        savedMuted: false,
+        savedLiveMuted: false,
+        liveStems: undefined,
+        liveSlots: [],
+        hasMusicalSlotLane: true,
+      }),
+    ).toBe(false)
+  })
+
+  it('only applies to lanes ON a button — an unlinked lane still fails closed', () => {
+    // The reason live ignores saved mute is that a lane with no button has no
+    // control surface, so remembering "on" could strand audio nobody can stop.
+    // A linked lane can always be switched back, so remembering is safe there
+    // and only there.
+    expect(
+      liveInitialMuted({
+        key: 'some-unlinked-lane',
+        liveSlot: 'none',
+        savedMuted: false,
+        savedLiveMuted: false,
+        liveStems: undefined,
+        liveSlots: undefined,
+        hasMusicalSlotLane: true,
+      }),
+    ).toBe(true)
+  })
+
+  it('a remembered stem choice beats the project start-state too', () => {
+    expect(
+      liveInitialMuted({
+        key: 'stem:vocals.wav',
+        liveSlot: 'vocals',
+        savedMuted: false,
+        savedLiveMuted: false,
+        liveStems: ['drums', 'bass'],
+        liveSlots: undefined,
+        hasMusicalSlotLane: true,
+      }),
+    ).toBe(false)
+  })
+})

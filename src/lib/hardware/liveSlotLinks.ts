@@ -168,15 +168,29 @@ export function liveInitialMuted(opts: {
   key: string
   liveSlot?: LiveSlotLink
   savedMuted: boolean
+  /**
+   * What the operator last decided for this track IN LIVE, for this song.
+   * `undefined` = never decided, so the project's start-state applies.
+   */
+  savedLiveMuted?: boolean | undefined
   liveStems: readonly AutoStemName[] | undefined
   /** The project's per-BUTTON start state. Unset = behave exactly as before. */
   liveSlots?: readonly LiveSlotName[] | undefined
   /** Does this song have ANY lane on a musical button? See above. */
   hasMusicalSlotLane: boolean
 }): boolean {
-  const { key, liveSlot, savedMuted, liveStems, liveSlots, hasMusicalSlotLane } = opts
+  const { key, liveSlot, savedMuted, savedLiveMuted, liveStems, liveSlots, hasMusicalSlotLane } = opts
   const slot = resolveLaneSlot(key, liveSlot)
   if (slot !== null) {
+    // A DELIBERATE live choice for this song wins over the project's start
+    // state. Only for lanes that are on a button: such a lane always has a
+    // control surface, so remembering "off" can never strand audio the
+    // operator cannot reach — which is the reason live ignores the arranging
+    // mute in the first place.
+    //
+    // Without this, turning Custom 1 off was forgotten the moment the song
+    // reloaded, every time, for every song.
+    if (typeof savedLiveMuted === 'boolean') return savedLiveMuted
     const name = slotNameByIndex(slot)
     // ONE RULE FOR ALL TEN BUTTONS. Which start on is a project decision, and
     // `audibleSlotSet` reproduces the old per-slot behaviour exactly when the

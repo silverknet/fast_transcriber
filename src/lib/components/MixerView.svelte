@@ -1031,6 +1031,7 @@
         key,
         liveSlot: liveSlotByKey[key],
         savedMuted: !!saved?.muted,
+        savedLiveMuted: liveMutedByKey[key],
         liveStems,
         liveSlots,
         hasMusicalSlotLane: hasAudibleStem,
@@ -1223,6 +1224,12 @@
   }
 
   // ── Lane order (drag to reorder; the original mix is pinned at the top) ───
+  /**
+   * Per-song live on/off, remembered. Seeded from `mixState.tracks[].liveMuted`
+   * on load and written back whenever a live button is pressed.
+   */
+  let liveMutedByKey = $state<Record<string, boolean>>({})
+
   /** Remembered key order, seeded from `mixState.tracks` and saved back to it. */
   let laneOrder = $state<string[]>([])
   /** The lane being dragged, and the lane it is currently over. */
@@ -2273,6 +2280,13 @@
         .filter((t) => isLiveSlotLink(t.liveSlot))
         .map((t) => [t.key, t.liveSlot as LiveSlotLink]),
     )
+    // What the operator last decided IN LIVE for this song. Absent = never
+    // decided, and the project's start-state applies.
+    liveMutedByKey = Object.fromEntries(
+      ($songMap?.mixState?.tracks ?? [])
+        .filter((t) => typeof t.liveMuted === 'boolean')
+        .map((t) => [t.key, t.liveMuted as boolean]),
+    )
     const hasAudibleStem = hasMusicalSlotLane(
       resolveLiveSlotLanes(plan.map((p) => ({ key: p.key, liveSlot: savedLinks.get(p.key) }))),
     )
@@ -2612,6 +2626,10 @@
         // it keeps following the name-based guess.
         const link = liveSlotByKey[t.key]
         if (link !== undefined) entry.liveSlot = link
+        // BOTH values matter: `false` says "I switched this on live", absent
+        // says "never decided". Storing only `true` would lose the difference.
+        const lm = liveMutedByKey[t.key]
+        if (typeof lm === 'boolean') entry.liveMuted = lm
         // A flat EQ is not worth storing; a deliberately bypassed one is.
         const eq = eqByKey[t.key]
         if (isEqWorthStoring(eq)) entry.eq = eq
@@ -2947,6 +2965,14 @@
     const muted = new Map(engine.listTracks().map((t) => [t.key, !!t.muted]))
     const next = nextGroupMuted(lane.keys, (k) => muted.get(k) !== false)
     for (const key of lane.keys) engine.setMuted(key, next)
+    // Remember the decision for THIS song. A live press is a statement about
+    // the arrangement, not a scratch change — it used to be forgotten the
+    // moment the song reloaded.
+    if (liveMode) {
+      const nextMap = { ...liveMutedByKey }
+      for (const key of lane.keys) nextMap[key] = next
+      liveMutedByKey = nextMap
+    }
     syncLanesFromEngine()
     schedulePersist()
   }

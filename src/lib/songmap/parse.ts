@@ -429,6 +429,10 @@ function parseMixState(raw: unknown, path: string): import('./types').MixState |
     // Unknown slot names are dropped rather than rejected: a song written by a
     // newer build must still open here, falling back to the name-based guess.
     if (isLiveSlotLink(t.liveSlot)) entry.liveSlot = t.liveSlot
+    // BOTH values are meaningful, so this is not the usual "only store true".
+    // `false` means "I deliberately switched this ON live"; absent means never
+    // decided, which is a different thing and must stay distinguishable.
+    if (typeof t.liveMuted === 'boolean') entry.liveMuted = t.liveMuted
     // Coerced, never thrown on: a malformed band flattens instead of taking
     // the whole song down.
     const eq = clampChannelEq(t.eq)
